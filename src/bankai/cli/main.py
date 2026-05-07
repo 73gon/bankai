@@ -1,0 +1,1448 @@
+"""Bankai CLI \u2014 Typer entry point with interactive menu, config, doctor.
+
+Top-level commands::
+
+    bankai                     # interactive menu (search / run / queue / config)
+    bankai shell               # REPL
+    bankai run "Title Year"    # auto-search + pipeline (--url to bypass search)
+    bankai search "Title"      # show matches, no download
+    bankai series "Show" -s 1  # whole season
+    bankai config get/set/list/path/edit/init
+    bankai doctor              # check ffmpeg, mkvmerge, alass, qbit, prowlarr
+    bankai jobs list/show/retry/cancel
+    bankai history
+    bankai daemon
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Annotated, Any, cast
+
+import typer
+from rich.console import Console
+from rich.prompt import Confirm, IntPrompt, Prompt
+from rich.table import Table
+
+from bankai import __version__
+from bankai.config import (
+    get_settings,
+    load_settings,
+    reset_settings_cache,
+    user_config_path,
+)
+from bankai.logging import configure_logging, get_logger
+
+app = typer.Typer(
+    name="bankai",
+    help="Extract German dub audio from web streams + HQ video from torrents \u2192 single MKV.",
+    add_completion=False,
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+jobs_app = typer.Typer(name="jobs", help="Inspect and manage queued jobs.", no_args_is_help=True)
+config_app = typer.Typer(name="config", help="View/edit configuration.", no_args_is_help=True)
+app.add_typer(jobs_app, name="jobs")
+app.add_typer(config_app, name="config")
+
+console = Console()
+log = get_logger(__name__)
+
+
+_BANNER = r"""[bold magenta]
+  ____    _    _   _ _  __    _    ___
+ | __ )  / \  | \ | | |/ /   / \  |_ _|
+ |  _ \ / _ \ |  \| | ' /   / _ \  | |
+ | |_) / ___ \| |\  | . \  / ___ \ | |
+ |____/_/   \_\_| \_|_|\_\/_/   \_\___|
+[/bold magenta][dim]                                  v{ver}[/dim]"""
+
+
+def _print_banner() -> None:
+    console.print(_BANNER.format(ver=__version__))
+    console.print()
+
+
+def _ask_select(message: str, choices: list[str], default: str | None = None) -> str | None:
+    """Arrow-key menu via questionary, with a number-prompt fallback.
+
+    Returns the chosen string, or ``None`` on Ctrl-C.
+    """
+    try:
+        import questionary
+    except ImportError:
+        # graceful degrade if dep missing (older installs)
+        for i, c in enumerate(choices, 1):
+            console.print(f"  [cyan]{i}[/cyan]  {c}")
+        try:
+            idx = IntPrompt.ask(message, default=1)
+        except (KeyboardInterrupt, EOFError):
+            return None
+        if 1 <= idx <= len(choices):
+            return choices[idx - 1]
+        return None
+    try:
+        return cast(
+            str | None,
+            questionary.select(
+                message,
+                choices=choices,
+                default=default or choices[0],
+                qmark="\u276f",
+                instruction="(\u2191/\u2193 to move, enter to pick)",
+                use_indicator=False,
+                use_arrow_keys=True,
+                style=questionary.Style(
+                    [
+                        # Kill the inverted-background highlight on the focused
+                        # row \u2014 we rely solely on the arrow pointer to show
+                        # which line is selected.
+                        ("highlighted", "noinherit"),
+                        ("selected", "noinherit"),
+                        ("pointer", "fg:ansimagenta bold"),
+                        ("qmark", "fg:ansimagenta bold"),
+                        ("question", "bold"),
+                    ]
+                ),
+            ).unsafe_ask(),
+        )
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+def _ask_table_select(
+    message: str,
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    back_label: str = "\u2190 Back",
+) -> int | None:
+    """Render an arrow-pickable table with box-drawing borders.
+
+    Each ``rows[i]`` is a list of column strings (already coloured if
+    desired). Returns the selected row index, or ``None`` on cancel.
+    """
+    if not rows:
+        console.print("[dim](empty)[/dim]")
+        return None
+    # Compute column widths (visual width, ignoring ANSI markup).
+    import re as _re
+
+    def _vis(s: str) -> int:
+        return len(_re.sub(r"\x1b\[[0-9;]*m", "", s))
+
+    widths = [max(_vis(headers[i]), max(_vis(r[i]) for r in rows)) for i in range(len(headers))]
+
+    def _row(parts: list[str]) -> str:
+        cells = []
+        for i, p in enumerate(parts):
+            pad = widths[i] - _vis(p)
+            cells.append(p + " " * pad)
+        return "  ".join(cells)
+
+    header_line = _row(headers)
+    sep_line = "\u2500" * _vis(header_line)
+    # questionary draws a 2-char left margin ("❯ " or "  ") in front
+    # of every choice; pad the header by the same amount so columns line
+    # up vertically with the rendered rows.
+    console.print(f"\n  [bold magenta]{header_line}[/bold magenta]")
+    console.print(f"  [dim]{sep_line}[/dim]")
+    labels = [_row(r) for r in rows]
+    labels.append(back_label)
+    choice = _ask_select(message, labels)
+    if choice is None or choice == back_label:
+        return None
+    return labels.index(choice)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"bankai {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    ctx: typer.Context,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", help="Path to config.toml.")
+    ] = None,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Global options applied to every subcommand."""
+    configure_logging(level="DEBUG" if verbose else "INFO")
+    if config is not None:
+        reset_settings_cache()
+        load_settings(config)
+    if ctx.invoked_subcommand is None:
+        _interactive_menu()
+        raise typer.Exit()
+
+
+# ---------------------------------------------------------------------------
+# interactive menu / shell
+# ---------------------------------------------------------------------------
+
+
+def _interactive_menu() -> None:
+    _print_banner()
+    while True:
+        choice = _ask_select(
+            "What do you want to do?",
+            [
+                "Run a movie",
+                "Run a series",
+                "Search",
+                "Queue / history",
+                "Config",
+                "Doctor",
+                "Quit",
+            ],
+        )
+        if choice is None or choice == "Quit":
+            console.print("[dim]bye[/dim]")
+            return
+        try:
+            if choice == "Run a movie":
+                _menu_run_movie()
+            elif choice == "Run a series":
+                _menu_run_series()
+            elif choice == "Search":
+                _menu_search()
+            elif choice == "Queue / history":
+                _menu_queue()
+            elif choice == "Config":
+                _menu_config()
+            elif choice == "Doctor":
+                _doctor()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]bye[/dim]")
+            return
+        console.print()
+
+
+def _menu_run_movie() -> None:
+    en = Prompt.ask("[bold]English title[/bold] (for torrent search, e.g. 'Cars 3 2017')")
+    if not en.strip():
+        return
+    de = Prompt.ask(
+        "[bold]German title[/bold] (for filmpalast lookup)",
+        default=en,
+    )
+    url = Prompt.ask("Stream URL (blank = auto-search filmpalast)", default="").strip()
+    if not url:
+        picked_url = _interactive_pick_movie(de)
+        if not picked_url:
+            console.print("[red]no stream URL found[/red]")
+            return
+        url = picked_url
+    where = _ask_select(
+        "Run mode",
+        [
+            "Background (return to menu, run silently)",
+            "Foreground (watch live in this terminal)",
+        ],
+    )
+    if where and where.startswith("Background"):
+        from bankai.cli import bgjobs
+
+        args = ["run", en, "--de", de, "--url", url, "--site", "filmpalast"]
+        job = bgjobs.spawn(kind="movie", title=f"{en}", args=args)
+        console.print(
+            f"[green]queued[/green] job [bold]{job.id}[/bold] \u2014 "
+            f"\u2018Queue / history\u2019 to watch / cancel."
+        )
+        return
+    _run_pipeline(query=en, url=url, kind="movie", site="filmpalast")
+
+
+def _menu_run_series() -> None:
+    show = Prompt.ask("Show name")
+    season = IntPrompt.ask("Season", default=1)
+    site = Prompt.ask("Site (filmpalast/aniworld)", default="filmpalast")
+    asyncio.run(_run_series(show=show, season=season, site=site, episode=None))
+
+
+def _menu_queue() -> None:
+    """Background-job queue browser: list, watch logs, cancel."""
+    from bankai.cli import bgjobs
+
+    while True:
+        jobs = bgjobs.list_jobs()
+        if not jobs:
+            console.print("[dim]no background jobs yet[/dim]")
+            return
+        rows = []
+        for j in jobs:
+            colour = {
+                "running": "yellow",
+                "done": "green",
+                "failed": "red",
+                "cancelled": "dim",
+            }.get(j.status, "white")
+            rows.append(
+                [
+                    f"\x1b[3{_ansi(colour)}m{j.status:>9}\x1b[0m",
+                    j.id,
+                    j.title[:55],
+                    _humanize_age(j.started_at),
+                ]
+            )
+        can_clear = any(j.status in {"done", "failed", "cancelled"} for j in jobs)
+        if can_clear:
+            rows.append(["   action", "-", "Clear finished background jobs", ""])
+        idx = _ask_table_select(
+            "Background jobs (newest first)",
+            ["Status", "ID", "Title", "Age"],
+            rows,
+        )
+        if idx is None:
+            return
+        if can_clear and idx == len(jobs):
+            count = bgjobs.clear_jobs(statuses={"done", "failed", "cancelled"})
+            console.print(f"[green]cleared[/green] {count} background job(s)")
+            continue
+        _job_detail_menu(jobs[idx])
+
+
+def _ansi(colour: str) -> str:
+    return {
+        "yellow": "3",
+        "green": "2",
+        "red": "1",
+        "dim": "0",
+        "white": "7",
+        "cyan": "6",
+        "magenta": "5",
+        "blue": "4",
+    }.get(colour, "7")
+
+
+def _job_detail_menu(job: Any) -> None:
+    from bankai.cli import bgjobs
+
+    while True:
+        job = job.refresh()
+        console.rule(
+            f"[bold]{job.title}[/bold]  \u00b7  {job.id}  \u00b7  status=[bold]{job.status}[/bold]"
+        )
+        if job.final_path:
+            console.print(f"  [green]final:[/green] {job.final_path}")
+        actions = []
+        if job.status == "running":
+            actions.append("Watch live (Ctrl-C to detach)")
+            actions.append("Cancel job")
+        actions.extend(
+            [
+                "Show last 50 log lines",
+                "Show full log",
+                "\u2190 Back",
+            ]
+        )
+        choice = _ask_select("Action", actions)
+        if choice is None or choice.startswith("\u2190"):
+            return
+        if choice.startswith("Watch"):
+            console.print("[dim]\u2014 streaming log (Ctrl-C to detach) \u2014[/dim]")
+            bgjobs.watch(job)
+        elif choice.startswith("Cancel"):
+            if Confirm.ask("Send SIGTERM to job?", default=False):
+                ok = job.cancel()
+                console.print(
+                    "[green]cancelled[/green]" if ok else "[yellow]could not cancel[/yellow]"
+                )
+        elif choice.startswith("Show last"):
+            console.print(bgjobs.tail(job, lines=50))
+        elif choice.startswith("Show full"):
+            console.print(bgjobs.tail(job, lines=10_000))
+
+
+def _humanize_age(ts: float) -> str:
+    import time as _t
+
+    delta = max(0, int(_t.time() - ts))
+    if delta < 60:
+        return f"{delta}s"
+    if delta < 3600:
+        return f"{delta // 60}m"
+    if delta < 86400:
+        return f"{delta // 3600}h{(delta % 3600) // 60}m"
+    return f"{delta // 86400}d"
+
+
+def _menu_search() -> None:
+    query = Prompt.ask("Search")
+    if not query.strip():
+        return
+    _do_search(query, site=None, limit=15)
+
+
+# Each entry: (label, dotted-key, type, description). The dotted-key MUST
+# match the actual pydantic Settings model field path.
+_QUICK_SETTINGS: list[tuple[str, str, str, str]] = [
+    (
+        "Interactive Pick",
+        "scraper.interactive_pick",
+        "bool",
+        "Ask which result to pick instead of auto-picking #1",
+    ),
+    (
+        "Min Torrent Size (GiB)",
+        "selector.min_size_gib",
+        "float",
+        "Minimum acceptable torrent size in GiB",
+    ),
+    (
+        "Max Torrent Size (GiB)",
+        "selector.max_size_gib",
+        "float",
+        "Maximum acceptable torrent size in GiB",
+    ),
+    (
+        "Min Seeders",
+        "selector.min_seeders",
+        "int",
+        "Minimum seeders for a torrent to be considered",
+    ),
+    (
+        "Preferred Resolutions",
+        "selector.preferred_resolutions",
+        "list",
+        "Comma-sep resolutions in priority order",
+    ),
+    ("Preferred Codecs", "selector.preferred_codecs", "list", "Comma-sep codecs in priority order"),
+    ("Library Directory", "output.directory", "str", "Where final remuxed MKVs go"),
+    ("Movie Filename Template", "output.filename_template", "str", "Plex movie filename template"),
+    (
+        "Series Filename Template",
+        "output.series_filename_template",
+        "str",
+        "Plex series filename template",
+    ),
+    (
+        "Cleanup After Success",
+        "paths.cleanup_after_success",
+        "bool",
+        "Remove intermediates + qBit torrent on success",
+    ),
+    (
+        "Discord Webhook URL",
+        "notifications.webhook_url",
+        "str",
+        "Discord webhook URL (blank = none)",
+    ),
+    (
+        "Notify On Success",
+        "notifications.on_success",
+        "bool",
+        "Send a Discord notification on success",
+    ),
+    (
+        "Notify On Failure",
+        "notifications.on_failure",
+        "bool",
+        "Send a Discord notification on failure",
+    ),
+]
+
+
+def _menu_config_quick() -> None:
+    """Quick edit of frequently-changed settings — shows current value
+    and prompts for a new one (blank to keep)."""
+
+    while True:
+        dump = get_settings().model_dump(mode="json")
+        rows = []
+        for label, key, typ, desc in _QUICK_SETTINGS:
+            cur = _resolve_key(dump, key)
+            if cur is None:
+                cur_str = "—"
+            elif isinstance(cur, list):
+                cur_str = ", ".join(str(x) for x in cur)
+            else:
+                cur_str = str(cur)
+            rows.append([label, cur_str[:32], typ, desc[:50]])
+        idx = _ask_table_select(
+            "Common settings",
+            ["Setting", "Current", "Type", "Description"],
+            rows,
+        )
+        if idx is None:
+            return
+        label, key, typ, _desc = _QUICK_SETTINGS[idx]
+        cur = _resolve_key(get_settings().model_dump(mode="json"), key)
+        # Prompt by type: bool gets arrow-pick, list gets csv prompt.
+        if typ == "bool":
+            cur_b = bool(cur)
+            choice = _ask_select(
+                f"{label} (current: {cur_b})",
+                ["true", "false"],
+                default="true" if cur_b else "false",
+            )
+            if choice is None:
+                continue
+            new = choice
+        else:
+            new = Prompt.ask(
+                f"  {label} (current: [bold]{cur}[/bold]) — new value (blank to keep)",
+                default="",
+            ).strip()
+            if not new:
+                continue
+        try:
+            if typ == "list":
+                # write list values one element at a time using nested keys
+                # is awkward; use config_set with a json-ish parsed value
+                items = [s.strip() for s in new.split(",") if s.strip()]
+                _set_raw(key, items)
+            else:
+                path, written = _set_config_value(key, _coerce(new))
+                console.print(f"[dim]wrote {key} to {path}[/dim]")
+                new = str(written)
+            console.print(f"  [green]saved[/green] {label} = {new}")
+        except Exception as exc:
+            console.print(f"  [red]failed:[/red] {exc}")
+
+
+def _set_raw(key: str, value: Any) -> None:
+    """Write a non-string value (e.g. a list) into the active config file."""
+    _set_config_value(key, value)
+
+
+def _menu_config() -> None:
+    while True:
+        choice = _ask_select(
+            "Config",
+            [
+                "Quick edit (common settings)",
+                "List all keys",
+                "Get a key",
+                "Set a key (advanced)",
+                "Edit in $EDITOR",
+                "Print path",
+                "Run init wizard",
+                "\u2190 Back",
+            ],
+        )
+        if choice is None or choice.startswith("\u2190"):
+            return
+        try:
+            if choice.startswith("Quick"):
+                _menu_config_quick()
+            elif choice.startswith("List"):
+                config_list()
+            elif choice.startswith("Get"):
+                k = Prompt.ask("key (e.g. output.directory)")
+                config_get(k)
+            elif choice.startswith("Set"):
+                k = Prompt.ask("key")
+                v = Prompt.ask("value")
+                config_set(k, v)
+            elif choice.startswith("Edit"):
+                config_edit()
+            elif choice.startswith("Print"):
+                config_path()
+            elif choice.startswith("Run init"):
+                config_init(force=False)
+        except (KeyboardInterrupt, EOFError):
+            return
+
+
+@app.command()
+def shell() -> None:
+    """Interactive REPL: type commands like ``run "Title"`` without leaving bankai."""
+    _print_banner()
+    console.print("[dim]REPL \u2014 type 'help' or 'exit'.[/dim]\n")
+    import shlex
+
+    while True:
+        try:
+            line = Prompt.ask("[bold magenta]bankai[/bold magenta]").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            return
+        if not line:
+            continue
+        if line in ("exit", "quit", "q"):
+            return
+        if line == "help":
+            console.print(
+                "Commands: search QUERY, run QUERY [URL], series SHOW SEASON, "
+                "queue, config, doctor, exit"
+            )
+            continue
+        try:
+            parts = shlex.split(line)
+        except ValueError as exc:
+            console.print(f"[red]parse error: {exc}[/red]")
+            continue
+        cmd, *args = parts
+        try:
+            if cmd == "search" and args:
+                _do_search(" ".join(args), site=None, limit=15)
+            elif cmd == "run" and args:
+                q = args[0]
+                u = args[1] if len(args) > 1 else _interactive_pick_movie(q)
+                if u:
+                    _run_pipeline(query=q, url=u, kind="movie")
+            elif cmd == "series" and len(args) >= 2:
+                asyncio.run(
+                    _run_series(show=args[0], season=int(args[1]), site="filmpalast", episode=None)
+                )
+            elif cmd == "queue":
+                jobs_list(status=None, kind=None, limit=20)
+            elif cmd == "config":
+                _menu_config()
+            elif cmd == "doctor":
+                _doctor()
+            else:
+                console.print(f"[yellow]unknown command: {cmd}[/yellow]")
+        except Exception as exc:
+            console.print(f"[red]error: {exc}[/red]")
+
+
+# ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Title to search."),
+    site: str | None = typer.Option(None, "--site", help="Restrict to one backend."),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """Query stream-site backends and print a Rich table."""
+    _do_search(query, site=site, limit=limit)
+
+
+def _do_search(query: str, *, site: str | None, limit: int) -> list[Any]:
+    from bankai.scraper import all_backends, get_backend
+
+    backends_to_query = [(site, get_backend(site))] if site else list(all_backends().items())
+
+    async def go() -> list[Any]:
+        results: list[Any] = []
+        for sid, cls in backends_to_query:
+            backend = cls()
+            try:
+                hits = await backend.search(query, limit=limit)
+            except Exception as exc:
+                log.warning("backend %s failed: %s", sid, exc)
+                hits = []
+            finally:
+                await backend.aclose()
+            results.extend(hits)
+        return results
+
+    results = asyncio.run(go())
+    table = Table(title=f"Search results for {query!r}", show_lines=False)
+    for col in ("#", "Site", "Title", "Year", "Kind", "URL"):
+        if col == "URL":
+            table.add_column(col, overflow="fold")
+        else:
+            table.add_column(col)
+    for i, r in enumerate(results, 1):
+        table.add_row(str(i), r.site, r.title, str(r.year or ""), str(r.kind), r.url)
+    if not results:
+        console.print("[yellow]no results[/yellow]")
+    else:
+        console.print(table)
+    return results
+
+
+def _interactive_pick_movie(query: str) -> str | None:
+    """Search filmpalast and let the user pick (or auto-pick top by setting).
+
+    Strips a trailing year (``"Cars 3 2017"`` \u2192 ``"Cars 3"``) before
+    searching since filmpalast indexes on title only and a year token in
+    the query reduces hit-count to zero.
+
+    Auto-pick mode re-ranks results by token overlap with the cleaned
+    query because filmpalast's own ranking is unreliable (e.g. searching
+    ``"Cars"`` returns the wanted ``"Cars 3: Evolution"`` at row 10).
+    """
+    settings = get_settings()
+    cleaned = re.sub(r"\s*\(?\b(19|20)\d{2}\b\)?\s*$", "", query).strip()
+
+    # filmpalast's search is finicky — multi-token queries with numbers
+    # (e.g. ``"Cars 3"``) often return zero hits while the bare first
+    # token (``"Cars"``) returns the wanted title at row 10. Probe with
+    # progressively shorter prefixes until something comes back.
+    tokens = cleaned.split()
+    results: list[Any] = []
+    for n in range(len(tokens), 0, -1):
+        attempt = " ".join(tokens[:n])
+        results = _do_search(attempt, site="filmpalast", limit=30)
+        if results:
+            break
+    if not results:
+        return None
+    if not settings.scraper.interactive_pick:
+        from bankai.scraper import SearchResult
+
+        def _tokens(s: str) -> set[str]:
+            return {t for t in re.findall(r"[a-z0-9]+", s.lower()) if t}
+
+        want = _tokens(cleaned or query)
+
+        def _score(r: SearchResult) -> tuple[int, int]:
+            cand = _tokens(r.title)
+            overlap = len(want & cand)
+            extra = len(cand - want)
+            return (overlap, -extra)  # max overlap, then min extra tokens
+
+        ranked = sorted(results, key=_score, reverse=True)
+        pick = ranked[0]
+        console.print(f"[green]auto-picked:[/green] {pick.title}")
+        return str(pick.url)
+    # Interactive: arrow-key pick rendered as a single aligned table.
+    rows = [[str(i), r.title[:60], str(r.year or ""), r.url[:60]] for i, r in enumerate(results, 1)]
+    idx = _ask_table_select(
+        f"Pick a stream for {query!r}",
+        ["#", "Title", "Year", "URL"],
+        rows,
+    )
+    if idx is None:
+        return None
+    return str(results[idx].url)
+
+
+# ---------------------------------------------------------------------------
+# config commands
+# ---------------------------------------------------------------------------
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the active config file path."""
+    console.print(str(user_config_path()))
+
+
+@config_app.command("list")
+def config_list() -> None:
+    """Dump current effective settings as JSON."""
+    s = get_settings().model_dump(mode="json")
+    console.print_json(data=s)
+
+
+@config_app.command("get")
+def config_get(key: str) -> None:
+    """Get a single key (dotted path, e.g. ``output.directory``)."""
+    val = _resolve_key(get_settings().model_dump(mode="json"), key)
+    if val is None:
+        console.print(f"[red]no such key: {key}[/red]")
+        raise typer.Exit(code=1)
+    console.print(val)
+
+
+@config_app.command("set")
+def config_set(
+    key: str,
+    value: str,
+    config_file: Annotated[
+        Path | None,
+        typer.Option("--file", help="Override config path."),
+    ] = None,
+) -> None:
+    """Set a key in the user config file (creates it if missing)."""
+    path, written = _set_config_value(key, _coerce(value), config_file=config_file)
+    console.print(f"[green]set[/green] {key} = {written!r}  \u2192  {path}")
+
+
+def _set_config_value(
+    key: str,
+    value: Any,
+    *,
+    config_file: Path | None = None,
+) -> tuple[Path, Any]:
+    """Set a key in the active TOML config and return the written value."""
+    path = config_file or user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _read_toml(path) if path.exists() else {}
+    parts = key.split(".")
+    cur = data
+    for p in parts[:-1]:
+        if p not in cur or not isinstance(cur.get(p), dict):
+            cur[p] = {}
+        cur = cur[p]
+    cur[parts[-1]] = value
+    _write_toml(path, data)
+    reset_settings_cache()
+    return path, cur[parts[-1]]
+
+
+@config_app.command("edit")
+def config_edit() -> None:
+    """Open the config in $EDITOR."""
+    path = user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("# bankai config\n", encoding="utf-8")
+    editor = os.environ.get("EDITOR") or ("notepad" if os.name == "nt" else "nano")
+    subprocess.call([editor, str(path)])
+    reset_settings_cache()
+
+
+@config_app.command("init")
+def config_init(
+    force: bool = typer.Option(False, "--force", help="Overwrite existing config."),
+) -> None:
+    """First-run wizard: ask the essentials and write ``~/.config/bankai/config.toml``."""
+    path = user_config_path()
+    if path.exists() and not force and not Confirm.ask(f"{path} exists. Overwrite?", default=False):
+        return
+    _print_banner()
+    console.print("[bold]Welcome \u2014 a few quick questions.[/bold]\n")
+    library = Prompt.ask("Library directory (final MKVs)", default="/mnt/media/bankai")
+    work = Prompt.ask(
+        "Work directory (intermediate files)", default=str(Path.home() / ".bankai/work")
+    )
+    state = Prompt.ask("State DB path", default=str(Path.home() / ".bankai/state.sqlite3"))
+    downloads = Prompt.ask(
+        "qBittorrent downloads dir (host path)", default="/mnt/media/downloads/bankai"
+    )
+    qbit_url = Prompt.ask("qBittorrent URL", default="http://localhost:8080")
+    qbit_user = Prompt.ask("qBittorrent username", default="admin")
+    qbit_pass = Prompt.ask("qBittorrent password", default="adminadmin", password=True)
+    prow_url = Prompt.ask("Prowlarr URL", default="http://localhost:9696")
+    prow_key = Prompt.ask("Prowlarr API key", default="")
+    discord = Prompt.ask("Discord webhook URL (blank = none)", default="")
+    interactive = Confirm.ask(
+        "When you run a movie without --url, ask before picking the search hit?",
+        default=False,
+    )
+    parent_host = downloads.rsplit("/", 1)[0] if "/" in downloads else "/downloads"
+    data: dict[str, Any] = {
+        "paths": {
+            "state_db": state,
+            "work_dir": work,
+            "downloads_dir": downloads,
+        },
+        "output": {"directory": library},
+        "qbittorrent": {
+            "url": qbit_url,
+            "username": qbit_user,
+            "password": qbit_pass,
+            "category": "bankai",
+            "save_path": "/downloads/bankai",
+            "path_map": {"/downloads": parent_host},
+        },
+        "prowlarr": {"url": prow_url, "api_key": prow_key},
+        "scraper": {"interactive_pick": interactive},
+    }
+    if discord:
+        data["notifications"] = {"webhook_url": discord}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_toml(path, data)
+    reset_settings_cache()
+    console.print(f"\n[green]wrote[/green] {path}")
+    console.print(
+        f"[dim]Add `export BANKAI_CONFIG={path}` to ~/.bashrc to make it the default.[/dim]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def doctor() -> None:
+    """Check that all external dependencies and services are reachable."""
+    _doctor()
+
+
+def _doctor() -> None:
+    settings = get_settings()
+    table = Table(title="bankai doctor", show_lines=False)
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail", overflow="fold")
+
+    def row(name: str, ok: bool, detail: str) -> None:
+        mark = "[green]\u2713[/green]" if ok else "[red]\u2717[/red]"
+        table.add_row(name, mark, detail)
+
+    for binary in ("ffmpeg", "ffprobe", "mkvmerge", "yt-dlp"):
+        path = shutil.which(binary)
+        row(binary, path is not None, path or "not on PATH")
+    alass = shutil.which(settings.sync.alass_binary)
+    row("alass", alass is not None, alass or f"not on PATH ({settings.sync.alass_binary})")
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            try:
+                _ = pw.chromium.executable_path
+                row("playwright chromium", True, "installed")
+            except Exception as exc:
+                row("playwright chromium", False, f"{exc}; run: playwright install chromium")
+    except Exception as exc:
+        row("playwright", False, str(exc))
+
+    for label, p in (
+        ("state_db parent", settings.paths.state_db.parent),
+        ("work_dir", settings.paths.work_dir),
+        ("output.directory", settings.output.directory),
+    ):
+        row(label, p.exists() or _can_create(p), str(p))
+
+    import httpx
+
+    try:
+        r = httpx.get(f"{settings.qbittorrent.url}/api/v2/app/version", timeout=3.0)
+        row("qBittorrent", r.status_code in (200, 403), f"HTTP {r.status_code}")
+    except Exception as exc:
+        row("qBittorrent", False, str(exc))
+
+    try:
+        r = httpx.get(
+            f"{settings.prowlarr.url}/api/v1/health",
+            headers={"X-Api-Key": settings.prowlarr.api_key},
+            timeout=3.0,
+        )
+        row("Prowlarr", r.status_code == 200, f"HTTP {r.status_code}")
+    except Exception as exc:
+        row("Prowlarr", False, str(exc))
+
+    if settings.notifications.webhook_url:
+        row("Discord webhook", True, "configured")
+
+    console.print(table)
+
+
+def _can_create(p: Path) -> bool:
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# extract / sync / remux (single-stage commands)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def extract(
+    url: str = typer.Option(..., "--url"),
+    out: Path = typer.Option(..., "--out"),
+    hint: str = typer.Option("ytdlp", "--hint"),
+    site: str = typer.Option("manual", "--site"),
+) -> None:
+    """Extract audio from a stream URL."""
+    from bankai.processor.extractor import ExtractWorker
+
+    out.mkdir(parents=True, exist_ok=True)
+    worker = ExtractWorker()
+
+    async def go() -> None:
+        result = await _run_worker_once(
+            worker,
+            out,
+            payload={"url": url, "hint": hint, "site": site},
+        )
+        console.print_json(data=result or {})
+
+    asyncio.run(go())
+
+
+@app.command()
+def sync(
+    audio: Path = typer.Option(..., "--audio", exists=True),
+    reference: Path = typer.Option(..., "--reference", exists=True),
+    out: Path = typer.Option(..., "--out"),
+    offset: float | None = typer.Option(None, "--offset"),
+) -> None:
+    """Align ``audio`` to ``reference`` (or apply manual offset)."""
+    from bankai.processor.sync import SyncWorker
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    worker = SyncWorker()
+    payload: dict[str, Any] = {"audio": str(audio), "reference": str(reference)}
+    if offset is not None:
+        payload["offset_seconds"] = offset
+
+    async def go() -> None:
+        result = await _run_worker_once(worker, out.parent, payload=payload)
+        console.print_json(data=result or {})
+
+    asyncio.run(go())
+
+
+@app.command()
+def remux(
+    video: Path = typer.Option(..., "--video", exists=True),
+    audio: Path = typer.Option(..., "--audio", exists=True),
+    out: Path = typer.Option(..., "--out"),
+    language: str = typer.Option("ger", "--language"),
+    track_name: str = typer.Option("German (Web-DL)", "--track-name"),
+    default_track: bool = typer.Option(True, "--default/--no-default"),
+) -> None:
+    """Remux HQ ``video`` + dub ``audio`` into a single MKV."""
+    from bankai.processor.remux import RemuxWorker
+
+    worker = RemuxWorker()
+    payload = {
+        "video": str(video),
+        "audio": str(audio),
+        "out": str(out),
+        "language": language,
+        "track_name": track_name,
+        "default_track": default_track,
+    }
+
+    async def go() -> None:
+        result = await _run_worker_once(worker, out.parent, payload=payload)
+        console.print_json(data=result or {})
+
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# run / series
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def run(
+    query: str = typer.Argument(..., help="English title for torrent search (include year)."),
+    de: str | None = typer.Option(
+        None,
+        "--de",
+        "--german",
+        help="German title for filmpalast lookup (defaults to QUERY).",
+    ),
+    url: str | None = typer.Option(None, "--url", help="Stream URL (skip search)."),
+    site: str | None = typer.Option(None, "--site", help="Stream site id."),
+    hint: str = typer.Option("ytdlp", "--hint"),
+    out: Path | None = typer.Option(None, "--out"),
+    kind: str = typer.Option("movie", "--kind", help="movie | episode"),
+    offset: float | None = typer.Option(None, "--offset"),
+    interactive: bool | None = typer.Option(
+        None, "--interactive/--auto", help="Override scraper.interactive_pick."
+    ),
+) -> None:
+    """End-to-end pipeline: extract dub \u2192 torrent video \u2192 sync \u2192 remux.
+
+    QUERY is the English title used for the torrent search. Pass --de
+    with the German title to look the dub up on filmpalast (which indexes
+    German titles only).
+    """
+    if not url:
+        if interactive is not None:
+            os.environ["BANKAI_SCRAPER__INTERACTIVE_PICK"] = "true" if interactive else "false"
+            reset_settings_cache()
+        url = _interactive_pick_movie(de or query)
+        if not url:
+            console.print("[red]no stream URL found \u2014 aborting[/red]")
+            raise typer.Exit(code=1)
+        if not site:
+            site = "filmpalast"
+    _run_pipeline(query=query, url=url, site=site, hint=hint, out=out, kind=kind, offset=offset)
+
+
+@app.command()
+def series(
+    show: str = typer.Argument(..., help="Show name."),
+    season: int = typer.Option(..., "--season", "-s", help="Season number."),
+    episode: int | None = typer.Option(None, "--episode", "-e", help="Single episode (else all)."),
+    site: str = typer.Option("filmpalast", "--site"),
+) -> None:
+    """Run the pipeline for an entire season (or one episode)."""
+    asyncio.run(_run_series(show=show, season=season, site=site, episode=episode))
+
+
+async def _run_series(*, show: str, season: int, site: str, episode: int | None) -> None:
+    from bankai.scraper import get_backend
+
+    backend = get_backend(site)()
+    try:
+        list_season = getattr(backend, "list_season", None)
+        if list_season is None:
+            console.print(f"[red]backend {site!r} does not support series[/red]")
+            return
+        episodes = await list_season(show, season)
+    finally:
+        await backend.aclose()
+    if not episodes:
+        console.print("[yellow]no episodes found[/yellow]")
+        return
+    if episode is not None:
+        episodes = [e for e in episodes if e.episode == episode]
+    console.print(f"[green]Found {len(episodes)} episode(s)[/green]")
+    for ep in episodes:
+        console.print(f"  S{season:02d}E{ep.episode:02d}  {ep.title or ''}  {ep.url}")
+    if not Confirm.ask(f"Run pipeline for {len(episodes)} episode(s)?", default=True):
+        return
+    for ep in episodes:
+        q = f"{show} S{season:02d}E{ep.episode:02d}"
+        _run_pipeline(
+            query=q,
+            url=ep.url,
+            site=site,
+            kind="episode",
+            extra_payload={"season": season, "episode": ep.episode, "episode_title": ep.title},
+        )
+
+
+def _run_pipeline(
+    *,
+    query: str,
+    url: str,
+    site: str | None = None,
+    hint: str = "ytdlp",
+    out: Path | None = None,
+    kind: str = "movie",
+    offset: float | None = None,
+    extra_payload: dict[str, Any] | None = None,
+) -> None:
+    from bankai.processor.pipeline import PipelineWorker
+
+    worker = PipelineWorker()
+    payload: dict[str, Any] = {
+        "query": query,
+        "stream_url": url,
+        "stream_site": site or "unknown",
+        "stream_hint": hint,
+        "kind": kind,
+    }
+    if out:
+        payload["out"] = str(out)
+    if offset is not None:
+        payload["offset_seconds"] = offset
+    if extra_payload:
+        payload.update(extra_payload)
+
+    async def go() -> None:
+        settings = get_settings()
+        result = await _run_worker_once(worker, settings.paths.work_dir, payload=payload)
+        console.print_json(data=result or {})
+
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# daemon
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def daemon() -> None:
+    """Run the dispatcher in the foreground."""
+    from bankai.db import initialize
+    from bankai.processor.extractor import ExtractWorker
+    from bankai.processor.pipeline import PipelineWorker
+    from bankai.processor.remux import RemuxWorker
+    from bankai.processor.sync import SyncWorker
+    from bankai.queue.worker import Dispatcher
+    from bankai.torrent.worker import TorrentWorker
+
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    workers = {
+        ExtractWorker.kind: ExtractWorker(),
+        TorrentWorker.kind: TorrentWorker(),
+        SyncWorker.kind: SyncWorker(),
+        RemuxWorker.kind: RemuxWorker(),
+        PipelineWorker.kind: PipelineWorker(),
+    }
+    dispatcher = Dispatcher(
+        db_path=settings.paths.state_db,
+        work_dir=settings.paths.work_dir,
+        workers=workers,
+        queue_settings=settings.queue,
+    )
+    console.print("[green]bankai daemon started[/green] \u2014 Ctrl+C to stop")
+
+    async def go() -> None:
+        try:
+            await dispatcher.run()
+        except KeyboardInterrupt:
+            await dispatcher.stop()
+
+    try:
+        asyncio.run(go())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]shutting down[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# jobs subcommands
+# ---------------------------------------------------------------------------
+
+
+@jobs_app.command("list")
+def jobs_list(
+    status: str | None = typer.Option(None, "--status"),
+    kind: str | None = typer.Option(None, "--kind"),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """List jobs in the queue."""
+    from bankai.db import StateRepository
+    from bankai.queue.models import JobKind, JobStatus
+
+    settings = get_settings()
+    repo = StateRepository(settings.paths.state_db)
+    rows = repo.list_jobs(
+        status=JobStatus(status) if status else None,
+        kind=JobKind(kind) if kind else None,
+        limit=limit,
+    )
+    table = Table(title=f"Jobs ({len(rows)})", show_lines=False)
+    for col in ("ID", "Kind", "Status", "Attempts", "Updated"):
+        table.add_column(col)
+    for j in rows:
+        color = {
+            "done": "green",
+            "failed": "red",
+            "running": "yellow",
+            "queued": "cyan",
+        }.get(str(j.status), "white")
+        table.add_row(
+            str(j.id),
+            str(j.kind),
+            f"[{color}]{j.status}[/{color}]",
+            f"{j.attempts}/{j.max_attempts}",
+            j.updated_at or "-",
+        )
+    console.print(table)
+
+
+@jobs_app.command("show")
+def jobs_show(job_id: int = typer.Argument(...)) -> None:
+    """Show one job's full payload + result + artifacts."""
+    from bankai.db import StateRepository
+
+    repo = StateRepository(get_settings().paths.state_db)
+    job = repo.get_job(job_id)
+    if job is None:
+        console.print(f"[red]no such job: {job_id}[/red]")
+        raise typer.Exit(code=1)
+    console.print_json(data=json.loads(job.model_dump_json()))
+    arts = repo.list_artifacts(job_id)
+    if arts:
+        table = Table(title="Artifacts")
+        for col in ("ID", "Kind", "Path", "Size"):
+            table.add_column(col)
+        for a in arts:
+            table.add_row(str(a.id), a.kind, str(a.path), str(a.size_bytes or "-"))
+        console.print(table)
+
+
+@jobs_app.command("retry")
+def jobs_retry(job_id: int = typer.Argument(...)) -> None:
+    """Reset a failed job to ``queued`` so the dispatcher picks it up."""
+    from bankai.db import StateRepository
+    from bankai.queue.models import Job, JobStatus
+
+    repo = StateRepository(get_settings().paths.state_db)
+    job = repo.get_job(job_id)
+    if job is None:
+        console.print(f"[red]no such job: {job_id}[/red]")
+        raise typer.Exit(code=1)
+    new_payload = job.model_dump(
+        exclude={"id", "created_at", "updated_at", "started_at", "finished_at"}
+    )
+    new_payload["status"] = JobStatus.QUEUED
+    new_payload["attempts"] = 0
+    new_payload["error"] = None
+    repo.create_job(Job(**new_payload))
+    console.print(f"[green]requeued job {job_id}[/green]")
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(job_id: int = typer.Argument(...)) -> None:
+    """Cancel a job (running or queued)."""
+    from bankai.db import StateRepository
+
+    repo = StateRepository(get_settings().paths.state_db)
+    repo.cancel_job(job_id)
+    console.print(f"[yellow]cancelled {job_id}[/yellow]")
+
+
+@jobs_app.command("clear")
+def jobs_clear(
+    status: Annotated[
+        list[str] | None,
+        typer.Option("--status", help="Status to delete; repeat for multiple statuses."),
+    ] = None,
+    all_jobs: Annotated[
+        bool,
+        typer.Option("--all", help="Delete jobs in every status, including queued/running."),
+    ] = False,
+) -> None:
+    """Delete queue rows. Defaults to completed, failed, and cancelled jobs."""
+    from bankai.db import StateRepository
+    from bankai.queue.models import JobStatus
+
+    if all_jobs:
+        statuses = list(JobStatus)
+    else:
+        raw = status or [JobStatus.DONE.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value]
+        try:
+            statuses = [JobStatus(s) for s in raw]
+        except ValueError as exc:
+            console.print(f"[red]invalid status:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+    with StateRepository(get_settings().paths.state_db) as repo:
+        count = repo.clear_jobs(statuses)
+    console.print(f"[green]cleared[/green] {count} job(s)")
+
+
+@app.command()
+def history(limit: int = typer.Option(20, "--limit")) -> None:
+    """Show recently completed pipeline jobs."""
+    from bankai.db import StateRepository
+    from bankai.queue.models import JobKind, JobStatus
+
+    repo = StateRepository(get_settings().paths.state_db)
+    rows = repo.list_jobs(status=JobStatus.DONE, kind=JobKind.PIPELINE, limit=limit)
+    table = Table(title="History")
+    for col in ("ID", "Finished", "Result"):
+        if col == "Result":
+            table.add_column(col, overflow="fold")
+        else:
+            table.add_column(col)
+    for j in rows:
+        result_summary = j.result.get("final_path", "?") if isinstance(j.result, dict) else "?"
+        table.add_row(str(j.id), j.finished_at or "-", str(result_summary))
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+async def _run_worker_once(
+    worker: Any,
+    work_dir: Path,
+    *,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Run a worker from a foreground CLI command and persist final status."""
+    ctx = _make_ctx(work_dir, payload=payload, kind=worker.kind)
+    assert ctx.job.id is not None
+    try:
+        result = await worker.run(ctx)
+    except Exception as exc:
+        ctx.repo.fail_job(ctx.job.id, f"{type(exc).__name__}: {exc}", retry=False)
+        raise
+    else:
+        ctx.repo.complete_job(ctx.job.id, result)
+        return cast(dict[str, Any] | None, result)
+    finally:
+        ctx.repo.close()
+
+
+def _make_ctx(work_dir: Path, *, payload: dict[str, Any], kind: Any | None = None) -> Any:
+    """Build an ad-hoc :class:`WorkerContext` for one-shot CLI commands."""
+    import asyncio as _a
+
+    from bankai.db import StateRepository, initialize
+    from bankai.queue.models import Job, JobKind
+    from bankai.queue.worker import WorkerContext
+
+    settings = get_settings()
+    settings.paths.state_db.parent.mkdir(parents=True, exist_ok=True)
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+    job = repo.create_job(Job(kind=kind or JobKind.PIPELINE, payload=payload))
+    assert job.id is not None
+    job = repo.start_job(job.id)
+    return WorkerContext(
+        job=job,
+        repo=repo,
+        work_dir=work_dir,
+        cancel_token=_a.Event(),
+    )
+
+
+def _resolve_key(data: dict[str, Any], key: str) -> Any:
+    cur: Any = data
+    for part in key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _coerce(value: str) -> Any:
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return value
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    import tomllib
+
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def _write_toml(path: Path, data: dict[str, Any]) -> None:
+    try:
+        import tomli_w
+    except ImportError:
+        path.write_text(_dump_toml_basic(data), encoding="utf-8")
+        return
+    with path.open("wb") as f:
+        tomli_w.dump(data, f)
+
+
+def _dump_toml_basic(data: dict[str, Any]) -> str:
+    out: list[str] = []
+    scalars = {k: v for k, v in data.items() if not isinstance(v, dict)}
+    sections = {k: v for k, v in data.items() if isinstance(v, dict)}
+    for k, v in scalars.items():
+        out.append(f"{k} = {_toml_val(v)}")
+    for sec, body in sections.items():
+        out.append(f"\n[{sec}]")
+        for k, v in body.items():
+            if isinstance(v, dict):
+                inner = ", ".join(f'"{ik}" = "{iv}"' for ik, iv in v.items())
+                out.append(f"{k} = {{ {inner} }}")
+            else:
+                out.append(f"{k} = {_toml_val(v)}")
+    return "\n".join(out) + "\n"
+
+
+def _toml_val(v: Any) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_val(x) for x in v) + "]"
+    return f'"{v}"'
+
+
+if __name__ == "__main__":
+    app()

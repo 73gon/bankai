@@ -1,0 +1,75 @@
+# bankai â€” example configuration
+# Copy to config.toml and edit. All values can be overridden via env vars
+# prefixed with BANKAI_ (e.g. BANKAI_OUTPUT__DIRECTORY=/data/library).
+
+[output]
+directory = "/library"
+# Placeholders: {title} {year} {audio_lang} {season} {episode} {episode_title}
+filename_template = "{title} ({year}) [{audio_lang}].mkv"
+series_filename_template = "{title} - S{season:02d}E{episode:02d} - {episode_title} [{audio_lang}].mkv"
+
+[audio]
+# "copy" keeps the original stream codec (recommended).
+# Other options: "eac3", "ac3"
+codec = "copy"
+language_tag = "ger"
+track_name = "German (Web-DL)"
+default_track = false
+
+[sync]
+# "auto" (alass), "manual" (use --offset), "skip"
+mode = "auto"
+# Below this, skip rewriting (already aligned).
+threshold_seconds = 0.5
+alass_binary = "alass"
+
+[scraper]
+# "ytdlp", "playwright", "auto"
+backend = "auto"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+request_timeout_seconds = 30
+
+[queue]
+# Per-stage worker concurrency.
+search_workers = 2
+extract_workers = 3
+torrent_workers = 5
+sync_workers = 2
+remux_workers = 1
+
+[paths]
+# All paths are inside the container when running via Docker.
+state_db = "/config/bankai.sqlite3"
+work_dir = "/work"
+downloads_dir = "/downloads"
+
+[prowlarr]
+url = "http://prowlarr:9696"
+api_key = "REPLACE_ME"
+# Restrict to specific indexer IDs (empty = all).
+indexer_ids = []
+
+[qbittorrent]
+url = "http://qbittorrent:8080"
+username = "admin"
+password = "adminadmin"
+category = "bankai"
+# Poll interval for download progress.
+poll_interval_seconds = 3
+
+[selector]
+# Quality preferences for torrent auto-selection.
+preferred_resolutions = ["2160p", "1080p"]
+preferred_codecs = ["x265", "h265", "x264", "h264"]
+preferred_sources = ["BluRay", "WEB-DL", "WEBRip"]
+preferred_groups = ["FraMeSToR", "DON", "TayTO", "FoRM"]
+min_seeders = 3
+# Hard size bounds, GiB.
+max_size_gib = 80
+min_size_gib = 0.5
+
+[notifications]
+# Optional: webhook fired on job completion / failure.
+webhook_url = ""
+on_success = true
+on_failure = true

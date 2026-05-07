@@ -1,0 +1,107 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bankai"
+version = "0.1.1"
+description = "Extract German dub audio from web streams and remux into HQ video files."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "bankai contributors" }]
+keywords = ["video", "audio", "remux", "german-dub", "yt-dlp", "mkvmerge"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "httpx>=0.27",
+    "selectolax>=0.3.21",
+    "yt-dlp>=2024.8.6",
+    "playwright>=1.45",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "qbittorrent-api>=2024.5.63",
+    "tomli>=2.0; python_version < '3.11'",
+    "tomli-w>=1.0",
+    "anyio>=4.4",
+    "questionary>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "respx>=0.21",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-requests",
+]
+
+[project.scripts]
+bankai = "bankai.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/73gon/bankai"
+Issues = "https://github.com/73gon/bankai/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bankai"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = [".tmp_*"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "SIM",           # simplify
+    "PTH",           # pathlib
+    "RUF",
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "RUF001", # CLI strings intentionally use arrows and styled glyphs
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer idiom: function-call defaults are how options are declared.
+"src/bankai/cli/main.py" = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_decorators = false
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["yt_dlp.*", "qbittorrentapi.*", "selectolax.*", "questionary.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error"]

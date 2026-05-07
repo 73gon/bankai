@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.tmp_*
+
+# Environment
+.env
+.envrc
+
+# Editors
+.vscode/
+.idea/
+
+# Project runtime
+config.toml
+/work/
+/downloads/
+/library/
+/config/
+*.sqlite3
+*.sqlite3-journal
+
+# OS
+.DS_Store
+Thumbs.db
