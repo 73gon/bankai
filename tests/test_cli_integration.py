@@ -98,6 +98,25 @@ def test_history_command() -> None:
     assert "History" in result.stdout
 
 
+def test_update_command_is_listed() -> None:
+    result = CliRunner().invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "update" in result.stdout
+
+
+def test_update_fails_cleanly_when_installer_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_install_script_path", lambda: None)
+
+    result = CliRunner().invoke(app, ["update"])
+
+    assert result.exit_code == 1
+    assert "could not find scripts/install.sh" in result.stdout
+
+
 def test_config_set_direct_call_uses_default_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

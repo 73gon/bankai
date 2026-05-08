@@ -38,6 +38,12 @@ outside the install directory.
 curl -sSfL https://raw.githubusercontent.com/73gon/bankai/main/scripts/install.sh | bash
 ```
 
+After that first install, update with:
+
+```bash
+bankai update
+```
+
 Useful overrides:
 
 ```bash

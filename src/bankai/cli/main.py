@@ -9,6 +9,7 @@ Top-level commands::
     bankai series "Show" -s 1  # whole season
     bankai config get/set/list/path/edit/init
     bankai doctor              # check ffmpeg, mkvmerge, alass, qbit, prowlarr
+    bankai update              # update this install from git
     bankai jobs list/show/retry/cancel
     bankai history
     bankai daemon
@@ -631,6 +632,53 @@ def shell() -> None:
                 console.print(f"[yellow]unknown command: {cmd}[/yellow]")
         except Exception as exc:
             console.print(f"[red]error: {exc}[/red]")
+
+
+@app.command()
+def update(
+    ref: str = typer.Option("main", "--ref", help="Git branch/tag/commit to install."),
+) -> None:
+    """Update this bankai install by rerunning the bundled installer."""
+    script = _install_script_path()
+    if script is None:
+        console.print(
+            "[red]could not find scripts/install.sh[/red]\n"
+            "[dim]Install once with the curl command from the README, then use `bankai update`.[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    prefix = script.parent.parent
+    bin_dir = _current_bin_dir()
+    env = os.environ.copy()
+    env["BANKAI_PREFIX"] = str(prefix)
+    env["BANKAI_BIN"] = str(bin_dir)
+    env["BANKAI_REF"] = ref
+
+    console.print(f"[bold]Updating bankai[/bold] from [cyan]{ref}[/cyan]")
+    console.print(f"[dim]prefix:[/dim] {prefix}")
+    console.print(f"[dim]bin:[/dim]    {bin_dir}")
+    proc = subprocess.run(["bash", str(script)], env=env, check=False)
+    if proc.returncode != 0:
+        raise typer.Exit(code=proc.returncode)
+
+
+def _install_script_path() -> Path | None:
+    candidates = [
+        Path.cwd() / "scripts" / "install.sh",
+        Path(sys.executable).resolve().parents[1] / "scripts" / "install.sh",
+        Path(sys.executable).resolve().parents[2] / "scripts" / "install.sh",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _current_bin_dir() -> Path:
+    command = shutil.which("bankai")
+    if command:
+        return Path(command).resolve().parent
+    return Path.home() / ".local" / "bin"
 
 
 # ---------------------------------------------------------------------------
