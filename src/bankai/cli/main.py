@@ -238,6 +238,8 @@ def _interactive_menu() -> None:
 
 
 def _menu_run_movie() -> None:
+    from bankai.cli import bgjobs
+
     en = Prompt.ask("[bold]English title[/bold] (for torrent search, e.g. 'Cars 3 2017')")
     if not en.strip():
         return
@@ -252,24 +254,12 @@ def _menu_run_movie() -> None:
             console.print("[red]no stream URL found[/red]")
             return
         url = picked_url
-    where = _ask_select(
-        "Run mode",
-        [
-            "Background (return to menu, run silently)",
-            "Foreground (watch live in this terminal)",
-        ],
+    args = ["run", en, "--de", de, "--url", url, "--site", "filmpalast"]
+    job = bgjobs.spawn(kind="movie", title=f"{en}", args=args)
+    console.print(
+        f"[green]queued[/green] job [bold]{job.id}[/bold] \u2014 "
+        f"\u2018Queue / history\u2019 to watch / cancel."
     )
-    if where and where.startswith("Background"):
-        from bankai.cli import bgjobs
-
-        args = ["run", en, "--de", de, "--url", url, "--site", "filmpalast"]
-        job = bgjobs.spawn(kind="movie", title=f"{en}", args=args)
-        console.print(
-            f"[green]queued[/green] job [bold]{job.id}[/bold] \u2014 "
-            f"\u2018Queue / history\u2019 to watch / cancel."
-        )
-        return
-    _run_pipeline(query=en, url=url, kind="movie", site="filmpalast")
 
 
 def _menu_run_series() -> None:
@@ -288,28 +278,32 @@ def _menu_queue() -> None:
         if not jobs:
             console.print("[dim]no background jobs yet[/dim]")
             return
-        rows = []
+        counts = _job_status_counts(jobs)
+        console.print(
+            "[dim]Background jobs:[/dim] "
+            f"[yellow]{counts.get('running', 0)} running[/yellow]  "
+            f"[green]{counts.get('done', 0)} done[/green]  "
+            f"[red]{counts.get('failed', 0)} failed[/red]"
+        )
+        rows: list[list[str]] = []
         for j in jobs:
-            colour = {
-                "running": "yellow",
-                "done": "green",
-                "failed": "red",
-                "cancelled": "dim",
-            }.get(j.status, "white")
             rows.append(
                 [
-                    f"\x1b[3{_ansi(colour)}m{j.status:>9}\x1b[0m",
                     j.id,
-                    j.title[:55],
+                    _format_job_status(j.status),
+                    _truncate(j.title, 42),
                     _humanize_age(j.started_at),
+                    _format_job_result(j),
                 ]
             )
         can_clear = any(j.status in {"done", "failed", "cancelled"} for j in jobs)
         if can_clear:
-            rows.append(["   action", "-", "Clear finished background jobs", ""])
+            rows.append(
+                ["-", "action", "Clear finished background jobs", "", "done/failed/cancelled"]
+            )
         idx = _ask_table_select(
             "Background jobs (newest first)",
-            ["Status", "ID", "Title", "Age"],
+            ["ID", "Status", "Title", "Age", "Result"],
             rows,
         )
         if idx is None:
@@ -321,17 +315,39 @@ def _menu_queue() -> None:
         _job_detail_menu(jobs[idx])
 
 
-def _ansi(colour: str) -> str:
-    return {
-        "yellow": "3",
-        "green": "2",
-        "red": "1",
-        "dim": "0",
-        "white": "7",
-        "cyan": "6",
-        "magenta": "5",
-        "blue": "4",
-    }.get(colour, "7")
+def _job_status_counts(jobs: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for job in jobs:
+        counts[job.status] = counts.get(job.status, 0) + 1
+    return counts
+
+
+def _format_job_status(status: str) -> str:
+    labels = {
+        "running": "RUNNING",
+        "done": "DONE",
+        "failed": "FAILED",
+        "cancelled": "CANCELLED",
+    }
+    return labels.get(status, status.upper())
+
+
+def _format_job_result(job: Any) -> str:
+    if job.status == "running":
+        return "open log"
+    if job.final_path:
+        return _truncate(Path(str(job.final_path)).name, 30)
+    if job.exit_code is not None:
+        return f"exit {job.exit_code}"
+    return "-"
+
+
+def _truncate(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 1:
+        return value[:width]
+    return f"{value[: width - 1]}…"
 
 
 def _job_detail_menu(job: Any) -> None:
@@ -632,7 +648,7 @@ def search(
     _do_search(query, site=site, limit=limit)
 
 
-def _do_search(query: str, *, site: str | None, limit: int) -> list[Any]:
+def _do_search(query: str, *, site: str | None, limit: int, render: bool = True) -> list[Any]:
     from bankai.scraper import all_backends, get_backend
 
     backends_to_query = [(site, get_backend(site))] if site else list(all_backends().items())
@@ -652,6 +668,8 @@ def _do_search(query: str, *, site: str | None, limit: int) -> list[Any]:
         return results
 
     results = asyncio.run(go())
+    if not render:
+        return results
     table = Table(title=f"Search results for {query!r}", show_lines=False)
     for col in ("#", "Site", "Title", "Year", "Kind", "URL"):
         if col == "URL":
@@ -689,10 +707,11 @@ def _interactive_pick_movie(query: str) -> str | None:
     results: list[Any] = []
     for n in range(len(tokens), 0, -1):
         attempt = " ".join(tokens[:n])
-        results = _do_search(attempt, site="filmpalast", limit=30)
+        results = _do_search(attempt, site="filmpalast", limit=30, render=False)
         if results:
             break
     if not results:
+        console.print("[yellow]no results[/yellow]")
         return None
     if not settings.scraper.interactive_pick:
         from bankai.scraper import SearchResult

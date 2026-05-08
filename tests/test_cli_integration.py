@@ -14,10 +14,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from bankai.cli import main
 from bankai.cli.main import app, config_set
 from bankai.config import get_settings, load_settings, reset_settings_cache, user_config_path
 from bankai.db import StateRepository
-from bankai.queue.models import Job, JobKind, JobStatus
+from bankai.queue.models import Job, JobKind, JobStatus, MediaKind
+from bankai.scraper.base import SearchResult
 
 
 @pytest.fixture(autouse=True)
@@ -107,3 +109,29 @@ def test_config_set_direct_call_uses_default_path(
 
     assert user_config_path().exists()
     assert load_settings(user_config_path()).scraper.interactive_pick is True
+
+
+def test_internal_search_can_skip_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeBackend:
+        async def search(self, query: str, *, kind: object = None, limit: int = 20):
+            return [
+                SearchResult(
+                    site="fake",
+                    title=f"{query} result",
+                    url="https://example.test/result",
+                    kind=MediaKind.MOVIE,
+                )
+            ]
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("bankai.scraper.get_backend", lambda site: FakeBackend)
+
+    results = main._do_search("quiet", site="fake", limit=1, render=False)
+
+    assert len(results) == 1
+    assert capsys.readouterr().out == ""
