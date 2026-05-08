@@ -117,6 +117,12 @@ def test_update_fails_cleanly_when_installer_is_missing(
     assert "could not find scripts/install.sh" in result.stdout
 
 
+def test_install_script_path_searches_package_ancestors() -> None:
+    found = main._install_script_path()
+    assert found is not None
+    assert found.name == "install.sh"
+
+
 def test_config_set_direct_call_uses_default_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

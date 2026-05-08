@@ -663,15 +663,30 @@ def update(
 
 
 def _install_script_path() -> Path | None:
-    candidates = [
-        Path.cwd() / "scripts" / "install.sh",
-        Path(sys.executable).resolve().parents[1] / "scripts" / "install.sh",
-        Path(sys.executable).resolve().parents[2] / "scripts" / "install.sh",
-    ]
-    for candidate in candidates:
+    for root in _candidate_install_roots():
+        candidate = root / "scripts" / "install.sh"
         if candidate.exists():
             return candidate
     return None
+
+
+def _candidate_install_roots() -> list[Path]:
+    roots: list[Path] = [Path.cwd()]
+    for path in (Path(__file__).resolve(), Path(sys.executable).resolve()):
+        roots.extend(path.parents)
+    command = shutil.which("bankai")
+    if command:
+        resolved = Path(command).resolve()
+        roots.append(resolved.parent)
+        roots.extend(resolved.parents)
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for root in roots:
+        if root not in seen:
+            seen.add(root)
+            unique.append(root)
+    return unique
 
 
 def _current_bin_dir() -> Path:
