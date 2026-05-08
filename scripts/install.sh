@@ -16,9 +16,12 @@ command -v git >/dev/null || fail "git not found"
 
 # Detect missing system binaries (don't auto-install — user knows their distro).
 missing=()
-for b in ffmpeg ffprobe mkvmerge alass; do
+for b in ffmpeg ffprobe mkvmerge; do
   command -v "$b" >/dev/null || missing+=("$b")
 done
+if ! command -v alass >/dev/null && [[ ! -x "$HOME/bin/alass" ]]; then
+  missing+=("alass")
+fi
 if (( ${#missing[@]} )); then
   say "WARNING: missing binaries: ${missing[*]}"
   say "On Debian/Ubuntu: sudo apt install ffmpeg mkvtoolnix"
