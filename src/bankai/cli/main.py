@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -880,7 +881,7 @@ def _doctor() -> None:
         table.add_row(name, mark, detail)
 
     for binary in ("ffmpeg", "ffprobe", "mkvmerge", "yt-dlp"):
-        path = shutil.which(binary)
+        path = _find_runtime_binary(binary)
         row(binary, path is not None, path or "not on PATH")
     alass = shutil.which(settings.sync.alass_binary)
     row("alass", alass is not None, alass or f"not on PATH ({settings.sync.alass_binary})")
@@ -934,6 +935,16 @@ def _can_create(p: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _find_runtime_binary(binary: str) -> str | None:
+    """Find a shell binary, including console scripts in bankai's venv."""
+    path = shutil.which(binary)
+    if path:
+        return path
+    name = f"{binary}.exe" if os.name == "nt" else binary
+    candidate = Path(sys.executable).with_name(name)
+    return str(candidate) if candidate.exists() else None
 
 
 # ---------------------------------------------------------------------------
