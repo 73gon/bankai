@@ -98,6 +98,19 @@ class SyncError(Exception):
     pass
 
 
+class PlaceholderAudioError(PermanentWorkerError):
+    """Extracted audio is too short to be the real feature stream."""
+
+    def __init__(self, *, audio_duration: float, video_duration: float) -> None:
+        self.audio_duration = audio_duration
+        self.video_duration = video_duration
+        super().__init__(
+            f"audio duration ({audio_duration:.1f}s) is much shorter than "
+            f"video ({video_duration:.1f}s); extract likely captured a placeholder. "
+            "Re-run with a different URL or hint."
+        )
+
+
 class SyncWorker(Worker):
     kind = JobKind.SYNC
 
@@ -155,10 +168,9 @@ class SyncWorker(Worker):
                 # than the reference video, the extractor most likely captured
                 # a placeholder/ad/preview rather than the feature stream.
                 if video_dur > 60 and audio_dur < 0.5 * video_dur:
-                    raise PermanentWorkerError(
-                        f"audio duration ({audio_dur:.1f}s) is much shorter than "
-                        f"video ({video_dur:.1f}s); extract likely captured a "
-                        "placeholder. Re-run with a different URL or hint."
+                    raise PlaceholderAudioError(
+                        audio_duration=audio_dur,
+                        video_duration=video_dur,
                     )
                 length_tol = max(settings.threshold_seconds, 2.0)
                 if abs(delta) <= length_tol:

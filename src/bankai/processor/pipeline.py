@@ -38,7 +38,8 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.processor.extractor import ExtractWorker
 from bankai.processor.remux import RemuxWorker
-from bankai.processor.sync import SyncWorker
+from bankai.processor.sync import PlaceholderAudioError, SyncWorker
+from bankai.processor.visual_sync import VisualSyncError, estimate_visual_timeline, is_video_file
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import (
     PermanentWorkerError,
@@ -124,13 +125,17 @@ class PipelineWorker(Worker):
                 pass  # unknown backend id; fall through with original URL
             except Exception as exc:
                 log.warning("[pipeline] resolve_stream failed: %s", exc)
-        extract_payload = {
-            "url": stream_url,
-            "hint": stream_hint,
-            "site": stream_site,
-        }
+        extract_attempts = _extract_attempt_payloads(
+            stream_url=stream_url,
+            stream_hint=stream_hint,
+            stream_site=stream_site,
+        )
+        extract_attempt_index = 0
         extract_result = await self._run_stage(
-            ctx, self._extractor, JobKind.EXTRACT, extract_payload
+            ctx,
+            self._extractor,
+            JobKind.EXTRACT,
+            extract_attempts[extract_attempt_index],
         )
         audio_path = extract_result["path"]
 
@@ -149,10 +154,32 @@ class PipelineWorker(Worker):
 
         # ---- 3. Sync audio to video ------------------------------------
         log.info("[pipeline] stage 3/4 â€” sync")
-        sync_payload = {"audio": audio_path, "reference": video_path}
-        if "offset_seconds" in payload:
-            sync_payload["offset_seconds"] = payload["offset_seconds"]
-        sync_result = await self._run_stage(ctx, self._sync, JobKind.SYNC, sync_payload)
+        while True:
+            sync_payload = await self._build_sync_payload(
+                audio_path=audio_path,
+                video_path=video_path,
+                payload=payload,
+            )
+            try:
+                sync_result = await self._run_stage(ctx, self._sync, JobKind.SYNC, sync_payload)
+                break
+            except PlaceholderAudioError:
+                extract_attempt_index += 1
+                if extract_attempt_index >= len(extract_attempts):
+                    raise
+                retry_payload = extract_attempts[extract_attempt_index]
+                log.warning(
+                    "[pipeline] extracted audio looked like a placeholder; retrying extract "
+                    "with hint=%s",
+                    retry_payload.get("hint"),
+                )
+                extract_result = await self._run_stage(
+                    ctx,
+                    self._extractor,
+                    JobKind.EXTRACT,
+                    retry_payload,
+                )
+                audio_path = extract_result["path"]
         synced_audio = sync_result["path"]
 
         # ---- 4. Remux ---------------------------------------------------
@@ -279,6 +306,61 @@ class PipelineWorker(Worker):
         result = await worker.run(child_ctx)
         return result or {}
 
+    async def _build_sync_payload(
+        self,
+        *,
+        audio_path: str,
+        video_path: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        sync_payload: dict[str, Any] = {"audio": audio_path, "reference": video_path}
+        if "offset_seconds" in payload:
+            sync_payload["offset_seconds"] = payload["offset_seconds"]
+            return sync_payload
+
+        source_path = Path(audio_path)
+        if not is_video_file(source_path):
+            return sync_payload
+        try:
+            timeline = await estimate_visual_timeline(
+                reference=Path(video_path),
+                source=source_path,
+            )
+        except VisualSyncError as exc:
+            log.info("[visual-sync] skipped: %s", exc)
+            return sync_payload
+
+        if abs(timeline.slope - 1.0) > 0.005:
+            log.info(
+                "[visual-sync] matched %d frames but timeline slope %.5f is not a simple "
+                "offset; leaving audio sync automatic",
+                len(timeline.matches),
+                timeline.slope,
+            )
+            return sync_payload
+        if abs(timeline.offset_seconds) < 0.25:
+            log.info("[visual-sync] source/HQ offset %.3fs is negligible", timeline.offset_seconds)
+            return sync_payload
+
+        # source_time = reference_time + offset. If the source has extra
+        # lead-in, offset is positive and the audio must be advanced.
+        sync_payload["offset_seconds"] = -timeline.offset_seconds
+        sync_payload["visual_offset_seconds"] = timeline.offset_seconds
+        sync_payload["visual_matches"] = [
+            {
+                "reference_time": m.reference_time,
+                "source_time": m.source_time,
+                "distance": m.distance,
+            }
+            for m in timeline.matches
+        ]
+        log.info(
+            "[visual-sync] applying offset %.3fs from %d frame matches",
+            -timeline.offset_seconds,
+            len(timeline.matches),
+        )
+        return sync_payload
+
 
 def _default_output_path(
     query: str,
@@ -317,3 +399,24 @@ def _default_output_path(
     else:
         folder = cleaned
     return library / "Movies" / folder / f"{folder}.mkv"
+
+
+def _extract_attempt_payloads(
+    *,
+    stream_url: str,
+    stream_hint: str,
+    stream_site: str,
+) -> list[dict[str, Any]]:
+    hints: list[str] = []
+    for hint in (stream_hint, "playwright", "ytdlp"):
+        if hint and hint not in hints:
+            hints.append(hint)
+    return [
+        {
+            "url": stream_url,
+            "hint": hint,
+            "site": stream_site,
+            "attempt": i + 1,
+        }
+        for i, hint in enumerate(hints)
+    ]
