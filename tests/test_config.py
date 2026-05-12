@@ -50,3 +50,17 @@ def test_env_overrides_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("BANKAI_AUDIO__CODEC", "eac3")
     settings = load_settings()
     assert settings.audio.codec == "eac3"
+
+
+def test_metadata_settings_can_be_configured_from_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BANKAI_METADATA__TVDB_API_KEY", "secret")
+    monkeypatch.setenv("BANKAI_METADATA__TVDB_ENABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.metadata.tvdb_enabled is True
+    assert settings.metadata.tvdb_api_key == "secret"

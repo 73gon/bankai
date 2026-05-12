@@ -1,0 +1,313 @@
+"""Optional TheTVDB v4 metadata lookup.
+
+The provider is deliberately fail-soft: missing credentials or transient TVDB
+errors should never block the local scraper flow.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+
+from bankai.config import get_settings
+from bankai.logging import get_logger
+from bankai.queue.models import MediaKind
+
+log = get_logger(__name__)
+
+_BASE_URL = "https://api4.thetvdb.com/v4"
+
+
+class TVDBError(Exception):
+    """TheTVDB returned an unusable response."""
+
+
+@dataclass(frozen=True, slots=True)
+class TitleAlias:
+    name: str | None = None
+    english_title: str | None = None
+    german_title: str | None = None
+    year: int | None = None
+    tvdb_id: int | None = None
+    kind: MediaKind | None = None
+
+
+class TVDBClient:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        pin: str = "",
+        languages: list[str] | None = None,
+        base_url: str = _BASE_URL,
+        timeout: float = 10.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._pin = pin
+        self._languages = [
+            _normalise_language(language) for language in (languages or ["deu", "eng"])
+        ]
+        self._client = httpx.AsyncClient(
+            base_url=base_url.rstrip("/") + "/",
+            timeout=timeout,
+            transport=transport,
+        )
+        self._token: str | None = None
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def search_aliases(
+        self,
+        query: str,
+        *,
+        kind: MediaKind,
+        limit: int = 5,
+    ) -> list[TitleAlias]:
+        clean = query.strip()
+        if not clean:
+            return []
+        token = await self._ensure_token()
+        tvdb_type = _tvdb_search_type(kind)
+        params: dict[str, str | int] = {"query": clean, "limit": limit}
+        if tvdb_type:
+            params["type"] = tvdb_type
+        response = await self._client.get(
+            "search",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+        )
+        response.raise_for_status()
+        payload = _as_dict(response.json())
+        items = _as_list(payload.get("data"))
+        aliases: list[TitleAlias] = []
+        for raw_item in items:
+            item = _as_dict(raw_item)
+            if not item:
+                continue
+            record_type = _record_type(item, fallback=tvdb_type)
+            tvdb_id = _record_id(item)
+            base = _alias_from_record(item, kind=kind)
+            translations = await self._fetch_translations(record_type, tvdb_id, token)
+            alias = TitleAlias(
+                name=base.name,
+                english_title=translations.get("eng") or base.english_title,
+                german_title=translations.get("deu") or base.german_title,
+                year=base.year,
+                tvdb_id=tvdb_id,
+                kind=base.kind,
+            )
+            if alias.name or alias.english_title or alias.german_title:
+                aliases.append(alias)
+        return aliases
+
+    async def _ensure_token(self) -> str:
+        if self._token:
+            return self._token
+        request: dict[str, str] = {"apikey": self._api_key}
+        if self._pin:
+            request["pin"] = self._pin
+        response = await self._client.post("login", json=request)
+        response.raise_for_status()
+        payload = _as_dict(response.json())
+        data = _as_dict(payload.get("data"))
+        token = data.get("token")
+        if not isinstance(token, str) or not token:
+            raise TVDBError("TVDB login response did not include a bearer token")
+        self._token = token
+        return token
+
+    async def _fetch_translations(
+        self,
+        record_type: str | None,
+        tvdb_id: int | None,
+        token: str,
+    ) -> dict[str, str]:
+        endpoint_type = _translation_endpoint_type(record_type)
+        if endpoint_type is None or tvdb_id is None:
+            return {}
+        translations: dict[str, str] = {}
+        for lang in self._languages:
+            try:
+                response = await self._client.get(
+                    f"{endpoint_type}/{tvdb_id}/translations/{lang}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                log.debug("TVDB translation lookup failed for %s/%s: %s", tvdb_id, lang, exc)
+                continue
+            payload = _as_dict(response.json())
+            data = _as_dict(payload.get("data"))
+            title = _title_from_translation(data)
+            if title:
+                translations[lang] = title
+        return translations
+
+
+async def get_title_aliases(query: str, *, kind: MediaKind) -> list[TitleAlias]:
+    settings = get_settings().metadata
+    if not settings.tvdb_enabled or not settings.tvdb_api_key:
+        return []
+    client = TVDBClient(
+        api_key=settings.tvdb_api_key,
+        pin=settings.tvdb_pin,
+        languages=settings.tvdb_languages,
+    )
+    try:
+        return await client.search_aliases(query, kind=kind)
+    except (TVDBError, httpx.HTTPError) as exc:
+        log.warning("TVDB lookup failed for %r: %s", query, exc)
+        return []
+    finally:
+        await client.aclose()
+
+
+def _alias_from_record(record: dict[str, Any], *, kind: MediaKind) -> TitleAlias:
+    name = _first_text(record, "name", "title", "slug")
+    english = _translated_title(record, "eng")
+    german = _translated_title(record, "deu")
+    record_type = _record_type(record, fallback=None)
+    inferred_kind = MediaKind.MOVIE if record_type == "movie" else kind
+    if record_type == "series":
+        inferred_kind = MediaKind.EPISODE
+    return TitleAlias(
+        name=name,
+        english_title=english,
+        german_title=german,
+        year=_year(record),
+        tvdb_id=_record_id(record),
+        kind=inferred_kind,
+    )
+
+
+def _tvdb_search_type(kind: MediaKind) -> str:
+    return "movie" if kind is MediaKind.MOVIE else "series"
+
+
+def _translation_endpoint_type(record_type: str | None) -> str | None:
+    if record_type == "movie":
+        return "movies"
+    if record_type == "series":
+        return "series"
+    return None
+
+
+def _record_type(record: dict[str, Any], *, fallback: str | None) -> str | None:
+    raw = record.get("type") or record.get("entityType") or fallback
+    if not isinstance(raw, str):
+        return fallback
+    raw = raw.lower()
+    if raw in {"movie", "movies"}:
+        return "movie"
+    if raw in {"series", "tv", "show"}:
+        return "series"
+    return fallback
+
+
+def _record_id(record: dict[str, Any]) -> int | None:
+    for key in ("tvdb_id", "tvdbId", "id", "objectID", "objectId"):
+        raw = record.get(key)
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str):
+            match = re.search(r"\d+", raw)
+            if match:
+                return int(match.group(0))
+    return None
+
+
+def _year(record: dict[str, Any]) -> int | None:
+    for key in ("year", "releaseYear", "first_air_time", "firstAired", "release_date"):
+        raw = record.get(key)
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str):
+            match = re.search(r"\b(19|20)\d{2}\b", raw)
+            if match:
+                return int(match.group(0))
+    return None
+
+
+def _translated_title(record: dict[str, Any], lang: str) -> str | None:
+    for key in ("translations", "name_translated", "title_translated"):
+        title = _title_from_translation_map(record.get(key), lang)
+        if title:
+            return title
+    return None
+
+
+def _title_from_translation_map(raw: object, lang: str) -> str | None:
+    if isinstance(raw, str):
+        text = raw
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            if lang == "eng":
+                return text.strip() or None
+            return None
+    if isinstance(raw, dict):
+        for key in (lang, _short_language(lang)):
+            value = raw.get(key)
+            title = _title_from_translation(value)
+            if title:
+                return title
+    if isinstance(raw, list):
+        for item in raw:
+            data = _as_dict(item)
+            code = _normalise_language(str(data.get("language") or data.get("lang") or ""))
+            if code == lang:
+                title = _title_from_translation(data)
+                if title:
+                    return title
+    return None
+
+
+def _title_from_translation(raw: object) -> str | None:
+    if isinstance(raw, str):
+        return raw.strip() or None
+    if isinstance(raw, dict):
+        return _first_text(raw, "name", "title", "translatedName", "officialName")
+    return None
+
+
+def _first_text(data: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        raw = data.get(key)
+        if isinstance(raw, str):
+            clean = raw.strip()
+            if clean:
+                return clean
+    return None
+
+
+def _normalise_language(lang: str) -> str:
+    clean = lang.strip().lower()
+    if clean in {"de", "ger", "deu"}:
+        return "deu"
+    if clean in {"en", "eng"}:
+        return "eng"
+    return clean
+
+
+def _short_language(lang: str) -> str:
+    if lang == "deu":
+        return "de"
+    if lang == "eng":
+        return "en"
+    return lang
+
+
+def _as_dict(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: object) -> list[object]:
+    return value if isinstance(value, list) else []

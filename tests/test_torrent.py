@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from bankai.config import SelectorSettings
 from bankai.scraper.base import EpisodeRef
@@ -16,7 +17,13 @@ from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.torrent.selector import TorrentSelector
 
 
-def _c(title: str, *, seeders: int = 50, size_gib: float = 5.0, **extra) -> TorrentCandidate:
+def _c(
+    title: str,
+    *,
+    seeders: int = 50,
+    size_gib: float = 5.0,
+    **extra: Any,
+) -> TorrentCandidate:
     return TorrentCandidate(
         title=title,
         indexer="test",

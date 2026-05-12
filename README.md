@@ -58,8 +58,9 @@ BANKAI_FORCE_REINSTALL=1 bash scripts/install.sh
 bankai                           # ASCII banner + menu
 bankai run "Finding Nemo 2003"   # auto-search filmpalast, pipeline through
 bankai run "Inception 2010" --url https://filmpalast.to/stream/inception
+bankai batch movies.txt          # queue many movie downloads in the background
 bankai search "matrix"
-bankai series "Attack on Titan" -s 1 --site aniworld
+bankai series "Arcane" -s 1      # auto-detect series site, queue episodes
 bankai jobs list
 bankai jobs clear                # delete done/failed/cancelled queue rows
 bankai history
@@ -79,7 +80,8 @@ bankai config set scraper.interactive_pick true
 | `bankai`                                  | Interactive menu (default when no subcommand).                      |
 | `bankai shell`                            | REPL mode \u2014 type `run "X"`, `search Y`, etc.                   |
 | `bankai run QUERY [--url URL]`            | End-to-end pipeline. Auto-searches filmpalast when `--url` omitted. |
-| `bankai series SHOW -s N [-e M]`          | Run a whole season (or one episode).                                |
+| `bankai batch FILE`                       | Queue movie downloads from a text file.                             |
+| `bankai series SHOW -s N [-e M]`          | Queue a whole season (or one episode).                              |
 | `bankai search QUERY [--site filmpalast]` | List matches as a table.                                            |
 | `bankai config init`                      | First-run wizard; writes `~/.config/bankai/config.toml`.            |
 | `bankai config get/set KEY [VALUE]`       | Read or write one key.                                              |
@@ -116,6 +118,12 @@ default_track = true              # German is the default audio track
 [scraper]
 interactive_pick = false          # true = ask before picking from search results
 
+[metadata]
+tvdb_enabled = true               # no effect until tvdb_api_key is set
+tvdb_api_key = ""                 # TheTVDB v4 API key
+tvdb_pin = ""                     # optional subscriber PIN
+tvdb_languages = ["deu", "eng"]
+
 [selector]
 preferred_resolutions    = ["1080p", "720p"]
 preferred_audio_languages = ["english"]   # prefer English HQ video
@@ -138,9 +146,24 @@ There are two ledgers:
   `$XDG_STATE_HOME/bankai/jobs` (usually `~/.local/state/bankai/jobs`). Open
   `bankai` -> `Queue / history` and select `Clear finished background jobs`.
 
+## Movie batches
+
+`bankai batch FILE` queues one background job per non-empty line. Lines use:
+
+```text
+English Title 2010
+English Title 2010 | German Title
+English Title 2010 | German Title | https://filmpalast.to/stream/title
+```
+
+Use `bankai batch FILE --dry-run` to preview the parsed jobs.
+
 ## Architecture
 
 - **`bankai.cli`** \u2014 Typer command tree, interactive menu, REPL.
+- **`bankai.backend`** \u2014 application services shared by the CLI today and a
+  future HTTP/web UI.
+- **`bankai.metadata`** \u2014 optional TVDB title aliases and language lookup.
 - **`bankai.processor`** \u2014 Stage workers: `extractor` (yt-dlp +
   Playwright capture-all + pick-longest), `sync` (alass / ffmpeg
   `-itsoffset`), `remux` (mkvmerge with track tagging),

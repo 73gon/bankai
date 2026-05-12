@@ -60,8 +60,45 @@ async def test_filmpalast_search_parses_fixture(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_filmpalast_series_lookup_tries_direct_slug_first() -> None:
+    html = """
+    <html>
+      <body>
+        <a href="/stream/arcane-s01-e01">Welcome to the Playground</a>
+        <a href="/stream/arcane-s01-e02">Some Mysteries</a>
+      </body>
+    </html>
+    """
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/stream/arcane":
+            return httpx.Response(200, text=html)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(base_url="http://example.invalid", transport=transport)
+    try:
+        episodes = await backend.list_season("Arcane", 1)
+    finally:
+        await backend.aclose()
+
+    assert requested_paths[0] == "/stream/arcane"
+    assert [ep.episode for ep in episodes] == [1, 2]
+    assert episodes[0].title == "Welcome to the Playground"
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_resolve_returns_ytdlp_handle() -> None:
     backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(lambda request: httpx.Response(404)),
+    )
     try:
         handle = await backend.resolve_stream("http://example.invalid/stream/x")
     finally:

@@ -28,6 +28,15 @@ alass_binary = "alass"
 backend = "auto"
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
 request_timeout_seconds = 30
+interactive_pick = false
+
+[metadata]
+# Optional TheTVDB v4 metadata. When configured, Bankai can expand searches
+# with English/German aliases and find series without you knowing the year.
+tvdb_enabled = true
+tvdb_api_key = ""
+tvdb_pin = ""
+tvdb_languages = ["deu", "eng"]
 
 [queue]
 # Per-stage worker concurrency.

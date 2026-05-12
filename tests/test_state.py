@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from bankai.queue.models import Artifact, Job, JobKind, JobStatus, Media, MediaK
 
 
 @pytest.fixture
-def repo(tmp_path: Path):
+def repo(tmp_path: Path) -> Iterator[StateRepository]:
     db = tmp_path / "state.sqlite3"
     with StateRepository(db) as r:
         yield r
@@ -123,7 +124,7 @@ def test_artifacts(repo: StateRepository, tmp_path: Path) -> None:
     job = repo.create_job(Job(kind=JobKind.EXTRACT))
     art = repo.add_artifact(
         Artifact(
-            job_id=job.id,  # type: ignore[arg-type]
+            job_id=job.id,
             kind="audio",
             path=tmp_path / "out.aac",
             codec="aac",

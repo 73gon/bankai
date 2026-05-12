@@ -40,7 +40,7 @@ class _FakePlaywright(PlaywrightRunner):
         super().__init__()
         self._captured = captured_url
 
-    async def extract(  # type: ignore[override]
+    async def extract(
         self, url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None
     ) -> ExtractResult:
         if self._captured is None:
@@ -96,7 +96,9 @@ async def test_extract_worker_falls_back_to_playwright(tmp_path: Path) -> None:
     # Replace the playwright runner's downstream ytdlp via monkeypatch:
     original = pw.extract
 
-    async def _patched(url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None):
+    async def _patched(
+        url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None
+    ) -> ExtractResult:
         return await original(url, out_dir, ytdlp=inner)
 
     pw.extract = _patched  # type: ignore[method-assign]

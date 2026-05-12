@@ -141,7 +141,9 @@ def test_internal_search_can_skip_rendering(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeBackend:
-        async def search(self, query: str, *, kind: object = None, limit: int = 20):
+        async def search(
+            self, query: str, *, kind: object = None, limit: int = 20
+        ) -> list[SearchResult]:
             return [
                 SearchResult(
                     site="fake",

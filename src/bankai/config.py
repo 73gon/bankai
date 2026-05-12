@@ -59,6 +59,13 @@ class ScraperSettings(BaseModel):
     interactive_pick: bool = False
 
 
+class MetadataSettings(BaseModel):
+    tvdb_enabled: bool = True
+    tvdb_api_key: str = ""
+    tvdb_pin: str = ""
+    tvdb_languages: list[str] = Field(default_factory=lambda: ["deu", "eng"])
+
+
 class QueueSettings(BaseModel):
     search_workers: int = 2
     extract_workers: int = 3
@@ -133,6 +140,7 @@ class Settings(BaseSettings):
     sync: SyncSettings = Field(default_factory=SyncSettings)
     scraper: ScraperSettings = Field(default_factory=ScraperSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)
+    metadata: MetadataSettings = Field(default_factory=MetadataSettings)
     paths: PathsSettings = Field(default_factory=PathsSettings)
     prowlarr: ProwlarrSettings = Field(default_factory=ProwlarrSettings)
     qbittorrent: QBittorrentSettings = Field(default_factory=QBittorrentSettings)

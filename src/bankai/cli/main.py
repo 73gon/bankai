@@ -33,6 +33,13 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 from bankai import __version__
+from bankai.backend import (
+    BatchMovie,
+    build_movie_args,
+    list_series_episodes,
+    parse_movie_batch,
+    search_stream_sources,
+)
 from bankai.config import (
     get_settings,
     load_settings,
@@ -40,6 +47,7 @@ from bankai.config import (
     user_config_path,
 )
 from bankai.logging import configure_logging, get_logger
+from bankai.queue.models import MediaKind
 
 app = typer.Typer(
     name="bankai",
@@ -55,6 +63,78 @@ app.add_typer(config_app, name="config")
 
 console = Console()
 log = get_logger(__name__)
+
+
+def _bool_text(value: bool) -> str:
+    return "[green]True[/green]" if value else "[red]False[/red]"
+
+
+def _format_value(value: Any, *, key: str | None = None) -> str:
+    if key and _is_secret_key(key) and value:
+        return "[dim]<set>[/dim]"
+    if isinstance(value, bool):
+        return _bool_text(value)
+    if value is None:
+        return "[dim]null[/dim]"
+    if isinstance(value, int | float):
+        return f"[cyan]{value}[/cyan]"
+    if isinstance(value, list):
+        if not value:
+            return "[dim][][/dim]"
+        return ", ".join(_format_value(v) for v in value)
+    if isinstance(value, dict):
+        if not value:
+            return "[dim]{}[/dim]"
+        return json.dumps(value, ensure_ascii=False)
+    if value == "":
+        return "[dim]<empty>[/dim]"
+    return str(value)
+
+
+def _plain_value(value: Any, *, key: str | None = None) -> str:
+    if key and _is_secret_key(key) and value:
+        return "<set>"
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if value == "":
+        return "<empty>"
+    return str(value)
+
+
+def _is_secret_key(key: str) -> bool:
+    return any(part in key.casefold() for part in ("password", "api_key", "pin", "webhook"))
+
+
+def _flatten_settings(data: dict[str, Any], *, prefix: str = "") -> list[tuple[str, Any]]:
+    rows: list[tuple[str, Any]] = []
+    for key, value in data.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            rows.extend(_flatten_settings(value, prefix=full_key))
+        else:
+            rows.append((full_key, value))
+    return rows
+
+
+def _status_color(status: str) -> str:
+    return {
+        "queued": "cyan",
+        "running": "yellow",
+        "done": "green",
+        "failed": "red",
+        "cancelled": "magenta",
+    }.get(status, "white")
+
+
+def _rich_status(status: str) -> str:
+    color = _status_color(status)
+    return f"[{color}]{status.upper()}[/{color}]"
 
 
 _BANNER = r"""[bold magenta]
@@ -208,6 +288,7 @@ def _interactive_menu() -> None:
             "What do you want to do?",
             [
                 "Run a movie",
+                "Run movie batch",
                 "Run a series",
                 "Search",
                 "Queue / history",
@@ -222,6 +303,8 @@ def _interactive_menu() -> None:
         try:
             if choice == "Run a movie":
                 _menu_run_movie()
+            elif choice == "Run movie batch":
+                _menu_run_batch()
             elif choice == "Run a series":
                 _menu_run_series()
             elif choice == "Search":
@@ -255,7 +338,7 @@ def _menu_run_movie() -> None:
             console.print("[red]no stream URL found[/red]")
             return
         url = picked_url
-    args = ["run", en, "--de", de, "--url", url, "--site", "filmpalast"]
+    args = build_movie_args(BatchMovie(title=en, german_title=de, url=url), site="filmpalast")
     job = bgjobs.spawn(kind="movie", title=f"{en}", args=args)
     console.print(
         f"[green]queued[/green] job [bold]{job.id}[/bold] \u2014 "
@@ -263,11 +346,20 @@ def _menu_run_movie() -> None:
     )
 
 
+def _menu_run_batch() -> None:
+    path = Path(Prompt.ask("Batch file path")).expanduser()
+    if not path.exists():
+        console.print(f"[red]not found:[/red] {path}")
+        return
+    site = Prompt.ask("Stream site", default="filmpalast")
+    _queue_movie_batch(path, site=site, dry_run=False)
+
+
 def _menu_run_series() -> None:
     show = Prompt.ask("Show name")
     season = IntPrompt.ask("Season", default=1)
-    site = Prompt.ask("Site (filmpalast/aniworld)", default="filmpalast")
-    asyncio.run(_run_series(show=show, season=season, site=site, episode=None))
+    site = Prompt.ask("Site (auto/filmpalast/aniworld/bs.to/kinox)", default="auto")
+    asyncio.run(_run_series(show=show, season=season, site=site, episode=None, yes=False))
 
 
 def _menu_queue() -> None:
@@ -357,7 +449,7 @@ def _job_detail_menu(job: Any) -> None:
     while True:
         job = job.refresh()
         console.rule(
-            f"[bold]{job.title}[/bold]  \u00b7  {job.id}  \u00b7  status=[bold]{job.status}[/bold]"
+            f"[bold]{job.title}[/bold]  \u00b7  {job.id}  \u00b7  status={_rich_status(job.status)}"
         )
         if job.final_path:
             console.print(f"  [green]final:[/green] {job.final_path}")
@@ -418,6 +510,24 @@ _QUICK_SETTINGS: list[tuple[str, str, str, str]] = [
         "scraper.interactive_pick",
         "bool",
         "Ask which result to pick instead of auto-picking #1",
+    ),
+    (
+        "TVDB Metadata",
+        "metadata.tvdb_enabled",
+        "bool",
+        "Use TVDB aliases when an API key is configured",
+    ),
+    (
+        "TVDB API Key",
+        "metadata.tvdb_api_key",
+        "str",
+        "TheTVDB v4 API key for title aliases",
+    ),
+    (
+        "TVDB PIN",
+        "metadata.tvdb_pin",
+        "str",
+        "Optional subscriber PIN for user-supported keys",
     ),
     (
         "Min Torrent Size (GiB)",
@@ -488,12 +598,7 @@ def _menu_config_quick() -> None:
         rows = []
         for label, key, typ, desc in _QUICK_SETTINGS:
             cur = _resolve_key(dump, key)
-            if cur is None:
-                cur_str = "—"
-            elif isinstance(cur, list):
-                cur_str = ", ".join(str(x) for x in cur)
-            else:
-                cur_str = str(cur)
+            cur_str = _plain_value(cur, key=key)
             rows.append([label, cur_str[:32], typ, desc[:50]])
         idx = _ask_table_select(
             "Common settings",
@@ -620,7 +725,7 @@ def shell() -> None:
                     _run_pipeline(query=q, url=u, kind="movie")
             elif cmd == "series" and len(args) >= 2:
                 asyncio.run(
-                    _run_series(show=args[0], season=int(args[1]), site="filmpalast", episode=None)
+                    _run_series(show=args[0], season=int(args[1]), site="auto", episode=None)
                 )
             elif cmd == "queue":
                 jobs_list(status=None, kind=None, limit=20)
@@ -712,23 +817,8 @@ def search(
 
 
 def _do_search(query: str, *, site: str | None, limit: int, render: bool = True) -> list[Any]:
-    from bankai.scraper import all_backends, get_backend
-
-    backends_to_query = [(site, get_backend(site))] if site else list(all_backends().items())
-
     async def go() -> list[Any]:
-        results: list[Any] = []
-        for sid, cls in backends_to_query:
-            backend = cls()
-            try:
-                hits = await backend.search(query, limit=limit)
-            except Exception as exc:
-                log.warning("backend %s failed: %s", sid, exc)
-                hits = []
-            finally:
-                await backend.aclose()
-            results.extend(hits)
-        return results
+        return await search_stream_sources(query, site=site, limit=limit)
 
     results = asyncio.run(go())
     if not render:
@@ -740,7 +830,15 @@ def _do_search(query: str, *, site: str | None, limit: int, render: bool = True)
         else:
             table.add_column(col)
     for i, r in enumerate(results, 1):
-        table.add_row(str(i), r.site, r.title, str(r.year or ""), str(r.kind), r.url)
+        kind = str(r.kind)
+        table.add_row(
+            f"[cyan]{i}[/cyan]",
+            f"[magenta]{r.site}[/magenta]",
+            r.title,
+            f"[cyan]{r.year}[/cyan]" if r.year else "",
+            f"[green]{kind}[/green]" if kind == MediaKind.MOVIE.value else f"[blue]{kind}[/blue]",
+            r.url,
+        )
     if not results:
         console.print("[yellow]no results[/yellow]")
     else:
@@ -819,9 +917,14 @@ def config_path() -> None:
 
 @config_app.command("list")
 def config_list() -> None:
-    """Dump current effective settings as JSON."""
+    """Print current effective settings."""
     s = get_settings().model_dump(mode="json")
-    console.print_json(data=s)
+    table = Table(title="Bankai config", show_lines=False)
+    table.add_column("Key", style="bold")
+    table.add_column("Value", overflow="fold")
+    for key, value in _flatten_settings(s):
+        table.add_row(key, _format_value(value, key=key))
+    console.print(table)
 
 
 @config_app.command("get")
@@ -831,7 +934,7 @@ def config_get(key: str) -> None:
     if val is None:
         console.print(f"[red]no such key: {key}[/red]")
         raise typer.Exit(code=1)
-    console.print(val)
+    console.print(_format_value(val, key=key))
 
 
 @config_app.command("set")
@@ -905,6 +1008,8 @@ def config_init(
     qbit_pass = Prompt.ask("qBittorrent password", default="adminadmin", password=True)
     prow_url = Prompt.ask("Prowlarr URL", default="http://localhost:9696")
     prow_key = Prompt.ask("Prowlarr API key", default="")
+    tvdb_key = Prompt.ask("TheTVDB API key (blank = disabled)", default="")
+    tvdb_pin = Prompt.ask("TheTVDB PIN (blank = none)", default="", password=True)
     discord = Prompt.ask("Discord webhook URL (blank = none)", default="")
     interactive = Confirm.ask(
         "When you run a movie without --url, ask before picking the search hit?",
@@ -928,6 +1033,12 @@ def config_init(
         },
         "prowlarr": {"url": prow_url, "api_key": prow_key},
         "scraper": {"interactive_pick": interactive},
+        "metadata": {
+            "tvdb_enabled": bool(tvdb_key),
+            "tvdb_api_key": tvdb_key,
+            "tvdb_pin": tvdb_pin,
+            "tvdb_languages": ["deu", "eng"],
+        },
     }
     if discord:
         data["notifications"] = {"webhook_url": discord}
@@ -1116,6 +1227,49 @@ def remux(
 
 
 @app.command()
+def batch(
+    file: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True),
+    site: str = typer.Option("filmpalast", "--site", help="Stream site for auto-search."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show parsed jobs without queueing."),
+) -> None:
+    """Queue a batch of movie downloads from a text file."""
+    _queue_movie_batch(file, site=site, dry_run=dry_run)
+
+
+def _queue_movie_batch(path: Path, *, site: str, dry_run: bool) -> None:
+    from bankai.cli import bgjobs
+
+    movies = parse_movie_batch(path)
+    if not movies:
+        console.print("[yellow]no movies found in batch file[/yellow]")
+        return
+
+    table = Table(title=f"Movie batch ({len(movies)})", show_lines=False)
+    table.add_column("#")
+    table.add_column("Title", overflow="fold")
+    table.add_column("German title", overflow="fold")
+    table.add_column("URL", overflow="fold")
+    for index, movie in enumerate(movies, 1):
+        table.add_row(
+            f"[cyan]{index}[/cyan]",
+            movie.title,
+            movie.german_title or "[dim]auto[/dim]",
+            movie.url or "[dim]auto-search[/dim]",
+        )
+    console.print(table)
+
+    if dry_run:
+        return
+
+    jobs = [
+        bgjobs.spawn(kind="movie", title=movie.title, args=build_movie_args(movie, site=site))
+        for movie in movies
+    ]
+    ids = ", ".join(job.id for job in jobs)
+    console.print(f"[green]queued[/green] {len(jobs)} movie job(s): {ids}")
+
+
+@app.command()
 def run(
     query: str = typer.Argument(..., help="English title for torrent search (include year)."),
     de: str | None = typer.Option(
@@ -1130,6 +1284,12 @@ def run(
     out: Path | None = typer.Option(None, "--out"),
     kind: str = typer.Option("movie", "--kind", help="movie | episode"),
     offset: float | None = typer.Option(None, "--offset"),
+    season_number: int | None = typer.Option(None, "--season", help="Episode season metadata."),
+    episode_number: int | None = typer.Option(None, "--episode", help="Episode number metadata."),
+    episode_title: str | None = typer.Option(
+        None, "--episode-title", help="Episode title metadata."
+    ),
+    series_title: str | None = typer.Option(None, "--series-title", help="Series title metadata."),
     interactive: bool | None = typer.Option(
         None, "--interactive/--auto", help="Override scraper.interactive_pick."
     ),
@@ -1150,7 +1310,25 @@ def run(
             raise typer.Exit(code=1)
         if not site:
             site = "filmpalast"
-    _run_pipeline(query=query, url=url, site=site, hint=hint, out=out, kind=kind, offset=offset)
+    extra_payload: dict[str, Any] = {}
+    if season_number is not None:
+        extra_payload["season"] = season_number
+    if episode_number is not None:
+        extra_payload["episode"] = episode_number
+    if episode_title:
+        extra_payload["episode_title"] = episode_title
+    if series_title:
+        extra_payload["series_title"] = series_title
+    _run_pipeline(
+        query=query,
+        url=url,
+        site=site,
+        hint=hint,
+        out=out,
+        kind=kind,
+        offset=offset,
+        extra_payload=extra_payload or None,
+    )
 
 
 @app.command()
@@ -1158,43 +1336,66 @@ def series(
     show: str = typer.Argument(..., help="Show name."),
     season: int = typer.Option(..., "--season", "-s", help="Season number."),
     episode: int | None = typer.Option(None, "--episode", "-e", help="Single episode (else all)."),
-    site: str = typer.Option("filmpalast", "--site"),
+    site: str = typer.Option("auto", "--site", help="Stream site id, or auto."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Queue without confirmation."),
 ) -> None:
-    """Run the pipeline for an entire season (or one episode)."""
-    asyncio.run(_run_series(show=show, season=season, site=site, episode=episode))
+    """Queue the pipeline for an entire season (or one episode)."""
+    asyncio.run(_run_series(show=show, season=season, site=site, episode=episode, yes=yes))
 
 
-async def _run_series(*, show: str, season: int, site: str, episode: int | None) -> None:
-    from bankai.scraper import get_backend
+async def _run_series(
+    *,
+    show: str,
+    season: int,
+    site: str,
+    episode: int | None,
+    yes: bool = False,
+) -> None:
+    from bankai.cli import bgjobs
 
-    backend = get_backend(site)()
-    try:
-        list_season = getattr(backend, "list_season", None)
-        if list_season is None:
-            console.print(f"[red]backend {site!r} does not support series[/red]")
-            return
-        episodes = await list_season(show, season)
-    finally:
-        await backend.aclose()
-    if not episodes:
+    site_id = None if site.casefold() in {"", "auto"} else site
+    result = await list_series_episodes(show, season=season, site=site_id)
+    if result is None:
         console.print("[yellow]no episodes found[/yellow]")
         return
+    episodes = result.episodes
     if episode is not None:
         episodes = [e for e in episodes if e.episode == episode]
-    console.print(f"[green]Found {len(episodes)} episode(s)[/green]")
+    if not episodes:
+        console.print("[yellow]no matching episode found[/yellow]")
+        return
+    table = Table(title=f"{show} season {season} ({result.site}, query={result.query!r})")
+    table.add_column("Episode")
+    table.add_column("Title", overflow="fold")
+    table.add_column("URL", overflow="fold")
     for ep in episodes:
-        console.print(f"  S{season:02d}E{ep.episode:02d}  {ep.title or ''}  {ep.url}")
-    if not Confirm.ask(f"Run pipeline for {len(episodes)} episode(s)?", default=True):
+        table.add_row(f"[cyan]S{season:02d}E{ep.episode:02d}[/cyan]", ep.title or "", ep.url)
+    console.print(table)
+    if not yes and not Confirm.ask(f"Queue pipeline for {len(episodes)} episode(s)?", default=True):
         return
     for ep in episodes:
         q = f"{show} S{season:02d}E{ep.episode:02d}"
-        _run_pipeline(
-            query=q,
-            url=ep.url,
-            site=site,
-            kind="episode",
-            extra_payload={"season": season, "episode": ep.episode, "episode_title": ep.title},
-        )
+        args = [
+            "run",
+            q,
+            "--url",
+            ep.url,
+            "--site",
+            result.site,
+            "--kind",
+            "episode",
+            "--season",
+            str(season),
+            "--episode",
+            str(ep.episode),
+            "--series-title",
+            show,
+            "--auto",
+        ]
+        if ep.title:
+            args.extend(["--episode-title", ep.title])
+        job = bgjobs.spawn(kind="series", title=q, args=args)
+        console.print(f"[green]queued[/green] {q} as job [bold]{job.id}[/bold] ({result.site})")
 
 
 def _run_pipeline(
@@ -1304,16 +1505,10 @@ def jobs_list(
     for col in ("ID", "Kind", "Status", "Attempts", "Updated"):
         table.add_column(col)
     for j in rows:
-        color = {
-            "done": "green",
-            "failed": "red",
-            "running": "yellow",
-            "queued": "cyan",
-        }.get(str(j.status), "white")
         table.add_row(
             str(j.id),
             str(j.kind),
-            f"[{color}]{j.status}[/{color}]",
+            _rich_status(str(j.status)),
             f"{j.attempts}/{j.max_attempts}",
             j.updated_at or "-",
         )

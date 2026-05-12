@@ -48,8 +48,6 @@ class FilmpalastBackend:
     async def search(
         self, query: str, *, kind: MediaKind | None = None, limit: int = 20
     ) -> list[SearchResult]:
-        if kind is MediaKind.EPISODE:
-            return []
         resp = await self._client.get("/search/title/" + query.strip().replace(" ", "+"))
         detect_cloudflare(resp)
         if resp.status_code != 200:
@@ -124,20 +122,49 @@ class FilmpalastBackend:
     async def list_season(self, show: str, season: int) -> list[EpisodeRef]:
         """Find a show by name and return episode refs for a single season.
 
-        Strategy: search for ``"<show> staffel <season>"`` first; if that fails,
-        fall back to ``"<show>"``. Take the first hit, then scrape episodes.
+        Strategy: try likely direct ``/stream/<slug>`` show pages first, then
+        search for ``"<show> staffel <season>"`` and ``"<show>"``.
         """
+        for url in self._series_url_candidates(show, season):
+            eps = await self._episodes_for_season(url, season)
+            if eps:
+                return eps
         for q in (f"{show} staffel {season}", show):
             hits = await self.search(q, limit=5)
             for hit in hits:
                 # Filter out hits that look like a single-episode page already.
                 if re.search(r"-s\d{1,2}-e\d{1,3}", hit.url):
                     continue
-                eps = await self.list_episodes(hit.url)
-                eps = [e for e in eps if e.season == season]
+                eps = await self._episodes_for_season(hit.url, season)
                 if eps:
                     return eps
         return []
+
+    async def _episodes_for_season(self, series_url: str, season: int) -> list[EpisodeRef]:
+        try:
+            eps = await self.list_episodes(series_url)
+        except ScraperError:
+            return []
+        return [e for e in eps if e.season == season]
+
+    def _series_url_candidates(self, show: str, season: int) -> list[str]:
+        slug = _slugify(show)
+        if not slug:
+            return []
+        candidates = [
+            slug,
+            f"{slug}-staffel-{season}",
+            f"{slug}-season-{season}",
+            f"{slug}-s{season:02d}",
+        ]
+        seen: set[str] = set()
+        urls: list[str] = []
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            urls.append(urljoin(self._base, f"/stream/{candidate}"))
+        return urls
 
     # ---- stream resolve ----------------------------------------------------
 
@@ -166,3 +193,18 @@ class FilmpalastBackend:
         hoster = m.group(1).strip()
         log.info("[filmpalast] resolved hoster: %s", hoster)
         return StreamHandle(site=self.site_id, url=hoster, hint="ytdlp")
+
+
+def _slugify(value: str) -> str:
+    clean = value.casefold()
+    replacements = {
+        "ä": "ae",
+        "ö": "oe",
+        "ü": "ue",
+        "ß": "ss",
+    }
+    for source, target in replacements.items():
+        clean = clean.replace(source, target)
+    clean = re.sub(r"\s*\(?\b(19|20)\d{2}\b\)?\s*$", "", clean).strip()
+    clean = re.sub(r"[^a-z0-9]+", "-", clean).strip("-")
+    return clean
