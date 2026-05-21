@@ -61,9 +61,13 @@ say "installing bankai"
 say "installing playwright chromium"
 "$PREFIX/.venv/bin/playwright" install chromium >/dev/null
 
-ln -sf "$PREFIX/.venv/bin/bankai" "$BIN_DIR/bankai"
+TARGET="$PREFIX/.venv/bin/bankai"
+LINK="$BIN_DIR/bankai"
+if [[ "$TARGET" != "$LINK" ]]; then
+  ln -sf "$TARGET" "$LINK"
+fi
 
-say "installed: $($PREFIX/.venv/bin/bankai --version)"
+say "installed: $($TARGET --version)"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) say "Add to PATH: echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.bashrc && source ~/.bashrc" ;;

@@ -158,6 +158,27 @@ There are two ledgers:
   `$XDG_STATE_HOME/bankai/jobs` (usually `~/.local/state/bankai/jobs`). Open
   `bankai` -> `Queue / history` and select `Clear finished background jobs`.
 
+## Library layout migration
+
+v0.2 changes the default output layout to:
+
+```text
+Movies/Title (Year)/Title (Year).mkv
+Shows/Show/Season XX/Show - SXXEXX.mkv
+```
+
+Existing files are not renamed automatically during `bankai update`. Preview
+the migration first, then apply it after checking the proposed moves:
+
+```bash
+cd /home/malik/bankai
+.venv/bin/python scripts/migrate_layout.py --dry-run
+.venv/bin/python scripts/migrate_layout.py --apply
+```
+
+Use `--library /path/to/library` if your `output.directory` is not the library
+you want to migrate.
+
 ## Movie batches
 
 `bankai batch FILE` queues one background job per non-empty line. Lines use:
