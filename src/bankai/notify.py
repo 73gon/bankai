@@ -39,6 +39,23 @@ async def notify_failure(*, query: str, error: str) -> None:
     )
 
 
+async def notify_transfer_summary(*, summary: str, ok: bool) -> None:
+    cfg = get_settings().notifications
+    if not cfg.webhook_url:
+        return
+    if ok and not cfg.on_success:
+        return
+    if not ok and not cfg.on_failure:
+        return
+    await _post(
+        title="\u2705 bankai transfer \u2014 done"
+        if ok
+        else "\u274c bankai transfer \u2014 issues",
+        description=summary[:3500],
+        color=0x57F287 if ok else 0xED4245,
+    )
+
+
 async def _post(*, title: str, description: str, color: int) -> None:
     cfg = get_settings().notifications
     url = str(cfg.webhook_url)

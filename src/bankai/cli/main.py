@@ -6,7 +6,7 @@ Top-level commands::
     bankai shell               # REPL
     bankai run "Title Year"    # auto-search + pipeline (--url to bypass search)
     bankai search "Title"      # show matches, no download
-    bankai series "Show" -s 1  # whole season
+    bankai shows "Show" -s 1   # whole season
     bankai config get/set/list/path/edit/init
     bankai doctor              # check ffmpeg, mkvmerge, alass, qbit, prowlarr
     bankai update              # update this install from git
@@ -35,10 +35,15 @@ from rich.table import Table
 from bankai import __version__
 from bankai.backend import (
     BatchMovie,
+    TransferKind,
     build_movie_args,
+    format_transfer_summary,
     list_series_episodes,
     parse_movie_batch,
+    plan_transfer,
     search_stream_sources,
+    title_aliases,
+    transfer_with_rsync,
 )
 from bankai.config import (
     get_settings,
@@ -47,19 +52,28 @@ from bankai.config import (
     user_config_path,
 )
 from bankai.logging import configure_logging, get_logger
+from bankai.metadata.tvdb import get_title_aliases
 from bankai.queue.models import MediaKind
 
 app = typer.Typer(
     name="bankai",
-    help="Extract German dub audio from web streams + HQ video from torrents \u2192 single MKV.",
+    help="Extract German dub audio from web streams + HQ video from torrents into one MKV.",
     add_completion=False,
     invoke_without_command=True,
     no_args_is_help=False,
 )
 jobs_app = typer.Typer(name="jobs", help="Inspect and manage queued jobs.", no_args_is_help=True)
 config_app = typer.Typer(name="config", help="View/edit configuration.", no_args_is_help=True)
+background_app = typer.Typer(
+    name="background", help="Inspect detached background jobs.", no_args_is_help=True
+)
+metadata_app = typer.Typer(
+    name="metadata", help="Inspect metadata providers.", no_args_is_help=True
+)
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
+app.add_typer(background_app, name="background")
+app.add_typer(metadata_app, name="metadata")
 
 console = Console()
 log = get_logger(__name__)
@@ -289,7 +303,7 @@ def _interactive_menu() -> None:
             [
                 "Run a movie",
                 "Run movie batch",
-                "Run a series",
+                "Run a show",
                 "Search",
                 "Queue / history",
                 "Config",
@@ -305,8 +319,8 @@ def _interactive_menu() -> None:
                 _menu_run_movie()
             elif choice == "Run movie batch":
                 _menu_run_batch()
-            elif choice == "Run a series":
-                _menu_run_series()
+            elif choice == "Run a show":
+                _menu_run_show()
             elif choice == "Search":
                 _menu_search()
             elif choice == "Queue / history":
@@ -355,11 +369,11 @@ def _menu_run_batch() -> None:
     _queue_movie_batch(path, site=site, dry_run=False)
 
 
-def _menu_run_series() -> None:
+def _menu_run_show() -> None:
     show = Prompt.ask("Show name")
     season = IntPrompt.ask("Season", default=1)
     site = Prompt.ask("Site (auto/filmpalast/aniworld/bs.to/kinox)", default="auto")
-    asyncio.run(_run_series(show=show, season=season, site=site, episode=None, yes=False))
+    asyncio.run(_run_show(show=show, season=season, site=site, episode=None, yes=False))
 
 
 def _menu_queue() -> None:
@@ -482,6 +496,66 @@ def _job_detail_menu(job: Any) -> None:
             console.print(bgjobs.tail(job, lines=10_000))
 
 
+@background_app.command("list")
+def background_list() -> None:
+    """List detached background jobs, including transfers."""
+    from bankai.cli import bgjobs
+
+    jobs = bgjobs.list_jobs()
+    table = Table(title=f"Background jobs ({len(jobs)})", show_lines=False)
+    for col in ("ID", "Kind", "Status", "Title", "Age", "Result"):
+        if col in {"Title", "Result"}:
+            table.add_column(col, overflow="fold")
+        else:
+            table.add_column(col)
+    for job in jobs:
+        table.add_row(
+            job.id,
+            job.kind,
+            _rich_status(job.status),
+            job.title,
+            _humanize_age(job.started_at),
+            _format_job_result(job),
+        )
+    console.print(table)
+
+
+@background_app.command("watch")
+def background_watch(job_id: str = typer.Argument(...)) -> None:
+    """Stream a background job log until it finishes."""
+    from bankai.cli import bgjobs
+
+    job = bgjobs.get_job(job_id)
+    if job is None:
+        console.print(f"[red]no such background job: {job_id}[/red]")
+        raise typer.Exit(code=1)
+    bgjobs.watch(job)
+
+
+@background_app.command("log")
+def background_log(
+    job_id: str = typer.Argument(...),
+    lines: int = typer.Option(80, "--lines", "-n", min=1),
+) -> None:
+    """Print recent background job log lines."""
+    from bankai.cli import bgjobs
+
+    job = bgjobs.get_job(job_id)
+    if job is None:
+        console.print(f"[red]no such background job: {job_id}[/red]")
+        raise typer.Exit(code=1)
+    console.print(bgjobs.tail(job, lines=lines))
+
+
+@background_app.command("clear")
+def background_clear() -> None:
+    """Delete finished background jobs."""
+    from bankai.cli import bgjobs
+
+    count = bgjobs.clear_jobs(statuses={"done", "failed", "cancelled"})
+    console.print(f"[green]cleared[/green] {count} background job(s)")
+
+
 def _humanize_age(ts: float) -> str:
     import time as _t
 
@@ -555,12 +629,15 @@ _QUICK_SETTINGS: list[tuple[str, str, str, str]] = [
     ),
     ("Preferred Codecs", "selector.preferred_codecs", "list", "Comma-sep codecs in priority order"),
     ("Library Directory", "output.directory", "str", "Where final remuxed MKVs go"),
+    ("Transfer Movies Dir", "transfer.movies_dir", "str", "Mounted movie destination"),
+    ("Transfer Shows Dir", "transfer.shows_dir", "str", "Mounted show destination"),
+    ("Rsync Binary", "transfer.rsync_binary", "str", "Command used for safe transfers"),
     ("Movie Filename Template", "output.filename_template", "str", "Plex movie filename template"),
     (
-        "Series Filename Template",
+        "Show Filename Template",
         "output.series_filename_template",
         "str",
-        "Plex series filename template",
+        "Plex show filename template",
     ),
     (
         "Cleanup After Success",
@@ -705,7 +782,7 @@ def shell() -> None:
             return
         if line == "help":
             console.print(
-                "Commands: search QUERY, run QUERY [URL], series SHOW SEASON, "
+                "Commands: search QUERY, run QUERY [URL], shows SHOW SEASON, "
                 "queue, config, doctor, exit"
             )
             continue
@@ -723,10 +800,8 @@ def shell() -> None:
                 u = args[1] if len(args) > 1 else _interactive_pick_movie(q)
                 if u:
                     _run_pipeline(query=q, url=u, kind="movie")
-            elif cmd == "series" and len(args) >= 2:
-                asyncio.run(
-                    _run_series(show=args[0], season=int(args[1]), site="auto", episode=None)
-                )
+            elif cmd in {"shows", "series"} and len(args) >= 2:
+                asyncio.run(_run_show(show=args[0], season=int(args[1]), site="auto", episode=None))
             elif cmd == "queue":
                 jobs_list(status=None, kind=None, limit=20)
             elif cmd == "config":
@@ -844,6 +919,54 @@ def _do_search(query: str, *, site: str | None, limit: int, render: bool = True)
     else:
         console.print(table)
     return results
+
+
+@metadata_app.command("search")
+def metadata_search(
+    query: str = typer.Argument(..., help="Movie or show title to look up."),
+    kind: str = typer.Option("show", "--kind", help="show | movie"),
+) -> None:
+    """Show TVDB title aliases used by Bankai lookups."""
+    media_kind = _metadata_kind(kind)
+    aliases = asyncio.run(get_title_aliases(query, kind=media_kind))
+    if not aliases:
+        console.print(
+            "[yellow]no metadata results[/yellow]\n"
+            "[dim]Check `metadata.tvdb_api_key` and `metadata.tvdb_enabled`.[/dim]"
+        )
+        return
+    table = Table(title=f"TVDB metadata for {query!r}", show_lines=False)
+    for col in ("#", "TVDB ID", "Name", "English", "German", "Year"):
+        if col in {"Name", "English", "German"}:
+            table.add_column(col, overflow="fold")
+        else:
+            table.add_column(col)
+    for index, alias in enumerate(aliases, 1):
+        table.add_row(
+            f"[cyan]{index}[/cyan]",
+            str(alias.tvdb_id or ""),
+            alias.name or "",
+            alias.english_title or "",
+            alias.german_title or "",
+            str(alias.year or ""),
+        )
+    console.print(table)
+
+
+def _metadata_kind(kind: str) -> MediaKind:
+    clean = kind.casefold()
+    if clean in {"movie", "movies"}:
+        return MediaKind.MOVIE
+    if clean in {"show", "shows", "series", "episode", "episodes"}:
+        return MediaKind.EPISODE
+    console.print(f"[red]invalid kind:[/red] {kind!r} (use movie or show)")
+    raise typer.Exit(code=1)
+
+
+async def _movie_lookup_queries(query: str, german_title: str | None) -> list[str]:
+    if german_title:
+        return [german_title]
+    return await title_aliases(query, kind=MediaKind.MOVIE)
 
 
 def _interactive_pick_movie(query: str) -> str | None:
@@ -1003,6 +1126,7 @@ def config_init(
     downloads = Prompt.ask(
         "qBittorrent downloads dir (host path)", default="/mnt/media/downloads/bankai"
     )
+    transfer_root = Prompt.ask("Mounted media server root", default="/mnt/media12")
     qbit_url = Prompt.ask("qBittorrent URL", default="http://localhost:8080")
     qbit_user = Prompt.ask("qBittorrent username", default="admin")
     qbit_pass = Prompt.ask("qBittorrent password", default="adminadmin", password=True)
@@ -1038,6 +1162,12 @@ def config_init(
             "tvdb_api_key": tvdb_key,
             "tvdb_pin": tvdb_pin,
             "tvdb_languages": ["deu", "eng"],
+        },
+        "transfer": {
+            "root": transfer_root,
+            "movies_dir": f"{transfer_root.rstrip('/')}/movies",
+            "shows_dir": f"{transfer_root.rstrip('/')}/shows",
+            "rsync_binary": "rsync",
         },
     }
     if discord:
@@ -1078,6 +1208,8 @@ def _doctor() -> None:
         row(binary, path is not None, path or "not on PATH")
     alass = shutil.which(settings.sync.alass_binary)
     row("alass", alass is not None, alass or f"not on PATH ({settings.sync.alass_binary})")
+    rsync = shutil.which(settings.transfer.rsync_binary)
+    row("rsync", rsync is not None, rsync or f"not on PATH ({settings.transfer.rsync_binary})")
 
     try:
         from playwright.sync_api import sync_playwright
@@ -1095,6 +1227,8 @@ def _doctor() -> None:
         ("state_db parent", settings.paths.state_db.parent),
         ("work_dir", settings.paths.work_dir),
         ("output.directory", settings.output.directory),
+        ("transfer.movies_dir", settings.transfer.movies_dir),
+        ("transfer.shows_dir", settings.transfer.shows_dir),
     ):
         row(label, p.exists() or _can_create(p), str(p))
 
@@ -1222,7 +1356,7 @@ def remux(
 
 
 # ---------------------------------------------------------------------------
-# run / series
+# run / shows
 # ---------------------------------------------------------------------------
 
 
@@ -1270,6 +1404,93 @@ def _queue_movie_batch(path: Path, *, site: str, dry_run: bool) -> None:
 
 
 @app.command()
+def transfer(
+    paths: Annotated[
+        list[Path] | None,
+        typer.Argument(
+            help="Files or folders to move. Defaults to output.directory with --library."
+        ),
+    ] = None,
+    kind: str = typer.Option("auto", "--kind", help="auto | movie | show"),
+    library: bool = typer.Option(
+        False, "--library", help="Transfer the configured output directory."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show planned moves without queueing."),
+) -> None:
+    """Queue a safe rsync move to the mounted media server."""
+    selected_paths = list(paths or [])
+    if library:
+        selected_paths.insert(0, Path(get_settings().output.directory))
+    if not selected_paths:
+        console.print("[red]no paths given[/red] [dim](pass paths or use --library)[/dim]")
+        raise typer.Exit(code=1)
+    transfer_kind = _transfer_kind(kind)
+    if dry_run:
+        _render_transfer_plan(selected_paths, kind=transfer_kind)
+        return
+    from bankai.cli import bgjobs
+
+    args = ["transfer-run", "--kind", transfer_kind, *[str(p) for p in selected_paths]]
+    title = "Transfer library" if library else f"Transfer {len(selected_paths)} path(s)"
+    job = bgjobs.spawn(kind="transfer", title=title, args=args)
+    console.print(
+        f"[green]queued[/green] transfer job [bold]{job.id}[/bold]\n"
+        f"[dim]Watch it with `bankai background watch {job.id}`.[/dim]"
+    )
+
+
+@app.command("transfer-run", hidden=True)
+def transfer_run(
+    paths: Annotated[list[Path], typer.Argument(help="Files or folders to move.")],
+    kind: str = typer.Option("auto", "--kind", help="auto | movie | show"),
+) -> None:
+    """Foreground transfer worker used by the background supervisor."""
+    from bankai.notify import notify_transfer_summary
+
+    transfer_kind = _transfer_kind(kind)
+    result = transfer_with_rsync(paths, kind=transfer_kind, progress=console.print)
+    summary = format_transfer_summary(result)
+    console.print(summary)
+    asyncio.run(notify_transfer_summary(summary=summary, ok=result.ok))
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
+def _transfer_kind(kind: str) -> TransferKind:
+    clean = kind.casefold()
+    if clean in {"auto", "movie", "show"}:
+        return cast(TransferKind, clean)
+    if clean in {"movies"}:
+        return "movie"
+    if clean in {"shows", "series"}:
+        return "show"
+    console.print(f"[red]invalid transfer kind:[/red] {kind!r}")
+    raise typer.Exit(code=1)
+
+
+def _render_transfer_plan(paths: list[Path], *, kind: TransferKind) -> None:
+    items = plan_transfer(paths, kind=kind)
+    if not items:
+        console.print("[yellow]no transfer files found[/yellow]")
+        return
+    table = Table(title=f"Transfer plan ({len(items)})", show_lines=False)
+    for col in ("#", "Kind", "Source", "Destination", "Status"):
+        if col in {"Source", "Destination"}:
+            table.add_column(col, overflow="fold")
+        else:
+            table.add_column(col)
+    for index, item in enumerate(items, 1):
+        table.add_row(
+            f"[cyan]{index}[/cyan]",
+            item.kind,
+            str(item.source),
+            str(item.destination),
+            "[yellow]skip exists[/yellow]" if item.destination.exists() else "[green]move[/green]",
+        )
+    console.print(table)
+
+
+@app.command()
 def run(
     query: str = typer.Argument(..., help="English title for torrent search (include year)."),
     de: str | None = typer.Option(
@@ -1289,12 +1510,12 @@ def run(
     episode_title: str | None = typer.Option(
         None, "--episode-title", help="Episode title metadata."
     ),
-    series_title: str | None = typer.Option(None, "--series-title", help="Series title metadata."),
+    series_title: str | None = typer.Option(None, "--series-title", help="Show title metadata."),
     interactive: bool | None = typer.Option(
         None, "--interactive/--auto", help="Override scraper.interactive_pick."
     ),
 ) -> None:
-    """End-to-end pipeline: extract dub \u2192 torrent video \u2192 sync \u2192 remux.
+    """End-to-end pipeline: extract dub, fetch video, sync, remux.
 
     QUERY is the English title used for the torrent search. Pass --de
     with the German title to look the dub up on filmpalast (which indexes
@@ -1304,7 +1525,10 @@ def run(
         if interactive is not None:
             os.environ["BANKAI_SCRAPER__INTERACTIVE_PICK"] = "true" if interactive else "false"
             reset_settings_cache()
-        url = _interactive_pick_movie(de or query)
+        for lookup_query in asyncio.run(_movie_lookup_queries(query, de)):
+            url = _interactive_pick_movie(lookup_query)
+            if url:
+                break
         if not url:
             console.print("[red]no stream URL found \u2014 aborting[/red]")
             raise typer.Exit(code=1)
@@ -1331,8 +1555,8 @@ def run(
     )
 
 
-@app.command()
-def series(
+@app.command("shows")
+def shows(
     show: str = typer.Argument(..., help="Show name."),
     season: int = typer.Option(..., "--season", "-s", help="Season number."),
     episode: int | None = typer.Option(None, "--episode", "-e", help="Single episode (else all)."),
@@ -1340,10 +1564,22 @@ def series(
     yes: bool = typer.Option(False, "--yes", "-y", help="Queue without confirmation."),
 ) -> None:
     """Queue the pipeline for an entire season (or one episode)."""
-    asyncio.run(_run_series(show=show, season=season, site=site, episode=episode, yes=yes))
+    asyncio.run(_run_show(show=show, season=season, site=site, episode=episode, yes=yes))
 
 
-async def _run_series(
+@app.command("series", hidden=True)
+def series(
+    show: str = typer.Argument(..., help="Show name."),
+    season: int = typer.Option(..., "--season", "-s", help="Season number."),
+    episode: int | None = typer.Option(None, "--episode", "-e", help="Single episode (else all)."),
+    site: str = typer.Option("auto", "--site", help="Stream site id, or auto."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Queue without confirmation."),
+) -> None:
+    """Backward-compatible alias for ``shows``."""
+    asyncio.run(_run_show(show=show, season=season, site=site, episode=episode, yes=yes))
+
+
+async def _run_show(
     *,
     show: str,
     season: int,
@@ -1394,7 +1630,7 @@ async def _run_series(
         ]
         if ep.title:
             args.extend(["--episode-title", ep.title])
-        job = bgjobs.spawn(kind="series", title=q, args=args)
+        job = bgjobs.spawn(kind="show", title=q, args=args)
         console.print(f"[green]queued[/green] {q} as job [bold]{job.id}[/bold] ({result.site})")
 
 

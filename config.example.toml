@@ -6,6 +6,7 @@
 directory = "/library"
 # Placeholders: {title} {year} {audio_lang} {season} {episode} {episode_title}
 filename_template = "{title} ({year}) [{audio_lang}].mkv"
+# Historical key name; this is the show filename template.
 series_filename_template = "{title} - S{season:02d}E{episode:02d} - {episode_title} [{audio_lang}].mkv"
 
 [audio]
@@ -32,11 +33,18 @@ interactive_pick = false
 
 [metadata]
 # Optional TheTVDB v4 metadata. When configured, Bankai can expand searches
-# with English/German aliases and find series without you knowing the year.
+# with English/German aliases and find shows without you knowing the year.
 tvdb_enabled = true
 tvdb_api_key = ""
 tvdb_pin = ""
 tvdb_languages = ["deu", "eng"]
+
+[transfer]
+# Safe moves use: rsync --ignore-existing --remove-source-files
+root = "/mnt/media12"
+movies_dir = "/mnt/media12/movies"
+shows_dir = "/mnt/media12/shows"
+rsync_binary = "rsync"
 
 [queue]
 # Per-stage worker concurrency.

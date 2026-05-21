@@ -1,6 +1,6 @@
 """Lightweight background-job manager.
 
-Spawns ``bankai run`` (or ``series``) as a detached subprocess so the
+Spawns ``bankai run`` (or ``shows``) as a detached subprocess so the
 TUI returns to the menu immediately. Each job gets a directory under
 ``$XDG_STATE_HOME/bankai/jobs/<id>/`` containing:
 
@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -28,16 +29,34 @@ from pathlib import Path
 
 
 def jobs_root() -> Path:
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    p = Path(base) / "bankai" / "jobs"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    base = os.environ.get("XDG_STATE_HOME")
+    candidates: list[Path] = []
+    if base:
+        candidates.append(Path(base))
+    elif os.name == "nt":
+        candidates.append(
+            Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home())
+        )
+    else:
+        candidates.append(Path.home() / ".local" / "state")
+    candidates.append(Path(tempfile.gettempdir()) / "bankai-state")
+    last_error: OSError | None = None
+    for root in candidates:
+        p = root / "bankai" / "jobs"
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except OSError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("could not determine background job state directory")
 
 
 @dataclass
 class BgJob:
     id: str
-    kind: str  # "movie" | "series"
+    kind: str  # "movie" | "show" | "transfer"
     title: str  # display name
     args: list[str]  # full argv (after "bankai")
     started_at: float

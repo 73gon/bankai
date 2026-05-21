@@ -60,8 +60,11 @@ bankai run "Finding Nemo 2003"   # auto-search filmpalast, pipeline through
 bankai run "Inception 2010" --url https://filmpalast.to/stream/inception
 bankai batch movies.txt          # queue many movie downloads in the background
 bankai search "matrix"
-bankai series "Arcane" -s 1      # auto-detect series site, queue episodes
+bankai metadata search "Arcane" --kind show
+bankai shows "Arcane" -s 1       # auto-detect show site, queue episodes
+bankai transfer --library        # background rsync move to /mnt/media12
 bankai jobs list
+bankai background list
 bankai jobs clear                # delete done/failed/cancelled queue rows
 bankai history
 bankai doctor
@@ -81,8 +84,11 @@ bankai config set scraper.interactive_pick true
 | `bankai shell`                            | REPL mode \u2014 type `run "X"`, `search Y`, etc.                   |
 | `bankai run QUERY [--url URL]`            | End-to-end pipeline. Auto-searches filmpalast when `--url` omitted. |
 | `bankai batch FILE`                       | Queue movie downloads from a text file.                             |
-| `bankai series SHOW -s N [-e M]`          | Queue a whole season (or one episode).                              |
+| `bankai shows SHOW -s N [-e M]`           | Queue a whole show season (or one episode).                         |
 | `bankai search QUERY [--site filmpalast]` | List matches as a table.                                            |
+| `bankai metadata search QUERY`            | Show TVDB aliases used by lookups.                                  |
+| `bankai transfer PATH...`                 | Background rsync move to the mounted media server.                  |
+| `bankai background list/watch/log/clear`  | Inspect detached movie/show/transfer jobs.                          |
 | `bankai config init`                      | First-run wizard; writes `~/.config/bankai/config.toml`.            |
 | `bankai config get/set KEY [VALUE]`       | Read or write one key.                                              |
 | `bankai config list/path/edit`            | Dump effective config / print path / open in `$EDITOR`.             |
@@ -108,7 +114,7 @@ work_dir      = "/home/you/.bankai/work"
 downloads_dir = "/mnt/media/downloads/bankai"
 
 [output]
-directory = "/mnt/media/bankai"   # Movies/Series subfolders are created automatically
+directory = "/mnt/media/bankai"   # Movies/Shows folders are created automatically
 
 [audio]
 language_tag  = "ger"
@@ -123,6 +129,12 @@ tvdb_enabled = true               # no effect until tvdb_api_key is set
 tvdb_api_key = ""                 # TheTVDB v4 API key
 tvdb_pin = ""                     # optional subscriber PIN
 tvdb_languages = ["deu", "eng"]
+
+[transfer]
+root = "/mnt/media12"
+movies_dir = "/mnt/media12/movies"
+shows_dir = "/mnt/media12/shows"
+rsync_binary = "rsync"
 
 [selector]
 preferred_resolutions    = ["1080p", "720p"]
@@ -158,12 +170,30 @@ English Title 2010 | German Title | https://filmpalast.to/stream/title
 
 Use `bankai batch FILE --dry-run` to preview the parsed jobs.
 
+## Transfers
+
+`bankai transfer PATH...` queues a detached background transfer. It moves files
+with `rsync --ignore-existing --remove-source-files`, so existing destination
+files are skipped and successful source files are removed only after rsync
+finishes. Watch progress any time with:
+
+```bash
+bankai background list
+bankai background watch JOB_ID
+```
+
+Use `bankai transfer --library` to transfer the configured output directory.
+Movies go to `transfer.movies_dir`; shows go to `transfer.shows_dir`. The
+Discord completion message includes moved files and skipped-existing files.
+
 ## Architecture
 
 - **`bankai.cli`** \u2014 Typer command tree, interactive menu, REPL.
 - **`bankai.backend`** \u2014 application services shared by the CLI today and a
   future HTTP/web UI.
 - **`bankai.metadata`** \u2014 optional TVDB title aliases and language lookup.
+- **`bankai.backend.transfer`** \u2014 rsync-backed safe moves to the mounted
+  media server.
 - **`bankai.processor`** \u2014 Stage workers: `extractor` (yt-dlp +
   Playwright capture-all + pick-longest), `sync` (alass / ffmpeg
   `-itsoffset`), `remux` (mkvmerge with track tagging),
@@ -184,7 +214,7 @@ Use `bankai batch FILE --dry-run` to preview the parsed jobs.
    `supports_series` class attributes and async `search`,
    `list_episodes`, `resolve_stream`, `aclose` methods.
 3. Decorate with `@register`. Add `list_season(show, season)` if you want
-   `bankai series` to work.
+   `bankai shows` to work.
 4. Drop a fixture HTML under `tests/fixtures/yoursite/` and write a test.
 
 ## Development

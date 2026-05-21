@@ -66,6 +66,13 @@ class MetadataSettings(BaseModel):
     tvdb_languages: list[str] = Field(default_factory=lambda: ["deu", "eng"])
 
 
+class TransferSettings(BaseModel):
+    root: Path = Path("/mnt/media12")
+    movies_dir: Path = Path("/mnt/media12/movies")
+    shows_dir: Path = Path("/mnt/media12/shows")
+    rsync_binary: str = "rsync"
+
+
 class QueueSettings(BaseModel):
     search_workers: int = 2
     extract_workers: int = 3
@@ -141,6 +148,7 @@ class Settings(BaseSettings):
     scraper: ScraperSettings = Field(default_factory=ScraperSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)
     metadata: MetadataSettings = Field(default_factory=MetadataSettings)
+    transfer: TransferSettings = Field(default_factory=TransferSettings)
     paths: PathsSettings = Field(default_factory=PathsSettings)
     prowlarr: ProwlarrSettings = Field(default_factory=ProwlarrSettings)
     qbittorrent: QBittorrentSettings = Field(default_factory=QBittorrentSettings)

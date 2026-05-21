@@ -64,8 +64,8 @@ async def test_filmpalast_series_lookup_tries_direct_slug_first() -> None:
     html = """
     <html>
       <body>
-        <a href="/stream/arcane-s01-e01">Welcome to the Playground</a>
-        <a href="/stream/arcane-s01-e02">Some Mysteries</a>
+        <a href="/stream/arcane-s01e01">Welcome to the Playground</a>
+        <a href="/stream/arcane-s01e02">Some Mysteries</a>
       </body>
     </html>
     """
@@ -89,6 +89,36 @@ async def test_filmpalast_series_lookup_tries_direct_slug_first() -> None:
     assert requested_paths[0] == "/stream/arcane"
     assert [ep.episode for ep in episodes] == [1, 2]
     assert episodes[0].title == "Welcome to the Playground"
+
+
+@pytest.mark.asyncio
+async def test_filmpalast_series_lookup_keeps_episode_search_hits() -> None:
+    search_html = """
+    <article class="liste rb">
+      <a class="rb" href="/stream/arcane-s01e01"><h2>Arcane S01E01</h2></a>
+    </article>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/stream/arcane":
+            return httpx.Response(404)
+        if request.url.path == "/stream/arcane-s01e01":
+            return httpx.Response(200, text=search_html)
+        if request.url.path.startswith("/search/title/"):
+            return httpx.Response(200, text=search_html)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(base_url="http://example.invalid", transport=transport)
+    try:
+        episodes = await backend.list_season("Arcane", 1)
+    finally:
+        await backend.aclose()
+
+    assert [(ep.season, ep.episode) for ep in episodes] == [(1, 1)]
+    assert episodes[0].url == "http://example.invalid/stream/arcane-s01e01"
 
 
 @pytest.mark.asyncio

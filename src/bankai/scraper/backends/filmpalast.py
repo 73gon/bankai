@@ -27,6 +27,7 @@ log = get_logger(__name__)
 
 _BASE = "https://filmpalast.to"
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
+_EPISODE_RE = re.compile(r"-s(?P<season>\d{1,2})-?e(?P<episode>\d{1,3})(?:-|$)", re.I)
 
 
 @register
@@ -75,12 +76,17 @@ class FilmpalastBackend:
                 poster = urljoin(self._base, poster)
             year_match = _YEAR_RE.search(title)
             year = int(year_match.group(0)) if year_match else None
+            kind = (
+                MediaKind.EPISODE
+                if _EPISODE_RE.search(href) or _EPISODE_RE.search(title)
+                else MediaKind.MOVIE
+            )
             results.append(
                 SearchResult(
                     site=self.site_id,
                     title=title,
                     url=urljoin(self._base, href),
-                    kind=MediaKind.MOVIE,
+                    kind=kind,
                     year=year,
                     poster_url=poster,
                 )
@@ -99,10 +105,9 @@ class FilmpalastBackend:
         tree = HTMLParser(resp.text)
         eps: list[EpisodeRef] = []
         seen: set[str] = set()
-        ep_re = re.compile(r"-s(\d{1,2})-e(\d{1,3})(?:-|$)")
         for a in tree.css("a[href*='/stream/']"):
             href = a.attributes.get("href") or ""
-            m = ep_re.search(href)
+            m = _EPISODE_RE.search(href)
             if not m or href in seen:
                 continue
             seen.add(href)
@@ -110,8 +115,8 @@ class FilmpalastBackend:
                 EpisodeRef(
                     site=self.site_id,
                     series_title=series_url.rsplit("/", 1)[-1],
-                    season=int(m.group(1)),
-                    episode=int(m.group(2)),
+                    season=int(m.group("season")),
+                    episode=int(m.group("episode")),
                     title=(a.text() or "").strip(),
                     url=urljoin(self._base, href),
                 )
@@ -125,20 +130,29 @@ class FilmpalastBackend:
         Strategy: try likely direct ``/stream/<slug>`` show pages first, then
         search for ``"<show> staffel <season>"`` and ``"<show>"``.
         """
+        found: list[EpisodeRef] = []
         for url in self._series_url_candidates(show, season):
-            eps = await self._episodes_for_season(url, season)
-            if eps:
-                return eps
-        for q in (f"{show} staffel {season}", show):
+            found.extend(await self._episodes_for_season(url, season))
+        if found:
+            return _dedupe_episodes(found)
+        for q in (
+            f"{show} s{season:02d}e01",
+            f"{show} s{season:02d}",
+            f"{show} staffel {season}",
+            show,
+        ):
             hits = await self.search(q, limit=5)
             for hit in hits:
-                # Filter out hits that look like a single-episode page already.
-                if re.search(r"-s\d{1,2}-e\d{1,3}", hit.url):
-                    continue
                 eps = await self._episodes_for_season(hit.url, season)
                 if eps:
-                    return eps
-        return []
+                    found.extend(eps)
+                    continue
+                ep = _episode_from_url(hit.url, hit.title)
+                if ep and ep.season == season:
+                    found.append(ep)
+            if found:
+                return _dedupe_episodes(found)
+        return _dedupe_episodes(found)
 
     async def _episodes_for_season(self, series_url: str, season: int) -> list[EpisodeRef]:
         try:
@@ -153,6 +167,7 @@ class FilmpalastBackend:
             return []
         candidates = [
             slug,
+            f"{slug}-s{season:02d}e01",
             f"{slug}-staffel-{season}",
             f"{slug}-season-{season}",
             f"{slug}-s{season:02d}",
@@ -208,3 +223,32 @@ def _slugify(value: str) -> str:
     clean = re.sub(r"\s*\(?\b(19|20)\d{2}\b\)?\s*$", "", clean).strip()
     clean = re.sub(r"[^a-z0-9]+", "-", clean).strip("-")
     return clean
+
+
+def _episode_from_url(url: str, title: str) -> EpisodeRef | None:
+    match = _EPISODE_RE.search(url)
+    if not match:
+        return None
+    season = int(match.group("season"))
+    episode = int(match.group("episode"))
+    clean_title = re.sub(r"\s*[Ss]\d{1,2}[Ee]\d{1,3}.*$", "", title).strip(" -_")
+    return EpisodeRef(
+        site=FilmpalastBackend.site_id,
+        series_title=clean_title or url.rsplit("/", 1)[-1],
+        season=season,
+        episode=episode,
+        title=title,
+        url=url,
+    )
+
+
+def _dedupe_episodes(episodes: list[EpisodeRef]) -> list[EpisodeRef]:
+    seen: set[tuple[int, int, str]] = set()
+    out: list[EpisodeRef] = []
+    for ep in sorted(episodes, key=lambda e: (e.season, e.episode, e.url)):
+        key = (ep.season, ep.episode, ep.url)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ep)
+    return out
