@@ -177,7 +177,8 @@ cd /home/malik/bankai
 ```
 
 Use `--library /path/to/library` if your `output.directory` is not the library
-you want to migrate.
+you want to migrate. Add `--infer-movie-years` when old movie folders were
+created without a year, for example `Movies/Cars/Cars.mkv`.
 
 ## Movie batches
 

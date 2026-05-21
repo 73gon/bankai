@@ -16,6 +16,7 @@ Supported migrations:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import re
 import sys
@@ -29,7 +30,9 @@ if SRC_ROOT.exists():
     sys.path.insert(0, str(SRC_ROOT))
 
 from bankai.config import get_settings, reset_settings_cache  # noqa: E402
+from bankai.metadata.tvdb import get_title_aliases  # noqa: E402
 from bankai.processor.naming import render_episode_path, render_movie_path  # noqa: E402
+from bankai.queue.models import MediaKind  # noqa: E402
 
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 EPISODE_RE = re.compile(r"\b[Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,3})\b")
@@ -70,7 +73,29 @@ def _movie_query(path: Path, movies_root: Path) -> str:
     return _strip_audio_tag(path.stem)
 
 
-def plan_movies(library: Path, settings: object) -> tuple[list[Move], list[Problem]]:
+async def _infer_movie_query(query: str) -> str | None:
+    aliases = await get_title_aliases(query, kind=MediaKind.MOVIE)
+    for alias in aliases:
+        if not alias.year:
+            continue
+        title = alias.english_title or alias.name or query
+        return f"{title} {alias.year}"
+    return None
+
+
+def _infer_movie_query_sync(query: str) -> str | None:
+    try:
+        return asyncio.run(_infer_movie_query(query))
+    except Exception:
+        return None
+
+
+def plan_movies(
+    library: Path,
+    settings: object,
+    *,
+    infer_missing_years: bool = False,
+) -> tuple[list[Move], list[Problem]]:
     moves: list[Move] = []
     problems: list[Problem] = []
     movies_root = library / "Movies"
@@ -80,8 +105,15 @@ def plan_movies(library: Path, settings: object) -> tuple[list[Move], list[Probl
     for source in sorted(movies_root.rglob("*.mkv")):
         query = _movie_query(source, movies_root)
         if not YEAR_RE.search(query):
-            problems.append(Problem(source=source, reason="movie year could not be inferred"))
-            continue
+            inferred = _infer_movie_query_sync(query) if infer_missing_years else None
+            if inferred:
+                query = inferred
+            else:
+                hint = " (try --infer-movie-years)" if not infer_missing_years else ""
+                problems.append(
+                    Problem(source=source, reason=f"movie year could not be inferred{hint}")
+                )
+                continue
         target = render_movie_path(
             library=library,
             query=query,
@@ -182,6 +214,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--library", type=Path, help="library root; defaults to output.directory")
     parser.add_argument("--dry-run", action="store_true", help="preview only (default)")
     parser.add_argument("--apply", action="store_true", help="perform moves instead of printing a dry-run")
+    parser.add_argument(
+        "--infer-movie-years",
+        action="store_true",
+        help="use TheTVDB to infer years for old movie folders/files that lack a year",
+    )
     parser.add_argument("--no-movies", action="store_true", help="skip Movies migration")
     parser.add_argument("--no-shows", action="store_true", help="skip Series/Shows migration")
     parser.add_argument("--keep-empty-dirs", action="store_true", help="do not prune empty old directories after apply")
@@ -199,7 +236,11 @@ def main(argv: list[str] | None = None) -> int:
     all_moves: list[Move] = []
     all_problems: list[Problem] = []
     if not args.no_movies:
-        moves, problems = plan_movies(library, settings)
+        moves, problems = plan_movies(
+            library,
+            settings,
+            infer_missing_years=args.infer_movie_years,
+        )
         all_moves.extend(moves)
         all_problems.extend(problems)
     if not args.no_shows:
