@@ -62,3 +62,64 @@ def test_clear_jobs_removes_finished_background_jobs(
     assert bgjobs.clear_jobs(statuses={"done"}) == 1
     assert not done.dir.exists()
     assert running.dir.exists()
+
+
+def test_progress_snapshot_parses_pipeline_download_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    job = bgjobs.BgJob(
+        id="prog1234",
+        kind="movie",
+        title="Cars",
+        args=["run", "Cars 2006"],
+        started_at=time.time(),
+        status="running",
+    )
+    job.save()
+    job.log_path.write_text(
+        "\n".join(
+            [
+                'BANKAI_STAGE step=2 total=4 key=torrent label="Download HQ video"',
+                "BANKAI_PROGRESS stage=stream pct=100.0 status=finished",
+                "BANKAI_PROGRESS stage=torrent pct=42.5 speed=1048576 eta=120 state=downloading",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = bgjobs.progress_snapshot(job)
+
+    assert snapshot.step == 2
+    assert snapshot.step_label == "Download HQ video"
+    assert snapshot.overall_percent == pytest.approx(35.625)
+    assert snapshot.parts["stream"].percent == 100.0
+    assert snapshot.parts["torrent"].percent == 42.5
+    assert snapshot.parts["torrent"].speed == 1_048_576
+
+
+def test_progress_snapshot_parses_transfer_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    job = bgjobs.BgJob(
+        id="tran1234",
+        kind="transfer",
+        title="Transfer library",
+        args=["transfer-run", "/library"],
+        started_at=time.time(),
+        status="running",
+    )
+    job.save()
+    job.log_path.write_text(
+        "BANKAI_PROGRESS stage=transfer pct=75.0 status=running\n",
+        encoding="utf-8",
+    )
+
+    snapshot = bgjobs.progress_snapshot(job)
+
+    assert snapshot.step_label == "Transfer files"
+    assert snapshot.overall_percent == 75.0
+    assert snapshot.parts["transfer"].percent == 75.0

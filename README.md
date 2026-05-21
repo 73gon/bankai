@@ -185,6 +185,28 @@ bankai background watch JOB_ID
 Use `bankai transfer --library` to transfer the configured output directory.
 Movies go to `transfer.movies_dir`; shows go to `transfer.shows_dir`. The
 Discord completion message includes moved files and skipped-existing files.
+By default the CLI prints the transfer plan first and asks for confirmation;
+use `--yes` to queue immediately.
+
+## Background progress
+
+Detached movie/show/transfer jobs expose parsed progress in:
+
+```bash
+bankai background list
+bankai background status JOB_ID
+bankai background watch JOB_ID
+```
+
+Pipeline steps are:
+
+1. Extract stream audio
+2. Download HQ video
+3. Sync audio
+4. Write final MKV
+
+When available, Bankai shows separate progress rows for the Filmpalast audio
+download and the HQ qBittorrent download.
 
 ## Architecture
 

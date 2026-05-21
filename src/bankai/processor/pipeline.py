@@ -97,8 +97,9 @@ class PipelineWorker(Worker):
                 raise PermanentWorkerError(f"pipeline payload missing {required!r}")
 
         # ---- 1. Extract dub audio --------------------------------------
-        log.info("[pipeline] stage 1/4 \u2014 extract")
-        stream_url = payload["stream_url"]
+        _log_stage(1, "extract", "Extract stream audio")
+        original_stream_url = payload["stream_url"]
+        stream_url = original_stream_url
         stream_hint = payload.get("stream_hint", "ytdlp")
         stream_site = payload.get("stream_site", "unknown")
         # If the source URL is a stream-site wrapper (e.g. filmpalast),
@@ -129,18 +130,16 @@ class PipelineWorker(Worker):
             stream_url=stream_url,
             stream_hint=stream_hint,
             stream_site=stream_site,
+            wrapper_url=original_stream_url if original_stream_url != stream_url else None,
         )
         extract_attempt_index = 0
-        extract_result = await self._run_stage(
-            ctx,
-            self._extractor,
-            JobKind.EXTRACT,
-            extract_attempts[extract_attempt_index],
+        extract_attempt_index, extract_result = await self._run_extract_attempts(
+            ctx, extract_attempts, extract_attempt_index
         )
         audio_path = extract_result["path"]
 
         # ---- 2. Torrent HQ video ---------------------------------------
-        log.info("[pipeline] stage 2/4 â€” torrent")
+        _log_stage(2, "torrent", "Download HQ video")
         torrent_payload = {
             "query": payload["query"],
             "kind": payload.get("kind", "movie"),
@@ -153,7 +152,7 @@ class PipelineWorker(Worker):
         video_path = torrent_result["path"]
 
         # ---- 3. Sync audio to video ------------------------------------
-        log.info("[pipeline] stage 3/4 â€” sync")
+        _log_stage(3, "sync", "Sync audio")
         while True:
             sync_payload = await self._build_sync_payload(
                 audio_path=audio_path,
@@ -167,23 +166,18 @@ class PipelineWorker(Worker):
                 extract_attempt_index += 1
                 if extract_attempt_index >= len(extract_attempts):
                     raise
-                retry_payload = extract_attempts[extract_attempt_index]
                 log.warning(
                     "[pipeline] extracted audio looked like a placeholder; retrying extract "
-                    "with hint=%s",
-                    retry_payload.get("hint"),
+                    "with the next source attempt"
                 )
-                extract_result = await self._run_stage(
-                    ctx,
-                    self._extractor,
-                    JobKind.EXTRACT,
-                    retry_payload,
+                extract_attempt_index, extract_result = await self._run_extract_attempts(
+                    ctx, extract_attempts, extract_attempt_index
                 )
                 audio_path = extract_result["path"]
         synced_audio = sync_result["path"]
 
         # ---- 4. Remux ---------------------------------------------------
-        log.info("[pipeline] stage 4/4 â€” remux")
+        _log_stage(4, "remux", "Write final MKV")
         out_path = payload.get("out") or _default_output_path(
             payload["query"],
             kind=payload.get("kind", "movie"),
@@ -219,6 +213,39 @@ class PipelineWorker(Worker):
             "remux": remux_result,
             "final_path": remux_result["path"],
         }
+
+    async def _run_extract_attempts(
+        self,
+        ctx: WorkerContext,
+        attempts: list[dict[str, Any]],
+        start_index: int,
+    ) -> tuple[int, dict[str, Any]]:
+        last_error: Exception | None = None
+        for index in range(start_index, len(attempts)):
+            attempt = attempts[index]
+            log.info(
+                "[pipeline] extract attempt %d/%d url=%s hint=%s",
+                index + 1,
+                len(attempts),
+                attempt.get("url"),
+                attempt.get("hint"),
+            )
+            try:
+                result = await self._run_stage(ctx, self._extractor, JobKind.EXTRACT, attempt)
+                return index, result
+            except Exception as exc:
+                last_error = exc
+                if index + 1 >= len(attempts):
+                    raise
+                log.warning(
+                    "[pipeline] extract attempt %d/%d failed: %s; trying next source",
+                    index + 1,
+                    len(attempts),
+                    exc,
+                )
+        if last_error is not None:
+            raise last_error
+        raise PermanentWorkerError("no extract attempts available")
 
     async def _cleanup(
         self,
@@ -406,17 +433,31 @@ def _extract_attempt_payloads(
     stream_url: str,
     stream_hint: str,
     stream_site: str,
+    wrapper_url: str | None = None,
 ) -> list[dict[str, Any]]:
-    hints: list[str] = []
-    for hint in (stream_hint, "playwright", "ytdlp"):
-        if hint and hint not in hints:
-            hints.append(hint)
+    specs: list[tuple[str, str]] = []
+
+    def add(url: str | None, hint: str | None) -> None:
+        if not url or not hint:
+            return
+        spec = (url, hint)
+        if spec not in specs:
+            specs.append(spec)
+
+    add(stream_url, stream_hint)
+    # If a scraper resolved the original wrapper to a hoster page, direct
+    # Playwright on that hoster may stall. The wrapper page often contains
+    # the click flow that exposes the real media URL, so try it next.
+    add(wrapper_url, "playwright")
+    add(stream_url, "playwright")
+    add(wrapper_url, "ytdlp")
+    add(stream_url, "ytdlp")
     return [
-        {
-            "url": stream_url,
-            "hint": hint,
-            "site": stream_site,
-            "attempt": i + 1,
-        }
-        for i, hint in enumerate(hints)
+        {"url": url, "hint": hint, "site": stream_site, "attempt": i + 1}
+        for i, (url, hint) in enumerate(specs)
     ]
+
+
+def _log_stage(step: int, key: str, label: str) -> None:
+    log.info('BANKAI_STAGE step=%d total=4 key=%s label="%s"', step, key, label)
+    log.info("[pipeline] stage %d/4 - %s", step, label)

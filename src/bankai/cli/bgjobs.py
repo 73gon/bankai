@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -139,6 +140,185 @@ class BgJob:
             return False
         shutil.rmtree(target, ignore_errors=True)
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressPart:
+    label: str
+    percent: float | None = None
+    speed: int | None = None
+    eta: int | None = None
+    status: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressSnapshot:
+    step: int | None
+    total_steps: int | None
+    step_key: str | None
+    step_label: str
+    overall_percent: float | None
+    parts: dict[str, ProgressPart]
+
+
+_STAGE_RE = re.compile(
+    r"BANKAI_STAGE\s+step=(?P<step>\d+)\s+total=(?P<total>\d+)\s+key=(?P<key>\w+)"
+    r"\s+label=\"(?P<label>[^\"]+)\""
+)
+_PROGRESS_RE = re.compile(r"BANKAI_PROGRESS\s+(?P<data>.+)$")
+_RSYNC_PERCENT_RE = re.compile(r"(?P<pct>\d{1,3})%")
+
+
+def progress_snapshot(job: BgJob) -> ProgressSnapshot:
+    job = job.refresh()
+    lines = _read_log_tail(job.log_path, lines=800)
+    step: int | None = None
+    total: int | None = None
+    step_key: str | None = None
+    step_label = _default_step_label(job)
+    parts: dict[str, ProgressPart] = {}
+
+    for line in lines:
+        stage_match = _STAGE_RE.search(line)
+        if stage_match:
+            step = int(stage_match.group("step"))
+            total = int(stage_match.group("total"))
+            step_key = stage_match.group("key")
+            step_label = stage_match.group("label")
+            continue
+
+        progress_match = _PROGRESS_RE.search(line)
+        if progress_match:
+            data = _parse_progress_data(progress_match.group("data"))
+            stage = str(data.get("stage") or "")
+            if not stage:
+                continue
+            parts[stage] = ProgressPart(
+                label=_part_label(stage),
+                percent=_parse_percent(data.get("pct")),
+                speed=_parse_int(data.get("speed")),
+                eta=_parse_int(data.get("eta")),
+                status=str(data.get("status") or data.get("state") or "") or None,
+            )
+            if stage == "transfer" and job.kind == "transfer":
+                step = 1
+                total = 1
+                step_key = "transfer"
+                step_label = "Transfer files"
+            continue
+
+        fallback_stage = _fallback_stage(line)
+        if fallback_stage is not None:
+            step, total, step_key, step_label = fallback_stage
+            continue
+
+        if job.kind == "transfer":
+            rsync_match = _RSYNC_PERCENT_RE.search(line)
+            if rsync_match:
+                pct = float(rsync_match.group("pct"))
+                parts["transfer"] = ProgressPart(label="Transfer", percent=pct)
+                step = 1
+                total = 1
+                step_key = "transfer"
+                step_label = "Transfer files"
+
+    overall: float | None
+    if job.status == "done":
+        overall = 100.0
+    else:
+        overall = _overall_percent(step=step, total=total, step_key=step_key, parts=parts)
+
+    return ProgressSnapshot(
+        step=step,
+        total_steps=total,
+        step_key=step_key,
+        step_label=step_label,
+        overall_percent=overall,
+        parts=parts,
+    )
+
+
+def _fallback_stage(line: str) -> tuple[int, int, str, str] | None:
+    lowered = line.lower()
+    if "stage 1/4" in lowered or "stage=extract" in lowered:
+        return 1, 4, "extract", "Extract stream audio"
+    if "stage 2/4" in lowered or "stage=torrent" in lowered:
+        return 2, 4, "torrent", "Download HQ video"
+    if "stage 3/4" in lowered or "stage=sync" in lowered:
+        return 3, 4, "sync", "Sync audio"
+    if "stage 4/4" in lowered or "stage=remux" in lowered:
+        return 4, 4, "remux", "Write final MKV"
+    return None
+
+
+def _default_step_label(job: BgJob) -> str:
+    if job.status == "done":
+        return "Done"
+    if job.status == "failed":
+        return "Failed"
+    if job.kind == "transfer":
+        return "Waiting to transfer"
+    return "Starting"
+
+
+def _parse_progress_data(raw: str) -> dict[str, str]:
+    data: dict[str, str] = {}
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
+    for token in tokens:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        data[key.strip()] = value.strip()
+    return data
+
+
+def _parse_percent(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, min(100.0, float(str(value))))
+    except ValueError:
+        return None
+
+
+def _parse_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(float(str(value)))
+    except ValueError:
+        return None
+
+
+def _part_label(stage: str) -> str:
+    return {
+        "stream": "Filmpalast audio",
+        "torrent": "HQ video",
+        "transfer": "Transfer",
+    }.get(stage, stage.replace("_", " ").title())
+
+
+def _overall_percent(
+    *,
+    step: int | None,
+    total: int | None,
+    step_key: str | None,
+    parts: dict[str, ProgressPart],
+) -> float | None:
+    if step is None or total is None or total <= 0:
+        for part in parts.values():
+            if part.percent is not None:
+                return part.percent
+        return None
+    stage_progress = 0.0
+    if step_key == "extract":
+        stage_progress = parts.get("stream", ProgressPart("")).percent or 0.0
+    elif step_key:
+        stage_progress = parts.get(step_key, ProgressPart("")).percent or 0.0
+    return max(0.0, min(100.0, ((step - 1) + stage_progress / 100.0) / total * 100.0))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -336,10 +516,13 @@ def _main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "BgJob",
+    "ProgressPart",
+    "ProgressSnapshot",
     "clear_jobs",
     "get_job",
     "jobs_root",
     "list_jobs",
+    "progress_snapshot",
     "spawn",
     "tail",
     "watch",

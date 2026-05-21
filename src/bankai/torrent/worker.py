@@ -138,7 +138,9 @@ class TorrentWorker(Worker):
         # ---- wait for completion ----------------------------------------
         try:
             status = await self._qbit.wait_until_complete(
-                torrent_hash, cancel_token=ctx.cancel_token
+                torrent_hash,
+                cancel_token=ctx.cancel_token,
+                progress_cb=_log_torrent_progress,
             )
         except QBittorrentError as exc:
             raise WorkerError(f"download failed: {exc}") from exc
@@ -299,6 +301,16 @@ class TorrentWorker(Worker):
                 return best[1]
             await _asyncio.sleep(1.0)
         return None
+
+
+def _log_torrent_progress(status: Any) -> None:
+    log.info(
+        "BANKAI_PROGRESS stage=torrent pct=%.1f speed=%s eta=%s state=%s",
+        max(0.0, min(100.0, status.progress * 100.0)),
+        int(status.dlspeed),
+        int(status.eta),
+        status.state,
+    )
 
 
 async def _fetch_torrent_info_hash(url: str) -> str | None:

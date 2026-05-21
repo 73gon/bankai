@@ -31,6 +31,7 @@ Job payload schema
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,7 @@ class YtDlpRunner:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            "progress_hooks": [_yt_dlp_progress_hook()],
             "user_agent": get_settings().scraper.user_agent,
             # Streaming sites often drop HTTP connections mid-transfer.
             # Retry the whole download a few times and per-fragment for HLS.
@@ -374,7 +376,15 @@ class PlaywrightRunner:
                         captured.append(href)
 
                 page.on("response", _on_response)
-                await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                except Exception as exc:
+                    log.warning(
+                        "[playwright] page navigation did not finish for %s: %s; "
+                        "continuing capture",
+                        url,
+                        exc,
+                    )
                 # Best-effort: click anything that looks like a play button.
                 for selector in (
                     "button[aria-label*='play' i]",
@@ -474,6 +484,7 @@ async def _ffmpeg_pull(url: str, out_dir: Path, *, referer: str) -> ExtractResul
         "[playwright] ffmpeg pull: %s",
         " ".join([*cmd[:8], "...", "-i", url, "...", str(out_path)]),
     )
+    log.info("BANKAI_PROGRESS stage=stream pct=0.0 status=ffmpeg")
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
     )
@@ -482,9 +493,63 @@ async def _ffmpeg_pull(url: str, out_dir: Path, *, referer: str) -> ExtractResul
         tail = (stderr or b"").decode("utf-8", "replace")
         tail = "\n".join(tail.splitlines()[-10:])
         raise YtDlpError(f"ffmpeg pull failed (exit {proc.returncode}):\n{tail}")
+    log.info("BANKAI_PROGRESS stage=stream pct=100.0 status=finished")
     return ExtractResult(
         path=out_path,
         codec=None,
         duration_ms=None,
         extractor="ffmpeg",
     )
+
+
+def _yt_dlp_progress_hook() -> Any:
+    last = {"time": 0.0, "pct": -1.0}
+
+    def hook(data: dict[str, Any]) -> None:
+        status = str(data.get("status") or "")
+        if status == "finished":
+            log.info("BANKAI_PROGRESS stage=stream pct=100.0 status=finished")
+            return
+        if status != "downloading":
+            return
+        downloaded = _as_float(data.get("downloaded_bytes"))
+        total = _as_float(data.get("total_bytes") or data.get("total_bytes_estimate"))
+        pct = (downloaded / total * 100.0) if downloaded is not None and total else None
+        now = time.monotonic()
+        if pct is not None and pct < 100:
+            if now - last["time"] < 5 and abs(pct - last["pct"]) < 2:
+                return
+            last["time"] = now
+            last["pct"] = pct
+            log.info(
+                "BANKAI_PROGRESS stage=stream pct=%.1f speed=%s eta=%s downloaded=%s total=%s",
+                pct,
+                _as_int(data.get("speed")),
+                _as_int(data.get("eta")),
+                _as_int(downloaded),
+                _as_int(total),
+            )
+        else:
+            if now - last["time"] < 10:
+                return
+            last["time"] = now
+            log.info(
+                "BANKAI_PROGRESS stage=stream pct=unknown speed=%s eta=%s downloaded=%s",
+                _as_int(data.get("speed")),
+                _as_int(data.get("eta")),
+                _as_int(downloaded),
+            )
+
+    return hook
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _as_int(value: object) -> int | str:
+    if isinstance(value, int | float):
+        return int(value)
+    return "unknown"

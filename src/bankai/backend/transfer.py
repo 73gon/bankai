@@ -86,10 +86,14 @@ def transfer_with_rsync(
         progress("No files to transfer.")
         return result
     progress(f"Planning complete: {len(items)} file(s)")
+    completed = 0
+    progress("BANKAI_PROGRESS stage=transfer pct=0.0 status=starting")
     for item in items:
         if item.destination.exists():
             progress(f"SKIP exists: {item.destination}")
             result.skipped.append(item)
+            completed += 1
+            _emit_transfer_progress(progress, completed=completed, total=len(items))
             continue
         item.destination.parent.mkdir(parents=True, exist_ok=True)
         progress(f"MOVE {item.source} -> {item.destination}")
@@ -108,6 +112,8 @@ def transfer_with_rsync(
         except TransferError as exc:
             result.failed.append((item, str(exc)))
             progress(f"FAILED {item.source}: {exc}")
+            completed += 1
+            _emit_transfer_progress(progress, completed=completed, total=len(items))
             continue
         if item.destination.exists():
             result.transferred.append(item)
@@ -118,6 +124,8 @@ def transfer_with_rsync(
         else:
             result.transferred.append(item)
             progress(f"DONE {item.destination}")
+        completed += 1
+        _emit_transfer_progress(progress, completed=completed, total=len(items))
     return result
 
 
@@ -228,3 +236,13 @@ def _run_rsync(cmd: list[str], *, progress: ProgressCallback) -> None:
     code = proc.wait()
     if code != 0:
         raise TransferError(f"rsync exited with {code}")
+
+
+def _emit_transfer_progress(
+    progress: ProgressCallback,
+    *,
+    completed: int,
+    total: int,
+) -> None:
+    pct = completed / total * 100.0 if total else 100.0
+    progress(f"BANKAI_PROGRESS stage=transfer pct={pct:.1f} status=running")

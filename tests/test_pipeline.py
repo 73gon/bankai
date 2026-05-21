@@ -13,7 +13,7 @@ from bankai.db import StateRepository, initialize
 from bankai.processor.pipeline import PipelineWorker
 from bankai.processor.sync import PlaceholderAudioError
 from bankai.queue.models import Job, JobKind, JobStatus
-from bankai.queue.worker import Worker, WorkerContext
+from bankai.queue.worker import Worker, WorkerContext, WorkerError
 
 
 class _FakeWorker(Worker):
@@ -36,6 +36,19 @@ class _SequenceWorker(Worker):
     async def run(self, ctx: WorkerContext) -> dict[str, Any] | None:
         self.calls.append(ctx.job.payload)
         return self._results.pop(0)
+
+
+class _FailThenSucceedWorker(Worker):
+    kind = JobKind.EXTRACT
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(self, ctx: WorkerContext) -> dict[str, Any] | None:
+        self.calls.append(ctx.job.payload)
+        if len(self.calls) == 1:
+            raise WorkerError("first source failed")
+        return {"path": "/tmp/audio.aac"}
 
 
 class _PlaceholderOnceSync(Worker):
@@ -142,3 +155,39 @@ async def test_pipeline_retries_extract_when_sync_detects_placeholder(tmp_path: 
     assert result is not None
     assert [c["hint"] for c in extract.calls] == ["ytdlp", "playwright"]
     assert [c["audio"] for c in sync.calls] == ["/tmp/placeholder.aac", "/tmp/full.aac"]
+
+
+async def test_pipeline_retries_next_extract_attempt_when_hoster_fails(
+    tmp_path: Path,
+) -> None:
+    extract = _FailThenSucceedWorker()
+    torrent = _FakeWorker(JobKind.TORRENT, {"path": "/tmp/video.mkv"})
+    sync = _FakeWorker(JobKind.SYNC, {"path": "/tmp/synced.aac"})
+    remux = _FakeWorker(JobKind.REMUX, {"path": "/tmp/final.mkv"})
+    pipeline = PipelineWorker(extractor=extract, torrent=torrent, sync=sync, remux=remux)  # type: ignore[arg-type]
+
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+    job = repo.create_job(
+        Job(
+            kind=JobKind.PIPELINE,
+            status=JobStatus.RUNNING,
+            payload={
+                "query": "Arcane S01E01",
+                "stream_url": "https://filmpalast.to/stream/arcane-s01e01",
+                "stream_hint": "ytdlp",
+                "stream_site": "unknown",
+                "kind": "episode",
+                "out": str(tmp_path / "out.mkv"),
+            },
+        )
+    )
+    ctx = WorkerContext(
+        job=job, repo=repo, work_dir=tmp_path / "work", cancel_token=asyncio.Event()
+    )
+
+    result = await pipeline.run(ctx)
+
+    assert result is not None
+    assert [call["hint"] for call in extract.calls] == ["ytdlp", "playwright"]

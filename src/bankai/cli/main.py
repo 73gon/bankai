@@ -35,6 +35,7 @@ from rich.table import Table
 from bankai import __version__
 from bankai.backend import (
     BatchMovie,
+    TransferError,
     TransferKind,
     build_movie_args,
     format_transfer_summary,
@@ -304,6 +305,7 @@ def _interactive_menu() -> None:
                 "Run a movie",
                 "Run movie batch",
                 "Run a show",
+                "Transfer files",
                 "Search",
                 "Queue / history",
                 "Config",
@@ -321,6 +323,8 @@ def _interactive_menu() -> None:
                 _menu_run_batch()
             elif choice == "Run a show":
                 _menu_run_show()
+            elif choice == "Transfer files":
+                _menu_transfer()
             elif choice == "Search":
                 _menu_search()
             elif choice == "Queue / history":
@@ -376,6 +380,28 @@ def _menu_run_show() -> None:
     asyncio.run(_run_show(show=show, season=season, site=site, episode=None, yes=False))
 
 
+def _menu_transfer() -> None:
+    choice = _ask_select(
+        "Transfer what?",
+        [
+            "Library output folder",
+            "Specific files/folders",
+            "\u2190 Back",
+        ],
+    )
+    if choice is None or choice.startswith("\u2190"):
+        return
+    if choice.startswith("Library"):
+        paths = [Path(get_settings().output.directory)]
+    else:
+        raw = Prompt.ask("Path(s), separated by comma")
+        paths = [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
+    if not paths:
+        return
+    kind = _transfer_kind(Prompt.ask("Kind", default="auto"))
+    _queue_transfer(paths, kind=kind, yes=False, title_library=choice.startswith("Library"))
+
+
 def _menu_queue() -> None:
     """Background-job queue browser: list, watch logs, cancel."""
     from bankai.cli import bgjobs
@@ -394,10 +420,13 @@ def _menu_queue() -> None:
         )
         rows: list[list[str]] = []
         for j in jobs:
+            snapshot = bgjobs.progress_snapshot(j)
             rows.append(
                 [
                     j.id,
                     _format_job_status(j.status),
+                    _truncate(snapshot.step_label, 24),
+                    _progress_text(snapshot.overall_percent),
                     _truncate(j.title, 42),
                     _humanize_age(j.started_at),
                     _format_job_result(j),
@@ -406,11 +435,19 @@ def _menu_queue() -> None:
         can_clear = any(j.status in {"done", "failed", "cancelled"} for j in jobs)
         if can_clear:
             rows.append(
-                ["-", "action", "Clear finished background jobs", "", "done/failed/cancelled"]
+                [
+                    "-",
+                    "action",
+                    "Cleanup",
+                    "",
+                    "Clear finished background jobs",
+                    "",
+                    "done/failed/cancelled",
+                ]
             )
         idx = _ask_table_select(
             "Background jobs (newest first)",
-            ["ID", "Status", "Title", "Age", "Result"],
+            ["ID", "Status", "Step", "Progress", "Title", "Age", "Result"],
             rows,
         )
         if idx is None:
@@ -449,6 +486,62 @@ def _format_job_result(job: Any) -> str:
     return "-"
 
 
+def _progress_text(percent: float | None) -> str:
+    if percent is None:
+        return "[dim]pending[/dim]"
+    clamped = max(0.0, min(100.0, percent))
+    filled = round(clamped / 10)
+    bar = f"[green]{'#' * filled}[/green][dim]{'-' * (10 - filled)}[/dim]"
+    return f"{bar} [cyan]{clamped:5.1f}%[/cyan]"
+
+
+def _format_speed(value: int | None) -> str:
+    if value is None or value <= 0:
+        return "-"
+    units = ["B/s", "KiB/s", "MiB/s", "GiB/s"]
+    n = float(value)
+    unit = units[0]
+    for unit in units:
+        if n < 1024 or unit == units[-1]:
+            break
+        n /= 1024
+    return f"{n:.1f} {unit}"
+
+
+def _format_eta(value: int | None) -> str:
+    if value is None or value < 0 or value >= 8_640_000:
+        return "-"
+    if value < 60:
+        return f"{value}s"
+    if value < 3600:
+        return f"{value // 60}m{value % 60:02d}s"
+    return f"{value // 3600}h{(value % 3600) // 60:02d}m"
+
+
+def _render_background_progress(job: Any) -> None:
+    from bankai.cli import bgjobs
+
+    snapshot = bgjobs.progress_snapshot(job)
+    console.print(
+        f"[bold]Step:[/bold] [magenta]{snapshot.step_label}[/magenta]  "
+        f"[bold]Overall:[/bold] {_progress_text(snapshot.overall_percent)}"
+    )
+    if not snapshot.parts:
+        return
+    table = Table(title="Downloads / transfer", show_lines=False)
+    for col in ("Item", "Progress", "Speed", "ETA", "Status"):
+        table.add_column(col)
+    for part in snapshot.parts.values():
+        table.add_row(
+            part.label,
+            _progress_text(part.percent),
+            _format_speed(part.speed),
+            _format_eta(part.eta),
+            part.status or "-",
+        )
+    console.print(table)
+
+
 def _truncate(value: str, width: int) -> str:
     if len(value) <= width:
         return value
@@ -465,6 +558,7 @@ def _job_detail_menu(job: Any) -> None:
         console.rule(
             f"[bold]{job.title}[/bold]  \u00b7  {job.id}  \u00b7  status={_rich_status(job.status)}"
         )
+        _render_background_progress(job)
         if job.final_path:
             console.print(f"  [green]final:[/green] {job.final_path}")
         actions = []
@@ -503,16 +597,19 @@ def background_list() -> None:
 
     jobs = bgjobs.list_jobs()
     table = Table(title=f"Background jobs ({len(jobs)})", show_lines=False)
-    for col in ("ID", "Kind", "Status", "Title", "Age", "Result"):
+    for col in ("ID", "Kind", "Status", "Step", "Progress", "Title", "Age", "Result"):
         if col in {"Title", "Result"}:
             table.add_column(col, overflow="fold")
         else:
             table.add_column(col)
     for job in jobs:
+        snapshot = bgjobs.progress_snapshot(job)
         table.add_row(
             job.id,
             job.kind,
             _rich_status(job.status),
+            snapshot.step_label,
+            _progress_text(snapshot.overall_percent),
             job.title,
             _humanize_age(job.started_at),
             _format_job_result(job),
@@ -545,6 +642,19 @@ def background_log(
         console.print(f"[red]no such background job: {job_id}[/red]")
         raise typer.Exit(code=1)
     console.print(bgjobs.tail(job, lines=lines))
+
+
+@background_app.command("status")
+def background_status(job_id: str = typer.Argument(...)) -> None:
+    """Show current parsed stage/download progress for one background job."""
+    from bankai.cli import bgjobs
+
+    job = bgjobs.get_job(job_id)
+    if job is None:
+        console.print(f"[red]no such background job: {job_id}[/red]")
+        raise typer.Exit(code=1)
+    console.rule(f"[bold]{job.title}[/bold]  \u00b7  {job.id}  \u00b7  {_rich_status(job.status)}")
+    _render_background_progress(job)
 
 
 @background_app.command("clear")
@@ -1416,6 +1526,7 @@ def transfer(
         False, "--library", help="Transfer the configured output directory."
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show planned moves without queueing."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Queue without confirmation."),
 ) -> None:
     """Queue a safe rsync move to the mounted media server."""
     selected_paths = list(paths or [])
@@ -1428,10 +1539,25 @@ def transfer(
     if dry_run:
         _render_transfer_plan(selected_paths, kind=transfer_kind)
         return
+    _queue_transfer(selected_paths, kind=transfer_kind, yes=yes, title_library=library)
+
+
+def _queue_transfer(
+    paths: list[Path],
+    *,
+    kind: TransferKind,
+    yes: bool,
+    title_library: bool = False,
+) -> None:
+    planned = _render_transfer_plan(paths, kind=kind)
+    if planned == 0:
+        return
+    if not yes and not Confirm.ask("Queue this transfer?", default=True):
+        return
     from bankai.cli import bgjobs
 
-    args = ["transfer-run", "--kind", transfer_kind, *[str(p) for p in selected_paths]]
-    title = "Transfer library" if library else f"Transfer {len(selected_paths)} path(s)"
+    args = ["transfer-run", "--kind", kind, *[str(p) for p in paths]]
+    title = "Transfer library" if title_library else f"Transfer {len(paths)} path(s)"
     job = bgjobs.spawn(kind="transfer", title=title, args=args)
     console.print(
         f"[green]queued[/green] transfer job [bold]{job.id}[/bold]\n"
@@ -1468,11 +1594,15 @@ def _transfer_kind(kind: str) -> TransferKind:
     raise typer.Exit(code=1)
 
 
-def _render_transfer_plan(paths: list[Path], *, kind: TransferKind) -> None:
-    items = plan_transfer(paths, kind=kind)
+def _render_transfer_plan(paths: list[Path], *, kind: TransferKind) -> int:
+    try:
+        items = plan_transfer(paths, kind=kind)
+    except TransferError as exc:
+        console.print(f"[red]transfer plan failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
     if not items:
         console.print("[yellow]no transfer files found[/yellow]")
-        return
+        return 0
     table = Table(title=f"Transfer plan ({len(items)})", show_lines=False)
     for col in ("#", "Kind", "Source", "Destination", "Status"):
         if col in {"Source", "Destination"}:
@@ -1488,6 +1618,7 @@ def _render_transfer_plan(paths: list[Path], *, kind: TransferKind) -> None:
             "[yellow]skip exists[/yellow]" if item.destination.exists() else "[green]move[/green]",
         )
     console.print(table)
+    return len(items)
 
 
 @app.command()
