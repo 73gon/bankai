@@ -386,8 +386,12 @@ def spawn(*, kind: str, title: str, args: list[str]) -> BgJob:
     job.save()
     cmd = [sys.executable, "-m", "bankai.cli.bgjobs", "--supervise", job.id, *args]
     env = os.environ.copy()
-    # Force colourless rich output in background logs.
-    env.setdefault("NO_COLOR", "1")
+    # Persist ANSI colour codes into the on-disk log so the viewer can
+    # replay them with Rich; older releases set NO_COLOR=1 here, which is
+    # what made `bankai background log` show plain text.
+    env.pop("NO_COLOR", None)
+    env.setdefault("FORCE_COLOR", "1")
+    env.setdefault("TERM", "xterm-256color")
     env.setdefault("BANKAI_BG_JOB_ID", job.id)
     if sys.platform == "win32":
         DETACHED = 0x00000008
@@ -436,7 +440,9 @@ def _supervise(job_id: str, args: list[str]) -> int:
         return 2
     cmd = [_bankai_cmd(), *args]
     env = os.environ.copy()
-    env.setdefault("NO_COLOR", "1")
+    env.pop("NO_COLOR", None)
+    env.setdefault("FORCE_COLOR", "1")
+    env.setdefault("TERM", "xterm-256color")
     env.setdefault("BANKAI_BG_JOB_ID", job.id)
     job.log_path.parent.mkdir(parents=True, exist_ok=True)
     with job.log_path.open("wb") as log_fh:
@@ -481,6 +487,21 @@ def tail(job: BgJob, *, lines: int = 50) -> str:
     return "\n".join(out)
 
 
+def render_tail(job: BgJob, *, lines: int = 50) -> "Any":
+    """Return a Rich-renderable that preserves ANSI colours from the log.
+
+    Background workers run with ``FORCE_COLOR=1``, so the log file on
+    disk already contains the ANSI escape sequences emitted by Rich. We
+    convert those back into styled :class:`rich.text.Text` here so the
+    interactive log viewer shows colour instead of brackets like
+    ``[green]done[/green]``.
+    """
+    from rich.text import Text
+
+    raw = tail(job, lines=lines)
+    return Text.from_ansi(raw)
+
+
 def watch(job: BgJob) -> None:
     """Follow the job's log until it ends or user hits Ctrl-C."""
     if not job.log_path.exists():
@@ -523,6 +544,7 @@ __all__ = [
     "jobs_root",
     "list_jobs",
     "progress_snapshot",
+    "render_tail",
     "spawn",
     "tail",
     "watch",

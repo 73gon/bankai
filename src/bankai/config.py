@@ -28,10 +28,16 @@ from pydantic_settings import (
 
 class OutputSettings(BaseModel):
     directory: Path = Path("/library")
-    filename_template: str = "{title} ({year}) [{audio_lang}].mkv"
-    series_filename_template: str = (
-        "{title} - S{season:02d}E{episode:02d} - {episode_title} [{audio_lang}].mkv"
-    )
+    # Default layout (Plex/Jellyfin compatible):
+    #   <directory>/Movies/<movie_folder_template>/<filename_template>
+    #   <directory>/Shows/<show name>/<season_folder_template>/<series_filename_template>
+    filename_template: str = "{title} ({year}).mkv"
+    series_filename_template: str = "{title} - S{season:02d}E{episode:02d}.mkv"
+    movie_folder_template: str = "{title} ({year})"
+    season_folder_template: str = "Season {season:02d}"
+    # When true, the pipeline skips work that would overwrite an
+    # existing target file and posts a Discord notice (if configured).
+    skip_existing: bool = True
 
 
 class AudioSettings(BaseModel):

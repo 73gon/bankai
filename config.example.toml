@@ -4,10 +4,17 @@
 
 [output]
 directory = "/library"
-# Placeholders: {title} {year} {audio_lang} {season} {episode} {episode_title}
-filename_template = "{title} ({year}) [{audio_lang}].mkv"
-# Historical key name; this is the show filename template.
-series_filename_template = "{title} - S{season:02d}E{episode:02d} - {episode_title} [{audio_lang}].mkv"
+# Filename templates. Placeholders:
+#   {title} {year} {audio_lang} {season} {episode} {episode_title} {series_title}
+# Defaults below match the v0.2 layout:
+#   <directory>/Movies/Title (Year)/Title (Year).mkv
+#   <directory>/Shows/Show/Season XX/Show - SXXEXX.mkv
+filename_template = "{title} ({year}).mkv"
+series_filename_template = "{title} - S{season:02d}E{episode:02d}.mkv"
+movie_folder_template = "{title} ({year})"
+season_folder_template = "Season {season:02d}"
+# Skip work when the target MKV already exists (and post a Discord notice).
+skip_existing = true
 
 [audio]
 # "copy" keeps the original stream codec (recommended).

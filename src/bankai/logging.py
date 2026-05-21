@@ -7,6 +7,8 @@ from typing import Any
 
 from rich.logging import RichHandler
 
+from bankai.theme import make_console
+
 _CONFIGURED = False
 
 
@@ -16,6 +18,7 @@ def configure_logging(level: int | str = logging.INFO, **handler_kwargs: Any) ->
     if _CONFIGURED:
         return
     handler = RichHandler(
+        console=make_console(),
         rich_tracebacks=True,
         show_time=True,
         show_path=False,

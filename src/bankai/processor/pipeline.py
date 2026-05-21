@@ -96,6 +96,34 @@ class PipelineWorker(Worker):
             if not payload.get(required):
                 raise PermanentWorkerError(f"pipeline payload missing {required!r}")
 
+        # ---- 0. Skip if the target MKV already exists ------------------
+        settings = get_settings()
+        if settings.output.skip_existing and not payload.get("out"):
+            planned_out = _default_output_path(
+                payload["query"],
+                kind=payload.get("kind", "movie"),
+                season=payload.get("season"),
+                episode=payload.get("episode"),
+                episode_title=payload.get("episode_title"),
+                series_title=payload.get("series_title"),
+            )
+            if planned_out.exists() and planned_out.stat().st_size > 0:
+                log.info("[pipeline] skipping \u2014 already present: %s", planned_out)
+                try:
+                    from bankai.notify import notify_skipped
+
+                    await notify_skipped(
+                        query=payload.get("query", ""),
+                        final_path=str(planned_out),
+                    )
+                except Exception:  # noqa: BLE001 -- notifications are best-effort.
+                    log.debug("[pipeline] skip-notify failed", exc_info=True)
+                return {
+                    "status": "skipped",
+                    "reason": "already_exists",
+                    "out": str(planned_out),
+                }
+
         # ---- 1. Extract dub audio --------------------------------------
         _log_stage(1, "extract", "Extract stream audio")
         original_stream_url = payload["stream_url"]
@@ -184,6 +212,7 @@ class PipelineWorker(Worker):
             season=payload.get("season"),
             episode=payload.get("episode"),
             episode_title=payload.get("episode_title"),
+            series_title=payload.get("series_title"),
         )
         remux_payload: dict[str, Any] = {
             "video": video_path,
@@ -396,36 +425,47 @@ def _default_output_path(
     season: int | None = None,
     episode: int | None = None,
     episode_title: str | None = None,
+    series_title: str | None = None,
 ) -> Path:
     """Build the default output path in Plex/Jellyfin layout.
 
-    Movies::
+    Movie layout::
 
-        <library>/Movies/Title (Year)/Title (Year).mkv
+        <library>/Movies/<movie_folder_template>/<filename_template>
 
-    Episodes::
+    Episode layout::
 
-        <library>/Series/Show/Season 01/Show - S01E03 - Title.mkv
+        <library>/Shows/<show>/<season_folder_template>/<series_filename_template>
+
+    Templates live in :class:`bankai.config.OutputSettings` so users can
+    customise the layout without touching the code.
     """
-    import re
+    from bankai.processor.naming import render_episode_path, render_movie_path
 
-    library = Path(get_settings().output.directory)
-    cleaned = "".join(c if c.isalnum() or c in " ._-()[]" else "_" for c in query).strip() or "out"
+    settings = get_settings()
+    library = Path(settings.output.directory)
+    out_cfg = settings.output
+    audio_lang = settings.audio.language_tag or "ger"
+
     if kind == "episode" and season is not None and episode is not None:
-        # Strip trailing year/SxxExx markers from query to get show name.
-        show = re.sub(r"\s*[Ss]\d{1,2}[EeXx]\d{1,3}.*$", "", cleaned).strip(" -_") or cleaned
-        ep = f"S{season:02d}E{episode:02d}"
-        suffix = f" - {episode_title.strip()}" if episode_title else ""
-        return library / "Series" / show / f"Season {season:02d}" / f"{show} - {ep}{suffix}.mkv"
-    # Movie
-    m = re.search(r"\s*\(?(\b(?:19|20)\d{2}\b)\)?\s*$", cleaned)
-    if m:
-        title = cleaned[: m.start()].rstrip(" ._-")
-        year = m.group(1)
-        folder = f"{title} ({year})" if title else f"({year})"
-    else:
-        folder = cleaned
-    return library / "Movies" / folder / f"{folder}.mkv"
+        return render_episode_path(
+            library=library,
+            query=query,
+            series_title=series_title,
+            season=season,
+            episode=episode,
+            episode_title=episode_title,
+            audio_lang=audio_lang,
+            season_folder_template=out_cfg.season_folder_template,
+            file_template=out_cfg.series_filename_template,
+        )
+    return render_movie_path(
+        library=library,
+        query=query,
+        audio_lang=audio_lang,
+        folder_template=out_cfg.movie_folder_template,
+        file_template=out_cfg.filename_template,
+    )
 
 
 def _extract_attempt_payloads(

@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -53,8 +54,9 @@ from bankai.config import (
     user_config_path,
 )
 from bankai.logging import configure_logging, get_logger
-from bankai.metadata.tvdb import get_title_aliases
+from bankai.metadata.tvdb import TitleAlias, get_title_aliases
 from bankai.queue.models import MediaKind
+from bankai.theme import make_console
 
 app = typer.Typer(
     name="bankai",
@@ -76,7 +78,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(background_app, name="background")
 app.add_typer(metadata_app, name="metadata")
 
-console = Console()
+console = make_console()
 log = get_logger(__name__)
 
 
@@ -264,6 +266,88 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+@dataclass(frozen=True, slots=True)
+class MediaIdentity:
+    """Normalised result of an interactive TheTVDB lookup.
+
+    ``original`` is whatever the user typed at the prompt; the other
+    fields come from TheTVDB and may be empty when an alias is missing
+    or when the user chose to keep their original query (no internet
+    / TVDB key not configured).
+    """
+
+    original: str
+    english: str | None = None
+    german: str | None = None
+    year: int | None = None
+    tvdb_id: int | None = None
+    kind: MediaKind | None = None
+
+
+def _format_identity_row(alias: TitleAlias, fallback_query: str) -> list[str]:
+    """Build a row for the TVDB picker table."""
+    en = alias.english_title or alias.name or fallback_query
+    de = alias.german_title or "[muted]\u2014[/muted]"
+    year = str(alias.year) if alias.year else "[muted]?[/muted]"
+    kind = alias.kind.value if alias.kind else "[muted]?[/muted]"
+    return [en, de, year, kind]
+
+
+def _identify_via_tvdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
+    """Search TheTVDB and let the user pick the correct title.
+
+    The picker shows English title, German title, year and kind. The
+    chosen entry is converted into a :class:`MediaIdentity` so callers
+    can pre-fill year / German alias without asking the user again.
+
+    Returns ``None`` if the user cancels. If TVDB is unreachable or no
+    matches are found the function falls back to a single
+    ``MediaIdentity(original=query)`` so the rest of the flow still
+    works.
+    """
+    try:
+        results: list[TitleAlias] = asyncio.run(
+            get_title_aliases(query, kind=kind)
+        )
+    except Exception as exc:  # noqa: BLE001 -- TVDB is fail-soft.
+        log.warning("tvdb lookup failed: %s", exc)
+        results = []
+
+    if not results:
+        console.print(
+            f"[warn]TheTVDB returned no matches for[/warn] [accent]{query}[/accent] "
+            "[muted]\u2014 continuing without metadata.[/muted]"
+        )
+        return MediaIdentity(original=query, kind=kind)
+
+    # Cap the list so the picker stays readable.
+    results = results[:10]
+    rows = [_format_identity_row(alias, query) for alias in results]
+    # Add a "None of these" sentinel so the user can still proceed
+    # when TVDB has the wrong entry.
+    rows.append(
+        [f"[muted]Use my query verbatim:[/muted] [accent]{query}[/accent]", "", "", ""]
+    )
+    idx = _ask_table_select(
+        "Pick the correct title (TheTVDB):",
+        headers=["English", "German", "Year", "Kind"],
+        rows=rows,
+    )
+    if idx is None:
+        return None
+    if idx == len(results):
+        return MediaIdentity(original=query, kind=kind)
+    alias = results[idx]
+    return MediaIdentity(
+        original=query,
+        english=alias.english_title or alias.name,
+        german=alias.german_title,
+        year=alias.year,
+        tvdb_id=alias.tvdb_id,
+        kind=alias.kind or kind,
+    )
+
+
 @app.callback()
 def _root(
     ctx: typer.Context,
@@ -342,24 +426,37 @@ def _interactive_menu() -> None:
 def _menu_run_movie() -> None:
     from bankai.cli import bgjobs
 
-    en = Prompt.ask("[bold]English title[/bold] (for torrent search, e.g. 'Cars 3 2017')")
-    if not en.strip():
+    title = Prompt.ask("[bold]Movie title[/bold] (any language)")
+    if not title.strip():
         return
-    de = Prompt.ask(
-        "[bold]German title[/bold] (for filmpalast lookup)",
-        default=en,
-    )
-    url = Prompt.ask("Stream URL (blank = auto-search filmpalast)", default="").strip()
+    identity = _identify_via_tvdb(title, kind=MediaKind.MOVIE)
+    if identity is None:
+        # User cancelled the picker.
+        return
+    en_title = identity.english or identity.original
+    de_title = identity.german or en_title
+    year = identity.year
+    # Build the canonical "English Title YYYY" query used for torrent
+    # search; downstream code parses the year off the end.
+    en_query = f"{en_title} {year}" if year else en_title
+    url = Prompt.ask(
+        "Stream URL (blank = auto-search filmpalast)", default=""
+    ).strip()
     if not url:
-        picked_url = _interactive_pick_movie(de)
+        # Prefer the German title for the filmpalast lookup; fall back to
+        # English when no German alias is known.
+        picked_url = _interactive_pick_movie(de_title)
         if not picked_url:
-            console.print("[red]no stream URL found[/red]")
+            console.print("[error]no stream URL found[/error]")
             return
         url = picked_url
-    args = build_movie_args(BatchMovie(title=en, german_title=de, url=url), site="filmpalast")
-    job = bgjobs.spawn(kind="movie", title=f"{en}", args=args)
+    args = build_movie_args(
+        BatchMovie(title=en_query, german_title=de_title, url=url),
+        site="filmpalast",
+    )
+    job = bgjobs.spawn(kind="movie", title=en_query, args=args)
     console.print(
-        f"[green]queued[/green] job [bold]{job.id}[/bold] \u2014 "
+        f"[success]queued[/success] job [accent]{job.id}[/accent] \u2014 "
         f"\u2018Queue / history\u2019 to watch / cancel."
     )
 
@@ -373,11 +470,118 @@ def _menu_run_batch() -> None:
     _queue_movie_batch(path, site=site, dry_run=False)
 
 
+def _parse_episode_selector(spec: str, available: list[int]) -> list[int]:
+    """Parse an episode selector like ``all`` / ``1-5`` / ``1,3,7-9``.
+
+    Returns the subset of ``available`` episode numbers matching the
+    spec, preserving the order of ``available``. Unknown numbers are
+    silently dropped so the user can paste a range that overshoots the
+    actual season length.
+    """
+    spec = (spec or "").strip().lower()
+    if not spec or spec in {"all", "*", "a"}:
+        return list(available)
+    picked: set[int] = set()
+    for token in spec.replace(" ", "").split(","):
+        if not token:
+            continue
+        if "-" in token:
+            lo_s, hi_s = token.split("-", 1)
+            try:
+                lo, hi = int(lo_s), int(hi_s)
+            except ValueError:
+                continue
+            if lo > hi:
+                lo, hi = hi, lo
+            picked.update(range(lo, hi + 1))
+        else:
+            try:
+                picked.add(int(token))
+            except ValueError:
+                continue
+    return [n for n in available if n in picked]
+
+
 def _menu_run_show() -> None:
-    show = Prompt.ask("Show name")
+    from bankai.cli import bgjobs
+
+    query = Prompt.ask("[bold]Show name[/bold]")
+    if not query.strip():
+        return
+    identity = _identify_via_tvdb(query, kind=MediaKind.EPISODE)
+    if identity is None:
+        return
+    show = identity.english or identity.german or identity.original
     season = IntPrompt.ask("Season", default=1)
-    site = Prompt.ask("Site (auto/filmpalast/aniworld/bs.to/kinox)", default="auto")
-    asyncio.run(_run_show(show=show, season=season, site=site, episode=None, yes=False))
+    site_choice = Prompt.ask(
+        "Site (auto/filmpalast/aniworld/bs.to/kinox)", default="auto"
+    )
+    site_id = None if site_choice.casefold() in {"", "auto"} else site_choice
+
+    result = asyncio.run(list_series_episodes(show, season=season, site=site_id))
+    if result is None:
+        console.print(
+            f"[warn]no episodes found for[/warn] [accent]{show}[/accent] "
+            f"S{season:02d} [muted](tried "
+            f"{site_choice if site_id else 'all sites'})[/muted]"
+        )
+        return
+
+    episodes = sorted(result.episodes, key=lambda e: e.episode)
+    table = Table(
+        title=f"{show} \u2014 Season {season}  "
+        f"[muted]({result.site}, query={result.query!r})[/muted]",
+        header_style="table.header",
+    )
+    table.add_column("#", justify="right")
+    table.add_column("Title", overflow="fold")
+    table.add_column("URL", overflow="fold", style="muted")
+    for ep in episodes:
+        table.add_row(
+            f"[accent]S{season:02d}E{ep.episode:02d}[/accent]",
+            ep.title or "",
+            ep.url,
+        )
+    console.print(table)
+
+    spec = Prompt.ask(
+        "Which episodes? [muted](all / 1-5 / 1,3,7-9)[/muted]", default="all"
+    )
+    wanted = _parse_episode_selector(spec, [e.episode for e in episodes])
+    if not wanted:
+        console.print("[warn]no episodes selected[/warn]")
+        return
+    selected = [e for e in episodes if e.episode in wanted]
+    if not Confirm.ask(
+        f"Queue pipeline for {len(selected)} episode(s)?", default=True
+    ):
+        return
+    for ep in selected:
+        q = f"{show} S{season:02d}E{ep.episode:02d}"
+        args = [
+            "run",
+            q,
+            "--url",
+            ep.url,
+            "--site",
+            result.site,
+            "--kind",
+            "episode",
+            "--season",
+            str(season),
+            "--episode",
+            str(ep.episode),
+            "--series-title",
+            show,
+            "--auto",
+        ]
+        if ep.title:
+            args.extend(["--episode-title", ep.title])
+        job = bgjobs.spawn(kind="show", title=q, args=args)
+        console.print(
+            f"[success]queued[/success] {q} \u2014 job [accent]{job.id}[/accent] "
+            f"[muted]({result.site})[/muted]"
+        )
 
 
 def _menu_transfer() -> None:
@@ -585,9 +789,9 @@ def _job_detail_menu(job: Any) -> None:
                     "[green]cancelled[/green]" if ok else "[yellow]could not cancel[/yellow]"
                 )
         elif choice.startswith("Show last"):
-            console.print(bgjobs.tail(job, lines=50))
+            console.print(bgjobs.render_tail(job, lines=50))
         elif choice.startswith("Show full"):
-            console.print(bgjobs.tail(job, lines=10_000))
+            console.print(bgjobs.render_tail(job, lines=10_000))
 
 
 @background_app.command("list")
@@ -641,7 +845,7 @@ def background_log(
     if job is None:
         console.print(f"[red]no such background job: {job_id}[/red]")
         raise typer.Exit(code=1)
-    console.print(bgjobs.tail(job, lines=lines))
+    console.print(bgjobs.render_tail(job, lines=lines))
 
 
 @background_app.command("status")

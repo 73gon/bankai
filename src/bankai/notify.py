@@ -39,6 +39,18 @@ async def notify_failure(*, query: str, error: str) -> None:
     )
 
 
+async def notify_skipped(*, query: str, final_path: str) -> None:
+    """Inform the user that we skipped a target because it already exists."""
+    cfg = get_settings().notifications
+    if not cfg.webhook_url or not cfg.on_success:
+        return
+    await _post(
+        title="\u23ed\ufe0f bankai \u2014 skipped (already present)",
+        description=f"**{query}**\n`{final_path}`",
+        color=0x5865F2,
+    )
+
+
 async def notify_transfer_summary(*, summary: str, ok: bool) -> None:
     cfg = get_settings().notifications
     if not cfg.webhook_url:
