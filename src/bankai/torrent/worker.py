@@ -20,6 +20,7 @@ batching)::
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,42 @@ log = get_logger(__name__)
 # Prowlarr Newznab category IDs.
 _CAT_MOVIES = [2000, 2010, 2020, 2030, 2040, 2045, 2050]
 _CAT_TV = [5000, 5010, 5020, 5030, 5040, 5045, 5050, 5060, 5070]
+
+_EPISODE_TAG_RE = re.compile(r"\bS\d{1,2}\s*E\d{1,3}\b", re.IGNORECASE)
+
+
+def _strip_episode_tag(text: str) -> str:
+    """Remove a trailing ``SxxExx`` tag (and anything after it) from a query."""
+    m = _EPISODE_TAG_RE.search(text)
+    cleaned = text[: m.start()] if m else text
+    return " ".join(cleaned.split()).strip(" -–—:")
+
+
+def episode_search_queries(payload: dict[str, Any]) -> list[str]:
+    """Ordered torrent search queries for an episode job.
+
+    Single-episode releases routinely fail quality/size policy (a 25-min
+    episode is ~1-3 GiB while ``selector.min_size_gib`` is tuned for
+    feature-length content). Season packs pass the policy and the
+    downstream :func:`match_episodes` step extracts the wanted episode, so
+    we search the season pack first and fall back to the per-episode
+    query.
+    """
+    query = payload["query"]
+    season = payload.get("season")
+    series = payload.get("series_title") or _strip_episode_tag(query)
+    queries: list[str] = []
+    if season is not None and series:
+        queries.append(f"{series} S{int(season):02d}")
+    queries.append(query)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for q in queries:
+        q = q.strip()
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            ordered.append(q)
+    return ordered
 
 
 class TorrentWorker(Worker):
@@ -65,17 +102,33 @@ class TorrentWorker(Worker):
         categories = _CAT_TV if media_kind == "episode" else _CAT_MOVIES
 
         # ---- search ------------------------------------------------------
-        try:
-            candidates = await self._prowlarr.search(query, categories=categories)
-        except Exception as exc:
-            raise WorkerError(f"prowlarr search failed: {exc}") from exc
-        if not candidates:
-            raise PermanentWorkerError(f"no torrent candidates for {query!r}")
+        # Episodes prefer a season pack (single-episode releases usually
+        # fail the size/seeder policy); fall back to the per-episode query.
+        if media_kind == "episode":
+            search_queries = episode_search_queries(ctx.job.payload)
+        else:
+            search_queries = [query]
 
-        chosen = self._selector.select(candidates, query=query)
+        chosen = None
+        attempts: list[str] = []
+        for search_query in search_queries:
+            try:
+                candidates = await self._prowlarr.search(search_query, categories=categories)
+            except Exception as exc:
+                raise WorkerError(f"prowlarr search failed: {exc}") from exc
+            attempts.append(f"{search_query!r}={len(candidates)}")
+            if not candidates:
+                continue
+            pick = self._selector.select(candidates, query=search_query)
+            if pick is not None:
+                chosen = pick
+                if search_query != query:
+                    log.info("[torrent] using season pack search %r", search_query)
+                break
+
         if chosen is None:
             raise PermanentWorkerError(
-                f"no candidate met selector criteria (had {len(candidates)} hits)"
+                f"no candidate met selector criteria (tried {', '.join(attempts) or 'nothing'})"
             )
         log.info(
             "[torrent] picked %s (score=%.1f, reasons=%s)",

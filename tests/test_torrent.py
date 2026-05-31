@@ -15,6 +15,7 @@ from bankai.torrent.matcher import (
 )
 from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.torrent.selector import TorrentSelector
+from bankai.torrent.worker import episode_search_queries
 
 
 def _c(
@@ -128,3 +129,21 @@ def test_find_video_files_filters_extensions(tmp_path: Path) -> None:
     (tmp_path / "c.txt").write_bytes(b"")
     files = find_video_files(tmp_path)
     assert {f.name for f in files} == {"a.mkv", "b.mp4"}
+
+
+def test_episode_search_queries_prefers_season_pack() -> None:
+    qs = episode_search_queries(
+        {"query": "Arcane S01E01", "season": 1, "series_title": "Arcane"}
+    )
+    assert qs == ["Arcane S01", "Arcane S01E01"]
+
+
+def test_episode_search_queries_derives_series_from_query() -> None:
+    qs = episode_search_queries({"query": "Some Show S02E05", "season": 2})
+    assert qs[0] == "Some Show S02"
+    assert "Some Show S02E05" in qs
+
+
+def test_episode_search_queries_without_season_is_query_only() -> None:
+    qs = episode_search_queries({"query": "Some Show S02E05"})
+    assert qs == ["Some Show S02E05"]
