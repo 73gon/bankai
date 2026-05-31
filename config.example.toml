@@ -97,3 +97,17 @@ min_size_gib = 0.5
 webhook_url = ""
 on_success = true
 on_failure = true
+
+[web]
+# Web control panel (bankai web serve). Install pip extra: pip install -e '.[web]'.
+host = "0.0.0.0"
+port = 9988
+# Max pipeline jobs running at once; extras wait in a pending queue.
+max_concurrent_jobs = 2
+# Allow on-the-fly ffmpeg transcode for browsers that can't play 4K/HEVC.
+transcode_fallback = true
+# Directories scanned to show what already exists on the media server.
+server_movie_dirs = ["/mnt/media12/movies", "/mnt/remote_media/movies"]
+server_show_dirs = ["/mnt/media12/shows", "/mnt/remote_media/shows"]
+# TTL for cached TVDB trending/posters and server-content scans.
+cache_ttl_seconds = 900

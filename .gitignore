@@ -17,6 +17,12 @@ htmlcov/
 .tox/
 .tmp_*
 
+# Frontend (build the SPA, commit only the static output)
+src/bankai/web/frontend/node_modules/
+src/bankai/web/frontend/.tsbuild-node/
+src/bankai/web/frontend/tsconfig.tsbuildinfo
+src/bankai/web/frontend/*.tsbuildinfo
+
 # Environment
 .env
 .envrc

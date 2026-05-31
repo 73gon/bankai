@@ -97,6 +97,9 @@ bankai config set scraper.interactive_pick true
 | `bankai history`                          | Recently completed pipelines.                                       |
 | `bankai daemon`                           | Run the dispatcher in the foreground.                               |
 | `bankai extract / sync / remux`           | Per-stage debugging entry points.                                   |
+| `bankai web serve [--host H] [--port N]`  | Run the web control panel (default `0.0.0.0:9988`).                 |
+| `bankai web install-service`              | Install + start the `bankai-web` systemd user service.             |
+| `bankai web status`                       | Show whether the web service is active.                            |
 
 ## Configuration
 
@@ -229,6 +232,34 @@ Pipeline steps are:
 
 When available, Bankai shows separate progress rows for the Filmpalast audio
 download and the HQ qBittorrent download.
+
+## Web control panel
+
+Bankai ships a dark, mobile-responsive web UI for driving downloads and
+manually QC'ing the German dub before anything is transferred to the media
+server.
+
+```bash
+pip install -e '.[web]'          # install web extras (FastAPI + uvicorn)
+bankai web serve                 # http://0.0.0.0:9988
+bankai web install-service       # run as a persistent systemd user service
+bankai web status                # check the service
+```
+
+Open `http://<host>:9988`. Pages:
+
+- **Discover** \u2014 trending movies/shows from TheTVDB; click a poster to queue.
+- **Search** \u2014 site search; pick a season and episode range for shows.
+- **Queue** \u2014 live job progress + colored log tail over a WebSocket; cancel/retry.
+- **Library** \u2014 review studio: play in-browser (with ffmpeg transcode fallback
+  for 4K/HEVC), switch audio tracks, nudge the German audio delay in
+  milliseconds, repack the MKV in place, then **Approve** and **Transfer**.
+  Nothing moves to the media server without explicit approval.
+- **Server** \u2014 two columns showing which titles already exist on the server.
+- **Settings** \u2014 edit safe config keys; secrets are masked (set/unset only).
+
+Configure defaults under the `[web]` section of `config.toml` (port, host,
+`max_concurrent_jobs`, `transcode_fallback`, server scan dirs, cache TTL).
 
 ## Architecture
 

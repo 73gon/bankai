@@ -1,0 +1,597 @@
+"""FastAPI application: JSON API under /api, WebSocket at /ws, static UI.
+
+Reuses the same services and background-job store as the CLI so the web
+UI and terminal stay in sync. Built as a single process that also serves
+the prebuilt React frontend from :data:`STATIC_DIR`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import mimetypes
+from pathlib import Path
+from typing import Any
+
+from bankai import __version__
+from bankai.config import get_settings, reset_settings_cache
+from bankai.logging import get_logger
+from bankai.queue.models import MediaKind
+from bankai.web import discover as discover_mod
+from bankai.web import jobs as webjobs
+from bankai.web import media as media_mod
+from bankai.web import review as review_mod
+from pydantic import BaseModel
+
+log = get_logger(__name__)
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+class MovieQueueRequest(BaseModel):
+    title: str
+    german: str | None = None
+    url: str | None = None
+    site: str = "filmpalast"
+
+
+class ShowQueueRequest(BaseModel):
+    show: str
+    season: int
+    episodes: list[int] | None = None
+    site: str | None = None
+
+
+class DelayRequest(BaseModel):
+    path: str
+    delay_ms: int
+
+
+class PathRequest(BaseModel):
+    path: str
+
+
+class SettingRequest(BaseModel):
+    key: str
+    value: Any
+
+# Settings keys the web UI is allowed to edit (safe subset).
+SAFE_SETTING_KEYS: set[str] = {
+    "metadata.tvdb_api_key",
+    "metadata.tvdb_pin",
+    "metadata.tvdb_enabled",
+    "notifications.webhook_url",
+    "notifications.on_success",
+    "notifications.on_failure",
+    "output.directory",
+    "output.skip_existing",
+    "transfer.root",
+    "transfer.movies_dir",
+    "transfer.shows_dir",
+    "scraper.interactive_pick",
+    "web.port",
+    "web.host",
+    "web.max_concurrent_jobs",
+    "web.transcode_fallback",
+}
+
+
+def _is_secret_key(key: str) -> bool:
+    return any(part in key.casefold() for part in ("password", "api_key", "pin", "webhook"))
+
+
+def create_app() -> Any:
+    from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import (
+        FileResponse,
+        HTMLResponse,
+        JSONResponse,
+        Response,
+        StreamingResponse,
+    )
+    from fastapi.staticfiles import StaticFiles
+
+    app = FastAPI(title="bankai", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # ------------------------------------------------------------------
+    # Path safety
+    # ------------------------------------------------------------------
+    def _library_root() -> Path:
+        return Path(get_settings().output.directory).resolve()
+
+    def _safe_path(raw: str) -> Path:
+        p = Path(raw).resolve()
+        root = _library_root()
+        try:
+            p.relative_to(root)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail="path outside library") from exc
+        if not p.exists():
+            raise HTTPException(status_code=404, detail="file not found")
+        return p
+
+    # ------------------------------------------------------------------
+    # Health / meta
+    # ------------------------------------------------------------------
+    @app.get("/api/health")
+    def health() -> dict:
+        s = get_settings()
+        return {
+            "status": "ok",
+            "version": __version__,
+            "library": str(s.output.directory),
+            "ffprobe": media_mod.ffprobe_bin() is not None,
+            "ffmpeg": media_mod.ffmpeg_bin() is not None,
+            "mkvmerge": media_mod.mkvmerge_bin() is not None,
+            "tvdb_configured": discover_mod.is_configured(),
+        }
+
+    # ------------------------------------------------------------------
+    # Discover
+    # ------------------------------------------------------------------
+    @app.get("/api/discover/trending")
+    async def discover_trending(kind: str = Query("movie")) -> dict:
+        k = "movie" if kind == "movie" else "show"
+        items = await discover_mod.trending(k)
+        return {
+            "configured": discover_mod.is_configured(),
+            "items": [discover_mod.to_dict(i) for i in items],
+        }
+
+    @app.get("/api/discover/search")
+    async def discover_search(q: str = Query(...), kind: str = Query("movie")) -> dict:
+        k = "movie" if kind == "movie" else "show"
+        items = await discover_mod.search(q, kind=k)
+        return {
+            "configured": discover_mod.is_configured(),
+            "items": [discover_mod.to_dict(i) for i in items],
+        }
+
+    @app.get("/api/discover/poster")
+    async def discover_poster(url: str = Query(...)) -> Response:
+        import httpx
+
+        if not url.startswith("https://") and not url.startswith("http://"):
+            raise HTTPException(status_code=400, detail="invalid url")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="poster fetch failed") from exc
+        return Response(
+            content=r.content,
+            media_type=r.headers.get("content-type", "image/jpeg"),
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    # ------------------------------------------------------------------
+    # Search (stream sources)
+    # ------------------------------------------------------------------
+    @app.get("/api/search")
+    async def search_sources(
+        q: str = Query(...),
+        kind: str = Query("movie"),
+        site: str | None = Query(None),
+        limit: int = Query(15, ge=1, le=50),
+    ) -> dict:
+        from bankai.backend import search_stream_sources
+
+        media_kind = MediaKind.MOVIE if kind == "movie" else MediaKind.EPISODE
+        results = await search_stream_sources(q, site=site, limit=limit, kind=media_kind)
+        return {
+            "results": [
+                {
+                    "site": r.site,
+                    "title": r.title,
+                    "year": r.year,
+                    "kind": str(r.kind),
+                    "url": r.url,
+                }
+                for r in results
+            ]
+        }
+
+    @app.get("/api/series/episodes")
+    async def series_episodes(
+        show: str = Query(...),
+        season: int = Query(...),
+        site: str | None = Query(None),
+    ) -> dict:
+        from bankai.backend import list_series_episodes
+
+        result = await list_series_episodes(show, season=season, site=site)
+        if result is None:
+            return {"found": False, "site": None, "episodes": []}
+        return {
+            "found": True,
+            "site": result.site,
+            "query": result.query,
+            "episodes": [
+                {"season": e.season, "episode": e.episode, "title": e.title, "url": e.url}
+                for e in sorted(result.episodes, key=lambda e: e.episode)
+            ],
+        }
+
+    # ------------------------------------------------------------------
+    # Queue / jobs
+    # ------------------------------------------------------------------
+    @app.get("/api/queue")
+    def queue_list() -> dict:
+        return {"jobs": webjobs.snapshot()}
+
+    @app.post("/api/queue/movie")
+    def queue_movie(req: MovieQueueRequest) -> dict:
+        from bankai.backend import BatchMovie, build_movie_args
+
+        movie = BatchMovie(title=req.title, german_title=req.german, url=req.url)
+        args = build_movie_args(movie, site=req.site)
+        return webjobs.enqueue(kind="movie", title=req.title, args=args)
+
+    @app.post("/api/queue/show")
+    async def queue_show(req: ShowQueueRequest) -> dict:
+        from bankai.backend import list_series_episodes
+
+        result = await list_series_episodes(req.show, season=req.season, site=req.site)
+        if result is None:
+            raise HTTPException(status_code=404, detail="no episodes found")
+        episodes = sorted(result.episodes, key=lambda e: e.episode)
+        if req.episodes:
+            wanted = set(req.episodes)
+            episodes = [e for e in episodes if e.episode in wanted]
+        if not episodes:
+            raise HTTPException(status_code=400, detail="no matching episodes")
+        queued: list[dict] = []
+        for ep in episodes:
+            q = f"{req.show} S{req.season:02d}E{ep.episode:02d}"
+            args = [
+                "run", q, "--url", ep.url, "--site", result.site,
+                "--kind", "episode", "--season", str(req.season),
+                "--episode", str(ep.episode), "--series-title", req.show, "--auto",
+            ]
+            if ep.title:
+                args.extend(["--episode-title", ep.title])
+            queued.append(webjobs.enqueue(kind="show", title=q, args=args))
+        return {"queued": queued, "count": len(queued)}
+
+    @app.post("/api/queue/{job_id}/cancel")
+    def queue_cancel(job_id: str) -> dict:
+        from bankai.cli import bgjobs
+
+        if webjobs.cancel_pending(job_id):
+            return {"cancelled": True, "pending": True}
+        job = bgjobs.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        ok = job.cancel()
+        return {"cancelled": ok, "pending": False}
+
+    @app.post("/api/queue/{job_id}/retry")
+    def queue_retry(job_id: str) -> dict:
+        from bankai.cli import bgjobs
+
+        job = bgjobs.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        return webjobs.enqueue(kind=job.kind, title=job.title, args=job.args)
+
+    @app.get("/api/jobs/{job_id}/log")
+    def job_log(job_id: str, lines: int = Query(200, ge=1, le=5000)) -> dict:
+        from bankai.cli import bgjobs
+
+        job = bgjobs.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        return {"id": job.id, "status": job.status, "log": bgjobs.tail(job, lines=lines)}
+
+    # ------------------------------------------------------------------
+    # Library
+    # ------------------------------------------------------------------
+    @app.get("/api/library")
+    def library_list() -> dict:
+        entries = media_mod.scan_library()
+        out = []
+        for e in entries:
+            state = review_mod.get_state(e.path)
+            out.append(
+                {
+                    "kind": e.kind,
+                    "path": e.path,
+                    "rel_path": e.rel_path,
+                    "name": e.name,
+                    "size": e.size,
+                    "mtime": e.mtime,
+                    "series": e.series,
+                    "season": e.season,
+                    "stage": state.stage,
+                    "delay_ms": state.delay_ms,
+                }
+            )
+        return {"entries": out, "library": str(get_settings().output.directory)}
+
+    @app.get("/api/media/info")
+    def media_info(path: str = Query(...)) -> dict:
+        p = _safe_path(path)
+        info = media_mod.probe(p)
+        if info is None:
+            raise HTTPException(status_code=422, detail="could not probe file")
+        state = review_mod.get_state(str(p))
+        return {
+            "path": info.path,
+            "size": info.size,
+            "duration": info.duration,
+            "video_codec": info.video_codec,
+            "width": info.width,
+            "height": info.height,
+            "has_german": info.has_german,
+            "browser_playable": info.browser_playable,
+            "stage": state.stage,
+            "delay_ms": state.delay_ms,
+            "audio_tracks": [
+                {
+                    "index": t.index,
+                    "order": t.order,
+                    "language": t.language,
+                    "title": t.title,
+                    "codec": t.codec,
+                    "channels": t.channels,
+                    "default": t.default,
+                    "is_german": t.is_german,
+                }
+                for t in info.audio_tracks
+            ],
+        }
+
+    @app.delete("/api/library/file")
+    def library_delete(req: PathRequest) -> dict:
+        p = _safe_path(req.path)
+        try:
+            p.unlink()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        review_mod.forget(str(p))
+        return {"deleted": True, "path": str(p)}
+
+    # ------------------------------------------------------------------
+    # Streaming + transcode preview
+    # ------------------------------------------------------------------
+    @app.get("/api/media/stream")
+    def media_stream(request: Request, path: str = Query(...)) -> Response:
+        p = _safe_path(path)
+        file_size = p.stat().st_size
+        content_type = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+        range_header = request.headers.get("range")
+        if range_header is None:
+            return FileResponse(p, media_type=content_type)
+        start, end = _parse_range(range_header, file_size)
+        length = end - start + 1
+
+        def iter_file():
+            with p.open("rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(1024 * 256, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+        }
+        return StreamingResponse(
+            iter_file(), status_code=206, headers=headers, media_type=content_type
+        )
+
+    @app.get("/api/media/transcode")
+    def media_transcode(
+        path: str = Query(...),
+        t: float = Query(0.0, ge=0.0),
+        audio: int = Query(0, ge=0),
+    ) -> Response:
+        p = _safe_path(path)
+        ffmpeg = media_mod.ffmpeg_bin()
+        if ffmpeg is None:
+            raise HTTPException(status_code=501, detail="ffmpeg not available")
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+        ]
+        if t > 0:
+            cmd += ["-ss", str(t)]
+        cmd += [
+            "-i", str(p),
+            "-map", "0:v:0", "-map", f"0:a:{audio}?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+            "-f", "mp4", "pipe:1",
+        ]
+        import subprocess
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+        def stream():
+            try:
+                assert proc.stdout is not None
+                while True:
+                    chunk = proc.stdout.read(1024 * 256)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                proc.kill()
+
+        return StreamingResponse(stream(), media_type="video/mp4")
+
+    # ------------------------------------------------------------------
+    # Review / approval workflow
+    # ------------------------------------------------------------------
+    @app.post("/api/review/delay")
+    def review_delay(req: DelayRequest) -> dict:
+        p = _safe_path(req.path)
+        state = review_mod.set_delay(str(p), req.delay_ms)
+        return review_mod.to_dict(state)
+
+    @app.post("/api/review/repack")
+    def review_repack(req: DelayRequest) -> dict:
+        p = _safe_path(req.path)
+        result = media_mod.repack_audio_delay(p, delay_ms=req.delay_ms)
+        if not result.ok:
+            raise HTTPException(status_code=422, detail=result.message)
+        review_mod.set_delay(str(p), req.delay_ms)
+        return {"ok": True, "message": result.message, "delay_ms": result.delay_ms}
+
+    @app.post("/api/review/approve")
+    def review_approve(req: PathRequest) -> dict:
+        p = _safe_path(req.path)
+        state = review_mod.set_stage(str(p), "approved")
+        return review_mod.to_dict(state)
+
+    @app.post("/api/review/transfer")
+    def review_transfer(req: PathRequest) -> dict:
+        p = _safe_path(req.path)
+        state = review_mod.get_state(str(p))
+        if state.stage not in {"approved", "transferred"}:
+            raise HTTPException(status_code=409, detail="file must be approved before transfer")
+        kind = "show" if "Shows" in p.parts else "movie"
+        args = ["transfer-run", str(p), "--kind", kind]
+        job = webjobs.enqueue(kind="transfer", title=f"Transfer {p.name}", args=args)
+        review_mod.set_stage(str(p), "transferred")
+        return {"transfer": job}
+
+    # ------------------------------------------------------------------
+    # Server page (media-server contents)
+    # ------------------------------------------------------------------
+    @app.get("/api/server/contents")
+    def server_contents(rescan: bool = Query(False)) -> dict:
+        if rescan:
+            media_mod.invalidate_server_cache()
+        movies = media_mod.scan_server("movie", use_cache=not rescan)
+        shows = media_mod.scan_server("show", use_cache=not rescan)
+        return {
+            "movies": [{"name": t.name, "present": t.present, "location": t.location} for t in movies],
+            "shows": [{"name": t.name, "present": t.present, "location": t.location} for t in shows],
+        }
+
+    # ------------------------------------------------------------------
+    # Settings
+    # ------------------------------------------------------------------
+    @app.get("/api/settings")
+    def settings_get() -> dict:
+        s = get_settings()
+        data = s.model_dump(mode="json")
+        out: list[dict] = []
+        for key in sorted(SAFE_SETTING_KEYS):
+            parts = key.split(".")
+            cur: Any = data
+            for part in parts:
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            secret = _is_secret_key(key)
+            out.append(
+                {
+                    "key": key,
+                    "value": "<set>" if (secret and cur) else cur,
+                    "secret": secret,
+                    "is_set": bool(cur),
+                }
+            )
+        return {"settings": out}
+
+    @app.post("/api/settings")
+    def settings_set(req: SettingRequest) -> dict:
+        if req.key not in SAFE_SETTING_KEYS:
+            raise HTTPException(status_code=403, detail="key not editable via web")
+        from bankai.cli.main import _set_config_value
+
+        path, written = _set_config_value(req.key, req.value)
+        reset_settings_cache()
+        return {"key": req.key, "saved": True, "path": str(path)}
+
+    # ------------------------------------------------------------------
+    # WebSocket: live queue + job log stream
+    # ------------------------------------------------------------------
+    @app.websocket("/ws")
+    async def ws_endpoint(ws: WebSocket) -> None:
+        await ws.accept()
+        from bankai.cli import bgjobs
+
+        follow_job: str | None = None
+        try:
+            while True:
+                # Non-blocking receive for control messages (e.g. follow a job).
+                try:
+                    msg = await asyncio.wait_for(ws.receive_json(), timeout=0.01)
+                    if isinstance(msg, dict) and "follow" in msg:
+                        follow_job = msg.get("follow") or None
+                except (asyncio.TimeoutError, ValueError):
+                    pass
+                payload: dict[str, Any] = {"type": "queue", "jobs": webjobs.snapshot()}
+                if follow_job:
+                    job = bgjobs.get_job(follow_job)
+                    if job is not None:
+                        payload["log"] = {"id": job.id, "tail": bgjobs.tail(job, lines=200)}
+                await ws.send_json(payload)
+                await asyncio.sleep(1.5)
+        except WebSocketDisconnect:
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("websocket closed: %s", exc)
+            return
+
+    # ------------------------------------------------------------------
+    # Static frontend (prebuilt React) — mounted last so /api wins.
+    # ------------------------------------------------------------------
+    if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():
+        assets = STATIC_DIR / "assets"
+        if assets.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+        @app.get("/")
+        def index() -> Any:
+            return FileResponse(STATIC_DIR / "index.html")
+
+        @app.get("/{full_path:path}")
+        def spa_fallback(full_path: str) -> Any:
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="not found")
+            candidate = STATIC_DIR / full_path
+            if candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(STATIC_DIR / "index.html")
+    else:
+        @app.get("/")
+        def placeholder() -> Any:
+            return HTMLResponse(
+                "<h1>bankai web</h1><p>Frontend assets not built yet. "
+                "Run the Vite build and place output in "
+                f"<code>{STATIC_DIR}</code>.</p>"
+            )
+
+    return app
+
+
+def _parse_range(range_header: str, file_size: int) -> tuple[int, int]:
+    """Parse a single ``bytes=start-end`` range header."""
+    try:
+        units, _, rng = range_header.partition("=")
+        if units.strip() != "bytes":
+            return 0, file_size - 1
+        start_s, _, end_s = rng.partition("-")
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else file_size - 1
+        start = max(0, start)
+        end = min(end, file_size - 1)
+        if start > end:
+            start, end = 0, file_size - 1
+        return start, end
+    except (ValueError, AttributeError):
+        return 0, file_size - 1

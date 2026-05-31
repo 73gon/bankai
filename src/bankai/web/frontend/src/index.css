@@ -1,0 +1,60 @@
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Dark, near-black with magenta/violet accent (matches the CLI). */
+    --background: 250 24% 4%;
+    --foreground: 270 20% 96%;
+    --card: 255 22% 7%;
+    --card-foreground: 270 20% 96%;
+    --primary: 292 84% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 260 18% 14%;
+    --secondary-foreground: 270 20% 92%;
+    --muted: 260 16% 12%;
+    --muted-foreground: 265 12% 62%;
+    --accent: 280 70% 22%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 268 18% 16%;
+    --input: 268 18% 16%;
+    --ring: 292 84% 55%;
+    --radius: 0.7rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    background-image:
+      radial-gradient(60rem 40rem at 80% -10%, hsl(292 84% 30% / 0.18), transparent),
+      radial-gradient(50rem 30rem at -10% 110%, hsl(265 84% 30% / 0.12), transparent);
+    background-attachment: fixed;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-secondary rounded-full;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-card/70 backdrop-blur-xl border border-border;
+  }
+  .ansi-log {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+}

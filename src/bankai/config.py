@@ -138,6 +138,30 @@ class NotificationsSettings(BaseModel):
     on_failure: bool = True
 
 
+class WebSettings(BaseModel):
+    """Settings for the bankai web UI / HTTP API server."""
+
+    host: str = "0.0.0.0"
+    port: int = 9988
+    # Maximum number of pipeline jobs allowed to run concurrently when
+    # launched from the web UI. Extra requests queue and start as slots
+    # free up.
+    max_concurrent_jobs: int = 2
+    # When true, files the browser cannot play natively (e.g. 4K HEVC)
+    # are transcoded on the fly with ffmpeg for the in-browser preview.
+    transcode_fallback: bool = True
+    # Directories on the media server scanned by the "Server" page to
+    # show which titles already exist there.
+    server_movie_dirs: list[Path] = Field(
+        default_factory=lambda: [Path("/mnt/media12/movies"), Path("/mnt/remote_media/movies")]
+    )
+    server_show_dirs: list[Path] = Field(
+        default_factory=lambda: [Path("/mnt/media12/shows"), Path("/mnt/remote_media/shows")]
+    )
+    # Seconds to cache TVDB discover/trending responses and ffprobe data.
+    cache_ttl_seconds: int = 900
+
+
 class Settings(BaseSettings):
     """Top-level settings, populated from TOML + env vars."""
 
@@ -160,6 +184,7 @@ class Settings(BaseSettings):
     qbittorrent: QBittorrentSettings = Field(default_factory=QBittorrentSettings)
     selector: SelectorSettings = Field(default_factory=SelectorSettings)
     notifications: NotificationsSettings = Field(default_factory=NotificationsSettings)
+    web: WebSettings = Field(default_factory=WebSettings)
 
     @classmethod
     def settings_customise_sources(

@@ -57,6 +57,7 @@ from bankai.logging import configure_logging, get_logger
 from bankai.metadata.tvdb import TitleAlias, get_title_aliases
 from bankai.queue.models import MediaKind
 from bankai.theme import make_console
+from bankai.web.server import SERVICE_NAME
 
 app = typer.Typer(
     name="bankai",
@@ -73,10 +74,12 @@ background_app = typer.Typer(
 metadata_app = typer.Typer(
     name="metadata", help="Inspect metadata providers.", no_args_is_help=True
 )
+web_app = typer.Typer(name="web", help="Run and manage the web UI.", no_args_is_help=True)
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
 app.add_typer(background_app, name="background")
 app.add_typer(metadata_app, name="metadata")
+app.add_typer(web_app, name="web")
 
 console = make_console()
 log = get_logger(__name__)
@@ -1567,6 +1570,21 @@ def _doctor() -> None:
     if settings.notifications.webhook_url:
         row("Discord webhook", True, "configured")
 
+    try:
+        from bankai.web.server import service_status
+
+        status = service_status()
+        if status["available"]:
+            row(
+                "web service",
+                status["active"],
+                f"{SERVICE_NAME}: {status['detail']} (port {settings.web.port})",
+            )
+        else:
+            row("web service", False, status["detail"])
+    except Exception as exc:
+        row("web service", False, str(exc))
+
     console.print(table)
 
 
@@ -1586,6 +1604,59 @@ def _find_runtime_binary(binary: str) -> str | None:
     name = f"{binary}.exe" if os.name == "nt" else binary
     candidate = Path(sys.executable).with_name(name)
     return str(candidate) if candidate.exists() else None
+
+
+# ---------------------------------------------------------------------------
+# web UI
+# ---------------------------------------------------------------------------
+
+
+@web_app.command("serve")
+def web_serve(
+    host: str | None = typer.Option(None, "--host", help="Bind host (default web.host)."),
+    port: int | None = typer.Option(None, "--port", help="Bind port (default web.port)."),
+) -> None:
+    """Run the web UI / HTTP API in the foreground (blocking)."""
+    from bankai.web.server import run_server
+
+    run_server(host=host, port=port)
+
+
+@web_app.command("install-service")
+def web_install_service(
+    host: str | None = typer.Option(None, "--host"),
+    port: int | None = typer.Option(None, "--port"),
+    no_enable: bool = typer.Option(False, "--no-enable", help="Write the unit but don't start it."),
+) -> None:
+    """Install (and start) the bankai-web systemd user service."""
+    from bankai.web.server import install_service
+
+    try:
+        unit = install_service(host=host, port=port, enable=not no_enable)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    settings = get_settings()
+    console.print(f"[green]wrote[/green] {unit}")
+    if not no_enable:
+        console.print(
+            f"[green]started[/green] {SERVICE_NAME} \u2014 "
+            f"open [accent]http://{settings.web.host}:{settings.web.port}[/accent]"
+        )
+
+
+@web_app.command("status")
+def web_status() -> None:
+    """Show the web service status."""
+    from bankai.web.server import service_status
+
+    status = service_status()
+    settings = get_settings()
+    if not status["available"]:
+        console.print(f"[yellow]{status['detail']}[/yellow]")
+        return
+    mark = "[green]active[/green]" if status["active"] else f"[red]{status['detail']}[/red]"
+    console.print(f"{SERVICE_NAME}: {mark}  (port {settings.web.port})")
 
 
 # ---------------------------------------------------------------------------

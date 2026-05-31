@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bankai"
-version = "0.2.2"
+version = "0.3.0"
 description = "Extract German dub audio from web streams and remux into HQ video files."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -45,6 +45,13 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "types-requests",
+]
+web = [
+    "fastapi>=0.115,<0.116",
+    "starlette>=0.41,<0.42",
+    "uvicorn[standard]>=0.30",
+    "websockets>=12.0",
+    "httpx>=0.27",
 ]
 
 [project.scripts]

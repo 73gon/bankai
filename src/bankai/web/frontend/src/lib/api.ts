@@ -1,0 +1,191 @@
+// Thin typed API client for the bankai backend.
+
+export interface ApiError {
+  detail: string;
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (typeof body.detail === "string") detail = body.detail;
+      else if (Array.isArray(body.detail)) detail = body.detail.map((d: any) => d.msg).join(", ");
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
+export interface HealthResponse {
+  status: string;
+  version: string;
+  library: string;
+  ffprobe: boolean;
+  ffmpeg: boolean;
+  mkvmerge: boolean;
+  tvdb_configured: boolean;
+}
+
+export interface DiscoverItem {
+  name: string;
+  kind: string;
+  tvdb_id: number | null;
+  year: number | null;
+  poster_url: string | null;
+  overview: string | null;
+}
+
+export interface SearchResult {
+  site: string;
+  title: string;
+  year: number | null;
+  kind: string;
+  url: string;
+}
+
+export interface EpisodeItem {
+  season: number;
+  episode: number;
+  title: string | null;
+  url: string;
+}
+
+export interface Job {
+  id: string;
+  kind: string;
+  title: string;
+  status: string;
+  started_at: number;
+  finished_at: number | null;
+  exit_code: number | null;
+  final_path: string | null;
+  step: number | null;
+  total_steps: number | null;
+  step_label: string;
+  overall_percent: number | null;
+  pending: boolean;
+}
+
+export interface LibraryEntry {
+  kind: string;
+  path: string;
+  rel_path: string;
+  name: string;
+  size: number;
+  mtime: number;
+  series: string | null;
+  season: number | null;
+  stage: string;
+  delay_ms: number;
+}
+
+export interface AudioTrack {
+  index: number;
+  order: number;
+  language: string | null;
+  title: string | null;
+  codec: string | null;
+  channels: number | null;
+  default: boolean;
+  is_german: boolean;
+}
+
+export interface MediaInfo {
+  path: string;
+  size: number;
+  duration: number | null;
+  video_codec: string | null;
+  width: number | null;
+  height: number | null;
+  has_german: boolean;
+  browser_playable: boolean;
+  stage: string;
+  delay_ms: number;
+  audio_tracks: AudioTrack[];
+}
+
+export interface ServerTitle {
+  name: string;
+  present: boolean;
+  location: string | null;
+}
+
+export interface SettingRow {
+  key: string;
+  value: any;
+  secret: boolean;
+  is_set: boolean;
+}
+
+export const api = {
+  health: () => request<HealthResponse>("/api/health"),
+
+  discoverTrending: (kind: string) =>
+    request<{ configured: boolean; items: DiscoverItem[] }>(
+      `/api/discover/trending?kind=${kind}`,
+    ),
+  discoverSearch: (q: string, kind: string) =>
+    request<{ configured: boolean; items: DiscoverItem[] }>(
+      `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}`,
+    ),
+  posterUrl: (url: string) => `/api/discover/poster?url=${encodeURIComponent(url)}`,
+
+  search: (q: string, kind: string, site?: string) =>
+    request<{ results: SearchResult[] }>(
+      `/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ""}`,
+    ),
+  episodes: (show: string, season: number, site?: string) =>
+    request<{ found: boolean; site: string | null; episodes: EpisodeItem[] }>(
+      `/api/series/episodes?show=${encodeURIComponent(show)}&season=${season}${
+        site ? `&site=${site}` : ""
+      }`,
+    ),
+
+  queue: () => request<{ jobs: Job[] }>("/api/queue"),
+  queueMovie: (body: { title: string; german?: string; url?: string; site?: string }) =>
+    request("/api/queue/movie", { method: "POST", body: JSON.stringify(body) }),
+  queueShow: (body: { show: string; season: number; episodes?: number[]; site?: string }) =>
+    request("/api/queue/show", { method: "POST", body: JSON.stringify(body) }),
+  cancelJob: (id: string) => request(`/api/queue/${id}/cancel`, { method: "POST" }),
+  retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: "POST" }),
+  jobLog: (id: string) =>
+    request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
+
+  library: () => request<{ entries: LibraryEntry[]; library: string }>("/api/library"),
+  mediaInfo: (path: string) =>
+    request<MediaInfo>(`/api/media/info?path=${encodeURIComponent(path)}`),
+  deleteFile: (path: string) =>
+    request("/api/library/file", { method: "DELETE", body: JSON.stringify({ path }) }),
+  streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
+  transcodeUrl: (path: string, audio = 0) =>
+    `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}`,
+
+  setDelay: (path: string, delay_ms: number) =>
+    request("/api/review/delay", { method: "POST", body: JSON.stringify({ path, delay_ms }) }),
+  repack: (path: string, delay_ms: number) =>
+    request<{ ok: boolean; message: string; delay_ms: number }>("/api/review/repack", {
+      method: "POST",
+      body: JSON.stringify({ path, delay_ms }),
+    }),
+  approve: (path: string) =>
+    request("/api/review/approve", { method: "POST", body: JSON.stringify({ path }) }),
+  transfer: (path: string) =>
+    request("/api/review/transfer", { method: "POST", body: JSON.stringify({ path }) }),
+
+  serverContents: (rescan = false) =>
+    request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(
+      `/api/server/contents${rescan ? "?rescan=true" : ""}`,
+    ),
+
+  settings: () => request<{ settings: SettingRow[] }>("/api/settings"),
+  setSetting: (key: string, value: any) =>
+    request("/api/settings", { method: "POST", body: JSON.stringify({ key, value }) }),
+};
