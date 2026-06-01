@@ -78,28 +78,28 @@ bankai config set scraper.interactive_pick true
 
 ## CLI map
 
-| Command                                   | Purpose                                                             |
-| ----------------------------------------- | ------------------------------------------------------------------- |
-| `bankai`                                  | Interactive menu (default when no subcommand).                      |
-| `bankai shell`                            | REPL mode \u2014 type `run "X"`, `search Y`, etc.                   |
-| `bankai run QUERY [--url URL]`            | End-to-end pipeline. Auto-searches filmpalast when `--url` omitted. |
-| `bankai batch FILE`                       | Queue movie downloads from a text file.                             |
-| `bankai shows SHOW -s N [-e M]`           | Queue a whole show season (or one episode).                         |
-| `bankai search QUERY [--site filmpalast]` | List matches as a table.                                            |
-| `bankai metadata search QUERY`            | Show TVDB aliases used by lookups.                                  |
-| `bankai transfer PATH...`                 | Background rsync move to the mounted media server.                  |
-| `bankai background list/watch/log/clear`  | Inspect detached movie/show/transfer jobs.                          |
-| `bankai config init`                      | First-run wizard; writes `~/.config/bankai/config.toml`.            |
-| `bankai config get/set KEY [VALUE]`       | Read or write one key.                                              |
-| `bankai config list/path/edit`            | Dump effective config / print path / open in `$EDITOR`.             |
-| `bankai doctor`                           | Check every dep + service.                                          |
-| `bankai jobs list/show/retry/cancel/clear` | Queue inspection and cleanup.                                      |
-| `bankai history`                          | Recently completed pipelines.                                       |
-| `bankai daemon`                           | Run the dispatcher in the foreground.                               |
-| `bankai extract / sync / remux`           | Per-stage debugging entry points.                                   |
-| `bankai web serve [--host H] [--port N]`  | Run the web control panel (default `0.0.0.0:9988`).                 |
-| `bankai web install-service`              | Install + start the `bankai-web` systemd user service.             |
-| `bankai web status`                       | Show whether the web service is active.                            |
+| Command                                    | Purpose                                                             |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `bankai`                                   | Interactive menu (default when no subcommand).                      |
+| `bankai shell`                             | REPL mode \u2014 type `run "X"`, `search Y`, etc.                   |
+| `bankai run QUERY [--url URL]`             | End-to-end pipeline. Auto-searches filmpalast when `--url` omitted. |
+| `bankai batch FILE`                        | Queue movie downloads from a text file.                             |
+| `bankai shows SHOW -s N [-e M]`            | Queue a whole show season (or one episode).                         |
+| `bankai search QUERY [--site filmpalast]`  | List matches as a table.                                            |
+| `bankai metadata search QUERY`             | Show TVDB aliases used by lookups.                                  |
+| `bankai transfer PATH...`                  | Background rsync move to the mounted media server.                  |
+| `bankai background list/watch/log/clear`   | Inspect detached movie/show/transfer jobs.                          |
+| `bankai config init`                       | First-run wizard; writes `~/.config/bankai/config.toml`.            |
+| `bankai config get/set KEY [VALUE]`        | Read or write one key.                                              |
+| `bankai config list/path/edit`             | Dump effective config / print path / open in `$EDITOR`.             |
+| `bankai doctor`                            | Check every dep + service.                                          |
+| `bankai jobs list/show/retry/cancel/clear` | Queue inspection and cleanup.                                       |
+| `bankai history`                           | Recently completed pipelines.                                       |
+| `bankai daemon`                            | Run the dispatcher in the foreground.                               |
+| `bankai extract / sync / remux`            | Per-stage debugging entry points.                                   |
+| `bankai web serve [--host H] [--port N]`   | Run the web control panel (default `0.0.0.0:9988`).                 |
+| `bankai web install-service`               | Install + start the `bankai-web` systemd user service.              |
+| `bankai web status`                        | Show whether the web service is active.                             |
 
 ## Configuration
 

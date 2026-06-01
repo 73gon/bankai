@@ -1,19 +1,19 @@
-import { useEffect, useState } from "react";
-import { Settings as SettingsIcon, Save, Loader2, Eye, EyeOff } from "lucide-react";
-import { toast } from "sonner";
-import { api, type SettingRow } from "@/lib/api";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
+import { useEffect, useState } from 'react';
+import { Settings as SettingsIcon, Save, Loader2, Eye, EyeOff } from 'lucide-react';
+import { toast } from 'sonner';
+import { api, type SettingRow } from '@/lib/api';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { Badge } from '@/components/ui/badge';
+import { Card, CardContent } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
 
 function label(key: string) {
   return key
     .split(/[._]/)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+    .join(' ');
 }
 
 export default function Settings() {
@@ -57,81 +57,58 @@ export default function Settings() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className='space-y-6'>
       <header>
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="text-sm text-muted-foreground">Edit safe configuration keys.</p>
+        <h1 className='text-2xl font-semibold'>Settings</h1>
+        <p className='text-sm text-muted-foreground'>Edit safe configuration keys.</p>
       </header>
 
       {loading ? (
-        <div className="space-y-2">
+        <div className='space-y-2'>
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-16" />
+            <Skeleton key={i} className='h-16' />
           ))}
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className='space-y-2'>
           {rows.map((row) => {
-            const isBool = typeof row.value === "boolean";
+            const isBool = typeof row.value === 'boolean';
             const current = key(edits, row);
             return (
               <Card key={row.key}>
-                <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{label(row.key)}</span>
-                      {row.secret &&
-                        (row.is_set ? (
-                          <Badge variant="success">Set</Badge>
-                        ) : (
-                          <Badge variant="muted">Unset</Badge>
-                        ))}
+                <CardContent className='flex flex-wrap items-center justify-between gap-4 p-4'>
+                  <div className='min-w-0'>
+                    <div className='flex items-center gap-2'>
+                      <span className='font-medium'>{label(row.key)}</span>
+                      {row.secret && (row.is_set ? <Badge variant='success'>Set</Badge> : <Badge variant='muted'>Unset</Badge>)}
                     </div>
-                    <code className="text-xs text-muted-foreground">{row.key}</code>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className='flex items-center gap-2'>
                     {isBool ? (
-                      <Switch
-                        checked={Boolean(current)}
-                        onCheckedChange={(v) => save(row.key, v)}
-                      />
+                      <Switch checked={Boolean(current)} onCheckedChange={(v) => save(row.key, v)} />
                     ) : (
                       <>
-                        <div className="relative">
+                        <div className='relative'>
                           <Input
-                            type={row.secret && !reveal[row.key] ? "password" : "text"}
-                            value={current ?? ""}
-                            placeholder={row.secret ? "not set" : ""}
-                            onChange={(e) =>
-                              setEdits((ed) => ({ ...ed, [row.key]: e.target.value }))
-                            }
-                            className="w-72 pr-9"
+                            type={row.secret && !reveal[row.key] ? 'password' : 'text'}
+                            value={current ?? ''}
+                            placeholder={row.secret ? 'not set' : ''}
+                            onChange={(e) => setEdits((ed) => ({ ...ed, [row.key]: e.target.value }))}
+                            className='w-72 pr-9'
                           />
                           {row.secret && (
                             <button
-                              type="button"
+                              type='button'
                               onClick={() => setReveal((r) => ({ ...r, [row.key]: !r[row.key] }))}
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                              className='absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground'
                             >
-                              {reveal[row.key] ? (
-                                <EyeOff className="h-4 w-4" />
-                              ) : (
-                                <Eye className="h-4 w-4" />
-                              )}
+                              {reveal[row.key] ? <EyeOff className='h-4 w-4' /> : <Eye className='h-4 w-4' />}
                             </button>
                           )}
                         </div>
-                        <Button
-                          size="sm"
-                          onClick={() => save(row.key, edits[row.key])}
-                          disabled={saving === row.key || edits[row.key] === undefined}
-                        >
-                          {saving === row.key ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Save className="h-4 w-4" />
-                          )}
+                        <Button size='sm' onClick={() => save(row.key, edits[row.key])} disabled={saving === row.key || edits[row.key] === undefined}>
+                          {saving === row.key ? <Loader2 className='h-4 w-4 animate-spin' /> : <Save className='h-4 w-4' />}
                         </Button>
                       </>
                     )}
@@ -141,8 +118,8 @@ export default function Settings() {
             );
           })}
           {rows.length === 0 && (
-            <div className="flex flex-col items-center py-16 text-muted-foreground">
-              <SettingsIcon className="mb-3 h-8 w-8" />
+            <div className='flex flex-col items-center py-16 text-muted-foreground'>
+              <SettingsIcon className='mb-3 h-8 w-8' />
               No editable settings.
             </div>
           )}
@@ -154,5 +131,5 @@ export default function Settings() {
 
 function key(edits: Record<string, any>, row: SettingRow) {
   if (row.key in edits) return edits[row.key];
-  return row.value ?? "";
+  return row.value ?? '';
 }

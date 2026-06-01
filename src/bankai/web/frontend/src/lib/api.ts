@@ -6,15 +6,15 @@ export interface ApiError {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers: { 'Content-Type': 'application/json' },
     ...options,
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try {
       const body = await res.json();
-      if (typeof body.detail === "string") detail = body.detail;
-      else if (Array.isArray(body.detail)) detail = body.detail.map((d: any) => d.msg).join(", ");
+      if (typeof body.detail === 'string') detail = body.detail;
+      else if (Array.isArray(body.detail)) detail = body.detail.map((d: any) => d.msg).join(', ');
     } catch {
       /* ignore */
     }
@@ -139,88 +139,62 @@ export interface SettingRow {
 }
 
 export const api = {
-  health: () => request<HealthResponse>("/api/health"),
+  health: () => request<HealthResponse>('/api/health'),
 
-  discoverTrending: (kind: string) =>
-    request<{ configured: boolean; items: DiscoverItem[] }>(
-      `/api/discover/trending?kind=${kind}`,
-    ),
+  discoverTrending: (kind: string) => request<{ configured: boolean; items: DiscoverItem[] }>(`/api/discover/trending?kind=${kind}`),
   discoverSearch: (q: string, kind: string) =>
-    request<{ configured: boolean; items: DiscoverItem[] }>(
-      `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}`,
-    ),
+    request<{ configured: boolean; items: DiscoverItem[] }>(`/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}`),
   discoverGerman: (id: number, kind: string) =>
-    request<{ tvdb_id: number; kind: string; german: string | null }>(
-      `/api/discover/german?id=${id}&kind=${kind}`,
-    ),
+    request<{ tvdb_id: number; kind: string; german: string | null }>(`/api/discover/german?id=${id}&kind=${kind}`),
   posterUrl: (url: string) => `/api/discover/poster?url=${encodeURIComponent(url)}`,
 
   search: (q: string, kind: string, site?: string) =>
-    request<{ results: SearchResult[] }>(
-      `/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ""}`,
-    ),
+    request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ''}`),
   episodes: (show: string, season: number, site?: string) =>
     request<{ found: boolean; site: string | null; episodes: EpisodeItem[] }>(
-      `/api/series/episodes?show=${encodeURIComponent(show)}&season=${season}${
-        site ? `&site=${site}` : ""
-      }`,
+      `/api/series/episodes?show=${encodeURIComponent(show)}&season=${season}${site ? `&site=${site}` : ''}`,
     ),
 
-  queue: () => request<{ jobs: Job[] }>("/api/queue"),
+  queue: () => request<{ jobs: Job[] }>('/api/queue'),
   queueMovie: (body: { title: string; german?: string; url?: string; site?: string }) =>
-    request("/api/queue/movie", { method: "POST", body: JSON.stringify(body) }),
+    request('/api/queue/movie', { method: 'POST', body: JSON.stringify(body) }),
   queueShow: (body: { show: string; season: number; episodes?: number[]; site?: string }) =>
-    request("/api/queue/show", { method: "POST", body: JSON.stringify(body) }),
-  cancelJob: (id: string) => request(`/api/queue/${id}/cancel`, { method: "POST" }),
-  retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: "POST" }),
-  jobLog: (id: string) =>
-    request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
+    request('/api/queue/show', { method: 'POST', body: JSON.stringify(body) }),
+  cancelJob: (id: string) => request(`/api/queue/${id}/cancel`, { method: 'POST' }),
+  retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: 'POST' }),
+  jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
 
-  library: () => request<{ entries: LibraryEntry[]; library: string }>("/api/library"),
-  mediaInfo: (path: string) =>
-    request<MediaInfo>(`/api/media/info?path=${encodeURIComponent(path)}`),
-  deleteFile: (path: string) =>
-    request("/api/library/file", { method: "DELETE", body: JSON.stringify({ path }) }),
+  library: () => request<{ entries: LibraryEntry[]; library: string }>('/api/library'),
+  mediaInfo: (path: string) => request<MediaInfo>(`/api/media/info?path=${encodeURIComponent(path)}`),
+  deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
-  transcodeUrl: (path: string, audio = 0) =>
-    `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}`,
+  transcodeUrl: (path: string, audio = 0, t = 0) => `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}&t=${t}`,
 
-  setDelay: (path: string, delay_ms: number) =>
-    request("/api/review/delay", { method: "POST", body: JSON.stringify({ path, delay_ms }) }),
+  setDelay: (path: string, delay_ms: number) => request('/api/review/delay', { method: 'POST', body: JSON.stringify({ path, delay_ms }) }),
   repack: (path: string, delay_ms: number) =>
-    request<{ ok: boolean; message: string; delay_ms: number }>("/api/review/repack", {
-      method: "POST",
+    request<{ ok: boolean; message: string; delay_ms: number }>('/api/review/repack', {
+      method: 'POST',
       body: JSON.stringify({ path, delay_ms }),
     }),
-  approve: (path: string) =>
-    request("/api/review/approve", { method: "POST", body: JSON.stringify({ path }) }),
-  transfer: (path: string) =>
-    request("/api/review/transfer", { method: "POST", body: JSON.stringify({ path }) }),
+  approve: (path: string) => request('/api/review/approve', { method: 'POST', body: JSON.stringify({ path }) }),
+  transfer: (path: string) => request('/api/review/transfer', { method: 'POST', body: JSON.stringify({ path }) }),
 
-  serverContents: (rescan = false) =>
-    request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(
-      `/api/server/contents${rescan ? "?rescan=true" : ""}`,
-    ),
+  serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
 
-  serverShow: (path: string) =>
-    request<{ path: string; seasons: ServerSeason[] }>(
-      `/api/server/show?path=${encodeURIComponent(path)}`,
-    ),
+  serverShow: (path: string) => request<{ path: string; seasons: ServerSeason[] }>(`/api/server/show?path=${encodeURIComponent(path)}`),
 
-  serverDirs: () =>
-    request<{ movie_dirs: string[]; show_dirs: string[] }>("/api/server/dirs"),
-  addServerDir: (kind: "movie" | "show", path: string) =>
-    request<{ kind: string; dirs: string[] }>("/api/server/dirs", {
-      method: "POST",
+  serverDirs: () => request<{ movie_dirs: string[]; show_dirs: string[] }>('/api/server/dirs'),
+  addServerDir: (kind: 'movie' | 'show', path: string) =>
+    request<{ kind: string; dirs: string[] }>('/api/server/dirs', {
+      method: 'POST',
       body: JSON.stringify({ kind, path }),
     }),
-  removeServerDir: (kind: "movie" | "show", path: string) =>
-    request<{ kind: string; dirs: string[] }>("/api/server/dirs", {
-      method: "DELETE",
+  removeServerDir: (kind: 'movie' | 'show', path: string) =>
+    request<{ kind: string; dirs: string[] }>('/api/server/dirs', {
+      method: 'DELETE',
       body: JSON.stringify({ kind, path }),
     }),
 
-  settings: () => request<{ settings: SettingRow[] }>("/api/settings"),
-  setSetting: (key: string, value: any) =>
-    request("/api/settings", { method: "POST", body: JSON.stringify({ key, value }) }),
+  settings: () => request<{ settings: SettingRow[] }>('/api/settings'),
+  setSetting: (key: string, value: any) => request('/api/settings', { method: 'POST', body: JSON.stringify({ key, value }) }),
 };
