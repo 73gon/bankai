@@ -7,6 +7,7 @@ the UI can show a friendly "configure TVDB" empty state.
 
 from __future__ import annotations
 
+import datetime
 import time
 from dataclasses import asdict, dataclass
 
@@ -30,6 +31,7 @@ class DiscoverItem:
     year: int | None = None
     poster_url: str | None = None
     overview: str | None = None
+    is_new: bool = False
 
 
 def is_configured() -> bool:
@@ -157,6 +159,66 @@ async def trending(kind: str, *, limit: int = 60) -> list[DiscoverItem]:
                 break
             items.extend(_item_from_record(rec, kind) for rec in data if isinstance(rec, dict))
             page += 1
+    items = items[:limit]
+    _cache_put(cache_key, items)
+    return items
+
+
+async def new_releases(kind: str, *, limit: int = 24) -> list[DiscoverItem]:
+    """Recent releases via TVDB's filter endpoint, sorted by score.
+
+    Pulls the current and previous calendar year so the Discover page can
+    surface (and tag) genuinely new titles. Fail-soft like the rest of the
+    TVDB integration."""
+    if not is_configured():
+        return []
+    cache_key = f"new:{kind}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    endpoint = "movies/filter" if kind == "movie" else "series/filter"
+    year = datetime.date.today().year
+    items: list[DiscoverItem] = []
+    seen: set[int | None] = set()
+    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
+        token = await _login(client)
+        if not token:
+            return []
+        headers = {"Authorization": f"Bearer {token}"}
+        for yr in (year, year - 1):
+            if len(items) >= limit:
+                break
+            try:
+                r = await client.get(
+                    endpoint,
+                    headers=headers,
+                    params={"country": "usa", "lang": "eng", "year": yr, "sort": "score"},
+                )
+                r.raise_for_status()
+                data = r.json().get("data") or []
+            except (httpx.HTTPError, ValueError) as exc:
+                log.warning("TVDB new releases failed: %s", exc)
+                break
+            for rec in data:
+                if not isinstance(rec, dict):
+                    continue
+                base = _item_from_record(rec, kind)
+                if base.tvdb_id in seen:
+                    continue
+                seen.add(base.tvdb_id)
+                items.append(
+                    DiscoverItem(
+                        name=base.name,
+                        kind=base.kind,
+                        tvdb_id=base.tvdb_id,
+                        year=base.year,
+                        poster_url=base.poster_url,
+                        overview=base.overview,
+                        is_new=True,
+                    )
+                )
+                if len(items) >= limit:
+                    break
     items = items[:limit]
     _cache_put(cache_key, items)
     return items

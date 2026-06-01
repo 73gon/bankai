@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Server as ServerIcon, RefreshCw, Film, Tv, Loader2, Plus, Trash2, FolderPlus } from "lucide-react";
+import { Server as ServerIcon, RefreshCw, Film, Tv, Loader2, Plus, Trash2, FolderPlus, ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
-import { api, type ServerTitle } from "@/lib/api";
+import { api, type ServerTitle, type ServerSeason } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -9,16 +9,115 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty";
 
+function fmtSize(bytes: number): string {
+  if (!bytes) return "";
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
+}
+
+function ShowRow({ it }: { it: ServerTitle }) {
+  const [open, setOpen] = useState(false);
+  const [seasons, setSeasons] = useState<ServerSeason[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const canExpand = it.present && !!it.location;
+
+  async function toggle() {
+    if (!canExpand) return;
+    const next = !open;
+    setOpen(next);
+    if (next && seasons === null) {
+      setLoading(true);
+      try {
+        const r = await api.serverShow(it.location!);
+        setSeasons(r.seasons);
+      } catch (e: any) {
+        toast.error(e.message);
+        setSeasons([]);
+      } finally {
+        setLoading(false);
+      }
+    }
+  }
+
+  return (
+    <div className="rounded-md">
+      <button
+        onClick={toggle}
+        disabled={!canExpand}
+        className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left hover:bg-secondary/40 disabled:cursor-default"
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          {canExpand ? (
+            open ? (
+              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+            )
+          ) : (
+            <span className="w-4 shrink-0" />
+          )}
+          <span className="truncate text-sm" title={it.location || undefined}>
+            {it.name}
+          </span>
+        </span>
+        {it.present ? (
+          <Badge variant="success">On server</Badge>
+        ) : (
+          <Badge variant="muted">Missing</Badge>
+        )}
+      </button>
+      {open && (
+        <div className="ml-6 mt-1 space-y-2 border-l border-border/60 pl-3">
+          {loading ? (
+            <p className="py-2 text-xs text-muted-foreground">Scanning…</p>
+          ) : !seasons || seasons.length === 0 ? (
+            <p className="py-2 text-xs text-muted-foreground">No episodes found.</p>
+          ) : (
+            seasons.map((se) => (
+              <div key={se.name}>
+                <div className="flex items-center gap-2 py-1 text-xs font-medium text-muted-foreground">
+                  {se.name}
+                  <Badge variant="muted">{se.episodes.length}</Badge>
+                </div>
+                {se.episodes.length === 0 ? (
+                  <p className="pl-2 text-xs text-muted-foreground/70">No files.</p>
+                ) : (
+                  se.episodes.map((ep) => (
+                    <div
+                      key={ep.path}
+                      className="flex items-center justify-between gap-3 rounded px-2 py-1 hover:bg-secondary/30"
+                    >
+                      <span className="truncate text-xs" title={ep.path}>
+                        {ep.name}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        {fmtSize(ep.size)}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Column({
   title,
   icon: Icon,
   items,
   filter,
+  expandable,
 }: {
   title: string;
   icon: React.ComponentType<{ className?: string }>;
   items: ServerTitle[];
   filter: string;
+  expandable?: boolean;
 }) {
   const filtered = items.filter((i) => i.name.toLowerCase().includes(filter.toLowerCase()));
   const present = items.filter((i) => i.present).length;
@@ -35,6 +134,8 @@ function Column({
       <CardContent className="max-h-[60vh] space-y-1.5 overflow-auto">
         {filtered.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No titles.</p>
+        ) : expandable ? (
+          filtered.map((it) => <ShowRow key={it.name} it={it} />)
         ) : (
           filtered.map((it) => (
             <div
@@ -192,7 +293,7 @@ export default function Server() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           <Column title="Movies" icon={Film} items={movies} filter={filter} />
-          <Column title="Shows" icon={Tv} items={shows} filter={filter} />
+          <Column title="Shows" icon={Tv} items={shows} filter={filter} expandable />
         </div>
       )}
     </div>

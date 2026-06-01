@@ -143,10 +143,19 @@ def create_app() -> Any:
     @app.get("/api/discover/trending")
     async def discover_trending(kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
-        items = await discover_mod.trending(k)
+        new = await discover_mod.new_releases(k)
+        browse = await discover_mod.trending(k)
+        merged: list = []
+        seen: set = set()
+        for it in [*new, *browse]:
+            key = (it.tvdb_id, it.name.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(it)
         return {
             "configured": discover_mod.is_configured(),
-            "items": [discover_mod.to_dict(i) for i in items],
+            "items": [discover_mod.to_dict(i) for i in merged],
         }
 
     @app.get("/api/discover/search")
@@ -491,6 +500,30 @@ def create_app() -> Any:
         return {
             "movies": [{"name": t.name, "present": t.present, "location": t.location} for t in movies],
             "shows": [{"name": t.name, "present": t.present, "location": t.location} for t in shows],
+        }
+
+    @app.get("/api/server/show")
+    def server_show(path: str = Query(...)) -> dict:
+        s = get_settings()
+        target = Path(path).resolve()
+        allowed = [Path(d).resolve() for d in s.web.server_show_dirs]
+        if not any(target == a or a in target.parents for a in allowed):
+            raise HTTPException(status_code=403, detail="path not under a configured show dir")
+        if not target.is_dir():
+            raise HTTPException(status_code=404, detail="not a directory")
+        seasons = media_mod.scan_server_show(target)
+        return {
+            "path": str(target),
+            "seasons": [
+                {
+                    "name": se.name,
+                    "season": se.season,
+                    "episodes": [
+                        {"name": e.name, "path": e.path, "size": e.size} for e in se.episodes
+                    ],
+                }
+                for se in seasons
+            ],
         }
 
     @app.get("/api/server/dirs")

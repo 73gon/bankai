@@ -331,6 +331,59 @@ def invalidate_server_cache() -> None:
     _SERVER_CACHE.clear()
 
 
+@dataclass(frozen=True, slots=True)
+class ServerEpisode:
+    name: str
+    path: str
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class ServerSeason:
+    name: str
+    season: int | None
+    episodes: list[ServerEpisode]
+
+
+def _server_episode(f: Path) -> ServerEpisode:
+    try:
+        size = f.stat().st_size
+    except OSError:
+        size = 0
+    return ServerEpisode(name=f.stem, path=str(f), size=size)
+
+
+def _season_number(name: str) -> int | None:
+    digits = "".join(ch for ch in name if ch.isdigit())
+    return int(digits) if digits else None
+
+
+def scan_server_show(show_dir: Path) -> list[ServerSeason]:
+    """Drill into a single show directory and return its seasons + the
+    episode files present in each. Bare episode files that sit directly in
+    the show folder (no Season subfolder) are grouped under "Episodes"."""
+    p = Path(show_dir)
+    if not p.is_dir():
+        return []
+    seasons: list[ServerSeason] = []
+    loose: list[ServerEpisode] = []
+    for child in sorted(p.iterdir(), key=lambda c: c.name.casefold()):
+        if child.is_dir():
+            eps = [
+                _server_episode(f)
+                for f in sorted(child.rglob("*"), key=lambda c: c.name.casefold())
+                if f.is_file() and f.suffix.lower() in _VIDEO_EXTS
+            ]
+            seasons.append(
+                ServerSeason(name=child.name, season=_season_number(child.name), episodes=eps)
+            )
+        elif child.is_file() and child.suffix.lower() in _VIDEO_EXTS:
+            loose.append(_server_episode(child))
+    if loose:
+        seasons.append(ServerSeason(name="Episodes", season=None, episodes=loose))
+    return seasons
+
+
 # --------------------------------------------------------------------------
 # Repack: re-apply audio delay with mkvmerge (no re-encode)
 # --------------------------------------------------------------------------

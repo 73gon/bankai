@@ -90,7 +90,7 @@ export default function Library() {
   }, [entries, filter, sort]);
 
   const movies = filtered.filter((e) => e.kind === "movie");
-  const shows = filtered.filter((e) => e.kind === "show");
+  const shows = filtered.filter((e) => e.kind === "episode");
   const seriesGroups = useMemo(() => {
     const map = new Map<string, LibraryEntry[]>();
     for (const e of shows) {

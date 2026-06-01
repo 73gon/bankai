@@ -54,6 +54,7 @@ export default function Search() {
   // selected TVDB title -> resolve German name -> filmpalast matches
   const [selected, setSelected] = useState<DiscoverItem | null>(null);
   const [german, setGerman] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
   const [filmResults, setFilmResults] = useState<SearchResult[]>([]);
   const [loadingFilm, setLoadingFilm] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -103,8 +104,27 @@ export default function Search() {
           setGerman(g.german);
         }
       }
+      setSearchTerm(name);
       const r = await api.search(name, item.kind === "movie" ? "movie" : "show");
       setFilmResults(r.results);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setLoadingFilm(false);
+    }
+  }
+
+  async function reSearch() {
+    if (!selected || !searchTerm.trim()) return;
+    setLoadingFilm(true);
+    setPicked(null);
+    try {
+      const r = await api.search(
+        searchTerm.trim(),
+        selected.kind === "movie" ? "movie" : "show",
+      );
+      setFilmResults(r.results);
+      if (r.results.length === 0) toast.info("No filmpalast match for that term");
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -253,6 +273,31 @@ export default function Search() {
                 : "Pick the matching filmpalast entry to queue."}
             </DialogDescription>
           </DialogHeader>
+
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">filmpalast search term</label>
+            <div className="flex gap-2">
+              <Input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && reSearch()}
+                placeholder="Edit the search term…"
+                className="flex-1"
+              />
+              <Button
+                variant="secondary"
+                onClick={reSearch}
+                disabled={loadingFilm || !searchTerm.trim()}
+              >
+                {loadingFilm ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <SearchIcon className="h-4 w-4" />
+                )}
+                Search
+              </Button>
+            </div>
+          </div>
 
           {loadingFilm ? (
             <div className="space-y-2">

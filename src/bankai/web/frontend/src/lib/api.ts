@@ -41,6 +41,7 @@ export interface DiscoverItem {
   year: number | null;
   poster_url: string | null;
   overview: string | null;
+  is_new?: boolean;
 }
 
 export interface SearchResult {
@@ -118,6 +119,18 @@ export interface ServerTitle {
   location: string | null;
 }
 
+export interface ServerEpisode {
+  name: string;
+  path: string;
+  size: number;
+}
+
+export interface ServerSeason {
+  name: string;
+  season: number | null;
+  episodes: ServerEpisode[];
+}
+
 export interface SettingRow {
   key: string;
   value: any;
@@ -187,6 +200,11 @@ export const api = {
   serverContents: (rescan = false) =>
     request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(
       `/api/server/contents${rescan ? "?rescan=true" : ""}`,
+    ),
+
+  serverShow: (path: string) =>
+    request<{ path: string; seasons: ServerSeason[] }>(
+      `/api/server/show?path=${encodeURIComponent(path)}`,
     ),
 
   serverDirs: () =>

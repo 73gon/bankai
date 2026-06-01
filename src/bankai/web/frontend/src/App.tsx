@@ -66,7 +66,7 @@ export default function App() {
       </aside>
 
       <main className="flex-1 px-4 py-6 md:px-8 md:py-8">
-        <div className="mx-auto max-w-6xl animate-fade-in">
+        <div className="w-full animate-fade-in">
           <Routes>
             <Route path="/" element={<Discover />} />
             <Route path="/search" element={<Search />} />

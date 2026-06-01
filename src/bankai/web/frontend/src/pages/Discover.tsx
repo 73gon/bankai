@@ -39,6 +39,11 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
         <div className="line-clamp-2 text-xs font-medium">{item.name}</div>
         {item.year && <div className="text-[10px] text-muted-foreground">{item.year}</div>}
       </div>
+      {item.is_new && (
+        <span className="absolute left-2 top-2 rounded bg-primary px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary-foreground shadow">
+          New
+        </span>
+      )}
       <div className="absolute inset-0 flex items-center justify-center bg-primary/20 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
         <Plus className="h-7 w-7" />
       </div>
