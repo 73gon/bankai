@@ -136,6 +136,10 @@ export const api = {
     request<{ configured: boolean; items: DiscoverItem[] }>(
       `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}`,
     ),
+  discoverGerman: (id: number, kind: string) =>
+    request<{ tvdb_id: number; kind: string; german: string | null }>(
+      `/api/discover/german?id=${id}&kind=${kind}`,
+    ),
   posterUrl: (url: string) => `/api/discover/poster?url=${encodeURIComponent(url)}`,
 
   search: (q: string, kind: string, site?: string) =>
@@ -184,6 +188,19 @@ export const api = {
     request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(
       `/api/server/contents${rescan ? "?rescan=true" : ""}`,
     ),
+
+  serverDirs: () =>
+    request<{ movie_dirs: string[]; show_dirs: string[] }>("/api/server/dirs"),
+  addServerDir: (kind: "movie" | "show", path: string) =>
+    request<{ kind: string; dirs: string[] }>("/api/server/dirs", {
+      method: "POST",
+      body: JSON.stringify({ kind, path }),
+    }),
+  removeServerDir: (kind: "movie" | "show", path: string) =>
+    request<{ kind: string; dirs: string[] }>("/api/server/dirs", {
+      method: "DELETE",
+      body: JSON.stringify({ kind, path }),
+    }),
 
   settings: () => request<{ settings: SettingRow[] }>("/api/settings"),
   setSetting: (key: string, value: any) =>

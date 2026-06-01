@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Server as ServerIcon, RefreshCw, Film, Tv, Loader2 } from "lucide-react";
+import { Server as ServerIcon, RefreshCw, Film, Tv, Loader2, Plus, Trash2, FolderPlus } from "lucide-react";
+import { toast } from "sonner";
 import { api, type ServerTitle } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -64,6 +65,12 @@ export default function Server() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
 
+  const [movieDirs, setMovieDirs] = useState<string[]>([]);
+  const [showDirs, setShowDirs] = useState<string[]>([]);
+  const [newMovieDir, setNewMovieDir] = useState("");
+  const [newShowDir, setNewShowDir] = useState("");
+  const [dirBusy, setDirBusy] = useState(false);
+
   async function load(rescan = false) {
     rescan ? setRescanning(true) : setLoading(true);
     setError(null);
@@ -79,9 +86,50 @@ export default function Server() {
     }
   }
 
+  async function loadDirs() {
+    try {
+      const r = await api.serverDirs();
+      setMovieDirs(r.movie_dirs);
+      setShowDirs(r.show_dirs);
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
   useEffect(() => {
     load();
+    loadDirs();
   }, []);
+
+  async function addDir(kind: "movie" | "show", path: string) {
+    if (!path.trim()) return;
+    setDirBusy(true);
+    try {
+      const r = await api.addServerDir(kind, path.trim());
+      kind === "movie" ? setMovieDirs(r.dirs) : setShowDirs(r.dirs);
+      kind === "movie" ? setNewMovieDir("") : setNewShowDir("");
+      toast.success("Directory added");
+      await load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setDirBusy(false);
+    }
+  }
+
+  async function removeDir(kind: "movie" | "show", path: string) {
+    setDirBusy(true);
+    try {
+      const r = await api.removeServerDir(kind, path);
+      kind === "movie" ? setMovieDirs(r.dirs) : setShowDirs(r.dirs);
+      toast.success("Directory removed");
+      await load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setDirBusy(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -104,6 +152,36 @@ export default function Server() {
         </div>
       </header>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FolderPlus className="h-4 w-4" /> Scan directories
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2">
+          <DirManager
+            title="Movie directories"
+            icon={Film}
+            dirs={movieDirs}
+            value={newMovieDir}
+            onChange={setNewMovieDir}
+            onAdd={() => addDir("movie", newMovieDir)}
+            onRemove={(p) => removeDir("movie", p)}
+            busy={dirBusy}
+          />
+          <DirManager
+            title="Show directories"
+            icon={Tv}
+            dirs={showDirs}
+            value={newShowDir}
+            onChange={setNewShowDir}
+            onAdd={() => addDir("show", newShowDir)}
+            onRemove={(p) => removeDir("show", p)}
+            busy={dirBusy}
+          />
+        </CardContent>
+      </Card>
+
       {error ? (
         <EmptyState icon={ServerIcon} title="Could not read server" description={error} />
       ) : loading ? (
@@ -117,6 +195,69 @@ export default function Server() {
           <Column title="Shows" icon={Tv} items={shows} filter={filter} />
         </div>
       )}
+    </div>
+  );
+}
+
+function DirManager({
+  title,
+  icon: Icon,
+  dirs,
+  value,
+  onChange,
+  onAdd,
+  onRemove,
+  busy,
+}: {
+  title: string;
+  icon: React.ComponentType<{ className?: string }>;
+  dirs: string[];
+  value: string;
+  onChange: (v: string) => void;
+  onAdd: () => void;
+  onRemove: (p: string) => void;
+  busy: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+        <Icon className="h-4 w-4" /> {title}
+      </div>
+      <div className="space-y-1.5">
+        {dirs.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No directories configured.</p>
+        ) : (
+          dirs.map((d) => (
+            <div
+              key={d}
+              className="flex items-center justify-between gap-2 rounded-md bg-secondary/40 px-2 py-1.5"
+            >
+              <code className="truncate text-xs">{d}</code>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => onRemove(d)}
+                disabled={busy}
+                title="Remove"
+              >
+                <Trash2 className="h-4 w-4 text-red-400" />
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="flex gap-2">
+        <Input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onAdd()}
+          placeholder="/mnt/media12/movies"
+          className="flex-1"
+        />
+        <Button size="icon" variant="outline" onClick={onAdd} disabled={busy || !value.trim()}>
+          <Plus className="h-4 w-4" />
+        </Button>
+      </div>
     </div>
   );
 }

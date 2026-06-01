@@ -50,6 +50,11 @@ class PathRequest(BaseModel):
     path: str
 
 
+class ServerDirRequest(BaseModel):
+    kind: str  # "movie" | "show"
+    path: str = ""
+
+
 class SettingRequest(BaseModel):
     key: str
     value: Any
@@ -170,6 +175,12 @@ def create_app() -> Any:
             media_type=r.headers.get("content-type", "image/jpeg"),
             headers={"Cache-Control": "public, max-age=86400"},
         )
+
+    @app.get("/api/discover/german")
+    async def discover_german(id: int = Query(...), kind: str = Query("movie")) -> dict:
+        k = "movie" if kind == "movie" else "show"
+        name = await discover_mod.german_title(id, kind=k)
+        return {"tvdb_id": id, "kind": k, "german": name}
 
     # ------------------------------------------------------------------
     # Search (stream sources)
@@ -482,6 +493,52 @@ def create_app() -> Any:
             "shows": [{"name": t.name, "present": t.present, "location": t.location} for t in shows],
         }
 
+    @app.get("/api/server/dirs")
+    def server_dirs() -> dict:
+        s = get_settings()
+        return {
+            "movie_dirs": [str(p) for p in s.web.server_movie_dirs],
+            "show_dirs": [str(p) for p in s.web.server_show_dirs],
+        }
+
+    @app.post("/api/server/dirs")
+    def server_dirs_add(req: ServerDirRequest) -> dict:
+        if req.kind not in {"movie", "show"}:
+            raise HTTPException(status_code=400, detail="kind must be movie or show")
+        path = req.path.strip()
+        if not path:
+            raise HTTPException(status_code=400, detail="path required")
+        key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
+        s = get_settings()
+        current = [
+            str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
+        ]
+        if path not in current:
+            current.append(path)
+        from bankai.cli.main import _set_config_value
+
+        _set_config_value(key, current)
+        reset_settings_cache()
+        media_mod.invalidate_server_cache()
+        return {"kind": req.kind, "dirs": current}
+
+    @app.delete("/api/server/dirs")
+    def server_dirs_remove(req: ServerDirRequest) -> dict:
+        if req.kind not in {"movie", "show"}:
+            raise HTTPException(status_code=400, detail="kind must be movie or show")
+        key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
+        s = get_settings()
+        current = [
+            str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
+        ]
+        current = [p for p in current if p != req.path.strip()]
+        from bankai.cli.main import _set_config_value
+
+        _set_config_value(key, current)
+        reset_settings_cache()
+        media_mod.invalidate_server_cache()
+        return {"kind": req.kind, "dirs": current}
+
     # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
@@ -499,7 +556,7 @@ def create_app() -> Any:
             out.append(
                 {
                     "key": key,
-                    "value": "<set>" if (secret and cur) else cur,
+                    "value": cur,
                     "secret": secret,
                     "is_set": bool(cur),
                 }

@@ -102,11 +102,11 @@ export default function Settings() {
                           <Input
                             type={row.secret && !reveal[row.key] ? "password" : "text"}
                             value={current ?? ""}
-                            placeholder={row.secret && row.is_set ? "•••••• (set)" : ""}
+                            placeholder={row.secret ? "not set" : ""}
                             onChange={(e) =>
                               setEdits((ed) => ({ ...ed, [row.key]: e.target.value }))
                             }
-                            className="w-64 pr-9"
+                            className="w-72 pr-9"
                           />
                           {row.secret && (
                             <button
@@ -154,6 +154,5 @@ export default function Settings() {
 
 function key(edits: Record<string, any>, row: SettingRow) {
   if (row.key in edits) return edits[row.key];
-  if (row.secret) return "";
-  return row.value;
+  return row.value ?? "";
 }

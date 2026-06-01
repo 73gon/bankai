@@ -27,15 +27,7 @@ const NAV = [
 function Brand() {
   return (
     <div className="flex items-center gap-2 px-2 py-1">
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-fuchsia-500 to-violet-600 font-bold text-white shadow-lg shadow-fuchsia-500/30">
-        卍
-      </div>
-      <div>
-        <div className="font-mono text-sm font-semibold tracking-wide">bankai</div>
-        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
-          dub studio
-        </div>
-      </div>
+      <div className="font-mono text-base font-semibold tracking-wide">bankai</div>
     </div>
   );
 }

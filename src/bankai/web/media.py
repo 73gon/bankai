@@ -307,14 +307,21 @@ def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
             continue
         for child in sorted(p.iterdir()):
             if child.is_dir():
-                key = child.name.casefold()
-                if key not in seen:
-                    seen[key] = ServerTitle(
-                        name=child.name,
-                        kind="movie" if kind == "movie" else "show",
-                        present=True,
-                        location=str(child),
-                    )
+                name = child.name
+            elif child.is_file() and child.suffix.lower() in _VIDEO_EXTS:
+                # Many movies live as a bare ``Title (Year).mkv`` rather than
+                # inside a folder — surface those too.
+                name = child.stem
+            else:
+                continue
+            key = name.casefold()
+            if key not in seen:
+                seen[key] = ServerTitle(
+                    name=name,
+                    kind="movie" if kind == "movie" else "show",
+                    present=True,
+                    location=str(child),
+                )
     titles = sorted(seen.values(), key=lambda t: t.name.casefold())
     _SERVER_CACHE[cache_key] = (time.time(), titles)
     return titles
