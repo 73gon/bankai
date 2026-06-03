@@ -10,6 +10,23 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
+// Parse "S02E01" / "Staffel 2" / "Season 2" out of a filmpalast title or URL.
+function parseSeason(s: string): number | null {
+  const m =
+    s.match(/s(\d{1,2})\s*e\d{1,3}/i) ||
+    s.match(/\bstaffel\s*(\d+)/i) ||
+    s.match(/\bseason\s*(\d+)/i);
+  return m ? Number(m[1]) : null;
+}
+
+// Strip a trailing year and any season/episode marker to get the series name.
+function cleanSeriesTitle(s: string): string {
+  return s
+    .replace(/\s*[\(\[]?\b(19|20)\d{2}\b[\)\]]?/g, '')
+    .replace(/\s*[-–:]?\s*(s\d{1,2}\s*e\d{1,3}|staffel\s*\d+|season\s*\d+).*$/i, '')
+    .trim();
+}
+
 function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) {
   const [err, setErr] = useState(false);
   return (
@@ -53,8 +70,10 @@ export default function Search() {
   const [season, setSeason] = useState('1');
   const [episodes, setEpisodes] = useState<EpisodeItem[]>([]);
   const [selectedEps, setSelectedEps] = useState<Set<number>>(new Set());
-  const [range, setRange] = useState('');
   const [loadingEps, setLoadingEps] = useState(false);
+  // seasons detected from the filmpalast results + resolved series name
+  const [showSeasons, setShowSeasons] = useState<number[]>([]);
+  const [seriesTitle, setSeriesTitle] = useState('');
 
   // Live filter from TVDB as the user types (debounced).
   useEffect(() => {
@@ -83,6 +102,10 @@ export default function Search() {
     setGerman(null);
     setFilmResults([]);
     setPicked(null);
+    setShowSeasons([]);
+    setSeriesTitle('');
+    setEpisodes([]);
+    setSelectedEps(new Set());
     setLoadingFilm(true);
     try {
       let name = item.name;
@@ -137,13 +160,15 @@ export default function Search() {
     }
   }
 
-  async function loadEpisodes(r: SearchResult, s: string) {
+  async function loadEpisodes(r: SearchResult, s: string, showName?: string, preselectAll = false) {
     setPicked(r);
     setLoadingEps(true);
-    setSelectedEps(new Set());
+    if (!preselectAll) setSelectedEps(new Set());
     try {
-      const res = await api.episodes(r.title, Number(s) || 1, r.site);
+      const name = (showName || cleanSeriesTitle(r.title) || r.title).trim();
+      const res = await api.episodes(name, Number(s) || 1, r.site);
       setEpisodes(res.episodes);
+      if (preselectAll) setSelectedEps(new Set(res.episodes.map((e) => e.episode)));
     } catch (e: any) {
       toast.error(e.message);
       setEpisodes([]);
@@ -152,27 +177,44 @@ export default function Search() {
     }
   }
 
-  function applyRange() {
-    const next = new Set(selectedEps);
-    range.split(',').forEach((p) => {
-      const m = p.trim().match(/^(\d+)\s*-\s*(\d+)$/);
-      if (m) for (let i = +m[1]; i <= +m[2]; i++) next.add(i);
-      else if (p.trim()) next.add(Number(p.trim()));
-    });
-    setSelectedEps(next);
+  // When filmpalast results arrive for a show, auto-detect the season(s),
+  // resolve the series name, and preselect every episode of the first
+  // season so the user only has to confirm (or deselect a few).
+  useEffect(() => {
+    if (!selected || selected.kind !== 'show' || filmResults.length === 0) return;
+    const seasons = new Set<number>();
+    for (const r of filmResults) {
+      const s = parseSeason(r.title) ?? parseSeason(r.url);
+      if (s) seasons.add(s);
+    }
+    const list = Array.from(seasons).sort((a, b) => a - b);
+    setShowSeasons(list);
+    const series = filmResults[0];
+    const cleaned = cleanSeriesTitle(series.title) || searchTerm || series.title;
+    setSeriesTitle(cleaned);
+    const firstSeason = list[0] ?? 1;
+    setSeason(String(firstSeason));
+    loadEpisodes(series, String(firstSeason), cleaned, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filmResults, selected]);
+
+  function pickSeason(s: number) {
+    setSeason(String(s));
+    if (picked) loadEpisodes(picked, String(s), seriesTitle, true);
   }
 
   async function queueShow() {
     if (!picked) return;
     setBusy(picked.url);
     try {
+      const show = (seriesTitle || picked.title).trim();
       await api.queueShow({
-        show: picked.title,
+        show,
         season: Number(season) || 1,
         episodes: selectedEps.size ? Array.from(selectedEps).sort((a, b) => a - b) : undefined,
         site: picked.site,
       });
-      toast.success(`Queued ${picked.title} S${season}`);
+      toast.success(`Queued ${show} S${season} (${selectedEps.size || 'all'})`);
       setSelected(null);
     } catch (e: any) {
       toast.error(e.message);
@@ -269,7 +311,7 @@ export default function Search() {
             </div>
           ) : filmResults.length === 0 ? (
             <EmptyState icon={SearchIcon} title='No filmpalast match' description='This title may not be available on filmpalast.' />
-          ) : (
+          ) : selected?.kind === 'movie' ? (
             <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
               {filmResults.map((r) => (
                 <div key={`${r.site}-${r.url}`} className='rounded-lg ring-1 ring-border/50'>
@@ -283,81 +325,100 @@ export default function Search() {
                         {r.site}
                       </Badge>
                     </div>
-                    {selected?.kind === 'movie' ? (
-                      <Button size='sm' onClick={() => queueMovie(r)} disabled={busy === r.url}>
-                        {busy === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
-                        Queue
-                      </Button>
-                    ) : (
-                      <Button size='sm' variant='secondary' onClick={() => loadEpisodes(r, season)}>
-                        Episodes
-                      </Button>
-                    )}
+                    <Button size='sm' onClick={() => queueMovie(r)} disabled={busy === r.url}>
+                      {busy === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
+                      Queue
+                    </Button>
                   </div>
-
-                  {selected?.kind === 'show' && picked?.url === r.url && (
-                    <div className='border-t border-border/50 p-3'>
-                      <div className='mb-3 flex flex-wrap items-end gap-3'>
-                        <div className='space-y-1'>
-                          <label className='text-xs text-muted-foreground'>Season</label>
-                          <Input
-                            type='number'
-                            min={1}
-                            value={season}
-                            onChange={(e) => setSeason(e.target.value)}
-                            onBlur={() => loadEpisodes(r, season)}
-                            className='w-24'
-                          />
-                        </div>
-                        <div className='space-y-1'>
-                          <label className='text-xs text-muted-foreground'>Range (e.g. 1-9)</label>
-                          <div className='flex gap-2'>
-                            <Input value={range} onChange={(e) => setRange(e.target.value)} className='w-28' />
-                            <Button size='sm' variant='outline' onClick={applyRange}>
-                              Add
-                            </Button>
-                          </div>
-                        </div>
-                        <Button size='sm' onClick={queueShow} disabled={busy === r.url}>
-                          {busy === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
-                          Queue {selectedEps.size ? `(${selectedEps.size})` : 'all'}
-                        </Button>
-                      </div>
-
-                      {loadingEps ? (
-                        <div className='text-sm text-muted-foreground'>Loading episodes…</div>
-                      ) : episodes.length === 0 ? (
-                        <div className='text-sm text-muted-foreground'>No episodes found for this season.</div>
-                      ) : (
-                        <div className='flex flex-wrap gap-2'>
-                          {episodes.map((ep) => {
-                            const on = selectedEps.has(ep.episode);
-                            return (
-                              <button
-                                key={ep.episode}
-                                onClick={() => {
-                                  const next = new Set(selectedEps);
-                                  on ? next.delete(ep.episode) : next.add(ep.episode);
-                                  setSelectedEps(next);
-                                }}
-                                className={
-                                  'rounded-md px-2.5 py-1 text-xs font-medium ring-1 transition-colors ' +
-                                  (on
-                                    ? 'bg-primary/20 text-primary-foreground ring-primary/40'
-                                    : 'bg-secondary/40 text-muted-foreground ring-border/40 hover:text-foreground')
-                                }
-                                title={ep.title || undefined}
-                              >
-                                E{String(ep.episode).padStart(2, '0')}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
               ))}
+            </div>
+          ) : (
+            // Show flow: season auto-detected, all episodes preselected — just confirm.
+            <div className='space-y-3 rounded-lg p-1'>
+              <div className='flex flex-wrap items-center gap-2'>
+                <span className='text-sm font-medium'>{seriesTitle || selected?.name}</span>
+                <Badge variant='muted'>{picked?.site || 'filmpalast'}</Badge>
+              </div>
+
+              <div className='flex flex-wrap items-center gap-2'>
+                <span className='text-xs text-muted-foreground'>Season</span>
+                {(showSeasons.length ? showSeasons : [Number(season) || 1]).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => pickSeason(s)}
+                    className={
+                      'rounded-md px-2.5 py-1 text-xs font-medium ring-1 transition-colors ' +
+                      (String(s) === season
+                        ? 'bg-primary/20 text-primary-foreground ring-primary/40'
+                        : 'bg-secondary/40 text-muted-foreground ring-border/40 hover:text-foreground')
+                    }
+                  >
+                    S{String(s).padStart(2, '0')}
+                  </button>
+                ))}
+                <div className='flex items-center gap-1'>
+                  <Input
+                    type='number'
+                    min={1}
+                    value={season}
+                    onChange={(e) => setSeason(e.target.value)}
+                    onBlur={() => picked && loadEpisodes(picked, season, seriesTitle, true)}
+                    className='h-8 w-20'
+                  />
+                </div>
+              </div>
+
+              {loadingEps ? (
+                <div className='text-sm text-muted-foreground'>Detecting episodes…</div>
+              ) : episodes.length === 0 ? (
+                <div className='text-sm text-muted-foreground'>No episodes found for this season.</div>
+              ) : (
+                <>
+                  <div className='flex items-center gap-2'>
+                    <Button size='sm' variant='outline' onClick={() => setSelectedEps(new Set(episodes.map((e) => e.episode)))}>
+                      Select all
+                    </Button>
+                    <Button size='sm' variant='outline' onClick={() => setSelectedEps(new Set())}>
+                      Clear
+                    </Button>
+                    <span className='text-xs text-muted-foreground'>
+                      {selectedEps.size} of {episodes.length} selected
+                    </span>
+                  </div>
+                  <div className='flex max-h-[35vh] flex-wrap gap-2 overflow-auto'>
+                    {episodes.map((ep) => {
+                      const on = selectedEps.has(ep.episode);
+                      return (
+                        <button
+                          key={ep.episode}
+                          onClick={() => {
+                            const next = new Set(selectedEps);
+                            on ? next.delete(ep.episode) : next.add(ep.episode);
+                            setSelectedEps(next);
+                          }}
+                          className={
+                            'rounded-md px-2.5 py-1 text-xs font-medium ring-1 transition-colors ' +
+                            (on
+                              ? 'bg-primary/20 text-primary-foreground ring-primary/40'
+                              : 'bg-secondary/40 text-muted-foreground ring-border/40 hover:text-foreground')
+                          }
+                          title={ep.title || undefined}
+                        >
+                          E{String(ep.episode).padStart(2, '0')}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+
+              <div className='flex justify-end'>
+                <Button onClick={queueShow} disabled={!!busy || episodes.length === 0}>
+                  {busy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
+                  Queue {selectedEps.size ? `${selectedEps.size} episode${selectedEps.size === 1 ? '' : 's'}` : 'all'}
+                </Button>
+              </div>
             </div>
           )}
         </DialogContent>

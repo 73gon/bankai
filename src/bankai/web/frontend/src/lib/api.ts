@@ -178,6 +178,16 @@ export const api = {
     }),
   approve: (path: string) => request('/api/review/approve', { method: 'POST', body: JSON.stringify({ path }) }),
   transfer: (path: string) => request('/api/review/transfer', { method: 'POST', body: JSON.stringify({ path }) }),
+  approveBatch: (paths: string[]) =>
+    request<{ approved: any[]; count: number; errors: any[] }>('/api/review/approve-batch', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
+  transferBatch: (paths: string[]) =>
+    request<{ transferred: any[]; count: number; skipped: any[]; errors: any[] }>('/api/review/transfer-batch', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
 
   serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
 

@@ -102,12 +102,15 @@ class BgJob:
             return self
         if not _pid_alive(self.pid):
             # Current supervisor writes the real exit code before exiting.
-            # This fallback is for jobs spawned by older versions.
+            # We only reach here when the supervisor vanished without
+            # recording a result -- e.g. the web service was restarted and
+            # killed the detached pipeline (the Cars 2 case). A job is only
+            # genuinely "done" when the pipeline printed a final_path; with
+            # no final_path the run never completed, so mark it "failed" so
+            # the user can retry instead of seeing a phantom "installed".
             self.finished_at = time.time()
             self.final_path = _extract_final_path(self.log_path)
-            self.status = (
-                "done" if self.final_path or not _log_looks_failed(self.log_path) else "failed"
-            )
+            self.status = "done" if self.final_path else "failed"
             self.save()
         return self
 

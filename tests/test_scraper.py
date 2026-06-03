@@ -122,6 +122,41 @@ async def test_filmpalast_series_lookup_keeps_episode_search_hits() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filmpalast_search_falls_back_to_shorter_query() -> None:
+    """Long, punctuated German titles return nothing from filmpalast's search;
+    the backend should retry with a trimmed query (the Green Book case)."""
+    result_html = """
+    <article class="liste rb">
+      <a class="rb" href="/stream/green-book-eine-besondere-freundschaft"><h2>Green Book - Eine besondere Freundschaft (2018)</h2></a>
+    </article>
+    """
+    queried: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.startswith("/search/title/")
+        q = request.url.path[len("/search/title/") :]
+        queried.append(q)
+        if q == "Green+Book":
+            return httpx.Response(200, text=result_html)
+        return httpx.Response(200, text="<html></html>")
+
+    transport = httpx.MockTransport(handler)
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(base_url="http://example.invalid", transport=transport)
+    try:
+        results = await backend.search(
+            "Green Book - Eine besondere Freundschaft", kind=MediaKind.MOVIE
+        )
+    finally:
+        await backend.aclose()
+
+    assert len(results) == 1
+    assert "Green Book" in results[0].title
+    assert "Green+Book" in queried
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_resolve_returns_ytdlp_handle() -> None:
     backend = FilmpalastBackend(base_url="http://example.invalid")
     await backend._client.aclose()

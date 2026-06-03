@@ -55,6 +55,10 @@ ExecStart={exec_path} web serve --host {host} --port {port}
 WorkingDirectory={workdir}
 Restart=on-failure
 RestartSec=3
+# Only kill the uvicorn process on stop/restart. Background pipeline jobs
+# are spawned detached (new session); without this a deploy restart would
+# kill an in-flight download mid-run (the Cars 2 phantom-"done" bug).
+KillMode=process
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

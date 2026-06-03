@@ -35,6 +35,35 @@ def test_failed_job_with_final_path_is_reconciled(
     assert refreshed.final_path == "/library/Zootopia.mkv"
 
 
+def test_running_job_killed_without_final_path_is_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running job whose supervisor vanished mid-run (e.g. the web service
+    restarted) must be reported as failed, not a phantom "done"."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    job = bgjobs.BgJob(
+        id="cars2bug",
+        kind="movie",
+        title="Cars 2",
+        args=["run", "Cars 2"],
+        started_at=time.time(),
+        status="running",
+        pid=2**30,  # a pid that is not alive
+    )
+    job.save()
+    # Log ends mid-download with no final_path and no traceback.
+    job.log_path.write_text(
+        "BANKAI_PROGRESS stage=torrent pct=69.3 state=downloading\n",
+        encoding="utf-8",
+    )
+
+    (refreshed,) = bgjobs.list_jobs()
+
+    assert refreshed.status == "failed"
+    assert refreshed.final_path is None
+
+
 def test_clear_jobs_removes_finished_background_jobs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

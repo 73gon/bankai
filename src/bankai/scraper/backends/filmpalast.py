@@ -49,11 +49,65 @@ class FilmpalastBackend:
     async def search(
         self, query: str, *, kind: MediaKind | None = None, limit: int = 20
     ) -> list[SearchResult]:
+        results = await self._raw_search(query, limit=limit)
+        if results:
+            return results
+        # Filmpalast's search engine frequently returns nothing for long or
+        # punctuated German titles (e.g. "Green Book - Eine besondere
+        # Freundschaft"). Retry with trimmed/shortened variants and finally
+        # probe the direct /stream/<slug> page before giving up.
+        return await self._search_fallback(query, kind=kind, limit=limit)
+
+    async def _raw_search(self, query: str, *, limit: int = 20) -> list[SearchResult]:
         resp = await self._client.get("/search/title/" + query.strip().replace(" ", "+"))
         detect_cloudflare(resp)
         if resp.status_code != 200:
             raise ScraperError(f"filmpalast search failed: HTTP {resp.status_code}")
         return self._parse_search(resp.text, limit=limit)
+
+    async def _search_fallback(
+        self, query: str, *, kind: MediaKind | None, limit: int
+    ) -> list[SearchResult]:
+        for variant in _query_variants(query):
+            try:
+                hits = await self._raw_search(variant, limit=limit)
+            except ScraperError:
+                continue
+            if hits:
+                return hits
+        # Last resort: probe the direct movie page by slug.
+        probed = await self._probe_slug(query)
+        return [probed] if probed else []
+
+    async def _probe_slug(self, query: str) -> SearchResult | None:
+        slug = _slugify(query)
+        if not slug:
+            return None
+        url = urljoin(self._base, f"/stream/{slug}")
+        try:
+            resp = await self._client.get(url)
+        except Exception as exc:  # pragma: no cover - network guard
+            log.debug("filmpalast slug probe failed: %s", exc)
+            return None
+        if resp.status_code != 200:
+            return None
+        text = resp.text
+        if "iconPlay" not in text and not self._HOSTER_RE.search(text):
+            return None
+        tree = HTMLParser(text)
+        title_el = tree.css_first("h1, h2, .name")
+        title = (title_el.text() or "").strip() if title_el is not None else ""
+        if not title:
+            title = slug.replace("-", " ").title()
+        year_match = _YEAR_RE.search(title)
+        return SearchResult(
+            site=self.site_id,
+            title=title,
+            url=url,
+            kind=MediaKind.EPISODE if _EPISODE_RE.search(slug) else MediaKind.MOVIE,
+            year=int(year_match.group(0)) if year_match else None,
+            poster_url=None,
+        )
 
     def _parse_search(self, html: str, *, limit: int) -> list[SearchResult]:
         tree = HTMLParser(html)
@@ -208,6 +262,35 @@ class FilmpalastBackend:
         hoster = m.group(1).strip()
         log.info("[filmpalast] resolved hoster: %s", hoster)
         return StreamHandle(site=self.site_id, url=hoster, hint="ytdlp")
+
+
+def _query_variants(query: str) -> list[str]:
+    """Generate progressively looser search queries for a stubborn title.
+
+    Filmpalast's search chokes on long, punctuated titles. We try the title
+    without its subtitle, without a trailing year, without punctuation, and
+    finally progressively shorter word-prefixes (down to a single word).
+    """
+    variants: list[str] = []
+
+    def add(value: str) -> None:
+        cleaned = value.strip()
+        if cleaned and cleaned.casefold() not in {v.casefold() for v in variants}:
+            variants.append(cleaned)
+
+    q = query.strip()
+    for sep in (" - ", " \u2013 ", ": ", " | ", " / "):
+        if sep in q:
+            add(q.split(sep, 1)[0])
+    no_year = re.sub(r"\s*\(?\b(19|20)\d{2}\b\)?\s*$", "", q).strip()
+    add(no_year)
+    no_punct = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", no_year)).strip()
+    add(no_punct)
+    words = no_punct.split()
+    for n in range(len(words) - 1, 0, -1):
+        add(" ".join(words[:n]))
+    # Drop the original query (it already failed before fallback ran).
+    return [v for v in variants if v.casefold() != q.casefold()]
 
 
 def _slugify(value: str) -> str:

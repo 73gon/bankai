@@ -52,6 +52,8 @@ export default function Library() {
 
   const [review, setReview] = useState<LibraryEntry | null>(null);
   const [del, setDel] = useState<LibraryEntry | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -90,14 +92,88 @@ export default function Library() {
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   }, [shows]);
 
+  function toggleSelect(path: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  const selectableEntries = useMemo(
+    () => filtered.filter((e) => e.stage === 'review' || e.stage === 'approved'),
+    [filtered],
+  );
+  const approvedCount = useMemo(() => entries.filter((e) => e.stage === 'approved').length, [entries]);
+  const selectedList = useMemo(() => filtered.filter((e) => selected.has(e.path)), [filtered, selected]);
+  const allSelected = selectableEntries.length > 0 && selectableEntries.every((e) => selected.has(e.path));
+
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      if (selectableEntries.every((e) => prev.has(e.path))) return new Set();
+      return new Set(selectableEntries.map((e) => e.path));
+    });
+  }
+
+  async function approveSelected() {
+    const paths = selectedList.filter((e) => e.stage !== 'transferred').map((e) => e.path);
+    if (paths.length === 0) {
+      toast.error('Nothing selected to approve');
+      return;
+    }
+    setBatchBusy(true);
+    try {
+      const r = await api.approveBatch(paths);
+      toast.success(`Approved ${r.count} title${r.count === 1 ? '' : 's'}`);
+      setSelected(new Set());
+      load();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  async function sendApprovedToServer() {
+    setBatchBusy(true);
+    try {
+      // Send the explicitly selected approved items, or all approved when none selected.
+      const paths = selectedList.filter((e) => e.stage === 'approved').map((e) => e.path);
+      const r = await api.transferBatch(paths);
+      if (r.count === 0) {
+        toast.error('No approved titles to send');
+      } else {
+        toast.success(`Sending ${r.count} title${r.count === 1 ? '' : 's'} to the server`);
+      }
+      setSelected(new Set());
+      load();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
   function Row({ e }: { e: LibraryEntry }) {
+    const selectable = e.stage === 'review' || e.stage === 'approved';
     return (
       <div className='flex items-center justify-between gap-3 rounded-md px-2 py-2 hover:bg-secondary/40'>
-        <div className='min-w-0'>
-          <div className='truncate text-sm font-medium'>{e.name}</div>
-          <div className='flex items-center gap-2 text-xs text-muted-foreground'>
-            <span>{formatBytes(e.size)}</span>
-            <span>· {timeAgo(e.mtime)}</span>
+        <div className='flex min-w-0 items-center gap-3'>
+          <input
+            type='checkbox'
+            className='h-4 w-4 shrink-0 cursor-pointer accent-primary disabled:opacity-30'
+            checked={selected.has(e.path)}
+            disabled={!selectable}
+            onChange={() => toggleSelect(e.path)}
+            title={selectable ? 'Select' : 'Already transferred'}
+          />
+          <div className='min-w-0'>
+            <div className='truncate text-sm font-medium'>{e.name}</div>
+            <div className='flex items-center gap-2 text-xs text-muted-foreground'>
+              <span>{formatBytes(e.size)}</span>
+              <span>· {timeAgo(e.mtime)}</span>
+            </div>
           </div>
         </div>
         <div className='flex items-center gap-2'>
@@ -146,6 +222,34 @@ export default function Library() {
           </Select>
         </div>
       </header>
+
+      {!loading && filtered.length > 0 && (
+        <div className='flex flex-wrap items-center gap-3 rounded-md border bg-card/40 px-3 py-2'>
+          <label className='flex cursor-pointer items-center gap-2 text-sm'>
+            <input
+              type='checkbox'
+              className='h-4 w-4 cursor-pointer accent-primary'
+              checked={allSelected}
+              onChange={toggleSelectAll}
+              disabled={selectableEntries.length === 0}
+            />
+            Select all
+          </label>
+          <span className='text-xs text-muted-foreground'>
+            {selected.size} selected · {approvedCount} approved
+          </span>
+          <div className='ml-auto flex items-center gap-2'>
+            <Button size='sm' variant='secondary' onClick={approveSelected} disabled={batchBusy || selected.size === 0}>
+              {batchBusy ? <Loader2 className='h-4 w-4 animate-spin' /> : <CheckCircle2 className='h-4 w-4' />}
+              Approve selected
+            </Button>
+            <Button size='sm' onClick={sendApprovedToServer} disabled={batchBusy || approvedCount === 0}>
+              {batchBusy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Send className='h-4 w-4' />}
+              Send approved to server
+            </Button>
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className='space-y-2'>

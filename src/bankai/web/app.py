@@ -50,6 +50,10 @@ class PathRequest(BaseModel):
     path: str
 
 
+class PathsRequest(BaseModel):
+    paths: list[str]
+
+
 class ServerDirRequest(BaseModel):
     kind: str  # "movie" | "show"
     path: str = ""
@@ -476,6 +480,20 @@ def create_app() -> Any:
         state = review_mod.set_stage(str(p), "approved")
         return review_mod.to_dict(state)
 
+    @app.post("/api/review/approve-batch")
+    def review_approve_batch(req: PathsRequest) -> dict:
+        approved: list[dict] = []
+        errors: list[dict] = []
+        for raw in req.paths:
+            try:
+                p = _safe_path(raw)
+            except HTTPException as exc:
+                errors.append({"path": raw, "detail": str(exc.detail)})
+                continue
+            state = review_mod.set_stage(str(p), "approved")
+            approved.append(review_mod.to_dict(state))
+        return {"approved": approved, "count": len(approved), "errors": errors}
+
     @app.post("/api/review/transfer")
     def review_transfer(req: PathRequest) -> dict:
         p = _safe_path(req.path)
@@ -487,6 +505,37 @@ def create_app() -> Any:
         job = webjobs.enqueue(kind="transfer", title=f"Transfer {p.name}", args=args)
         review_mod.set_stage(str(p), "transferred")
         return {"transfer": job}
+
+    @app.post("/api/review/transfer-batch")
+    def review_transfer_batch(req: PathsRequest) -> dict:
+        """Transfer every approved path (or all approved files when omitted)."""
+        targets: list[Path] = []
+        errors: list[dict] = []
+        if req.paths:
+            for raw in req.paths:
+                try:
+                    targets.append(_safe_path(raw))
+                except HTTPException as exc:
+                    errors.append({"path": raw, "detail": str(exc.detail)})
+        else:
+            for path_str, state in review_mod.all_states().items():
+                if state.stage == "approved":
+                    try:
+                        targets.append(_safe_path(path_str))
+                    except HTTPException:
+                        continue
+        jobs: list[dict] = []
+        skipped: list[dict] = []
+        for p in targets:
+            state = review_mod.get_state(str(p))
+            if state.stage not in {"approved", "transferred"}:
+                skipped.append({"path": str(p), "stage": state.stage})
+                continue
+            kind = "show" if "Shows" in p.parts else "movie"
+            args = ["transfer-run", str(p), "--kind", kind]
+            jobs.append(webjobs.enqueue(kind="transfer", title=f"Transfer {p.name}", args=args))
+            review_mod.set_stage(str(p), "transferred")
+        return {"transferred": jobs, "count": len(jobs), "skipped": skipped, "errors": errors}
 
     # ------------------------------------------------------------------
     # Server page (media-server contents)

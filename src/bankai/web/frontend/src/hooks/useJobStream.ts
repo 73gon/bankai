@@ -13,6 +13,7 @@ export function useJobStream(followId?: string | null) {
   const [wsConnected, setWsConnected] = useState(false);
   const [pollOk, setPollOk] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const wsConnectedRef = useRef(false);
 
   // Live WebSocket stream (preferred).
   useEffect(() => {
@@ -25,11 +26,15 @@ export function useJobStream(followId?: string | null) {
       wsRef.current = ws;
       ws.onopen = () => {
         setWsConnected(true);
+        wsConnectedRef.current = true;
         if (followId) ws.send(JSON.stringify({ follow: followId }));
       };
       ws.onclose = () => {
         setWsConnected(false);
-        if (!closed) reconnect = window.setTimeout(connect, 3000);
+        wsConnectedRef.current = false;
+        // Reconnect quickly; the polling heartbeat keeps the queue live
+        // in the meantime so the UI never flips to "offline" on a blip.
+        if (!closed) reconnect = window.setTimeout(connect, 1500);
       };
       ws.onerror = () => ws.close();
       ws.onmessage = (ev) => {
@@ -51,29 +56,28 @@ export function useJobStream(followId?: string | null) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // REST polling fallback — always runs so the queue works even when the
-  // WebSocket can't connect (e.g. proxy without WS upgrade).
+  // REST polling heartbeat — always runs (even while the WebSocket is up)
+  // so a momentary WS drop never shows "offline" and the queue stays fresh
+  // behind proxies that can't upgrade WebSocket connections.
   useEffect(() => {
     let active = true;
     async function poll() {
-      if (wsConnected) return; // WS already feeding jobs
       try {
         const r = await api.queue();
-        if (active) {
-          setJobs(r.jobs);
-          setPollOk(true);
-        }
+        if (!active) return;
+        setPollOk(true);
+        if (!wsConnectedRef.current) setJobs(r.jobs); // avoid double updates
       } catch {
         if (active) setPollOk(false);
       }
     }
     poll();
-    const id = window.setInterval(poll, 2500);
+    const id = window.setInterval(poll, 2000);
     return () => {
       active = false;
       window.clearInterval(id);
     };
-  }, [wsConnected]);
+  }, []);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

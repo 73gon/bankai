@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Compass, Loader2, Plus, Film, Tv } from 'lucide-react';
+import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type DiscoverItem } from '@/lib/api';
+import { api, type DiscoverItem, type SearchResult } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -59,6 +60,13 @@ export default function Discover() {
   const [busy, setBusy] = useState(false);
   const [serverNames, setServerNames] = useState<Set<string>>(new Set());
 
+  // Movie -> resolve German title -> filmpalast picker
+  const [german, setGerman] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filmResults, setFilmResults] = useState<SearchResult[]>([]);
+  const [loadingFilm, setLoadingFilm] = useState(false);
+  const [busyUrl, setBusyUrl] = useState<string | null>(null);
+
   useEffect(() => {
     setLoading(true);
     api
@@ -87,31 +95,89 @@ export default function Discover() {
     [items, serverNames],
   );
 
-  async function enqueue() {
+  async function openItem(item: DiscoverItem) {
+    setSelected(item);
+    setGerman(null);
+    setFilmResults([]);
+    setSeason('1');
+    setEpisodes('');
+    if (item.kind !== 'movie') return;
+    // Movies: resolve the German title and search filmpalast so the user
+    // picks the actual source (instead of blind-queuing by English name).
+    setLoadingFilm(true);
+    try {
+      let name = item.name;
+      if (item.tvdb_id) {
+        const g = await api.discoverGerman(item.tvdb_id, item.kind);
+        if (g.german) {
+          name = g.german;
+          setGerman(g.german);
+        }
+      }
+      setSearchTerm(name);
+      const r = await api.search(name, 'movie');
+      setFilmResults(r.results);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setLoadingFilm(false);
+    }
+  }
+
+  async function reSearchMovie() {
+    if (!searchTerm.trim()) return;
+    setLoadingFilm(true);
+    try {
+      const r = await api.search(searchTerm.trim(), 'movie');
+      setFilmResults(r.results);
+      if (r.results.length === 0) toast.info('No filmpalast match for that term');
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setLoadingFilm(false);
+    }
+  }
+
+  async function queueMovie(r: SearchResult) {
+    if (!selected) return;
+    setBusyUrl(r.url);
+    try {
+      await api.queueMovie({
+        title: selected.name,
+        german: german ?? undefined,
+        url: r.url,
+        site: r.site,
+      });
+      toast.success(`Queued ${selected.name}`);
+      setSelected(null);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setBusyUrl(null);
+    }
+  }
+
+  async function enqueueShow() {
     if (!selected) return;
     setBusy(true);
     try {
-      if (selected.kind === 'movie') {
-        await api.queueMovie({ title: selected.name });
-      } else {
-        const eps = episodes
-          .split(',')
-          .flatMap((p) => {
-            const m = p.trim().match(/^(\d+)\s*-\s*(\d+)$/);
-            if (m) {
-              const out = [];
-              for (let i = +m[1]; i <= +m[2]; i++) out.push(i);
-              return out;
-            }
-            return p.trim() ? [Number(p.trim())] : [];
-          })
-          .filter((n) => !Number.isNaN(n));
-        await api.queueShow({
-          show: selected.name,
-          season: Number(season) || 1,
-          episodes: eps.length ? eps : undefined,
-        });
-      }
+      const eps = episodes
+        .split(',')
+        .flatMap((p) => {
+          const m = p.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+          if (m) {
+            const out = [];
+            for (let i = +m[1]; i <= +m[2]; i++) out.push(i);
+            return out;
+          }
+          return p.trim() ? [Number(p.trim())] : [];
+        })
+        .filter((n) => !Number.isNaN(n));
+      await api.queueShow({
+        show: selected.name,
+        season: Number(season) || 1,
+        episodes: eps.length ? eps : undefined,
+      });
       toast.success(`Queued ${selected.name}`);
       setSelected(null);
       setEpisodes('');
@@ -155,7 +221,7 @@ export default function Discover() {
           ) : (
             <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8'>
               {visibleItems.map((it) => (
-                <Poster key={`${it.kind}-${it.tvdb_id}-${it.name}`} item={it} onClick={() => setSelected(it)} />
+                <Poster key={`${it.kind}-${it.tvdb_id}-${it.name}`} item={it} onClick={() => openItem(it)} />
               ))}
             </div>
           )}
@@ -163,33 +229,90 @@ export default function Discover() {
       </Tabs>
 
       <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
-        <DialogContent>
+        <DialogContent className={selected?.kind === 'movie' ? 'max-w-2xl' : undefined}>
           <DialogHeader>
-            <DialogTitle>{selected?.name}</DialogTitle>
+            <DialogTitle className='flex items-center gap-2'>
+              {selected?.name}
+              {german && german !== selected?.name && <Badge variant='accent'>DE: {german}</Badge>}
+            </DialogTitle>
             <DialogDescription>
-              {selected?.kind === 'movie' ? 'Queue this movie for download and German dubbing.' : 'Pick a season and optional episode list to queue.'}
+              {selected?.kind === 'movie'
+                ? loadingFilm
+                  ? 'Searching filmpalast…'
+                  : 'Pick the matching filmpalast entry to queue.'
+                : 'Pick a season and optional episode list to queue.'}
             </DialogDescription>
           </DialogHeader>
 
-          {selected?.kind === 'show' && (
-            <div className='grid grid-cols-2 gap-3'>
-              <div className='space-y-1'>
-                <label className='text-xs text-muted-foreground'>Season</label>
-                <Input value={season} onChange={(e) => setSeason(e.target.value)} type='number' min={1} />
+          {selected?.kind === 'show' ? (
+            <>
+              <div className='grid grid-cols-2 gap-3'>
+                <div className='space-y-1'>
+                  <label className='text-xs text-muted-foreground'>Season</label>
+                  <Input value={season} onChange={(e) => setSeason(e.target.value)} type='number' min={1} />
+                </div>
+                <div className='space-y-1'>
+                  <label className='text-xs text-muted-foreground'>Episodes (e.g. 1-9 or blank=all)</label>
+                  <Input value={episodes} onChange={(e) => setEpisodes(e.target.value)} placeholder='all' />
+                </div>
               </div>
+              <DialogFooter>
+                <Button onClick={enqueueShow} disabled={busy}>
+                  {busy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
+                  Queue
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <div className='space-y-3'>
               <div className='space-y-1'>
-                <label className='text-xs text-muted-foreground'>Episodes (e.g. 1-9 or blank=all)</label>
-                <Input value={episodes} onChange={(e) => setEpisodes(e.target.value)} placeholder='all' />
+                <label className='text-xs text-muted-foreground'>filmpalast search term</label>
+                <div className='flex gap-2'>
+                  <Input
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && reSearchMovie()}
+                    placeholder='Edit the search term…'
+                    className='flex-1'
+                  />
+                  <Button variant='secondary' onClick={reSearchMovie} disabled={loadingFilm || !searchTerm.trim()}>
+                    {loadingFilm ? <Loader2 className='h-4 w-4 animate-spin' /> : <SearchIcon className='h-4 w-4' />}
+                    Search
+                  </Button>
+                </div>
               </div>
+
+              {loadingFilm ? (
+                <div className='space-y-2'>
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <Skeleton key={i} className='h-14' />
+                  ))}
+                </div>
+              ) : filmResults.length === 0 ? (
+                <EmptyState icon={SearchIcon} title='No filmpalast match' description='Try editing the search term above.' />
+              ) : (
+                <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
+                  {filmResults.map((r) => (
+                    <div key={`${r.site}-${r.url}`} className='flex items-center justify-between gap-3 rounded-lg p-3 ring-1 ring-border/50'>
+                      <div className='min-w-0'>
+                        <div className='flex items-center gap-2'>
+                          <span className='truncate font-medium'>{r.title}</span>
+                          {r.year && <span className='text-xs text-muted-foreground'>{r.year}</span>}
+                        </div>
+                        <Badge variant='muted' className='mt-1'>
+                          {r.site}
+                        </Badge>
+                      </div>
+                      <Button size='sm' onClick={() => queueMovie(r)} disabled={busyUrl === r.url}>
+                        {busyUrl === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
+                        Queue
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
-
-          <DialogFooter>
-            <Button onClick={enqueue} disabled={busy}>
-              {busy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
-              Queue
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
