@@ -157,6 +157,29 @@ async def test_filmpalast_search_falls_back_to_shorter_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filmpalast_resolve_prefers_supported_hoster() -> None:
+    """A page may list several mirrors; veev.to defeats yt-dlp and playwright,
+    so we must pick the supported voe.sx mirror instead (the Arcane S02 case)."""
+    page = """
+    <a class="button iconPlay" href="https://veev.to/e/abc">veev</a>
+    <a href="https://voe.sx/d6b91t8" class="button iconPlay">voe</a>
+    <a class="button iconPlay" href="https://vinovo.to/d/x2g">vinovo</a>
+    """
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text=page)),
+    )
+    try:
+        handle = await backend.resolve_stream("http://example.invalid/stream/arcane-s02e01")
+    finally:
+        await backend.aclose()
+    assert handle.url == "https://voe.sx/d6b91t8"
+    assert handle.hint == "ytdlp"
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_resolve_returns_ytdlp_handle() -> None:
     backend = FilmpalastBackend(base_url="http://example.invalid")
     await backend._client.aclose()

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from typing import ClassVar
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from selectolax.parser import HTMLParser
 
@@ -241,13 +241,18 @@ class FilmpalastBackend:
         r"""<a[^>]+class=["'][^"']*iconPlay[^"']*["'][^>]+href=["']([^"']+)["']""",
         re.I,
     )
+    # Any <a ...> tag that carries the iconPlay class, in either attribute order.
+    _HOSTER_ANCHOR_RE = re.compile(r"<a\b[^>]*iconPlay[^>]*>", re.I)
+    _HREF_RE = re.compile(r"""href=["']([^"']+)["']""", re.I)
 
     async def resolve_stream(self, url: str) -> StreamHandle:
         """Scrape the detail page for the hoster URL (Voe / Streamtape / \u2026).
 
         Filmpalast itself is just a wrapper; the actual playable URL lives in
-        an ``<a class="button iconPlay" href="https://voe.sx/\u2026">`` tag. yt-dlp
-        understands those hosters directly, so we return the hoster URL.
+        ``<a class="button iconPlay" href="https://voe.sx/\u2026">`` tags. A page
+        often lists several mirrors (e.g. voe.sx, veev.to, vinovo.to); we pick
+        the one most likely to extract cleanly, since hosters like veev.to are
+        not supported by yt-dlp and defeat the playwright fallback too.
         """
         try:
             resp = await self._client.get(url)
@@ -256,12 +261,54 @@ class FilmpalastBackend:
             return StreamHandle(site=self.site_id, url=url, hint="playwright")
         if resp.status_code != 200:
             return StreamHandle(site=self.site_id, url=url, hint="playwright")
-        m = self._HOSTER_RE.search(resp.text)
-        if not m:
+        hosters = self._extract_hosters(resp.text)
+        if not hosters:
             return StreamHandle(site=self.site_id, url=url, hint="playwright")
-        hoster = m.group(1).strip()
-        log.info("[filmpalast] resolved hoster: %s", hoster)
+        hoster = min(hosters, key=_hoster_rank)
+        log.info("[filmpalast] resolved hoster: %s (from %d mirror(s))", hoster, len(hosters))
         return StreamHandle(site=self.site_id, url=hoster, hint="ytdlp")
+
+    def _extract_hosters(self, html: str) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for tag in self._HOSTER_ANCHOR_RE.findall(html):
+            m = self._HREF_RE.search(tag)
+            if not m:
+                continue
+            href = m.group(1).strip()
+            if href.startswith("http") and href not in seen:
+                seen.add(href)
+                out.append(href)
+        return out
+
+
+# Hosters ranked by how reliably the extractor (yt-dlp, then playwright)
+# can pull a media URL. Lower score = preferred. Anything unlisted sits in
+# the middle; known-bad hosts (veev.to defeats both yt-dlp and playwright)
+# are pushed to the back.
+_HOSTER_PREFERRED = (
+    "voe.sx",
+    "voe",
+    "streamtape",
+    "dood",
+    "mixdrop",
+    "vidoza",
+    "upstream",
+    "filemoon",
+    "supervideo",
+    "vinovo",
+)
+_HOSTER_AVOID = ("veev.to", "veev")
+
+
+def _hoster_rank(url: str) -> int:
+    host = urlparse(url).netloc.lower()
+    for i, key in enumerate(_HOSTER_PREFERRED):
+        if key in host:
+            return i
+    if any(bad in host for bad in _HOSTER_AVOID):
+        return 900
+    return 500
 
 
 def _query_variants(query: str) -> list[str]:
