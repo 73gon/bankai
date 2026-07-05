@@ -22,6 +22,7 @@ from bankai.queue.models import MediaKind
 from bankai.web import discover as discover_mod
 from bankai.web import jobs as webjobs
 from bankai.web import media as media_mod
+from bankai.web import posters as posters_mod
 from bankai.web import review as review_mod
 
 log = get_logger(__name__)
@@ -38,6 +39,25 @@ def _norm_title(s: str) -> str:
     s = re.sub(r"\b(19|20)\d{2}\b", "", s)  # bare year
     s = re.sub(r"[^a-z0-9]+", "", s)  # punctuation / whitespace
     return s
+
+
+def _extract_year(s: str) -> int | None:
+    """Pull a 4-digit year out of a title/filename, if present."""
+    m = re.search(r"\((\d{4})\)", s) or re.search(r"\b(19|20)\d{2}\b", s)
+    if not m:
+        return None
+    try:
+        return int(m.group(0).strip("()"))
+    except ValueError:
+        return None
+
+
+def _clean_title(s: str) -> str:
+    """Human title without the file extension, ``(year)`` or release cruft."""
+    s = re.sub(r"\.[a-z0-9]{2,4}$", "", s, flags=re.I)  # extension
+    s = re.sub(r"\s*\(\d{4}\)\s*", " ", s)  # (2016)
+    s = re.sub(r"\s*\((?:unknown)\)\s*", " ", s, flags=re.I)
+    return s.strip()
 
 
 def _job_priority(job: dict) -> tuple[int, float]:
@@ -395,6 +415,14 @@ def create_app() -> Any:
         entries = media_mod.scan_library()
         transfers = webjobs.transfer_states()
         jobs = webjobs.snapshot()  # already excludes transfer jobs
+        # Map normalised title -> newest job, so a finished library row can
+        # still surface its download log (expandable row) and be re-run.
+        job_by_norm: dict[str, dict] = {}
+        for j in jobs:
+            nt = _norm_title(j.get("title", ""))
+            cur = job_by_norm.get(nt)
+            if cur is None or (j.get("started_at") or 0) >= (cur.get("started_at") or 0):
+                job_by_norm[nt] = j
         rows: list[dict] = []
         lib_paths: set[str] = set()
         lib_norms: set[str] = set()
@@ -408,13 +436,25 @@ def create_app() -> Any:
             if tinfo and tinfo["status"] != state.transfer_status:
                 state = review_mod.set_transfer(e.path, tinfo["status"], percent=tinfo.get("percent"))
             lib_paths.add(rp)
-            lib_norms.add(_norm_title(e.name))
+            norm = _norm_title(e.name)
+            lib_norms.add(norm)
+            clean = _clean_title(e.name)
+            poster_key = ("show:" if e.kind == "episode" else "movie:") + (
+                _norm_title(e.series or clean) if e.kind == "episode" else norm
+            )
+            posters_mod.ensure(
+                poster_key, e.series or clean, "series" if e.kind == "episode" else "movie"
+            )
+            related = job_by_norm.get(norm)
             rows.append(
                 {
                     "row_kind": "library",
                     "id": e.path,
-                    "title": e.name,
+                    "title": clean,
                     "kind": e.kind,
+                    "year": _extract_year(e.name),
+                    "poster": posters_mod.cached(poster_key),
+                    "done_at": e.mtime,
                     "path": e.path,
                     "rel_path": e.rel_path,
                     "name": e.name,
@@ -433,7 +473,7 @@ def create_app() -> Any:
                         if tinfo
                         else state.transfer_percent
                     ),
-                    "job_id": None,
+                    "job_id": related["id"] if related else None,
                     "job_status": None,
                     "step_label": None,
                     "overall_percent": None,
@@ -460,12 +500,19 @@ def create_app() -> Any:
             if cur is None or _job_priority(j) >= _job_priority(cur):
                 best_by_norm[nt] = j
         for j in best_by_norm.values():
+            clean = _clean_title(j.get("title", ""))
+            is_ep = j.get("kind") == "show"
+            poster_key = ("show:" if is_ep else "movie:") + _norm_title(clean)
+            posters_mod.ensure(poster_key, clean, "series" if is_ep else "movie")
             rows.append(
                 {
                     "row_kind": "job",
                     "id": j["id"],
-                    "title": j.get("title", ""),
-                    "kind": "episode" if j.get("kind") == "show" else "movie",
+                    "title": clean,
+                    "kind": "episode" if is_ep else "movie",
+                    "year": _extract_year(j.get("title", "")),
+                    "poster": posters_mod.cached(poster_key),
+                    "done_at": j.get("finished_at") or j.get("started_at"),
                     "path": None,
                     "rel_path": None,
                     "name": j.get("title", ""),
@@ -489,6 +536,31 @@ def create_app() -> Any:
                 }
             )
         return {"rows": rows, "library": str(get_settings().output.directory)}
+
+    @app.post("/api/titles/redo")
+    def titles_redo(req: PathRequest) -> dict:
+        """Re-run the pipeline for a title, reusing its original source args.
+
+        ``req.path`` may be a library file path OR a plain title. We find the
+        most recent movie/show job with a matching normalised title and
+        re-enqueue its exact args (same german title + hoster URL).
+        """
+        from bankai.cli import bgjobs
+
+        raw = req.path
+        want = _norm_title(Path(raw).name if ("/" in raw or "\\" in raw) else raw)
+        best = None
+        for j in bgjobs.list_jobs():
+            if j.kind not in ("movie", "show"):
+                continue
+            if _norm_title(j.title) != want:
+                continue
+            if best is None or (j.started_at or 0) >= (best.started_at or 0):
+                best = j
+        if best is None or not best.args:
+            raise HTTPException(status_code=404, detail="no previous run found to redo")
+        job = webjobs.enqueue(kind=best.kind, title=best.title, args=list(best.args))
+        return {"redo": job, "title": best.title}
 
     @app.get("/api/media/info")
     def media_info(path: str = Query(...)) -> dict:

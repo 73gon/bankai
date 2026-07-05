@@ -99,6 +99,9 @@ export interface TitleRow {
   id: string;
   title: string;
   kind: string;
+  year: number | null;
+  poster: string | null;
+  done_at: number | null;
   path: string | null;
   rel_path: string | null;
   name: string;
@@ -202,6 +205,11 @@ export const api = {
 
   library: () => request<{ entries: LibraryEntry[]; library: string }>('/api/library'),
   titles: () => request<{ rows: TitleRow[]; library: string }>('/api/titles'),
+  redoTitle: (path: string) =>
+    request<{ redo: any; title: string }>('/api/titles/redo', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
   mediaInfo: (path: string) => request<MediaInfo>(`/api/media/info?path=${encodeURIComponent(path)}`),
   deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,

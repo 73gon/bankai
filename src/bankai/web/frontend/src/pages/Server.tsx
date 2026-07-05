@@ -240,7 +240,7 @@ export default function Server() {
           <p className='text-sm text-muted-foreground'>What already lives on the media server.</p>
         </div>
         <div className='flex gap-2'>
-          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Filter…' className='w-48' />
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Search titles…' className='w-64' />
           <Button variant='secondary' onClick={() => load(true)} disabled={rescanning}>
             {rescanning ? <Loader2 className='h-4 w-4 animate-spin' /> : <RefreshCw className='h-4 w-4' />}
             Rescan

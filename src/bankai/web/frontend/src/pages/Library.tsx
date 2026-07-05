@@ -15,6 +15,12 @@ import {
   Clock,
   AlertCircle,
   X,
+  RefreshCw,
+  Film,
+  ChevronUp,
+  ChevronDown,
+  ChevronRight,
+  ChevronsUpDown,
   Languages,
   AudioLines,
 } from 'lucide-react';
@@ -28,10 +34,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { formatBytes, timeAgo } from '@/lib/utils';
+import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
-
-type SortKey = 'name' | 'date' | 'size' | 'status';
 
 function stageBadge(stage: string | null) {
   switch (stage) {
@@ -97,44 +101,61 @@ function statusRank(r: TitleRow): number {
   return 6; // transferred
 }
 
-type FilterKey = 'all' | 'active' | 'review' | 'approved' | 'transferred' | 'failed';
+type FilterKey = 'active' | 'review' | 'approved' | 'done' | 'failed';
 
 const FILTERS: { key: FilterKey; label: string }[] = [
-  { key: 'all', label: 'All' },
   { key: 'active', label: 'Downloading' },
   { key: 'review', label: 'Review' },
   { key: 'approved', label: 'Approved' },
-  { key: 'transferred', label: 'On server' },
+  { key: 'done', label: 'Done' },
   { key: 'failed', label: 'Failed' },
 ];
-
-const PAGE_SIZE = 12;
 
 function rowCategory(r: TitleRow): FilterKey {
   if (r.row_kind === 'job') {
     if (r.pending || r.job_status === 'running') return 'active';
     if (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled')
       return 'failed';
-    return 'transferred'; // finished job with no local file (already on server)
+    return 'done'; // finished job with no local file (already on server)
   }
   if (r.transfer_status === 'transferring') return 'approved';
-  if (r.stage === 'transferred' || r.transfer_status === 'done') return 'transferred';
+  if (r.stage === 'transferred' || r.transfer_status === 'done') return 'done';
   if (r.stage === 'approved') return 'approved';
   return 'review';
+}
+
+type SortCol = 'title' | 'type' | 'status' | 'when';
+
+function whenLabel(ts: number | null): string {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return (
+    d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+    ', ' +
+    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  );
+}
+
+function titleWithYear(r: TitleRow): string {
+  return r.year ? `${r.title} (${r.year})` : r.title;
 }
 
 export default function Library() {
   const [rows, setRows] = useState<TitleRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sort, setSort] = useState<SortKey>('status');
   const [filter, setFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState<FilterKey>('all');
+  const [statusFilters, setStatusFilters] = useState<Set<FilterKey>>(new Set());
+  const [sortCol, setSortCol] = useState<SortCol>('when');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(10);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  const [redoing, setRedoing] = useState<Set<string>>(new Set());
 
   const [review, setReview] = useState<TitleRow | null>(null);
   const [del, setDel] = useState<TitleRow | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [batchBusy, setBatchBusy] = useState(false);
+  const tableWrapRef = useRef<HTMLDivElement>(null);
 
   async function load(silent = false) {
     if (!silent) setLoading(true);
@@ -149,32 +170,38 @@ export default function Library() {
   }
   useEffect(() => {
     load();
-    // Poll quietly so download progress + transfer column update live.
     const t = setInterval(() => load(true), 3000);
     return () => clearInterval(t);
   }, []);
 
-  const filtered = useMemo(() => {
-    const list = rows.filter(
-      (e) =>
-        e.title.toLowerCase().includes(filter.toLowerCase()) &&
-        (statusFilter === 'all' || rowCategory(e) === statusFilter),
-    );
-    list.sort((a, b) => {
-      if (sort === 'name') return a.title.localeCompare(b.title);
-      if (sort === 'size') return (b.size ?? 0) - (a.size ?? 0);
-      if (sort === 'status') {
-        const d = statusRank(a) - statusRank(b);
-        return d !== 0 ? d : (b.mtime ?? 0) - (a.mtime ?? 0);
-      }
-      return (b.mtime ?? 0) - (a.mtime ?? 0);
-    });
-    return list;
-  }, [rows, filter, sort, statusFilter]);
+  // Size the page to however many rows fit the viewport (no window scroll).
+  useEffect(() => {
+    const el = tableWrapRef.current;
+    if (!el) return;
+    const compute = () => {
+      const rowH = 60;
+      const headH = 42;
+      const h = el.clientHeight - headH;
+      setPageSize(Math.max(4, Math.floor(h / rowH)));
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [loading]);
 
-  // Per-filter counts for the chip labels.
+  function typeLabel(r: TitleRow): string {
+    if (r.kind === 'episode') {
+      const parts: string[] = [];
+      if (r.series) parts.push(r.series);
+      if (r.season != null) parts.push(`S${String(r.season).padStart(2, '0')}`);
+      return parts.length ? parts.join(' · ') : 'Episode';
+    }
+    return 'Movie';
+  }
+
   const counts = useMemo(() => {
-    const c: Record<string, number> = { all: rows.length };
+    const c: Record<string, number> = {};
     for (const r of rows) {
       const k = rowCategory(r);
       c[k] = (c[k] ?? 0) + 1;
@@ -182,87 +209,62 @@ export default function Library() {
     return c;
   }, [rows]);
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const filtered = useMemo(() => {
+    const list = rows.filter(
+      (e) =>
+        titleWithYear(e).toLowerCase().includes(filter.toLowerCase()) &&
+        (statusFilters.size === 0 || statusFilters.has(rowCategory(e))),
+    );
+    const dir = sortDir === 'asc' ? 1 : -1;
+    list.sort((a, b) => {
+      let d = 0;
+      if (sortCol === 'title') d = a.title.localeCompare(b.title);
+      else if (sortCol === 'type') d = typeLabel(a).localeCompare(typeLabel(b));
+      else if (sortCol === 'status') d = statusRank(a) - statusRank(b);
+      else d = (a.done_at ?? 0) - (b.done_at ?? 0);
+      if (d === 0) d = (a.done_at ?? 0) - (b.done_at ?? 0);
+      return d * dir;
+    });
+    return list;
+  }, [rows, filter, statusFilters, sortCol, sortDir]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = useMemo(
-    () => filtered.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE),
-    [filtered, safePage],
+    () => filtered.slice(safePage * pageSize, safePage * pageSize + pageSize),
+    [filtered, safePage, pageSize],
   );
-
-  // Reset to the first page whenever the view changes.
   useEffect(() => {
     setPage(0);
-  }, [filter, statusFilter, sort]);
+  }, [filter, statusFilters, sortCol, sortDir, pageSize]);
 
-  function toggleSelect(path: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
+  function toggleFilter(k: FilterKey) {
+    setStatusFilters((prev) => {
+      const n = new Set(prev);
+      n.has(k) ? n.delete(k) : n.add(k);
+      return n;
     });
   }
 
-  const selectableEntries = useMemo(
-    () =>
-      filtered.filter(
-        (e) => e.row_kind === 'library' && (e.stage === 'review' || e.stage === 'approved'),
-      ),
-    [filtered],
-  );
-  const approvedCount = useMemo(
-    () => rows.filter((e) => e.row_kind === 'library' && e.stage === 'approved').length,
-    [rows],
-  );
-  const selectedList = useMemo(
-    () => filtered.filter((e) => e.path && selected.has(e.path)),
-    [filtered, selected],
-  );
-  const allSelected =
-    selectableEntries.length > 0 && selectableEntries.every((e) => selected.has(e.path!));
-
-  function toggleSelectAll() {
-    setSelected((prev) => {
-      if (selectableEntries.every((e) => prev.has(e.path!))) return new Set();
-      return new Set(selectableEntries.map((e) => e.path!));
-    });
-  }
-
-  async function approveSelected() {
-    const paths = selectedList.filter((e) => e.stage !== 'transferred').map((e) => e.path!);
-    if (paths.length === 0) {
-      toast.error('Nothing selected to approve');
-      return;
-    }
-    setBatchBusy(true);
-    try {
-      const r = await api.approveBatch(paths);
-      toast.success(`Approved ${r.count} title${r.count === 1 ? '' : 's'}`);
-      setSelected(new Set());
-      load();
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setBatchBusy(false);
+  function sortBy(col: SortCol) {
+    if (sortCol === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else {
+      setSortCol(col);
+      setSortDir(col === 'title' || col === 'type' ? 'asc' : 'desc');
     }
   }
 
-  async function sendApprovedToServer() {
-    setBatchBusy(true);
-    try {
-      const paths = selectedList.filter((e) => e.stage === 'approved').map((e) => e.path!);
-      const r = await api.transferBatch(paths);
-      if (r.count === 0) {
-        toast.error('No approved titles to send');
-      } else {
-        toast.success(`Sending ${r.count} title${r.count === 1 ? '' : 's'} to the server`);
+  async function toggleExpand(r: TitleRow) {
+    const next = expanded === r.id ? null : r.id;
+    setExpanded(next);
+    if (next && r.job_id && logs[r.job_id] === undefined) {
+      setLogs((l) => ({ ...l, [r.job_id!]: 'Loading logs…' }));
+      try {
+        const res = await api.jobLog(r.job_id);
+        setLogs((l) => ({ ...l, [r.job_id!]: res.log || '(no log output)' }));
+      } catch (e: any) {
+        setLogs((l) => ({ ...l, [r.job_id!]: `Failed to load log: ${e.message}` }));
       }
-      setSelected(new Set());
-      load();
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setBatchBusy(false);
     }
   }
 
@@ -293,6 +295,24 @@ export default function Library() {
       load(true);
     } catch (e: any) {
       toast.error(e.message);
+    }
+  }
+
+  async function redo(r: TitleRow) {
+    const key = r.path || r.title;
+    setRedoing((s) => new Set(s).add(r.id));
+    try {
+      const res = await api.redoTitle(key);
+      toast.success(`Re-running ${res.title}`);
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setRedoing((s) => {
+        const n = new Set(s);
+        n.delete(r.id);
+        return n;
+      });
     }
   }
 
@@ -334,8 +354,8 @@ export default function Library() {
     }
     if (st === 'done' || r.stage === 'transferred') {
       return (
-        <Badge variant='success' className='gap-1.5' title='On the media server'>
-          <CheckCircle2 className='h-3 w-3' /> On server
+        <Badge variant='success' className='gap-1.5' title='Transferred to the media server'>
+          <CheckCircle2 className='h-3 w-3' /> Done
         </Badge>
       );
     }
@@ -353,85 +373,147 @@ export default function Library() {
         </Button>
       );
     }
-    return <span className='text-xs text-muted-foreground'>Approve first</span>;
+    return <span className='text-xs text-muted-foreground'>—</span>;
   }
 
-  function typeLabel(r: TitleRow): string {
-    if (r.kind === 'episode') {
-      const parts: string[] = [];
-      if (r.series) parts.push(r.series);
-      if (r.season != null) parts.push(`S${String(r.season).padStart(2, '0')}`);
-      return parts.length ? parts.join(' · ') : 'Episode';
-    }
-    return 'Movie';
+  function Poster({ r }: { r: TitleRow }) {
+    if (r.poster)
+      return (
+        <img
+          src={r.poster}
+          alt=''
+          loading='lazy'
+          className='h-14 w-10 shrink-0 rounded object-cover'
+        />
+      );
+    return (
+      <div className='flex h-14 w-10 shrink-0 items-center justify-center rounded bg-secondary/60'>
+        {r.kind === 'episode' ? (
+          <LibraryIcon className='h-4 w-4 text-muted-foreground' />
+        ) : (
+          <Film className='h-4 w-4 text-muted-foreground' />
+        )}
+      </div>
+    );
   }
 
   function RowView({ r }: { r: TitleRow }) {
     const isLib = r.row_kind === 'library';
-    const selectable = isLib && (r.stage === 'review' || r.stage === 'approved');
     const isJob = r.row_kind === 'job';
     const canCancel = isJob && (r.pending || r.job_status === 'running');
     const canRetry = isJob && (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled');
+    const isOpen = expanded === r.id;
+    const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
-      <tr className='border-t border-border hover:bg-secondary/30'>
-        <td className='px-2 py-2 align-middle'>
-          <input
-            type='checkbox'
-            className='h-4 w-4 cursor-pointer accent-primary disabled:opacity-30'
-            checked={!!r.path && selected.has(r.path)}
-            disabled={!selectable}
-            onChange={() => r.path && toggleSelect(r.path)}
-            title={selectable ? 'Select' : 'Only approvable titles'}
-          />
-        </td>
-        <td className='max-w-[22rem] px-2 py-2 align-middle'>
-          <div className='truncate font-medium'>{r.title}</div>
-          <div className='text-xs text-muted-foreground'>
-            {isLib ? (
-              <>
-                {formatBytes(r.size ?? 0)}
-                {r.mtime ? <span> · {timeAgo(r.mtime)}</span> : null}
-              </>
+      <>
+        <tr
+          className='cursor-pointer border-t border-border hover:bg-secondary/30'
+          onClick={() => toggleExpand(r)}
+        >
+          <td className='px-2 py-2 align-middle'>
+            <Poster r={r} />
+          </td>
+          <td className='max-w-[24rem] px-2 py-2 align-middle'>
+            <div className='flex items-center gap-1.5'>
+              {isOpen ? (
+                <ChevronDown className='h-3.5 w-3.5 shrink-0 text-muted-foreground' />
+              ) : (
+                <ChevronRight className='h-3.5 w-3.5 shrink-0 text-muted-foreground' />
+              )}
+              <span className='truncate font-medium'>{titleWithYear(r)}</span>
+            </div>
+            {isLib && r.size ? (
+              <div className='pl-5 text-xs text-muted-foreground'>{formatBytes(r.size)}</div>
+            ) : null}
+          </td>
+          <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>{typeLabel(r)}</td>
+          <td className='px-2 py-2 align-middle'>
+            <StatusCell r={r} />
+          </td>
+          <td className='px-2 py-2 align-middle'>
+            <SyncCell r={r} />
+          </td>
+          <td className='px-2 py-2 align-middle'>
+            <TransferCell r={r} />
+          </td>
+          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>
+            {whenLabel(r.done_at)}
+          </td>
+          <td className='px-2 py-2 align-middle' onClick={stop}>
+            <div className='flex items-center justify-end gap-1'>
+              {isLib && (
+                <Button size='sm' variant='secondary' onClick={() => setReview(r)}>
+                  <Play className='h-4 w-4' /> Review
+                </Button>
+              )}
+              <Button
+                size='icon'
+                variant='ghost'
+                onClick={() => redo(r)}
+                disabled={redoing.has(r.id)}
+                title='Redo — re-run the pipeline for this title'
+              >
+                {redoing.has(r.id) ? (
+                  <Loader2 className='h-4 w-4 animate-spin' />
+                ) : (
+                  <RefreshCw className='h-4 w-4' />
+                )}
+              </Button>
+              {canCancel && (
+                <Button size='icon' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel'>
+                  <X className='h-4 w-4' />
+                </Button>
+              )}
+              {canRetry && (
+                <Button size='icon' variant='ghost' onClick={() => retryJob(r.job_id!)} title='Retry'>
+                  <RotateCcw className='h-4 w-4' />
+                </Button>
+              )}
+              {isLib && (
+                <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete'>
+                  <Trash2 className='h-4 w-4 text-red-400' />
+                </Button>
+              )}
+            </div>
+          </td>
+        </tr>
+        {isOpen && (
+          <tr className='border-t border-border bg-black/20'>
+            <td colSpan={8} className='px-3 py-2'>
+              {r.job_id ? (
+                <pre className='max-h-72 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-3 text-[11px] leading-relaxed text-muted-foreground'>
+                  {logs[r.job_id] ?? 'Loading logs…'}
+                </pre>
+              ) : (
+                <p className='text-xs text-muted-foreground'>No log available for this title.</p>
+              )}
+            </td>
+          </tr>
+        )}
+      </>
+    );
+  }
+
+  function SortHeader({ col, label, className }: { col: SortCol; label: string; className?: string }) {
+    const active = sortCol === col;
+    return (
+      <th className={cn('px-2 py-2 font-medium', className)}>
+        <button
+          onClick={() => sortBy(col)}
+          className='inline-flex items-center gap-1 hover:text-foreground'
+        >
+          {label}
+          {active ? (
+            sortDir === 'asc' ? (
+              <ChevronUp className='h-3 w-3' />
             ) : (
-              <span>{r.mtime ? timeAgo(r.mtime) : 'just now'}</span>
-            )}
-          </div>
-        </td>
-        <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>{typeLabel(r)}</td>
-        <td className='px-2 py-2 align-middle'>
-          <StatusCell r={r} />
-        </td>
-        <td className='px-2 py-2 align-middle'>
-          <SyncCell r={r} />
-        </td>
-        <td className='px-2 py-2 align-middle'>
-          <TransferCell r={r} />
-        </td>
-        <td className='px-2 py-2 align-middle'>
-          <div className='flex items-center justify-end gap-1.5'>
-            {isLib && (
-              <Button size='sm' variant='secondary' onClick={() => setReview(r)}>
-                <Play className='h-4 w-4' /> Review
-              </Button>
-            )}
-            {canCancel && (
-              <Button size='icon' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel'>
-                <X className='h-4 w-4' />
-              </Button>
-            )}
-            {canRetry && (
-              <Button size='icon' variant='ghost' onClick={() => retryJob(r.job_id!)} title='Retry'>
-                <RotateCcw className='h-4 w-4' />
-              </Button>
-            )}
-            {isLib && (
-              <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete'>
-                <Trash2 className='h-4 w-4 text-red-400' />
-              </Button>
-            )}
-          </div>
-        </td>
-      </tr>
+              <ChevronDown className='h-3 w-3' />
+            )
+          ) : (
+            <ChevronsUpDown className='h-3 w-3 opacity-40' />
+          )}
+        </button>
+      </th>
     );
   }
 
@@ -448,38 +530,25 @@ export default function Library() {
   }
 
   return (
-    <div className='space-y-6'>
+    <div className='flex h-[calc(100vh-3.5rem)] flex-col gap-4'>
       <header className='flex flex-wrap items-center justify-between gap-3'>
         <div>
-          <h1 className='text-2xl font-semibold'>Library</h1>
+          <h1 className='text-2xl font-semibold'>Queue</h1>
           <p className='text-sm text-muted-foreground'>
             Every title in one table — downloads, review, sync and transfer.
           </p>
         </div>
-        <div className='flex items-center gap-2'>
-          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Filter…' className='w-44' />
-          <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-            <SelectTrigger className='w-32'>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='status'>Status</SelectItem>
-              <SelectItem value='date'>Newest</SelectItem>
-              <SelectItem value='name'>Name</SelectItem>
-              <SelectItem value='size'>Size</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Search…' className='w-56' />
       </header>
 
       <div className='flex flex-wrap items-center gap-1.5'>
         {FILTERS.map((f) => (
           <button
             key={f.key}
-            onClick={() => setStatusFilter(f.key)}
+            onClick={() => toggleFilter(f.key)}
             className={cn(
               'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-              statusFilter === f.key
+              statusFilters.has(f.key)
                 ? 'border-primary bg-primary text-primary-foreground'
                 : 'border-border text-muted-foreground hover:bg-secondary hover:text-foreground',
             )}
@@ -488,35 +557,15 @@ export default function Library() {
             <span className='ml-1.5 opacity-70'>{counts[f.key] ?? 0}</span>
           </button>
         ))}
+        {statusFilters.size > 0 && (
+          <button
+            onClick={() => setStatusFilters(new Set())}
+            className='px-2 py-1 text-xs text-muted-foreground hover:text-foreground'
+          >
+            Clear
+          </button>
+        )}
       </div>
-
-      {!loading && filtered.length > 0 && (
-        <div className='flex flex-wrap items-center gap-3 rounded-md border bg-card/40 px-3 py-2'>
-          <label className='flex cursor-pointer items-center gap-2 text-sm'>
-            <input
-              type='checkbox'
-              className='h-4 w-4 cursor-pointer accent-primary'
-              checked={allSelected}
-              onChange={toggleSelectAll}
-              disabled={selectableEntries.length === 0}
-            />
-            Select all
-          </label>
-          <span className='text-xs text-muted-foreground'>
-            {selected.size} selected · {approvedCount} approved
-          </span>
-          <div className='ml-auto flex items-center gap-2'>
-            <Button size='sm' variant='secondary' onClick={approveSelected} disabled={batchBusy || selected.size === 0}>
-              {batchBusy ? <Loader2 className='h-4 w-4 animate-spin' /> : <CheckCircle2 className='h-4 w-4' />}
-              Approve selected
-            </Button>
-            <Button size='sm' onClick={sendApprovedToServer} disabled={batchBusy || approvedCount === 0}>
-              {batchBusy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Send className='h-4 w-4' />}
-              Send approved to server
-            </Button>
-          </div>
-        </div>
-      )}
 
       {loading ? (
         <div className='space-y-2'>
@@ -527,16 +576,17 @@ export default function Library() {
       ) : filtered.length === 0 ? (
         <EmptyState icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
       ) : (
-        <div className='overflow-x-auto rounded-lg border'>
+        <div ref={tableWrapRef} className='min-h-0 flex-1 overflow-auto rounded-lg border'>
           <table className='w-full text-sm'>
-            <thead className='bg-card/60 text-xs uppercase tracking-wide text-muted-foreground'>
+            <thead className='sticky top-0 z-10 bg-card text-left text-xs uppercase tracking-wide text-muted-foreground'>
               <tr>
-                <th className='w-8 px-2 py-2' />
-                <th className='px-2 py-2 text-left font-medium'>Title</th>
-                <th className='px-2 py-2 text-left font-medium'>Type</th>
-                <th className='px-2 py-2 text-left font-medium'>Status</th>
+                <th className='w-14 px-2 py-2' />
+                <SortHeader col='title' label='Title' className='text-left' />
+                <SortHeader col='type' label='Type' className='text-left' />
+                <SortHeader col='status' label='Status' className='text-left' />
                 <th className='px-2 py-2 text-left font-medium'>Sync</th>
                 <th className='px-2 py-2 text-left font-medium'>Transfer</th>
+                <SortHeader col='when' label='When' className='text-left' />
                 <th className='px-2 py-2 text-right font-medium'>Actions</th>
               </tr>
             </thead>
@@ -549,10 +599,10 @@ export default function Library() {
         </div>
       )}
 
-      {!loading && filtered.length > PAGE_SIZE && (
+      {!loading && filtered.length > pageSize && (
         <div className='flex items-center justify-between gap-3 text-sm'>
           <span className='text-xs text-muted-foreground'>
-            {safePage * PAGE_SIZE + 1}–{Math.min(filtered.length, (safePage + 1) * PAGE_SIZE)} of{' '}
+            {safePage * pageSize + 1}–{Math.min(filtered.length, (safePage + 1) * pageSize)} of{' '}
             {filtered.length}
           </span>
           <div className='flex items-center gap-2'>

@@ -10,7 +10,7 @@ import Settings from '@/pages/Settings';
 const NAV = [
   { to: '/', label: 'Discover', icon: Compass, end: true },
   { to: '/search', label: 'Search', icon: SearchIcon },
-  { to: '/library', label: 'Library', icon: LibraryIcon },
+  { to: '/library', label: 'Queue', icon: LibraryIcon },
   { to: '/server', label: 'Server', icon: ServerIcon },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
