@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from bankai import __version__
 from bankai.config import get_settings, reset_settings_cache
 from bankai.logging import get_logger
+from fastapi import HTTPException
 from bankai.queue.models import MediaKind
 from bankai.web import discover as discover_mod
 from bankai.web import jobs as webjobs
@@ -812,7 +813,7 @@ def create_app() -> Any:
                     ffmpeg, "-hide_banner", "-loglevel", "error",
                     "-ss", str(start), "-t", str(dur), "-i", str(p),
                     "-map", f"0:{stream}", "-ac", "2",
-                    "-c:a", "libmp3lame", "-b:a", "128k", "-y", str(out),
+                    "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "-y", str(out),
                 ],
                 timeout=120,
                 check=False,
@@ -851,7 +852,8 @@ def create_app() -> Any:
                     "-map", "0:v:0", "-an",
                     "-vf", f"scale=-2:{height}",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", str(out),
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                    "-f", "mp4", "-y", str(out),
                 ],
                 timeout=300,
                 check=False,
