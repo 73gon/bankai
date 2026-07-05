@@ -33,6 +33,35 @@ STATIC_DIR = Path(__file__).parent / "static"
 _WAVEFORM_CACHE: dict[tuple, dict] = {}
 
 
+def _clips_dir() -> Path:
+    from bankai.web.review import _state_root
+
+    d = _state_root() / "clips"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _cached_clip(key: str, ext: str, build) -> Path:
+    """Return a disk-cached media clip, building it once via ``build(tmp)``.
+
+    Clips (short audio/video windows for the review tool) are cached so
+    replaying/scrubbing a section is instant and doesn't re-transcode.
+    """
+    import hashlib
+
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    out = _clips_dir() / f"{h}.{ext}"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    tmp = out.with_name(out.name + ".tmp")
+    build(tmp)
+    if not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="clip build failed")
+    tmp.replace(out)
+    return out
+
+
 def _norm_title(s: str) -> str:
     """Loosely normalise a title/filename so a queue job and its finished
     library file collapse to the same key (one row per movie)."""
@@ -768,33 +797,69 @@ def create_app() -> Any:
         start: float = Query(0.0, ge=0.0),
         dur: float = Query(10.0, gt=0.0, le=120.0),
     ) -> Response:
-        """Stream a short MP3 clip of one audio track for A/B playback."""
+        """Return a short, disk-cached MP3 clip of one audio track (A/B play)."""
         import subprocess
 
         p = _safe_path(path)
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
-        cmd = [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            "-ss", str(start), "-t", str(dur), "-i", str(p),
-            "-map", f"0:{stream}", "-ac", "2",
-            "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "pipe:1",
-        ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        st = p.stat()
 
-        def stream_clip():
-            try:
-                assert proc.stdout is not None
-                while True:
-                    chunk = proc.stdout.read(1024 * 64)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                proc.kill()
+        def build(out: Path) -> None:
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-ss", str(start), "-t", str(dur), "-i", str(p),
+                    "-map", f"0:{stream}", "-ac", "2",
+                    "-c:a", "libmp3lame", "-b:a", "128k", "-y", str(out),
+                ],
+                timeout=120,
+                check=False,
+            )
 
-        return StreamingResponse(stream_clip(), media_type="audio/mpeg")
+        key = f"{p}|{st.st_mtime_ns}|aud|{stream}|{round(start, 2)}|{round(dur, 2)}"
+        clip = _cached_clip(key, "mp3", build)
+        return FileResponse(clip, media_type="audio/mpeg")
+
+    @app.get("/api/media/videoclip")
+    def media_videoclip(
+        path: str = Query(...),
+        start: float = Query(0.0, ge=0.0),
+        dur: float = Query(30.0, gt=0.0, le=120.0),
+        height: int = Query(480, ge=180, le=1080),
+    ) -> Response:
+        """Return a short, disk-cached H.264 video clip of the visible window.
+
+        Video-only (no audio — sound comes from the separate audio clips),
+        scaled down and fast-preset so it transcodes quickly and caches for
+        instant replay. This is the HQ English picture (the reference).
+        """
+        import subprocess
+
+        p = _safe_path(path)
+        ffmpeg = media_mod.ffmpeg_bin()
+        if ffmpeg is None:
+            raise HTTPException(status_code=501, detail="ffmpeg not available")
+        st = p.stat()
+
+        def build(out: Path) -> None:
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-ss", str(start), "-t", str(dur), "-i", str(p),
+                    "-map", "0:v:0", "-an",
+                    "-vf", f"scale=-2:{height}",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", str(out),
+                ],
+                timeout=300,
+                check=False,
+            )
+
+        key = f"{p}|{st.st_mtime_ns}|vid|{round(start, 2)}|{round(dur, 2)}|{height}"
+        clip = _cached_clip(key, "mp4", build)
+        return FileResponse(clip, media_type="video/mp4")
 
     # ------------------------------------------------------------------
     # Review / approval workflow

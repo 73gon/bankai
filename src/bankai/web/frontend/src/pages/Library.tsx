@@ -748,12 +748,13 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [engStream, setEngStream] = useState<number | null>(null);
   const [gerStream, setGerStream] = useState<number | null>(null);
   const [engPeaks, setEngPeaks] = useState<Uint8Array | null>(null);
-  const [gerPeaks, setGerPeaks] = useState<Uint8Array | null>(null);
-  const [fetchedDelay, setFetchedDelay] = useState(0);
+  // German is fetched as a WIDE buffer (track-time) so dragging the offset
+  // redraws instantly from memory (smooth grab-and-pan, no re-fetch mid-drag).
+  const [gerBuf, setGerBuf] = useState<{ peaks: Uint8Array; trackStart: number; dur: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [delayMs, setDelayMs] = useState(0);
   const [savedDelay, setSavedDelay] = useState(0);
-  const [windowSec, setWindowSec] = useState(20);
+  const [windowSec, setWindowSec] = useState(30);
   const [center, setCenter] = useState(60);
   const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
   const [busy, setBusy] = useState<string | null>(null);
@@ -766,6 +767,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const gerCanvas = useRef<HTMLCanvasElement>(null);
   const engAudio = useRef<HTMLAudioElement | null>(null);
   const gerAudio = useRef<HTMLAudioElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const dragRef = useRef<{ x: number; delay: number } | null>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -773,6 +775,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const duration = info?.duration ?? 0;
   const viewStart = Math.max(0, center - windowSec / 2);
   const pxPerSec = canvasW / windowSec;
+  const playDur = Math.min(windowSec, 30);
 
   function stopAll() {
     for (const r of [engAudio, gerAudio]) {
@@ -782,6 +785,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         r.current = null;
       }
     }
+    if (videoRef.current) videoRef.current.pause();
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -809,7 +813,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         const ei = e ? e.index : null;
         setGerStream(gi);
         setEngStream(ei);
-        setCenter(Math.min(120, (m.duration ?? 240) / 2));
+        // Open ~1/3 into the runtime — usually dialogue-heavy, easy to align.
+        setCenter(Math.max(60, (m.duration ?? 600) * 0.35));
       } catch (e: any) {
         if (!cancelled) toast.error(e.message);
       } finally {
@@ -828,8 +833,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const compute = () => {
       const el = wrapRef.current;
       if (el) setCanvasW(Math.max(320, el.clientWidth));
-      // Split the remaining viewport height between the two lanes.
-      setCanvasH(Math.max(120, Math.floor((window.innerHeight - 340) / 2)));
+      // Video takes the top ~45%; split the rest between the two lanes.
+      setCanvasH(Math.max(70, Math.floor((window.innerHeight - 560) / 2)));
     };
     compute();
     const el = wrapRef.current;
@@ -844,9 +849,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   // Windowed waveform fetch (debounced) — decode only the visible slice so it
   // stays fast on weak hardware. German is fetched already delay-shifted.
+  // English: fetch the visible window. German: fetch a WIDE track-time buffer
+  // (3× the view) so dragging the offset redraws from memory (smooth), and
+  // prefetch the video clip for this window. Never re-fetch mid-drag.
   useEffect(() => {
-    if (engStream == null && gerStream == null) return;
-    if (dragging) return; // don't re-fetch mid-drag — keep it smooth
+    if (dragging) return;
     const bins = Math.max(200, Math.round(canvasW));
     const t = setTimeout(async () => {
       try {
@@ -855,52 +862,95 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           setEngPeaks(decodePeaks(w.peaks));
         }
         if (gerStream != null) {
-          const gs = Math.max(0, viewStart - delayMs / 1000);
-          const w = await api.waveform(path, gerStream, gs, windowSec, bins);
-          setGerPeaks(decodePeaks(w.peaks));
-          setFetchedDelay(delayMs);
+          const trackStart = Math.max(0, viewStart - delayMs / 1000 - windowSec);
+          const bufDur = windowSec * 3;
+          const w = await api.waveform(path, gerStream, trackStart, bufDur, bins * 3);
+          setGerBuf({ peaks: decodePeaks(w.peaks), trackStart, dur: bufDur });
         }
       } catch {
         /* transient — ignore */
       }
-    }, 180);
+    }, 160);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, engStream, gerStream, viewStart, windowSec, delayMs, canvasW, dragging]);
+  }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging]);
 
-  function drawPeaks(canvas: HTMLCanvasElement | null, peaks: Uint8Array | null, color: string) {
+  // Prefetch the video clip whenever the view moves (browser + server cache it).
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.src = api.videoClipUrl(path, viewStart, playDur, 480);
+    v.load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, viewStart, windowSec]);
+
+  function drawGrid(ctx: CanvasRenderingContext2D, W: number, H: number) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    for (let s = Math.ceil(viewStart); s < viewStart + windowSec; s++) {
+      ctx.fillRect((s - viewStart) * pxPerSec, 0, 1, H);
+    }
+  }
+
+  function finishLane(ctx: CanvasRenderingContext2D, W: number, H: number) {
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(0, H / 2, W, 1);
+  }
+
+  function drawEng() {
+    const canvas = engCanvas.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const W = canvas.width;
     const H = canvas.height;
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    for (let s = Math.ceil(viewStart); s < viewStart + windowSec; s++) {
-      const x = (s - viewStart) * pxPerSec;
-      ctx.fillRect(x, 0, 1, H);
-    }
-    if (peaks && peaks.length) {
-      ctx.fillStyle = color;
-      const n = peaks.length;
+    drawGrid(ctx, W, H);
+    if (engPeaks && engPeaks.length) {
+      ctx.fillStyle = '#38bdf8';
+      const n = engPeaks.length;
       for (let x = 0; x < W; x++) {
-        const idx = Math.floor((x / W) * n);
-        const v = peaks[idx] || 0;
+        const v = engPeaks[Math.floor((x / W) * n)] || 0;
         const h = (v / 127) * (H / 2 - 2);
         ctx.fillRect(x, H / 2 - h, 1, h * 2);
       }
     }
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    ctx.fillRect(0, H / 2, W, 1);
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillRect(W / 2, 0, 1, H);
+    finishLane(ctx, W, H);
+  }
+
+  function drawGer() {
+    const canvas = gerCanvas.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    drawGrid(ctx, W, H);
+    if (gerBuf && gerBuf.peaks.length) {
+      ctx.fillStyle = '#f472b6';
+      const delaySec = delayMs / 1000;
+      const bn = gerBuf.peaks.length;
+      for (let x = 0; x < W; x++) {
+        const viewTime = viewStart + (x / W) * windowSec;
+        const trackTime = viewTime - delaySec;
+        const bi = Math.floor(((trackTime - gerBuf.trackStart) / gerBuf.dur) * bn);
+        const v = bi >= 0 && bi < bn ? gerBuf.peaks[bi] : 0;
+        const h = (v / 127) * (H / 2 - 2);
+        ctx.fillRect(x, H / 2 - h, 1, h * 2);
+      }
+    }
+    finishLane(ctx, W, H);
   }
 
   useEffect(() => {
-    drawPeaks(engCanvas.current, engPeaks, '#38bdf8');
-    drawPeaks(gerCanvas.current, gerPeaks, '#f472b6');
+    drawEng();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engPeaks, gerPeaks, canvasW, windowSec, center]);
+  }, [engPeaks, canvasW, canvasH, windowSec, center]);
+
+  // German redraws on every delay change too — that's the smooth drag.
+  useEffect(() => {
+    drawGer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gerBuf, delayMs, canvasW, canvasH, windowSec, center]);
 
   function onGerDown(e: React.MouseEvent) {
     dragRef.current = { x: e.clientX, delay: delayMs };
@@ -928,7 +978,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   function playSection(which: 'both' | 'eng' | 'ger') {
     stopAll();
-    const dur = Math.min(windowSec, 30);
+    const dur = playDur;
     if (which !== 'ger' && engStream != null) {
       const a = new Audio(api.audioClipUrl(path, engStream, viewStart, dur));
       a.onended = () => stopAll();
@@ -942,14 +992,23 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       gerAudio.current = a;
       a.play().catch(() => {});
     }
+    // The picture always follows the reference (English) timeline.
+    const v = videoRef.current;
+    if (v) {
+      try {
+        v.currentTime = 0;
+      } catch {
+        /* not seekable yet */
+      }
+      v.play().catch(() => {});
+    }
     setPlaying(which);
     // Animate the playhead across the window while it plays.
-    const primary = which === 'ger' ? gerAudio : engAudio;
     const tick = () => {
-      const a = primary.current;
+      const clock = videoRef.current ?? engAudio.current ?? gerAudio.current;
       const line = playheadRef.current;
-      if (a && line) {
-        const frac = Math.min(1, a.currentTime / windowSec);
+      if (clock && line) {
+        const frac = Math.min(1, clock.currentTime / dur);
         line.style.opacity = '1';
         line.style.transform = `translateX(${frac * canvasW}px)`;
       }
@@ -1001,38 +1060,46 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         </div>
       </div>
 
-      <div className='flex flex-1 flex-col overflow-hidden p-4 md:p-6'>
+      <div className='flex flex-1 flex-col overflow-hidden px-1 py-2'>
         {loading ? (
-          <div className='space-y-3'>
-            <Skeleton className='h-24 w-full' />
+          <div className='space-y-3 p-3'>
+            <Skeleton className='h-40 w-full' />
             <Skeleton className='h-24 w-full' />
           </div>
         ) : (
-          <div className='flex min-h-0 flex-1 flex-col gap-3'>
-            <p className='text-xs text-muted-foreground'>
-              The English track (blue) is locked to the HQ picture. Drag the German track (pink) left/right
-              until the waveforms line up, or nudge in milliseconds. Play both to hear the match, then approve.
-            </p>
+          <div className='flex min-h-0 flex-1 flex-col gap-2'>
+            {/* Video preview — the English HQ picture for this window */}
+            <video
+              ref={videoRef}
+              muted
+              playsInline
+              preload='auto'
+              className='mx-auto max-h-[42vh] w-auto rounded-md bg-black'
+            />
 
             <div ref={wrapRef} className='relative flex min-h-0 flex-1 flex-col gap-1'>
-              <div className='flex items-center gap-2 text-xs text-sky-400'>
-                <Languages className='h-3.5 w-3.5' /> English (reference)
+              <div className='flex items-center justify-between px-1 text-xs'>
+                <span className='flex items-center gap-2 text-sky-400'>
+                  <Languages className='h-3.5 w-3.5' /> English (reference)
+                </span>
+                <span className='font-mono text-muted-foreground'>
+                  {fmtClock(viewStart)} – {fmtClock(viewStart + windowSec)}
+                </span>
               </div>
               <canvas ref={engCanvas} width={canvasW} height={canvasH} className='w-full rounded-md bg-black/40' />
-              <div className='flex items-center gap-2 text-xs text-pink-400'>
-                <AudioLines className='h-3.5 w-3.5' /> German (drag to align)
+              <div className='flex items-center gap-2 px-1 text-xs text-pink-400'>
+                <AudioLines className='h-3.5 w-3.5' /> German (grab &amp; drag to align)
               </div>
               <canvas
                 ref={gerCanvas}
                 width={canvasW}
                 height={canvasH}
                 onMouseDown={onGerDown}
-                style={{ transform: `translateX(${((delayMs - fetchedDelay) / 1000) * pxPerSec}px)` }}
                 className='w-full cursor-ew-resize rounded-md bg-black/40'
               />
               <div
                 ref={playheadRef}
-                className='pointer-events-none absolute top-0 bottom-0 left-0 w-0.5 bg-white/80'
+                className='pointer-events-none absolute inset-y-0 left-0 w-0.5 bg-white/80'
                 style={{ opacity: 0, transform: 'translateX(0px)' }}
               />
             </div>
