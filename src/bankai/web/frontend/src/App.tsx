@@ -1,9 +1,8 @@
-import { NavLink, Route, Routes } from 'react-router-dom';
-import { Compass, Search as SearchIcon, ListVideo, Library as LibraryIcon, Server as ServerIcon, Settings as SettingsIcon } from 'lucide-react';
+import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { Compass, Search as SearchIcon, Library as LibraryIcon, Server as ServerIcon, Settings as SettingsIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
-import Queue from '@/pages/Queue';
 import Library from '@/pages/Library';
 import Server from '@/pages/Server';
 import Settings from '@/pages/Settings';
@@ -11,7 +10,6 @@ import Settings from '@/pages/Settings';
 const NAV = [
   { to: '/', label: 'Discover', icon: Compass, end: true },
   { to: '/search', label: 'Search', icon: SearchIcon },
-  { to: '/queue', label: 'Queue', icon: ListVideo },
   { to: '/library', label: 'Library', icon: LibraryIcon },
   { to: '/server', label: 'Server', icon: ServerIcon },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -63,7 +61,7 @@ export default function App() {
           <Routes>
             <Route path='/' element={<Discover />} />
             <Route path='/search' element={<Search />} />
-            <Route path='/queue' element={<Queue />} />
+            <Route path='/queue' element={<Navigate to='/library' replace />} />
             <Route path='/library' element={<Library />} />
             <Route path='/server' element={<Server />} />
             <Route path='/settings' element={<Settings />} />

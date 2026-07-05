@@ -12,55 +12,106 @@ import {
   CheckCircle2,
   Send,
   UploadCloud,
+  Clock,
+  AlertCircle,
+  X,
   Languages,
   AudioLines,
-  ChevronDown,
-  ChevronRight,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type LibraryEntry, type MediaInfo } from '@/lib/api';
+import { api, type MediaInfo, type TitleRow } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Slider } from '@/components/ui/slider';
-import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { formatBytes, timeAgo } from '@/lib/utils';
 
-type SortKey = 'name' | 'date' | 'size';
+type SortKey = 'name' | 'date' | 'size' | 'status';
 
-function stageBadge(stage: string) {
+function stageBadge(stage: string | null) {
   switch (stage) {
     case 'approved':
       return <Badge variant='success'>Approved</Badge>;
     case 'transferred':
       return <Badge variant='accent'>Transferred</Badge>;
     case 'review':
-    default:
       return <Badge variant='warning'>Review</Badge>;
+    default:
+      return null;
   }
 }
 
-export default function Library() {
-  const [entries, setEntries] = useState<LibraryEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [sort, setSort] = useState<SortKey>('date');
-  const [filter, setFilter] = useState('');
-  const [openSeries, setOpenSeries] = useState<Record<string, boolean>>({});
+function StatusCell({ r }: { r: TitleRow }) {
+  if (r.row_kind === 'job') {
+    if (r.pending)
+      return (
+        <Badge variant='muted' className='gap-1.5'>
+          <Clock className='h-3 w-3' /> Queued
+        </Badge>
+      );
+    const s = r.job_status;
+    if (s === 'running') {
+      const pct = Math.round(r.overall_percent ?? 0);
+      return (
+        <div className='min-w-[10rem]'>
+          <Badge variant='accent' className='gap-1.5'>
+            <Loader2 className='h-3 w-3 animate-spin' />
+            {r.step_label || 'Working'} {pct > 0 ? `${pct}%` : ''}
+          </Badge>
+          <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
+            <div
+              className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500'
+              style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+            />
+          </div>
+        </div>
+      );
+    }
+    if (s === 'failed' || s === 'error')
+      return (
+        <Badge variant='destructive' className='gap-1.5'>
+          <AlertCircle className='h-3 w-3' /> Failed
+        </Badge>
+      );
+    if (s === 'cancelled') return <Badge variant='warning'>Cancelled</Badge>;
+    if (s === 'done' || s === 'success') return <Badge variant='success'>Done</Badge>;
+    return <Badge variant='muted'>{s}</Badge>;
+  }
+  return stageBadge(r.stage) ?? <Badge variant='muted'>Review</Badge>;
+}
 
-  const [review, setReview] = useState<LibraryEntry | null>(null);
-  const [del, setDel] = useState<LibraryEntry | null>(null);
+function statusRank(r: TitleRow): number {
+  if (r.row_kind === 'job') {
+    if (r.job_status === 'running') return 0;
+    if (r.pending) return 1;
+    if (r.job_status === 'failed' || r.job_status === 'error') return 2;
+    return 3;
+  }
+  if (r.stage === 'review') return 4;
+  if (r.stage === 'approved') return 5;
+  return 6; // transferred
+}
+
+export default function Library() {
+  const [rows, setRows] = useState<TitleRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sort, setSort] = useState<SortKey>('status');
+  const [filter, setFilter] = useState('');
+
+  const [review, setReview] = useState<TitleRow | null>(null);
+  const [del, setDel] = useState<TitleRow | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
 
   async function load(silent = false) {
     if (!silent) setLoading(true);
     try {
-      const r = await api.library();
-      setEntries(r.entries);
+      const r = await api.titles();
+      setRows(r.rows);
     } catch (e: any) {
       if (!silent) toast.error(e.message);
     } finally {
@@ -69,32 +120,24 @@ export default function Library() {
   }
   useEffect(() => {
     load();
-    // Poll quietly so the transfer column reflects live progress.
-    const t = setInterval(() => load(true), 4000);
+    // Poll quietly so download progress + transfer column update live.
+    const t = setInterval(() => load(true), 3000);
     return () => clearInterval(t);
   }, []);
 
   const filtered = useMemo(() => {
-    let list = entries.filter((e) => e.name.toLowerCase().includes(filter.toLowerCase()));
+    const list = rows.filter((e) => e.title.toLowerCase().includes(filter.toLowerCase()));
     list.sort((a, b) => {
-      if (sort === 'name') return a.name.localeCompare(b.name);
-      if (sort === 'size') return b.size - a.size;
-      return b.mtime - a.mtime;
+      if (sort === 'name') return a.title.localeCompare(b.title);
+      if (sort === 'size') return (b.size ?? 0) - (a.size ?? 0);
+      if (sort === 'status') {
+        const d = statusRank(a) - statusRank(b);
+        return d !== 0 ? d : (b.mtime ?? 0) - (a.mtime ?? 0);
+      }
+      return (b.mtime ?? 0) - (a.mtime ?? 0);
     });
     return list;
-  }, [entries, filter, sort]);
-
-  const movies = filtered.filter((e) => e.kind === 'movie');
-  const shows = filtered.filter((e) => e.kind === 'episode');
-  const seriesGroups = useMemo(() => {
-    const map = new Map<string, LibraryEntry[]>();
-    for (const e of shows) {
-      const k = e.series || 'Unknown';
-      if (!map.has(k)) map.set(k, []);
-      map.get(k)!.push(e);
-    }
-    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [shows]);
+  }, [rows, filter, sort]);
 
   function toggleSelect(path: string) {
     setSelected((prev) => {
@@ -106,22 +149,32 @@ export default function Library() {
   }
 
   const selectableEntries = useMemo(
-    () => filtered.filter((e) => e.stage === 'review' || e.stage === 'approved'),
+    () =>
+      filtered.filter(
+        (e) => e.row_kind === 'library' && (e.stage === 'review' || e.stage === 'approved'),
+      ),
     [filtered],
   );
-  const approvedCount = useMemo(() => entries.filter((e) => e.stage === 'approved').length, [entries]);
-  const selectedList = useMemo(() => filtered.filter((e) => selected.has(e.path)), [filtered, selected]);
-  const allSelected = selectableEntries.length > 0 && selectableEntries.every((e) => selected.has(e.path));
+  const approvedCount = useMemo(
+    () => rows.filter((e) => e.row_kind === 'library' && e.stage === 'approved').length,
+    [rows],
+  );
+  const selectedList = useMemo(
+    () => filtered.filter((e) => e.path && selected.has(e.path)),
+    [filtered, selected],
+  );
+  const allSelected =
+    selectableEntries.length > 0 && selectableEntries.every((e) => selected.has(e.path!));
 
   function toggleSelectAll() {
     setSelected((prev) => {
-      if (selectableEntries.every((e) => prev.has(e.path))) return new Set();
-      return new Set(selectableEntries.map((e) => e.path));
+      if (selectableEntries.every((e) => prev.has(e.path!))) return new Set();
+      return new Set(selectableEntries.map((e) => e.path!));
     });
   }
 
   async function approveSelected() {
-    const paths = selectedList.filter((e) => e.stage !== 'transferred').map((e) => e.path);
+    const paths = selectedList.filter((e) => e.stage !== 'transferred').map((e) => e.path!);
     if (paths.length === 0) {
       toast.error('Nothing selected to approve');
       return;
@@ -142,8 +195,7 @@ export default function Library() {
   async function sendApprovedToServer() {
     setBatchBusy(true);
     try {
-      // Send the explicitly selected approved items, or all approved when none selected.
-      const paths = selectedList.filter((e) => e.stage === 'approved').map((e) => e.path);
+      const paths = selectedList.filter((e) => e.stage === 'approved').map((e) => e.path!);
       const r = await api.transferBatch(paths);
       if (r.count === 0) {
         toast.error('No approved titles to send');
@@ -169,10 +221,55 @@ export default function Library() {
     }
   }
 
-  function TransferCell({ e }: { e: LibraryEntry }) {
-    const st = e.transfer_status;
+  async function cancelJob(id: string) {
+    try {
+      await api.cancelJob(id);
+      toast.success('Cancelled');
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
+  async function retryJob(id: string) {
+    try {
+      await api.retryJob(id);
+      toast.success('Retrying');
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
+  function SyncCell({ r }: { r: TitleRow }) {
+    if (r.row_kind !== 'library') return <span className='text-muted-foreground'>—</span>;
+    if (r.needs_sync_review)
+      return (
+        <Badge
+          variant='warning'
+          title={
+            'Automatic audio sync was low-confidence' +
+            (r.sync_confidence != null ? ` (${Math.round(r.sync_confidence * 100)}%)` : '') +
+            '. Open Review to check and nudge the German delay.'
+          }
+        >
+          Check sync
+        </Badge>
+      );
+    if (r.sync_confidence != null)
+      return (
+        <span className='text-xs text-muted-foreground' title='Automatic sync confidence'>
+          {Math.round(r.sync_confidence * 100)}%
+        </span>
+      );
+    return <span className='text-xs text-muted-foreground'>—</span>;
+  }
+
+  function TransferCell({ r }: { r: TitleRow }) {
+    if (r.row_kind !== 'library') return <span className='text-muted-foreground'>—</span>;
+    const st = r.transfer_status;
     if (st === 'transferring') {
-      const pct = Math.round(e.transfer_percent || 0);
+      const pct = Math.round(r.transfer_percent || 0);
       return (
         <Badge variant='accent' className='gap-1.5' title='Transfer in progress'>
           <Loader2 className='h-3 w-3 animate-spin' />
@@ -180,7 +277,7 @@ export default function Library() {
         </Badge>
       );
     }
-    if (st === 'done' || e.stage === 'transferred') {
+    if (st === 'done' || r.stage === 'transferred') {
       return (
         <Badge variant='success' className='gap-1.5' title='On the media server'>
           <CheckCircle2 className='h-3 w-3' /> On server
@@ -189,14 +286,14 @@ export default function Library() {
     }
     if (st === 'failed') {
       return (
-        <Button size='sm' variant='destructive' onClick={() => transferOne(e.path)} title='Retry transfer'>
+        <Button size='sm' variant='destructive' onClick={() => transferOne(r.path!)} title='Retry transfer'>
           <RotateCcw className='h-4 w-4' /> Retry
         </Button>
       );
     }
-    if (e.stage === 'approved') {
+    if (r.stage === 'approved') {
       return (
-        <Button size='sm' variant='secondary' onClick={() => transferOne(e.path)} title='Send to media server'>
+        <Button size='sm' variant='secondary' onClick={() => transferOne(r.path!)} title='Send to media server'>
           <UploadCloud className='h-4 w-4' /> Send
         </Button>
       );
@@ -204,57 +301,87 @@ export default function Library() {
     return <span className='text-xs text-muted-foreground'>Approve first</span>;
   }
 
-  function Row({ e }: { e: LibraryEntry }) {
-    const selectable = e.stage === 'review' || e.stage === 'approved';
+  function typeLabel(r: TitleRow): string {
+    if (r.kind === 'episode') {
+      const parts: string[] = [];
+      if (r.series) parts.push(r.series);
+      if (r.season != null) parts.push(`S${String(r.season).padStart(2, '0')}`);
+      return parts.length ? parts.join(' · ') : 'Episode';
+    }
+    return 'Movie';
+  }
+
+  function RowView({ r }: { r: TitleRow }) {
+    const isLib = r.row_kind === 'library';
+    const selectable = isLib && (r.stage === 'review' || r.stage === 'approved');
+    const isJob = r.row_kind === 'job';
+    const canCancel = isJob && (r.pending || r.job_status === 'running');
+    const canRetry = isJob && (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled');
     return (
-      <div className='flex items-center justify-between gap-3 rounded-md px-2 py-2 hover:bg-secondary/40'>
-        <div className='flex min-w-0 items-center gap-3'>
+      <tr className='border-t border-border hover:bg-secondary/30'>
+        <td className='px-2 py-2 align-middle'>
           <input
             type='checkbox'
-            className='h-4 w-4 shrink-0 cursor-pointer accent-primary disabled:opacity-30'
-            checked={selected.has(e.path)}
+            className='h-4 w-4 cursor-pointer accent-primary disabled:opacity-30'
+            checked={!!r.path && selected.has(r.path)}
             disabled={!selectable}
-            onChange={() => toggleSelect(e.path)}
-            title={selectable ? 'Select' : 'Already transferred'}
+            onChange={() => r.path && toggleSelect(r.path)}
+            title={selectable ? 'Select' : 'Only approvable titles'}
           />
-          <div className='min-w-0'>
-            <div className='truncate text-sm font-medium'>{e.name}</div>
-            <div className='flex items-center gap-2 text-xs text-muted-foreground'>
-              <span>{formatBytes(e.size)}</span>
-              <span>· {timeAgo(e.mtime)}</span>
-            </div>
+        </td>
+        <td className='max-w-[22rem] px-2 py-2 align-middle'>
+          <div className='truncate font-medium'>{r.title}</div>
+          <div className='text-xs text-muted-foreground'>
+            {isLib ? (
+              <>
+                {formatBytes(r.size ?? 0)}
+                {r.mtime ? <span> · {timeAgo(r.mtime)}</span> : null}
+              </>
+            ) : (
+              <span>{r.mtime ? timeAgo(r.mtime) : 'just now'}</span>
+            )}
           </div>
-        </div>
-        <div className='flex items-center gap-2'>
-          {e.needs_sync_review ? (
-            <Badge
-              variant='warning'
-              title={
-                'Automatic audio sync was low-confidence' +
-                (e.sync_confidence != null
-                  ? ` (${Math.round(e.sync_confidence * 100)}%)`
-                  : '') +
-                '. Open Review to check and nudge the German delay.'
-              }
-            >
-              Check sync
-            </Badge>
-          ) : null}
-          {stageBadge(e.stage)}
-          <TransferCell e={e} />
-          <Button size='sm' variant='secondary' onClick={() => setReview(e)}>
-            <Play className='h-4 w-4' /> Review
-          </Button>
-          <Button size='icon' variant='ghost' onClick={() => setDel(e)} title='Delete'>
-            <Trash2 className='h-4 w-4 text-red-400' />
-          </Button>
-        </div>
-      </div>
+        </td>
+        <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>{typeLabel(r)}</td>
+        <td className='px-2 py-2 align-middle'>
+          <StatusCell r={r} />
+        </td>
+        <td className='px-2 py-2 align-middle'>
+          <SyncCell r={r} />
+        </td>
+        <td className='px-2 py-2 align-middle'>
+          <TransferCell r={r} />
+        </td>
+        <td className='px-2 py-2 align-middle'>
+          <div className='flex items-center justify-end gap-1.5'>
+            {isLib && (
+              <Button size='sm' variant='secondary' onClick={() => setReview(r)}>
+                <Play className='h-4 w-4' /> Review
+              </Button>
+            )}
+            {canCancel && (
+              <Button size='icon' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel'>
+                <X className='h-4 w-4' />
+              </Button>
+            )}
+            {canRetry && (
+              <Button size='icon' variant='ghost' onClick={() => retryJob(r.job_id!)} title='Retry'>
+                <RotateCcw className='h-4 w-4' />
+              </Button>
+            )}
+            {isLib && (
+              <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete'>
+                <Trash2 className='h-4 w-4 text-red-400' />
+              </Button>
+            )}
+          </div>
+        </td>
+      </tr>
     );
   }
 
   async function doDelete() {
-    if (!del) return;
+    if (!del?.path) return;
     try {
       await api.deleteFile(del.path);
       toast.success('Deleted');
@@ -270,7 +397,9 @@ export default function Library() {
       <header className='flex flex-wrap items-center justify-between gap-3'>
         <div>
           <h1 className='text-2xl font-semibold'>Library</h1>
-          <p className='text-sm text-muted-foreground'>Review, QC and approve merged titles.</p>
+          <p className='text-sm text-muted-foreground'>
+            Every title in one table — downloads, review, sync and transfer.
+          </p>
         </div>
         <div className='flex items-center gap-2'>
           <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Filter…' className='w-44' />
@@ -279,6 +408,7 @@ export default function Library() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value='status'>Status</SelectItem>
               <SelectItem value='date'>Newest</SelectItem>
               <SelectItem value='name'>Name</SelectItem>
               <SelectItem value='size'>Size</SelectItem>
@@ -318,44 +448,31 @@ export default function Library() {
       {loading ? (
         <div className='space-y-2'>
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className='h-14' />
+            <Skeleton key={i} className='h-12' />
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <EmptyState icon={LibraryIcon} title='Library is empty' description='Merged titles will appear here for review.' />
+        <EmptyState icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
       ) : (
-        <div className='space-y-6'>
-          {movies.length > 0 && (
-            <Card>
-              <CardContent className='p-3'>
-                <div className='mb-1 px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground'>Movies</div>
-                {movies.map((e) => (
-                  <Row key={e.path} e={e} />
-                ))}
-              </CardContent>
-            </Card>
-          )}
-
-          {seriesGroups.map(([series, eps]) => {
-            const open = openSeries[series] ?? true;
-            return (
-              <Card key={series}>
-                <CardContent className='p-3'>
-                  <button
-                    className='flex w-full items-center gap-2 px-2 py-1 text-left'
-                    onClick={() => setOpenSeries((s) => ({ ...s, [series]: !open }))}
-                  >
-                    {open ? <ChevronDown className='h-4 w-4' /> : <ChevronRight className='h-4 w-4' />}
-                    <span className='font-semibold'>{series}</span>
-                    <Badge variant='muted' className='ml-1'>
-                      {eps.length}
-                    </Badge>
-                  </button>
-                  {open && eps.sort((a, b) => a.name.localeCompare(b.name)).map((e) => <Row key={e.path} e={e} />)}
-                </CardContent>
-              </Card>
-            );
-          })}
+        <div className='overflow-x-auto rounded-lg border'>
+          <table className='w-full text-sm'>
+            <thead className='bg-card/60 text-xs uppercase tracking-wide text-muted-foreground'>
+              <tr>
+                <th className='w-8 px-2 py-2' />
+                <th className='px-2 py-2 text-left font-medium'>Title</th>
+                <th className='px-2 py-2 text-left font-medium'>Type</th>
+                <th className='px-2 py-2 text-left font-medium'>Status</th>
+                <th className='px-2 py-2 text-left font-medium'>Sync</th>
+                <th className='px-2 py-2 text-left font-medium'>Transfer</th>
+                <th className='px-2 py-2 text-right font-medium'>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((r) => (
+                <RowView key={r.id} r={r} />
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
@@ -380,7 +497,7 @@ export default function Library() {
       </Dialog>
 
       {/* Review studio */}
-      {review && (
+      {review && review.path && (
         <ReviewStudio
           entry={review}
           onClose={() => {
@@ -549,7 +666,7 @@ function Player({
   );
 }
 
-function ReviewStudio({ entry, onClose }: { entry: LibraryEntry; onClose: () => void }) {
+function ReviewStudio({ entry, onClose }: { entry: TitleRow; onClose: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [info, setInfo] = useState<MediaInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -559,11 +676,12 @@ function ReviewStudio({ entry, onClose }: { entry: LibraryEntry; onClose: () => 
   const [useTranscode, setUseTranscode] = useState(false);
   const [repacking, setRepacking] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const path = entry.path as string;
 
   async function loadInfo() {
     setLoading(true);
     try {
-      const m = await api.mediaInfo(entry.path);
+      const m = await api.mediaInfo(path);
       setInfo(m);
       setDelay(m.delay_ms);
       setSavedDelay(m.delay_ms);
@@ -598,7 +716,7 @@ function ReviewStudio({ entry, onClose }: { entry: LibraryEntry; onClose: () => 
   async function repack() {
     setRepacking(true);
     try {
-      const r = await api.repack(entry.path, delay);
+      const r = await api.repack(path, delay);
       toast.success(r.message || 'Repacked');
       await loadInfo();
       if (videoRef.current) videoRef.current.load();
@@ -611,7 +729,7 @@ function ReviewStudio({ entry, onClose }: { entry: LibraryEntry; onClose: () => 
 
   async function persistDelay() {
     try {
-      await api.setDelay(entry.path, delay);
+      await api.setDelay(path, delay);
       setSavedDelay(delay);
     } catch (e: any) {
       toast.error(e.message);
@@ -621,7 +739,7 @@ function ReviewStudio({ entry, onClose }: { entry: LibraryEntry; onClose: () => 
   async function approve() {
     setBusy('approve');
     try {
-      await api.approve(entry.path);
+      await api.approve(path);
       toast.success('Approved — ready to transfer');
       await loadInfo();
     } catch (e: any) {
@@ -634,7 +752,7 @@ function ReviewStudio({ entry, onClose }: { entry: LibraryEntry; onClose: () => 
   async function transfer() {
     setBusy('transfer');
     try {
-      await api.transfer(entry.path);
+      await api.transfer(path);
       toast.success('Transferred to server');
       onClose();
     } catch (e: any) {
@@ -681,7 +799,7 @@ function ReviewStudio({ entry, onClose }: { entry: LibraryEntry; onClose: () => 
             <>
               <Player
                 videoRef={videoRef}
-                path={entry.path}
+                path={path}
                 audioIdx={audioIdx}
                 duration={info?.duration ?? null}
                 useTranscode={useTranscode}

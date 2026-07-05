@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel
 
 from bankai import __version__
 from bankai.config import get_settings, reset_settings_cache
@@ -20,11 +23,31 @@ from bankai.web import discover as discover_mod
 from bankai.web import jobs as webjobs
 from bankai.web import media as media_mod
 from bankai.web import review as review_mod
-from pydantic import BaseModel
 
 log = get_logger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _norm_title(s: str) -> str:
+    """Loosely normalise a title/filename so a queue job and its finished
+    library file collapse to the same key (one row per movie)."""
+    s = s.lower()
+    s = re.sub(r"\.[a-z0-9]{2,4}$", "", s)  # extension
+    s = re.sub(r"\(\d{4}\)", "", s)  # (2016)
+    s = re.sub(r"\b(19|20)\d{2}\b", "", s)  # bare year
+    s = re.sub(r"[^a-z0-9]+", "", s)  # punctuation / whitespace
+    return s
+
+
+def _job_priority(job: dict) -> tuple[int, float]:
+    """Rank jobs of the same title so the most relevant one wins.
+
+    Active (running/queued) beats finished; ties break on recency.
+    """
+    status = job.get("status", "")
+    active = 2 if (job.get("pending") or status == "running") else (1 if status in ("done", "success") else 0)
+    return (active, float(job.get("started_at") or 0))
 
 
 class MovieQueueRequest(BaseModel):
@@ -359,6 +382,113 @@ def create_app() -> Any:
                 }
             )
         return {"entries": out, "library": str(get_settings().output.directory)}
+
+    @app.get("/api/titles")
+    def titles_list() -> dict:
+        """Unified one-row-per-title view merging the library and the queue.
+
+        Each movie/episode appears exactly once: a title being downloaded
+        shows its job status; once finished it becomes its library row. Extra
+        state (sync, transfer, download progress) is carried as columns, never
+        as extra rows.
+        """
+        entries = media_mod.scan_library()
+        transfers = webjobs.transfer_states()
+        jobs = webjobs.snapshot()  # already excludes transfer jobs
+        rows: list[dict] = []
+        lib_paths: set[str] = set()
+        lib_norms: set[str] = set()
+        for e in entries:
+            state = review_mod.get_state(e.path)
+            try:
+                rp = str(Path(e.path).resolve())
+            except OSError:
+                rp = e.path
+            tinfo = transfers.get(rp)
+            if tinfo and tinfo["status"] != state.transfer_status:
+                state = review_mod.set_transfer(e.path, tinfo["status"], percent=tinfo.get("percent"))
+            lib_paths.add(rp)
+            lib_norms.add(_norm_title(e.name))
+            rows.append(
+                {
+                    "row_kind": "library",
+                    "id": e.path,
+                    "title": e.name,
+                    "kind": e.kind,
+                    "path": e.path,
+                    "rel_path": e.rel_path,
+                    "name": e.name,
+                    "size": e.size,
+                    "mtime": e.mtime,
+                    "series": e.series,
+                    "season": e.season,
+                    "stage": state.stage,
+                    "delay_ms": state.delay_ms,
+                    "needs_sync_review": state.needs_sync_review,
+                    "sync_confidence": state.sync_confidence,
+                    "auto_delay_ms": state.auto_delay_ms,
+                    "transfer_status": state.transfer_status,
+                    "transfer_percent": (
+                        tinfo.get("percent", state.transfer_percent)
+                        if tinfo
+                        else state.transfer_percent
+                    ),
+                    "job_id": None,
+                    "job_status": None,
+                    "step_label": None,
+                    "overall_percent": None,
+                    "total_steps": None,
+                    "pending": False,
+                }
+            )
+        # Collapse queue jobs that have no finished library file yet into one
+        # row per title (prefer the most relevant attempt).
+        best_by_norm: dict[str, dict] = {}
+        for j in jobs:
+            fp = j.get("final_path")
+            if fp:
+                try:
+                    rfp = str(Path(fp).resolve())
+                except OSError:
+                    rfp = fp
+                if rfp in lib_paths:
+                    continue  # already represented by its library row
+            nt = _norm_title(j.get("title", ""))
+            if nt in lib_norms:
+                continue  # a library file already covers this title
+            cur = best_by_norm.get(nt)
+            if cur is None or _job_priority(j) >= _job_priority(cur):
+                best_by_norm[nt] = j
+        for j in best_by_norm.values():
+            rows.append(
+                {
+                    "row_kind": "job",
+                    "id": j["id"],
+                    "title": j.get("title", ""),
+                    "kind": "episode" if j.get("kind") == "show" else "movie",
+                    "path": None,
+                    "rel_path": None,
+                    "name": j.get("title", ""),
+                    "size": None,
+                    "mtime": j.get("started_at"),
+                    "series": None,
+                    "season": None,
+                    "stage": None,
+                    "delay_ms": 0,
+                    "needs_sync_review": False,
+                    "sync_confidence": None,
+                    "auto_delay_ms": 0,
+                    "transfer_status": "idle",
+                    "transfer_percent": 0.0,
+                    "job_id": j["id"],
+                    "job_status": j.get("status"),
+                    "step_label": j.get("step_label"),
+                    "overall_percent": j.get("overall_percent"),
+                    "total_steps": j.get("total_steps"),
+                    "pending": j.get("pending", False),
+                }
+            )
+        return {"rows": rows, "library": str(get_settings().output.directory)}
 
     @app.get("/api/media/info")
     def media_info(path: str = Query(...)) -> dict:

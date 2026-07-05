@@ -93,6 +93,34 @@ export interface LibraryEntry {
   transfer_percent: number;
 }
 
+/** Unified one-row-per-title view (library file OR in-flight/failed job). */
+export interface TitleRow {
+  row_kind: 'library' | 'job';
+  id: string;
+  title: string;
+  kind: string;
+  path: string | null;
+  rel_path: string | null;
+  name: string;
+  size: number | null;
+  mtime: number | null;
+  series: string | null;
+  season: number | null;
+  stage: string | null;
+  delay_ms: number;
+  needs_sync_review: boolean;
+  sync_confidence: number | null;
+  auto_delay_ms: number;
+  transfer_status: string;
+  transfer_percent: number;
+  job_id: string | null;
+  job_status: string | null;
+  step_label: string | null;
+  overall_percent: number | null;
+  total_steps: number | null;
+  pending: boolean;
+}
+
 export interface AudioTrack {
   index: number;
   order: number;
@@ -173,6 +201,7 @@ export const api = {
   jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
 
   library: () => request<{ entries: LibraryEntry[]; library: string }>('/api/library'),
+  titles: () => request<{ rows: TitleRow[]; library: string }>('/api/titles'),
   mediaInfo: (path: string) => request<MediaInfo>(`/api/media/info?path=${encodeURIComponent(path)}`),
   deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
