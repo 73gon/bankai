@@ -833,8 +833,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const compute = () => {
       const el = wrapRef.current;
       if (el) setCanvasW(Math.max(320, el.clientWidth));
-      // Video takes the top ~45%; split the rest between the two lanes.
-      setCanvasH(Math.max(70, Math.floor((window.innerHeight - 560) / 2)));
+      // Thin, fixed-height lanes — full width for detail; controls stay in a
+      // fixed footer so they're always visible/clickable.
+      setCanvasH(96);
     };
     compute();
     const el = wrapRef.current;
@@ -862,9 +863,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           setEngPeaks(decodePeaks(w.peaks));
         }
         if (gerStream != null) {
-          const trackStart = Math.max(0, viewStart - delayMs / 1000 - windowSec);
-          const bufDur = windowSec * 3;
-          const w = await api.waveform(path, gerStream, trackStart, bufDur, bins * 3);
+          const trackStart = Math.max(0, viewStart - delayMs / 1000 - windowSec / 2);
+          const bufDur = windowSec * 2;
+          const w = await api.waveform(path, gerStream, trackStart, bufDur, bins * 2);
           setGerBuf({ peaks: decodePeaks(w.peaks), trackStart, dur: bufDur });
         }
       } catch {
@@ -1060,24 +1061,24 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         </div>
       </div>
 
-      <div className='flex flex-1 flex-col overflow-hidden px-1 py-2'>
+      <div className='flex flex-1 flex-col overflow-hidden'>
         {loading ? (
           <div className='space-y-3 p-3'>
             <Skeleton className='h-40 w-full' />
             <Skeleton className='h-24 w-full' />
           </div>
         ) : (
-          <div className='flex min-h-0 flex-1 flex-col gap-2'>
+          <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2'>
             {/* Video preview — the English HQ picture for this window */}
             <video
               ref={videoRef}
               muted
               playsInline
               preload='auto'
-              className='mx-auto max-h-[42vh] w-auto rounded-md bg-black'
+              className='mx-auto h-[34vh] w-auto shrink-0 rounded-md bg-black object-contain'
             />
 
-            <div ref={wrapRef} className='relative flex min-h-0 flex-1 flex-col gap-1'>
+            <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
               <div className='flex items-center justify-between px-1 text-xs'>
                 <span className='flex items-center gap-2 text-sky-400'>
                   <Languages className='h-3.5 w-3.5' /> English (reference)
@@ -1089,6 +1090,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               <canvas ref={engCanvas} width={canvasW} height={canvasH} className='w-full rounded-md bg-black/40' />
               <div className='flex items-center gap-2 px-1 text-xs text-pink-400'>
                 <AudioLines className='h-3.5 w-3.5' /> German (grab &amp; drag to align)
+                {gerStream != null && !gerBuf && <Loader2 className='h-3 w-3 animate-spin' />}
               </div>
               <canvas
                 ref={gerCanvas}
@@ -1103,7 +1105,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 style={{ opacity: 0, transform: 'translateX(0px)' }}
               />
             </div>
+          </div>
+        )}
 
+        {!loading && (
+          <div className='shrink-0 space-y-2 border-t border-border/50 bg-card/30 px-3 py-2'>
             {/* Timeline / pan */}
             <div className='flex items-center gap-3'>
               <span className='w-12 shrink-0 text-right font-mono text-xs text-muted-foreground'>
