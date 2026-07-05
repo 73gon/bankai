@@ -640,12 +640,6 @@ export default function Library() {
 // Waveform review — lightweight audio A/B aligner (no video transcode)
 // --------------------------------------------------------------------------
 
-interface Wave {
-  sr: number;
-  duration: number;
-  peaks: Uint8Array;
-}
-
 function decodePeaks(b64: string): Uint8Array {
   const bin = atob(b64);
   const arr = new Uint8Array(bin.length);
@@ -665,8 +659,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [info, setInfo] = useState<MediaInfo | null>(null);
   const [engStream, setEngStream] = useState<number | null>(null);
   const [gerStream, setGerStream] = useState<number | null>(null);
-  const [eng, setEng] = useState<Wave | null>(null);
-  const [ger, setGer] = useState<Wave | null>(null);
+  const [engPeaks, setEngPeaks] = useState<Uint8Array | null>(null);
+  const [gerPeaks, setGerPeaks] = useState<Uint8Array | null>(null);
+  const [fetchedDelay, setFetchedDelay] = useState(0);
   const [loading, setLoading] = useState(true);
   const [delayMs, setDelayMs] = useState(0);
   const [savedDelay, setSavedDelay] = useState(0);
@@ -683,8 +678,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const gerAudio = useRef<HTMLAudioElement | null>(null);
   const dragRef = useRef<{ x: number; delay: number } | null>(null);
 
-  const duration = info?.duration ?? eng?.duration ?? ger?.duration ?? 0;
+  const duration = info?.duration ?? 0;
   const viewStart = Math.max(0, center - windowSec / 2);
+  const pxPerSec = canvasW / windowSec;
 
   function stopAll() {
     for (const r of [engAudio, gerAudio]) {
@@ -717,20 +713,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         setGerStream(gi);
         setEngStream(ei);
         setCenter(Math.min(120, (m.duration ?? 240) / 2));
-        const tasks: Promise<void>[] = [];
-        if (ei != null)
-          tasks.push(
-            api.waveform(path, ei).then((w) => {
-              if (!cancelled) setEng({ sr: w.sr, duration: w.duration, peaks: decodePeaks(w.peaks) });
-            }),
-          );
-        if (gi != null)
-          tasks.push(
-            api.waveform(path, gi).then((w) => {
-              if (!cancelled) setGer({ sr: w.sr, duration: w.duration, peaks: decodePeaks(w.peaks) });
-            }),
-          );
-        await Promise.all(tasks);
       } catch (e: any) {
         if (!cancelled) toast.error(e.message);
       } finally {
@@ -755,49 +737,64 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     return () => ro.disconnect();
   }, [loading]);
 
-  function drawWave(
-    canvas: HTMLCanvasElement | null,
-    wave: Wave | null,
-    shiftSec: number,
-    color: string,
-  ) {
+  // Windowed waveform fetch (debounced) — decode only the visible slice so it
+  // stays fast on weak hardware. German is fetched already delay-shifted.
+  useEffect(() => {
+    if (engStream == null && gerStream == null) return;
+    const bins = Math.max(200, Math.round(canvasW));
+    const t = setTimeout(async () => {
+      try {
+        if (engStream != null) {
+          const w = await api.waveform(path, engStream, viewStart, windowSec, bins);
+          setEngPeaks(decodePeaks(w.peaks));
+        }
+        if (gerStream != null) {
+          const gs = Math.max(0, viewStart - delayMs / 1000);
+          const w = await api.waveform(path, gerStream, gs, windowSec, bins);
+          setGerPeaks(decodePeaks(w.peaks));
+          setFetchedDelay(delayMs);
+        }
+      } catch {
+        /* transient — ignore */
+      }
+    }, 180);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, engStream, gerStream, viewStart, windowSec, delayMs, canvasW]);
+
+  function drawPeaks(canvas: HTMLCanvasElement | null, peaks: Uint8Array | null, color: string) {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const W = canvas.width;
     const H = canvas.height;
     ctx.clearRect(0, 0, W, H);
-    // faint grid every second
     ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    const pxPerSec = W / windowSec;
     for (let s = Math.ceil(viewStart); s < viewStart + windowSec; s++) {
       const x = (s - viewStart) * pxPerSec;
       ctx.fillRect(x, 0, 1, H);
     }
-    if (wave) {
+    if (peaks && peaks.length) {
       ctx.fillStyle = color;
-      const sr = wave.sr;
+      const n = peaks.length;
       for (let x = 0; x < W; x++) {
-        const t = viewStart + (x / W) * windowSec - shiftSec;
-        const idx = Math.floor(t * sr);
-        let v = 0;
-        if (idx >= 0 && idx < wave.peaks.length) v = wave.peaks[idx];
+        const idx = Math.floor((x / W) * n);
+        const v = peaks[idx] || 0;
         const h = (v / 127) * (H / 2 - 2);
         ctx.fillRect(x, H / 2 - h, 1, h * 2);
       }
     }
     ctx.fillStyle = 'rgba(255,255,255,0.18)';
     ctx.fillRect(0, H / 2, W, 1);
-    // playhead at center
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
     ctx.fillRect(W / 2, 0, 1, H);
   }
 
   useEffect(() => {
-    drawWave(engCanvas.current, eng, 0, '#38bdf8');
-    drawWave(gerCanvas.current, ger, delayMs / 1000, '#f472b6');
+    drawPeaks(engCanvas.current, engPeaks, '#38bdf8');
+    drawPeaks(gerCanvas.current, gerPeaks, '#f472b6');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eng, ger, delayMs, windowSec, center, canvasW]);
+  }, [engPeaks, gerPeaks, canvasW, windowSec, center]);
 
   function onGerDown(e: React.MouseEvent) {
     dragRef.current = { x: e.clientX, delay: delayMs };
@@ -909,6 +906,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 width={canvasW}
                 height={90}
                 onMouseDown={onGerDown}
+                style={{ transform: `translateX(${((delayMs - fetchedDelay) / 1000) * pxPerSec}px)` }}
                 className='w-full cursor-ew-resize rounded-md bg-black/40'
               />
             </div>

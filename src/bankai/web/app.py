@@ -689,12 +689,19 @@ def create_app() -> Any:
     # Audio alignment (waveform review)
     # ------------------------------------------------------------------
     @app.get("/api/media/waveform")
-    def media_waveform(path: str = Query(...), stream: int = Query(..., ge=0)) -> dict:
-        """Downsampled peak envelope for one audio track (base64 uint8 peaks).
+    def media_waveform(
+        path: str = Query(...),
+        stream: int = Query(..., ge=0),
+        start: float = Query(0.0, ge=0.0),
+        dur: float = Query(30.0, gt=0.0, le=1800.0),
+        bins: int = Query(1000, ge=50, le=4000),
+    ) -> dict:
+        """Downsampled peak envelope for a *window* of one audio track.
 
-        Computed once per file+track and cached, so the browser can zoom/pan/
-        offset entirely client-side without re-decoding — important on weak
-        hardware.
+        Only the requested ``[start, start+dur]`` slice is decoded, so this
+        stays fast even on weak hardware (a full-movie decode would take
+        minutes). Returns base64 uint8 peaks; the client maps pixels to peaks
+        using ``start``/``dur``.
         """
         import array
         import base64
@@ -705,28 +712,32 @@ def create_app() -> Any:
             st = p.stat()
         except OSError as exc:
             raise HTTPException(status_code=404, detail="not found") from exc
-        key = (str(p), st.st_mtime_ns, stream)
+        key = (str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
         hit = _WAVEFORM_CACHE.get(key)
         if hit is not None:
             return hit
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
-        ar = 1000  # decode rate (Hz)
-        sps = 50  # output peaks per second
-        binsz = ar // sps
+        # Decode at a rate that yields a few samples per output bin.
+        ar = max(200, min(8000, int(bins * 4 / dur)))
         cmd = [
-            ffmpeg, "-v", "error", "-i", str(p),
+            ffmpeg, "-v", "error", "-ss", str(start), "-t", str(dur), "-i", str(p),
             "-map", f"0:{stream}", "-ac", "1", "-ar", str(ar),
             "-f", "s16le", "pipe:1",
         ]
-        proc = subprocess.run(cmd, capture_output=True, timeout=600)
-        if proc.returncode != 0 or not proc.stdout:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=504, detail="waveform decode timed out") from exc
+        if proc.returncode != 0:
             raise HTTPException(status_code=422, detail="could not decode audio track")
+        raw = proc.stdout
         pcm = array.array("h")
-        pcm.frombytes(proc.stdout[: len(proc.stdout) - (len(proc.stdout) % 2)])
-        peaks = bytearray()
+        pcm.frombytes(raw[: len(raw) - (len(raw) % 2)])
         n = len(pcm)
+        binsz = max(1, n // bins)
+        peaks = bytearray()
         for i in range(0, n, binsz):
             chunk = pcm[i : i + binsz]
             if not chunk:
@@ -736,8 +747,9 @@ def create_app() -> Any:
             m = hi if hi >= -lo else -lo
             peaks.append(min(127, (m * 127) // 32768))
         out = {
-            "sr": sps,
-            "duration": n / ar,
+            "start": start,
+            "dur": dur,
+            "bins": len(peaks),
             "peaks": base64.b64encode(bytes(peaks)).decode("ascii"),
         }
         _WAVEFORM_CACHE[key] = out

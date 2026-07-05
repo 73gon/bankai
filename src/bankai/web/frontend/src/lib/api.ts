@@ -214,9 +214,9 @@ export const api = {
   deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
   transcodeUrl: (path: string, audio = 0, t = 0) => `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}&t=${t}`,
-  waveform: (path: string, stream: number) =>
-    request<{ sr: number; duration: number; peaks: string }>(
-      `/api/media/waveform?path=${encodeURIComponent(path)}&stream=${stream}`,
+  waveform: (path: string, stream: number, start: number, dur: number, bins: number) =>
+    request<{ start: number; dur: number; bins: number; peaks: string }>(
+      `/api/media/waveform?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}&bins=${bins}`,
     ),
   audioClipUrl: (path: string, stream: number, start: number, dur: number) =>
     `/api/media/audioclip?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}`,
