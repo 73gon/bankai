@@ -7,25 +7,25 @@
 
 @layer base {
   :root {
-    /* Dark, near-black with magenta/violet accent (matches the CLI). */
-    --background: 250 24% 4%;
-    --foreground: 270 20% 96%;
-    --card: 255 22% 7%;
-    --card-foreground: 270 20% 96%;
-    --primary: 292 84% 55%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 260 18% 14%;
-    --secondary-foreground: 270 20% 92%;
-    --muted: 260 16% 12%;
-    --muted-foreground: 265 12% 62%;
-    --accent: 280 70% 22%;
-    --accent-foreground: 0 0% 100%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 100%;
-    --border: 268 18% 16%;
-    --input: 268 18% 16%;
-    --ring: 292 84% 55%;
-    --radius: 0.7rem;
+    /* Deep dark espresso background with a terracotta accent. */
+    --background: 22 32% 4%;
+    --foreground: 28 18% 90%;
+    --card: 22 24% 7%;
+    --card-foreground: 28 18% 90%;
+    --primary: 18 72% 52%;
+    --primary-foreground: 22 40% 9%;
+    --secondary: 22 16% 13%;
+    --secondary-foreground: 28 16% 88%;
+    --muted: 22 14% 11%;
+    --muted-foreground: 26 12% 60%;
+    --accent: 18 45% 22%;
+    --accent-foreground: 28 22% 92%;
+    --destructive: 0 65% 46%;
+    --destructive-foreground: 28 22% 94%;
+    --border: 22 16% 15%;
+    --input: 22 16% 15%;
+    --ring: 18 72% 52%;
+    --radius: 0.6rem;
   }
 
   * {
@@ -35,8 +35,8 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     background-image:
-      radial-gradient(60rem 40rem at 80% -10%, hsl(292 84% 30% / 0.18), transparent),
-      radial-gradient(50rem 30rem at -10% 110%, hsl(265 84% 30% / 0.12), transparent);
+      radial-gradient(55rem 36rem at 85% -12%, hsl(18 60% 26% / 0.12), transparent),
+      radial-gradient(45rem 28rem at -8% 108%, hsl(22 40% 18% / 0.10), transparent);
     background-attachment: fixed;
   }
 

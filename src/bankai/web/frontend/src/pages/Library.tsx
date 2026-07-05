@@ -11,6 +11,7 @@ import {
   RotateCcw,
   CheckCircle2,
   Send,
+  UploadCloud,
   Languages,
   AudioLines,
   ChevronDown,
@@ -55,19 +56,22 @@ export default function Library() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
 
-  async function load() {
-    setLoading(true);
+  async function load(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const r = await api.library();
       setEntries(r.entries);
     } catch (e: any) {
-      toast.error(e.message);
+      if (!silent) toast.error(e.message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
   useEffect(() => {
     load();
+    // Poll quietly so the transfer column reflects live progress.
+    const t = setInterval(() => load(true), 4000);
+    return () => clearInterval(t);
   }, []);
 
   const filtered = useMemo(() => {
@@ -155,6 +159,51 @@ export default function Library() {
     }
   }
 
+  async function transferOne(path: string) {
+    try {
+      await api.transfer(path);
+      toast.success('Sending to server');
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
+  function TransferCell({ e }: { e: LibraryEntry }) {
+    const st = e.transfer_status;
+    if (st === 'transferring') {
+      const pct = Math.round(e.transfer_percent || 0);
+      return (
+        <Badge variant='accent' className='gap-1.5' title='Transfer in progress'>
+          <Loader2 className='h-3 w-3 animate-spin' />
+          {pct > 0 ? `Sending ${pct}%` : 'Sending…'}
+        </Badge>
+      );
+    }
+    if (st === 'done' || e.stage === 'transferred') {
+      return (
+        <Badge variant='success' className='gap-1.5' title='On the media server'>
+          <CheckCircle2 className='h-3 w-3' /> On server
+        </Badge>
+      );
+    }
+    if (st === 'failed') {
+      return (
+        <Button size='sm' variant='destructive' onClick={() => transferOne(e.path)} title='Retry transfer'>
+          <RotateCcw className='h-4 w-4' /> Retry
+        </Button>
+      );
+    }
+    if (e.stage === 'approved') {
+      return (
+        <Button size='sm' variant='secondary' onClick={() => transferOne(e.path)} title='Send to media server'>
+          <UploadCloud className='h-4 w-4' /> Send
+        </Button>
+      );
+    }
+    return <span className='text-xs text-muted-foreground'>Approve first</span>;
+  }
+
   function Row({ e }: { e: LibraryEntry }) {
     const selectable = e.stage === 'review' || e.stage === 'approved';
     return (
@@ -177,7 +226,22 @@ export default function Library() {
           </div>
         </div>
         <div className='flex items-center gap-2'>
+          {e.needs_sync_review ? (
+            <Badge
+              variant='warning'
+              title={
+                'Automatic audio sync was low-confidence' +
+                (e.sync_confidence != null
+                  ? ` (${Math.round(e.sync_confidence * 100)}%)`
+                  : '') +
+                '. Open Review to check and nudge the German delay.'
+              }
+            >
+              Check sync
+            </Badge>
+          ) : null}
           {stageBadge(e.stage)}
+          <TransferCell e={e} />
           <Button size='sm' variant='secondary' onClick={() => setReview(e)}>
             <Play className='h-4 w-4' /> Review
           </Button>

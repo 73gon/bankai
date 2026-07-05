@@ -29,7 +29,7 @@ export default function App() {
   return (
     <div className='flex min-h-screen flex-col md:flex-row'>
       {/* Sidebar (desktop) / top bar (mobile) */}
-      <aside className='sticky top-0 z-30 flex shrink-0 flex-row items-center gap-1 border-b border-border bg-background/80 px-3 py-2 backdrop-blur-xl md:h-screen md:w-60 md:flex-col md:items-stretch md:gap-2 md:border-b-0 md:border-r md:px-3 md:py-5'>
+      <aside className='sticky top-0 z-30 flex shrink-0 flex-row items-center gap-1 border-b border-border bg-background px-3 py-2 md:h-screen md:w-60 md:flex-col md:items-stretch md:gap-2 md:border-b-0 md:border-r md:px-3 md:py-5'>
         <div className='hidden md:block'>
           <Brand />
         </div>
@@ -46,8 +46,8 @@ export default function App() {
                 cn(
                   'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
                   isActive
-                    ? 'bg-primary/15 text-primary-foreground ring-1 ring-primary/30'
-                    : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
                 )
               }
             >

@@ -86,6 +86,11 @@ export interface LibraryEntry {
   season: number | null;
   stage: string;
   delay_ms: number;
+  needs_sync_review: boolean;
+  sync_confidence: number | null;
+  auto_delay_ms: number;
+  transfer_status: string;
+  transfer_percent: number;
 }
 
 export interface AudioTrack {
@@ -110,6 +115,9 @@ export interface MediaInfo {
   browser_playable: boolean;
   stage: string;
   delay_ms: number;
+  needs_sync_review: boolean;
+  sync_confidence: number | null;
+  auto_delay_ms: number;
   audio_tracks: AudioTrack[];
 }
 

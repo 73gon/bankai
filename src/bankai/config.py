@@ -51,6 +51,23 @@ class SyncSettings(BaseModel):
     mode: Literal["auto", "manual", "skip"] = "auto"
     threshold_seconds: float = 0.5
     alass_binary: str = "alass"
+    # Visual frame-matching alignment: sample frames from the HQ video and
+    # locate them in the German source to measure the true start offset
+    # (and any speed drift) instead of guessing from durations alone.
+    visual: bool = True
+    # Cap the throwaway German match video's height; it only feeds tiny
+    # perceptual-hash thumbnails, so low resolution is plenty and saves
+    # bandwidth. 0 disables the cap.
+    visual_max_height: int = 480
+    # Minimum alignment confidence [0, 1] to auto-apply the detected offset
+    # without flagging the title for manual review in the web UI.
+    visual_min_confidence: float = 0.6
+    # How many frames to sample across the runtime for matching.
+    visual_sample_count: int = 9
+    # Only auto-correct speed drift (atempo re-encode) when the detected
+    # ratio matches a known PAL/NDF ratio at high confidence; otherwise the
+    # drift is only reported and the constant offset is applied.
+    visual_apply_drift: bool = False
 
 
 class ScraperSettings(BaseModel):

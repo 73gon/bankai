@@ -30,13 +30,21 @@ from typing import Any
 
 # Characters that are unsafe on Windows / problematic for media scanners.
 _BAD_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_MULTISPACE_RE = re.compile(r"\s{2,}")
 _TRAILING_DOTS_SPACE_RE = re.compile(r"[ .]+$")
 
 
 def sanitise(component: str, *, fallback: str = "untitled") -> str:
-    """Strip filesystem-hostile characters from a single path component."""
-    cleaned = _BAD_CHARS_RE.sub("_", component).strip()
-    cleaned = _TRAILING_DOTS_SPACE_RE.sub("", cleaned)
+    """Make a single path component safe on Windows + media scanners.
+
+    Windows-illegal characters (``: / \\ < > " | ? *``) are **dropped**
+    rather than replaced, so a TVDB title like ``Paul Blart: Mall Cop``
+    becomes ``Paul Blart Mall Cop`` (matching how Plex/Jellyfin expect
+    the folder) instead of ``Paul Blart_ Mall Cop``.
+    """
+    cleaned = _BAD_CHARS_RE.sub("", component)
+    cleaned = _MULTISPACE_RE.sub(" ", cleaned).strip()
+    cleaned = _TRAILING_DOTS_SPACE_RE.sub("", cleaned).strip()
     return cleaned or fallback
 
 

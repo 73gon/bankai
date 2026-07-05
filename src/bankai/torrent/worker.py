@@ -21,6 +21,7 @@ batching)::
 from __future__ import annotations
 
 import re
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -357,13 +358,29 @@ class TorrentWorker(Worker):
 
 
 def _log_torrent_progress(status: Any) -> None:
+    # Throttle: the qBittorrent poll fires every few seconds and would
+    # otherwise flood the log with near-identical progress lines. Only emit
+    # when the percentage moves by >=1 point or ~15s have passed. We also
+    # drop the noisy ``state=`` token — the percentage/speed already convey
+    # activity and the queue column doesn't need it.
+    pct = max(0.0, min(100.0, status.progress * 100.0))
+    now = _time.monotonic()
+    last_pct = _log_torrent_progress._last_pct  # type: ignore[attr-defined]
+    last_t = _log_torrent_progress._last_t  # type: ignore[attr-defined]
+    if pct < 100 and abs(pct - last_pct) < 1.0 and (now - last_t) < 15.0:
+        return
+    _log_torrent_progress._last_pct = pct  # type: ignore[attr-defined]
+    _log_torrent_progress._last_t = now  # type: ignore[attr-defined]
     log.info(
-        "BANKAI_PROGRESS stage=torrent pct=%.1f speed=%s eta=%s state=%s",
-        max(0.0, min(100.0, status.progress * 100.0)),
+        "BANKAI_PROGRESS stage=torrent pct=%.1f speed=%s eta=%s",
+        pct,
         int(status.dlspeed),
         int(status.eta),
-        status.state,
     )
+
+
+_log_torrent_progress._last_pct = -1.0  # type: ignore[attr-defined]
+_log_torrent_progress._last_t = 0.0  # type: ignore[attr-defined]
 
 
 async def _fetch_torrent_info_hash(url: str) -> str | None:

@@ -40,6 +40,35 @@ async def test_build_mkvmerge_command_shape() -> None:
     assert "0:0" in cmd  # default-track-flag
 
 
+async def test_build_mkvmerge_command_applies_audio_delay() -> None:
+    cmd = await build_mkvmerge_command(
+        video=Path("v.mkv"),
+        audio=Path("a.aac"),
+        out=Path("out.mkv"),
+        language="ger",
+        track_name="German (Web-DL)",
+        default_track=False,
+        audio_delay_ms=-1200,
+    )
+    assert "--sync" in cmd
+    assert "0:-1200" in cmd
+    # The delay flag precedes the dub audio source file.
+    assert cmd.index("--sync") < cmd.index("a.aac")
+
+
+async def test_build_mkvmerge_command_omits_sync_when_zero_delay() -> None:
+    cmd = await build_mkvmerge_command(
+        video=Path("v.mkv"),
+        audio=Path("a.aac"),
+        out=Path("out.mkv"),
+        language="ger",
+        track_name="German (Web-DL)",
+        default_track=False,
+        audio_delay_ms=0,
+    )
+    assert "--sync" not in cmd
+
+
 async def test_remux_worker_invokes_mkvmerge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

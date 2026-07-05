@@ -24,6 +24,13 @@ from bankai.torrent.prowlarr import TorrentCandidate
 _GIB = 1024**3
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+# A release that names a specific episode / season (SxxEyy, 1x01, "Season 2",
+# "Staffel 2", "Complete Series"). Used to keep TV packs out of movie picks.
+_EPISODIC_RE = re.compile(
+    r"\b(s\d{1,2}\s*e\d{1,3}|\d{1,2}x\d{1,3}|season\s*\d+|staffel\s*\d+"
+    r"|complete\s+series|s\d{1,2}\b)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize(text: str) -> list[str]:
@@ -86,14 +93,28 @@ class TorrentSelector:
         q_main = [t for t in q_tokens if len(t) >= 2]
         if not q_main:
             return candidates
+        # If the query itself names no episode/season, treat it as a movie
+        # search and reject episodic (TV) releases outright — this stops a
+        # short movie title like "Get Out" from matching a random series.
+        query_is_episodic = bool(_EPISODIC_RE.search(query))
         kept: list[TorrentCandidate] = []
         for c in candidates:
+            if not query_is_episodic and _EPISODIC_RE.search(c.title):
+                continue
             cand_tokens = _release_title_tokens(c.title)
             cand_set = set(cand_tokens)
             # All informative query tokens must appear in the candidate's
             # leading title segment (before the year tag).
             if not all(t in cand_set for t in q_main):
                 continue
+            # Reject candidates whose leading title carries *extra* trailing
+            # words beyond the query (e.g. query "Smile" vs release
+            # "Smile 2") — a same-prefix sequel is a different movie.
+            if q_year and not query_is_episodic and len(cand_tokens) > len(q_main):
+                extra = cand_tokens[len(q_main):]
+                # A lone numeric token right after the title means a sequel.
+                if extra and extra[0].isdigit():
+                    continue
             # If the query carries a year, the candidate must mention the
             # same year somewhere in its full title.
             if q_year and q_year not in c.title:

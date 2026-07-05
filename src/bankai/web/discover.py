@@ -7,7 +7,9 @@ the UI can show a friendly "configure TVDB" empty state.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
+import threading
 import time
 from dataclasses import asdict, dataclass
 
@@ -21,6 +23,10 @@ log = get_logger(__name__)
 _BASE_URL = "https://api4.thetvdb.com/v4"
 _ARTWORK_BASE = "https://artworks.thetvdb.com"
 _CACHE: dict[str, tuple[float, list["DiscoverItem"]]] = {}
+# Keys currently being refreshed in the background (stale-while-revalidate),
+# so we never launch duplicate refreshes for the same key.
+_REFRESHING: set[str] = set()
+_REFRESH_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,3 +269,88 @@ async def german_title(tvdb_id: int, *, kind: str) -> str | None:
 
 def to_dict(item: DiscoverItem) -> dict:
     return asdict(item)
+
+
+# ---------------------------------------------------------------------------
+# Merged Discover feed with stale-while-revalidate
+# ---------------------------------------------------------------------------
+
+
+async def _build_feed(kind: str) -> list["DiscoverItem"]:
+    """Merge new-releases + browse into the deduped Discover feed."""
+    new = await new_releases(kind)
+    browse = await trending(kind)
+    merged: list[DiscoverItem] = []
+    seen: set = set()
+    for it in [*new, *browse]:
+        key = (it.tvdb_id, it.name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(it)
+    return merged
+
+
+async def discover_feed(kind: str) -> tuple[list["DiscoverItem"], bool]:
+    """Return the Discover feed, fresh or stale-while-revalidate.
+
+    * Warm + fresh cache  -> returned immediately (fresh=True).
+    * Warm + stale cache  -> returned immediately (fresh=False) and a
+      background refresh is kicked off so the next visit is current.
+    * Cold cache          -> fetched synchronously once.
+    """
+    key = f"feed:{kind}"
+    ttl = get_settings().web.cache_ttl_seconds
+    hit = _CACHE.get(key)
+    if hit is not None:
+        age = time.time() - hit[0]
+        if age < ttl:
+            return hit[1], True
+        _schedule_refresh(kind)
+        return hit[1], False
+    items = await _build_feed(kind)
+    _CACHE[key] = (time.time(), items)
+    return items, True
+
+
+def _schedule_refresh(kind: str) -> None:
+    """Refresh ``feed:<kind>`` in the background (deduped)."""
+    key = f"feed:{kind}"
+    with _REFRESH_LOCK:
+        if key in _REFRESHING:
+            return
+        _REFRESHING.add(key)
+
+    async def _run() -> None:
+        try:
+            items = await _build_feed(kind)
+            _CACHE[key] = (time.time(), items)
+        except Exception as exc:  # pragma: no cover - background best effort
+            log.debug("discover refresh failed for %s: %s", kind, exc)
+        finally:
+            with _REFRESH_LOCK:
+                _REFRESHING.discard(key)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run())
+    except RuntimeError:
+        threading.Thread(target=lambda: asyncio.run(_run()), daemon=True).start()
+
+
+def prewarm() -> None:
+    """Populate the Discover cache on startup so the first visit is instant."""
+    if not is_configured():
+        return
+
+    def _warm() -> None:
+        for kind in ("movie", "show"):
+            try:
+                items = asyncio.run(_build_feed(kind))
+                _CACHE[f"feed:{kind}"] = (time.time(), items)
+                log.info("prewarmed discover feed: %s (%d items)", kind, len(items))
+            except Exception as exc:  # pragma: no cover
+                log.debug("discover prewarm failed for %s: %s", kind, exc)
+
+    threading.Thread(target=_warm, daemon=True).start()
+

@@ -20,6 +20,7 @@ class BatchMovie:
     title: str
     german_title: str | None = None
     url: str | None = None
+    year: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +53,14 @@ def parse_movie_batch(path: Path) -> list[BatchMovie]:
 
 
 def build_movie_args(movie: BatchMovie, *, site: str = "filmpalast") -> list[str]:
+    # Bake the release year into the search query ("Title YYYY") so the
+    # torrent search + selector can disambiguate same-name titles (e.g.
+    # "Smile" 2022 vs "Smile 2" 2024) and the output filename gets the
+    # correct year instead of "(unknown)".
+    query = f"{movie.title} {movie.year}" if movie.year else movie.title
     args = [
         "run",
-        movie.title,
+        query,
         "--de",
         movie.german_title or movie.title,
         "--site",
@@ -98,6 +104,28 @@ async def search_stream_sources(
 async def title_aliases(query: str, *, kind: MediaKind) -> list[str]:
     aliases = await get_title_aliases(query, kind=kind)
     return _dedupe_aliases(query, aliases)
+
+
+async def check_stream_url(url: str, *, site: str = "filmpalast") -> dict:
+    """Validate a user-supplied stream URL and report what was found.
+
+    Returns a dict with ``ok``/``found``/``title``/``hosters`` so the UI can
+    tell the user immediately whether the link resolves to a playable page.
+    """
+    try:
+        cls = scraper_registry.get_backend(site)
+        backend = cls()
+    except Exception as exc:
+        return {"ok": False, "found": False, "error": f"backend {site}: {exc}"}
+    try:
+        checker = getattr(backend, "check_url", None)
+        if not callable(checker):
+            return {"ok": False, "found": False, "error": f"{site} has no URL check"}
+        return await checker(url)
+    except Exception as exc:
+        return {"ok": False, "found": False, "error": str(exc)}
+    finally:
+        await backend.aclose()
 
 
 async def list_series_episodes(

@@ -23,6 +23,16 @@ def test_defaults_load_without_config(tmp_path: Path, monkeypatch: pytest.Monkey
     assert settings.queue.remux_workers == 1
 
 
+def test_sync_visual_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BANKAI_CONFIG", raising=False)
+    sync = load_settings().sync
+    assert sync.visual is True
+    assert sync.visual_max_height == 480
+    assert sync.visual_min_confidence == 0.6
+    assert sync.visual_apply_drift is False
+
+
 def test_toml_overrides_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "config.toml"
     cfg.write_text(

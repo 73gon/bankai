@@ -320,9 +320,21 @@ def create_app() -> Any:
     @app.get("/api/library")
     def library_list() -> dict:
         entries = media_mod.scan_library()
+        transfers = webjobs.transfer_states()
         out = []
         for e in entries:
             state = review_mod.get_state(e.path)
+            # Reconcile the detached transfer job into the per-entry status so
+            # the library shows transfer progress as a column (not a queue job).
+            try:
+                tkey = str(Path(e.path).resolve())
+            except OSError:
+                tkey = e.path
+            tinfo = transfers.get(tkey)
+            if tinfo and tinfo["status"] != state.transfer_status:
+                state = review_mod.set_transfer(
+                    e.path, tinfo["status"], percent=tinfo.get("percent")
+                )
             out.append(
                 {
                     "kind": e.kind,
@@ -335,6 +347,15 @@ def create_app() -> Any:
                     "season": e.season,
                     "stage": state.stage,
                     "delay_ms": state.delay_ms,
+                    "needs_sync_review": state.needs_sync_review,
+                    "sync_confidence": state.sync_confidence,
+                    "auto_delay_ms": state.auto_delay_ms,
+                    "transfer_status": state.transfer_status,
+                    "transfer_percent": (
+                        tinfo.get("percent", state.transfer_percent)
+                        if tinfo
+                        else state.transfer_percent
+                    ),
                 }
             )
         return {"entries": out, "library": str(get_settings().output.directory)}
@@ -357,6 +378,9 @@ def create_app() -> Any:
             "browser_playable": info.browser_playable,
             "stage": state.stage,
             "delay_ms": state.delay_ms,
+            "needs_sync_review": state.needs_sync_review,
+            "sync_confidence": state.sync_confidence,
+            "auto_delay_ms": state.auto_delay_ms,
             "audio_tracks": [
                 {
                     "index": t.index,
@@ -503,7 +527,7 @@ def create_app() -> Any:
         kind = "show" if "Shows" in p.parts else "movie"
         args = ["transfer-run", str(p), "--kind", kind]
         job = webjobs.enqueue(kind="transfer", title=f"Transfer {p.name}", args=args)
-        review_mod.set_stage(str(p), "transferred")
+        review_mod.set_transfer(str(p), "transferring", percent=0.0)
         return {"transfer": job}
 
     @app.post("/api/review/transfer-batch")
@@ -534,7 +558,7 @@ def create_app() -> Any:
             kind = "show" if "Shows" in p.parts else "movie"
             args = ["transfer-run", str(p), "--kind", kind]
             jobs.append(webjobs.enqueue(kind="transfer", title=f"Transfer {p.name}", args=args))
-            review_mod.set_stage(str(p), "transferred")
+            review_mod.set_transfer(str(p), "transferring", percent=0.0)
         return {"transferred": jobs, "count": len(jobs), "skipped": skipped, "errors": errors}
 
     # ------------------------------------------------------------------

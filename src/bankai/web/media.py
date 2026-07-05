@@ -174,8 +174,13 @@ def _parse_probe(path: Path, size: int, data: dict) -> MediaInfo:
 
 
 def _browser_playable(path: Path, video_codec: str | None) -> bool:
-    """Heuristic: can a typical browser play this directly via <video>?"""
-    if path.suffix.lower() not in {".mp4", ".m4v", ".webm", ".mkv"}:
+    """Heuristic: can a typical browser play this directly via <video>?
+
+    Note: Matroska (.mkv) is **not** a browser-playable container even when
+    it holds h264/aac — browsers only natively demux mp4/webm. So an MKV
+    always goes through the remux/transcode endpoint.
+    """
+    if path.suffix.lower() not in {".mp4", ".m4v", ".webm"}:
         return False
     if video_codec is None:
         return False
@@ -397,11 +402,20 @@ class RepackResult:
     log: list[str] = field(default_factory=list)
 
 
-def repack_audio_delay(path: Path, *, delay_ms: int, german_only: bool = True) -> RepackResult:
-    """Re-apply ``delay_ms`` to the German audio track and overwrite ``path``.
+def repack_audio_delay(
+    path: Path,
+    *,
+    delay_ms: int,
+    german_only: bool = True,
+    track_index: int | None = None,
+) -> RepackResult:
+    """Re-apply ``delay_ms`` to an audio track and overwrite ``path``.
 
     Uses ``mkvmerge --sync <track>:<delay>`` which remuxes without
-    re-encoding (fast). The German track is kept as the default audio.
+    re-encoding (fast). When ``track_index`` is given, the delay is
+    applied to exactly that track (by ffprobe stream index) — used by the
+    per-track nudge in the review player to fix e.g. an offset English
+    track. Otherwise it falls back to the German track(s).
     """
     p = Path(path)
     if not p.is_file():
@@ -412,19 +426,27 @@ def repack_audio_delay(path: Path, *, delay_ms: int, german_only: bool = True) -
     info = probe(p, use_cache=False)
     if info is None:
         return RepackResult(False, "could not probe file")
-    targets = [t for t in info.audio_tracks if (t.is_german or not german_only)]
-    if german_only and not targets:
-        return RepackResult(False, "no German audio track found to delay")
+    if track_index is not None:
+        targets = [t for t in info.audio_tracks if t.index == track_index]
+        if not targets:
+            return RepackResult(False, f"no audio track with index {track_index}")
+        set_default = False
+    else:
+        targets = [t for t in info.audio_tracks if (t.is_german or not german_only)]
+        if german_only and not targets:
+            return RepackResult(False, "no German audio track found to delay")
+        set_default = True
 
     tmp = p.with_suffix(p.suffix + ".repack.mkv")
     cmd: list[str] = [bin_, "-o", str(tmp)]
-    # Apply sync to each German audio track. mkvmerge --sync uses the
+    # Apply sync to each target audio track. mkvmerge --sync uses the
     # track id within the source file, which equals the ffprobe stream
     # index for single-file inputs.
     for t in targets:
         cmd.extend(["--sync", f"{t.index}:{delay_ms}"])
-    # Make the (first) German track the default.
-    if targets:
+    # Keep the German track default when nudging German; leave defaults
+    # untouched for an explicit per-track nudge.
+    if set_default and targets:
         cmd.extend(["--default-track", f"{targets[0].index}:yes"])
     cmd.append(str(p))
 
@@ -445,9 +467,10 @@ def repack_audio_delay(path: Path, *, delay_ms: int, german_only: bool = True) -
         return RepackResult(False, f"could not overwrite original: {exc}")
     # Invalidate probe cache for this path.
     _PROBE_CACHE.pop(str(p.resolve()), None)
+    where = f"track #{track_index}" if track_index is not None else "German audio"
     return RepackResult(
         True,
-        f"applied {delay_ms} ms delay to German audio",
+        f"applied {delay_ms} ms delay to {where}",
         delay_ms=delay_ms,
         log=log_lines[-20:],
     )

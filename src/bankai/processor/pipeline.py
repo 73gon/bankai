@@ -31,6 +31,7 @@ Job payload schema::
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -132,22 +133,43 @@ class PipelineWorker(Worker):
         stream_site = payload.get("stream_site", "unknown")
         # If the source URL is a stream-site wrapper (e.g. filmpalast),
         # ask the backend to resolve the underlying hoster URL first.
+        mirror_urls: list[str] = []
         if stream_site and stream_site != "unknown":
             try:
                 from bankai.scraper import get_backend
 
                 backend = get_backend(stream_site)()
                 try:
-                    handle = await backend.resolve_stream(stream_url)
-                    if handle.url and handle.url != stream_url:
-                        log.info(
-                            "[pipeline] %s resolved \u2192 %s (hint=%s)",
-                            stream_site,
-                            handle.url,
-                            handle.hint,
-                        )
-                        stream_url = handle.url
-                        stream_hint = handle.hint
+                    # Prefer the full mirror list when the backend exposes it
+                    # so a dead top mirror (e.g. an expired voe link) can fall
+                    # through to the next one instead of failing the job.
+                    resolve_all = getattr(backend, "resolve_all_streams", None)
+                    handles = []
+                    if callable(resolve_all):
+                        handles = await resolve_all(stream_url)
+                    if handles:
+                        primary = handles[0]
+                        if primary.url and primary.url != stream_url:
+                            log.info(
+                                "[pipeline] %s resolved \u2192 %s (+%d more mirror(s))",
+                                stream_site,
+                                primary.url,
+                                len(handles) - 1,
+                            )
+                            stream_url = primary.url
+                            stream_hint = primary.hint
+                        mirror_urls = [h.url for h in handles if h.url]
+                    else:
+                        handle = await backend.resolve_stream(stream_url)
+                        if handle.url and handle.url != stream_url:
+                            log.info(
+                                "[pipeline] %s resolved \u2192 %s (hint=%s)",
+                                stream_site,
+                                handle.url,
+                                handle.hint,
+                            )
+                            stream_url = handle.url
+                            stream_hint = handle.hint
                 finally:
                     await backend.aclose()
             except KeyError:
@@ -159,12 +181,15 @@ class PipelineWorker(Worker):
             stream_hint=stream_hint,
             stream_site=stream_site,
             wrapper_url=original_stream_url if original_stream_url != stream_url else None,
+            mirror_urls=mirror_urls,
+            want_video=get_settings().sync.visual,
+            max_height=get_settings().sync.visual_max_height or None,
         )
         extract_attempt_index = 0
         extract_attempt_index, extract_result = await self._run_extract_attempts(
             ctx, extract_attempts, extract_attempt_index
         )
-        audio_path = extract_result["path"]
+        audio_path, visual_source = await self._prepare_german_source(ctx, extract_result)
 
         # ---- 2. Torrent HQ video ---------------------------------------
         _log_stage(2, "torrent", "Download HQ video")
@@ -182,10 +207,11 @@ class PipelineWorker(Worker):
         # ---- 3. Sync audio to video ------------------------------------
         _log_stage(3, "sync", "Sync audio")
         while True:
-            sync_payload = await self._build_sync_payload(
+            sync_payload, visual_meta = await self._build_sync_payload(
                 audio_path=audio_path,
                 video_path=video_path,
                 payload=payload,
+                visual_source=visual_source,
             )
             try:
                 sync_result = await self._run_stage(ctx, self._sync, JobKind.SYNC, sync_payload)
@@ -201,7 +227,9 @@ class PipelineWorker(Worker):
                 extract_attempt_index, extract_result = await self._run_extract_attempts(
                     ctx, extract_attempts, extract_attempt_index
                 )
-                audio_path = extract_result["path"]
+                audio_path, visual_source = await self._prepare_german_source(
+                    ctx, extract_result
+                )
         synced_audio = sync_result["path"]
 
         # ---- 4. Remux ---------------------------------------------------
@@ -218,11 +246,16 @@ class PipelineWorker(Worker):
             "video": video_path,
             "audio": synced_audio,
             "out": str(out_path),
+            "audio_delay_ms": visual_meta.get("delay_ms", 0),
         }
         for k in ("language", "track_name", "default_track"):
             if k in payload:
                 remux_payload[k] = payload[k]
         remux_result = await self._run_stage(ctx, self._remux, JobKind.REMUX, remux_payload)
+
+        # Record the alignment outcome so the web UI can flag titles whose
+        # automatic sync was low-confidence for a quick manual delay nudge.
+        self._record_sync_review(remux_result.get("path"), visual_meta)
 
         # ---- 5. Cleanup intermediates ----------------------------------
         if get_settings().paths.cleanup_after_success:
@@ -368,54 +401,128 @@ class PipelineWorker(Worker):
         audio_path: str,
         video_path: str,
         payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        sync_payload: dict[str, Any] = {"audio": audio_path, "reference": video_path}
-        if "offset_seconds" in payload:
-            sync_payload["offset_seconds"] = payload["offset_seconds"]
-            return sync_payload
+        visual_source: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return ``(sync_payload, visual_meta)``.
 
-        source_path = Path(audio_path)
-        if not is_video_file(source_path):
-            return sync_payload
+        ``visual_meta`` carries the constant ``delay_ms`` to apply at remux
+        (via ``mkvmerge --sync``) plus confidence/drift diagnostics used to
+        flag the title for manual review.
+        """
+        sync_payload: dict[str, Any] = {"audio": audio_path, "reference": video_path}
+        visual_meta: dict[str, Any] = {"delay_ms": 0}
+        if "offset_seconds" in payload:
+            # Explicit manual override wins; keep the ffmpeg -itsoffset path.
+            sync_payload["offset_seconds"] = payload["offset_seconds"]
+            return sync_payload, visual_meta
+
+        settings = get_settings().sync
+        if not settings.visual:
+            return sync_payload, visual_meta
+
+        # Prefer the dedicated German match video; fall back to the audio
+        # file itself if it happens to be a video container.
+        source_candidate = Path(visual_source) if visual_source else Path(audio_path)
+        if not is_video_file(source_candidate):
+            log.info("[visual-sync] no German video available for matching; skipping")
+            return sync_payload, visual_meta
         try:
             timeline = await estimate_visual_timeline(
                 reference=Path(video_path),
-                source=source_path,
+                source=source_candidate,
+                sample_count=settings.visual_sample_count,
             )
         except VisualSyncError as exc:
             log.info("[visual-sync] skipped: %s", exc)
-            return sync_payload
+            visual_meta["needs_review"] = True
+            visual_meta["reason"] = str(exc)
+            return sync_payload, visual_meta
 
-        if abs(timeline.slope - 1.0) > 0.005:
-            log.info(
-                "[visual-sync] matched %d frames but timeline slope %.5f is not a simple "
-                "offset; leaving audio sync automatic",
-                len(timeline.matches),
-                timeline.slope,
-            )
-            return sync_payload
-        if abs(timeline.offset_seconds) < 0.25:
-            log.info("[visual-sync] source/HQ offset %.3fs is negligible", timeline.offset_seconds)
-            return sync_payload
-
-        # source_time = reference_time + offset. If the source has extra
-        # lead-in, offset is positive and the audio must be advanced.
-        sync_payload["offset_seconds"] = -timeline.offset_seconds
-        sync_payload["visual_offset_seconds"] = timeline.offset_seconds
-        sync_payload["visual_matches"] = [
+        visual_meta.update(
             {
-                "reference_time": m.reference_time,
-                "source_time": m.source_time,
-                "distance": m.distance,
+                "confidence": timeline.confidence,
+                "offset_seconds": timeline.offset_seconds,
+                "spread_seconds": timeline.spread_seconds,
+                "drift_ratio": timeline.drift_ratio,
+                "matches": len(timeline.matches),
             }
-            for m in timeline.matches
-        ]
-        log.info(
-            "[visual-sync] applying offset %.3fs from %d frame matches",
-            -timeline.offset_seconds,
-            len(timeline.matches),
         )
-        return sync_payload
+        low_confidence = timeline.confidence < settings.visual_min_confidence
+        visual_meta["needs_review"] = low_confidence
+
+        # Speed drift: only auto-correct for a known PAL/NDF ratio at high
+        # confidence when explicitly enabled; otherwise just report it.
+        drift = timeline.drift_ratio
+        if abs(drift - 1.0) > 0.005:
+            if settings.visual_apply_drift and not low_confidence and _is_known_fps_ratio(drift):
+                # source runs at `drift` x reference; play the audio at that
+                # factor to match the reference timeline.
+                sync_payload["tempo"] = drift
+                log.info("[visual-sync] applying speed drift correction tempo=%.5f", drift)
+            else:
+                log.info(
+                    "[visual-sync] detected speed drift ratio=%.5f (not auto-corrected)", drift
+                )
+                visual_meta["needs_review"] = True
+
+        # source_time = reference_time + offset. Positive offset means the
+        # German source has extra lead-in, so the dub must be pulled earlier
+        # (negative mkvmerge --sync delay).
+        offset = timeline.offset_seconds
+        if abs(offset) < 0.10:
+            log.info("[visual-sync] source/HQ offset %.3fs is negligible", offset)
+        else:
+            visual_meta["delay_ms"] = -round(offset * 1000)
+            log.info(
+                "[visual-sync] offset %.3fs (delay %+dms) from %d matches, confidence %.2f%s",
+                offset,
+                visual_meta["delay_ms"],
+                len(timeline.matches),
+                timeline.confidence,
+                " [LOW CONFIDENCE -> review]" if low_confidence else "",
+            )
+        return sync_payload, visual_meta
+
+    async def _prepare_german_source(
+        self, ctx: WorkerContext, extract_result: dict[str, Any]
+    ) -> tuple[str, str | None]:
+        """Return ``(dub_audio_path, visual_source_path)``.
+
+        When visual sync is enabled and the extracted German media carries a
+        video track, demux a clean dub-audio file (so the sync/remux stages
+        get audio only) and keep the video for frame matching. Otherwise the
+        extracted file is used directly as the dub audio.
+        """
+        raw_path = extract_result["path"]
+        media = Path(raw_path)
+        if not get_settings().sync.visual:
+            return raw_path, None
+        if not (extract_result.get("has_video") or await _probe_has_video(media)):
+            return raw_path, None
+        out_dir = ctx.work_dir / f"job-{ctx.job.id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dub = out_dir / "dub.mka"
+        try:
+            await _demux_audio(media, dub)
+        except Exception as exc:  # fall back to using the video directly
+            log.warning("[visual-sync] audio demux failed (%s); using media as-is", exc)
+            return str(media), str(media)
+        return str(dub), str(media)
+
+    def _record_sync_review(self, final_path: str | None, visual_meta: dict[str, Any]) -> None:
+        if not final_path:
+            return
+        try:
+            from bankai.web.review import set_sync_review
+
+            set_sync_review(
+                final_path,
+                needs_review=bool(visual_meta.get("needs_review")),
+                confidence=visual_meta.get("confidence"),
+                applied_delay_ms=int(visual_meta.get("delay_ms", 0) or 0),
+            )
+        except Exception as exc:  # review flagging is best-effort
+            log.debug("[visual-sync] could not record review flag: %s", exc)
 
 
 def _default_output_path(
@@ -474,6 +581,9 @@ def _extract_attempt_payloads(
     stream_hint: str,
     stream_site: str,
     wrapper_url: str | None = None,
+    mirror_urls: list[str] | None = None,
+    want_video: bool = False,
+    max_height: int | None = None,
 ) -> list[dict[str, Any]]:
     specs: list[tuple[str, str]] = []
 
@@ -485,6 +595,14 @@ def _extract_attempt_payloads(
             specs.append(spec)
 
     add(stream_url, stream_hint)
+    # Try every other hoster mirror (vinovo, streamtape, …) before falling
+    # back to the wrapper page. Each is attempted with yt-dlp first, then the
+    # Playwright/headful-browser capture, since most German hosters are not
+    # natively supported by yt-dlp.
+    for mirror in mirror_urls or []:
+        add(mirror, "ytdlp")
+    for mirror in mirror_urls or []:
+        add(mirror, "playwright")
     # If a scraper resolved the original wrapper to a hoster page, direct
     # Playwright on that hoster may stall. The wrapper page often contains
     # the click flow that exposes the real media URL, so try it next.
@@ -493,7 +611,14 @@ def _extract_attempt_payloads(
     add(wrapper_url, "ytdlp")
     add(stream_url, "ytdlp")
     return [
-        {"url": url, "hint": hint, "site": stream_site, "attempt": i + 1}
+        {
+            "url": url,
+            "hint": hint,
+            "site": stream_site,
+            "attempt": i + 1,
+            "want_video": want_video,
+            "max_height": max_height,
+        }
         for i, (url, hint) in enumerate(specs)
     ]
 
@@ -501,3 +626,63 @@ def _extract_attempt_payloads(
 def _log_stage(step: int, key: str, label: str) -> None:
     log.info('BANKAI_STAGE step=%d total=4 key=%s label="%s"', step, key, label)
     log.info("[pipeline] stage %d/4 - %s", step, label)
+
+
+# Same PAL/NDF ratios the sync worker recognises, used to gate automatic
+# speed-drift correction.
+_KNOWN_FPS_RATIOS = (
+    23.976 / 25.0,
+    25.0 / 23.976,
+    24.0 / 25.0,
+    25.0 / 24.0,
+)
+
+
+def _is_known_fps_ratio(ratio: float, *, tol: float = 0.004) -> bool:
+    return any(abs(ratio - target) <= tol for target in _KNOWN_FPS_RATIOS)
+
+
+async def _probe_has_video(path: Path) -> bool:
+    """Return True if ``path`` contains at least one video stream."""
+    if not path.exists():
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    stdout, _ = await proc.communicate()
+    return proc.returncode == 0 and b"video" in stdout
+
+
+async def _demux_audio(media: Path, out: Path) -> None:
+    """Copy the first audio track out of ``media`` into ``out`` (no re-encode)."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(media),
+        "-map",
+        "0:a:0",
+        "-c",
+        "copy",
+        str(out),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not out.exists():
+        raise RuntimeError(f"ffmpeg demux failed: {stderr.decode(errors='ignore')[:300]}")
+

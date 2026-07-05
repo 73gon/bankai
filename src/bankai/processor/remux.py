@@ -80,6 +80,7 @@ class RemuxWorker(Worker):
             binary=self._bin,
             audio_track_id=await _first_audio_track_id(audio_p, binary=self._bin),
             video_audio_track_ids=await _all_audio_track_ids(video_p, binary=self._bin),
+            audio_delay_ms=int(payload.get("audio_delay_ms", 0) or 0),
         )
         log.info("[remux] mkvmerge %s", " ".join(cmd[1:]))
 
@@ -130,12 +131,18 @@ async def build_mkvmerge_command(
     binary: str = "mkvmerge",
     audio_track_id: int = 0,
     video_audio_track_ids: tuple[int, ...] = (),
+    audio_delay_ms: int = 0,
 ) -> list[str]:
     """Construct the mkvmerge argv. Pure function â€” easy to test.
 
     When ``default_track`` is true, the dub gets the default flag and
     every audio track in the source video has its default flag cleared
     via ``--default-track-flag <id>:0`` so players auto-select the dub.
+
+    ``audio_delay_ms`` shifts the dub track by that many milliseconds via
+    ``mkvmerge --sync`` (no re-encode) â€” the same mechanism the web review
+    UI uses for manual nudges, so automatic and manual offsets behave
+    identically.
     """
     tid = str(audio_track_id)
     cmd = [binary, "--output", str(out)]
@@ -160,8 +167,10 @@ async def build_mkvmerge_command(
         f"{tid}:{track_name}",
         "--default-track-flag",
         f"{tid}:{'1' if default_track else '0'}",
-        str(audio),
     ]
+    if audio_delay_ms:
+        cmd += ["--sync", f"{tid}:{audio_delay_ms}"]
+    cmd.append(str(audio))
     return cmd
 
 

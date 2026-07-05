@@ -133,13 +133,19 @@ class SyncWorker(Worker):
 
         settings = get_settings().sync
         manual_offset = payload.get("offset_seconds")
+        explicit_tempo = payload.get("tempo")
         mode = settings.mode
         if manual_offset is not None:
             mode = "manual"
         log.info("[sync] mode=%s threshold=%.2fs", mode, settings.threshold_seconds)
 
         try:
-            if mode == "skip":
+            if explicit_tempo is not None and mode not in ("skip",):
+                # Visual sync detected a speed drift and asked us to correct
+                # it directly; re-encode the audio at the given tempo factor.
+                log.info("[sync] applying explicit tempo=%.5f", float(explicit_tempo))
+                result = await self._apply_tempo(audio_path, out_path, float(explicit_tempo))
+            elif mode == "skip":
                 shutil.copyfile(audio_path, out_path)
                 result = SyncResult(path=out_path, offset_seconds=0.0, method="skip")
             elif mode == "manual":

@@ -47,6 +47,13 @@ class ReviewState:
     updated_at: float = 0.0
     transferred_at: float | None = None
     note: str | None = None
+    needs_sync_review: bool = False
+    sync_confidence: float | None = None
+    auto_delay_ms: int = 0
+    # Transfer is tracked per-entry (shown as a column on the library row)
+    # instead of as a standalone queue job.
+    transfer_status: str = "idle"  # idle | transferring | done | failed
+    transfer_percent: float = 0.0
 
 
 def _load() -> dict[str, dict]:
@@ -101,6 +108,58 @@ def set_delay(path: str | Path, delay_ms: int) -> ReviewState:
     raw = data.get(key, {"path": str(path), "stage": "review"})
     raw["path"] = str(path)
     raw["delay_ms"] = delay_ms
+    raw["updated_at"] = time.time()
+    data[key] = raw
+    _save(data)
+    return ReviewState(**raw)
+
+
+def set_sync_review(
+    path: str | Path,
+    *,
+    needs_review: bool,
+    confidence: float | None = None,
+    applied_delay_ms: int = 0,
+) -> ReviewState:
+    """Record the automatic-alignment outcome for a finished library file.
+
+    ``needs_review`` marks titles whose visual sync was low-confidence so the
+    web UI can surface them for a quick manual delay nudge. ``applied_delay_ms``
+    is the offset the pipeline already baked in via ``mkvmerge --sync`` so the
+    review player can show it as the current baseline.
+    """
+    data = _load()
+    key = _key(path)
+    raw = data.get(key, {"path": str(path), "stage": "review"})
+    raw["path"] = str(path)
+    raw["needs_sync_review"] = bool(needs_review)
+    raw["sync_confidence"] = confidence
+    raw["auto_delay_ms"] = int(applied_delay_ms)
+    raw["updated_at"] = time.time()
+    data[key] = raw
+    _save(data)
+    return ReviewState(**raw)
+
+
+def set_transfer(
+    path: str | Path, status: str, *, percent: float | None = None
+) -> ReviewState:
+    """Update the per-entry transfer status shown in the library column.
+
+    ``status`` is one of ``idle|transferring|done|failed``. When ``done`` the
+    entry also advances to the ``transferred`` stage.
+    """
+    data = _load()
+    key = _key(path)
+    raw = data.get(key, {"path": str(path), "stage": "review"})
+    raw["path"] = str(path)
+    raw["transfer_status"] = status
+    if percent is not None:
+        raw["transfer_percent"] = float(percent)
+    if status == "done":
+        raw["stage"] = "transferred"
+        raw["transferred_at"] = time.time()
+        raw["transfer_percent"] = 100.0
     raw["updated_at"] = time.time()
     data[key] = raw
     _save(data)

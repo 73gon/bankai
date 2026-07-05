@@ -25,7 +25,10 @@ class _FakeYtDlp(YtDlpRunner):
         self.calls: list[str] = []
         self._fail = fail
 
-    async def extract(self, url: str, out_dir: Path) -> ExtractResult:  # type: ignore[override]
+    async def extract(  # type: ignore[override]
+        self, url: str, out_dir: Path, *, referer: str | None = None,
+        want_video: bool = False, max_height: int | None = None,
+    ) -> ExtractResult:
         self.calls.append(url)
         if self._fail:
             raise YtDlpError("synthetic failure")
@@ -41,7 +44,8 @@ class _FakePlaywright(PlaywrightRunner):
         self._captured = captured_url
 
     async def extract(
-        self, url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None
+        self, url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None,
+        want_video: bool = False, max_height: int | None = None,
     ) -> ExtractResult:
         if self._captured is None:
             raise PlaywrightError("no capture")
@@ -97,7 +101,8 @@ async def test_extract_worker_falls_back_to_playwright(tmp_path: Path) -> None:
     original = pw.extract
 
     async def _patched(
-        url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None
+        url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None,
+        want_video: bool = False, max_height: int | None = None,
     ) -> ExtractResult:
         return await original(url, out_dir, ytdlp=inner)
 

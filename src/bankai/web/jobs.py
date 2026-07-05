@@ -109,10 +109,17 @@ def cancel_pending(job_id: str) -> bool:
 
 
 def snapshot() -> list[dict]:
-    """Unified list of running/finished jobs + pending, newest first."""
+    """Unified list of running/finished jobs + pending, newest first.
+
+    Transfer jobs are intentionally excluded — they are surfaced as a column
+    on the library entry (see :func:`transfer_states`) rather than as their
+    own queue point.
+    """
     reconcile()
     out: list[dict] = []
     for j in bgjobs.list_jobs():
+        if j.kind == "transfer":
+            continue
         snap = bgjobs.progress_snapshot(j)
         out.append(
             {
@@ -132,6 +139,8 @@ def snapshot() -> list[dict]:
             }
         )
     for item in _load_pending():
+        if item.kind == "transfer":
+            continue
         out.append(
             {
                 "id": item.id,
@@ -151,3 +160,70 @@ def snapshot() -> list[dict]:
         )
     out.sort(key=lambda r: r["started_at"], reverse=True)
     return out
+
+
+def _transfer_target(args: list[str]) -> str | None:
+    """Return the library path a ``transfer-run`` job operates on."""
+    if not args or args[0] != "transfer-run":
+        return None
+    skip_next = False
+    for a in args[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if a.startswith("-"):
+            skip_next = True  # this flag consumes the following value
+            continue
+        return a
+    return None
+
+
+def transfer_states() -> dict[str, dict]:
+    """Map ``resolved library path -> {status, percent, id, exit_code}``.
+
+    Reconciles the detached ``transfer-run`` background jobs into a per-entry
+    status so the library can show transfer progress as a column instead of a
+    standalone queue job. Newest job per path wins.
+    """
+    reconcile()
+    by_path: dict[str, dict] = {}
+    jobs = sorted(bgjobs.list_jobs(), key=lambda j: j.started_at or 0)
+    for j in jobs:
+        if j.kind != "transfer":
+            continue
+        target = _transfer_target(j.args)
+        if not target:
+            continue
+        try:
+            key = str(Path(target).resolve())
+        except OSError:
+            key = target
+        if j.status == "running":
+            status, percent = "transferring", bgjobs.progress_snapshot(j).overall_percent or 0.0
+        elif j.status == "done" and (j.exit_code in (0, None)):
+            status, percent = "done", 100.0
+        elif j.status in ("failed", "error") or (j.exit_code not in (0, None)):
+            status, percent = "failed", 0.0
+        else:
+            status, percent = "transferring", 0.0
+        by_path[key] = {
+            "status": status,
+            "percent": percent,
+            "id": j.id,
+            "exit_code": j.exit_code,
+        }
+    # Include pending transfers (waiting for a slot) as queued transfers.
+    for item in _load_pending():
+        if item.kind != "transfer":
+            continue
+        target = _transfer_target(item.args)
+        if not target:
+            continue
+        try:
+            key = str(Path(target).resolve())
+        except OSError:
+            key = target
+        by_path.setdefault(
+            key, {"status": "transferring", "percent": 0.0, "id": item.id, "exit_code": None}
+        )
+    return by_path
