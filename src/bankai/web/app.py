@@ -66,10 +66,11 @@ def _clean_title(s: str) -> str:
 def _job_priority(job: dict) -> tuple[int, float]:
     """Rank jobs of the same title so the most relevant one wins.
 
-    Active (running/queued) beats finished; ties break on recency.
+    Active (running/queued) beats any finished attempt; among finished attempts
+    the most recent one wins — so a fresh *failed* re-run is shown as Failed
+    rather than being masked by an older successful run.
     """
-    status = job.get("status", "")
-    active = 2 if (job.get("pending") or status == "running") else (1 if status in ("done", "success") else 0)
+    active = 1 if (job.get("pending") or job.get("status") == "running") else 0
     return (active, float(job.get("started_at") or 0))
 
 
@@ -737,15 +738,20 @@ def create_app() -> Any:
         pcm.frombytes(raw[: len(raw) - (len(raw) % 2)])
         n = len(pcm)
         binsz = max(1, n // bins)
-        peaks = bytearray()
+        # First pass: per-bin peak magnitude (0..32767).
+        mags: list[int] = []
         for i in range(0, n, binsz):
             chunk = pcm[i : i + binsz]
             if not chunk:
                 continue
             hi = max(chunk)
             lo = min(chunk)
-            m = hi if hi >= -lo else -lo
-            peaks.append(min(127, (m * 127) // 32768))
+            mags.append(hi if hi >= -lo else -lo)
+        # Normalise the window to full height so quiet passages are still
+        # visible (amplify), with a floor so silence doesn't blow up noise.
+        wmax = max(mags) if mags else 0
+        scale = max(wmax, 1500)
+        peaks = bytearray(min(127, (m * 127) // scale) for m in mags)
         out = {
             "start": start,
             "dur": dur,

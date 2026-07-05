@@ -9,8 +9,6 @@ import {
   RotateCcw,
   CheckCircle2,
   UploadCloud,
-  Clock,
-  AlertCircle,
   X,
   RefreshCw,
   Film,
@@ -36,61 +34,147 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
-function StatusCell({ r }: { r: TitleRow }) {
-  if (r.row_kind === 'job') {
-    if (r.pending)
-      return (
-        <Badge variant='muted' className='gap-1.5'>
-          <Clock className='h-3 w-3' /> Queued
-        </Badge>
-      );
-    const s = r.job_status;
-    if (s === 'running') {
-      const pct = Math.round(r.overall_percent ?? 0);
-      return (
-        <div className='min-w-[10rem]'>
-          <Badge variant='accent' className='gap-1.5'>
-            <Loader2 className='h-3 w-3 animate-spin' />
-            {r.step_label || 'Working'} {pct > 0 ? `${pct}%` : ''}
-          </Badge>
-          <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
-            <div
-              className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500'
-              style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-            />
-          </div>
-        </div>
-      );
-    }
-    if (s === 'failed' || s === 'error')
-      return (
-        <Badge variant='destructive' className='gap-1.5'>
-          <AlertCircle className='h-3 w-3' /> Failed
-        </Badge>
-      );
-    if (s === 'cancelled') return <Badge variant='warning'>Cancelled</Badge>;
-    if (s === 'done' || s === 'success') return <Badge variant='success'>Done</Badge>;
-    return <Badge variant='muted'>{s}</Badge>;
+// --- ANSI colour rendering for job logs -----------------------------------
+const ANSI_FG: Record<number, string> = {
+  30: '#6b7280', 31: '#f87171', 32: '#4ade80', 33: '#fbbf24',
+  34: '#60a5fa', 35: '#e879f9', 36: '#22d3ee', 37: '#e5e7eb',
+  90: '#9ca3af', 91: '#fca5a5', 92: '#86efac', 93: '#fde047',
+  94: '#93c5fd', 95: '#f0abfc', 96: '#67e8f9', 97: '#ffffff',
+};
+
+function ansi256(n: number): string {
+  if (n < 16) return ANSI_FG[n < 8 ? 30 + n : 82 + n] ?? '#d1d5db';
+  if (n >= 232) {
+    const v = 8 + (n - 232) * 10;
+    return `rgb(${v},${v},${v})`;
   }
-  // Library row: transfer state is folded into the status here.
-  if (r.transfer_status === 'transferring') {
+  const i = n - 16;
+  const conv = (x: number) => (x ? 55 + x * 40 : 0);
+  return `rgb(${conv(Math.floor(i / 36))},${conv(Math.floor((i % 36) / 6))},${conv(i % 6)})`;
+}
+
+function AnsiLog({ text }: { text: string }) {
+  const nodes: JSX.Element[] = [];
+  let color: string | undefined;
+  let bold = false;
+  let key = 0;
+  const re = /\x1b\[([0-9;]*)m/g;
+  let last = 0;
+  const push = (t: string) => {
+    if (!t) return;
+    nodes.push(
+      <span key={key++} style={{ color, fontWeight: bold ? 600 : undefined }}>
+        {t}
+      </span>,
+    );
+  };
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    push(text.slice(last, m.index));
+    last = re.lastIndex;
+    const codes = m[1].split(';').filter(Boolean).map(Number);
+    if (codes.length === 0) {
+      color = undefined;
+      bold = false;
+    }
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (c === 0) {
+        color = undefined;
+        bold = false;
+      } else if (c === 1) bold = true;
+      else if (c === 22) bold = false;
+      else if (c === 39) color = undefined;
+      else if (ANSI_FG[c]) color = ANSI_FG[c];
+      else if (c === 38 && codes[i + 1] === 5) {
+        color = ansi256(codes[i + 2]);
+        i += 2;
+      } else if (c === 38 && codes[i + 1] === 2) {
+        color = `rgb(${codes[i + 2]},${codes[i + 3]},${codes[i + 4]})`;
+        i += 4;
+      }
+    }
+  }
+  push(text.slice(last));
+  return <>{nodes}</>;
+}
+
+// Fixed set of statuses a row can be in.
+type Status =
+  | 'queued'
+  | 'downloading'
+  | 'failed'
+  | 'cancelled'
+  | 'review'
+  | 'approved'
+  | 'transferring'
+  | 'done';
+
+const STATUS_VARIANT: Record<Status, 'muted' | 'accent' | 'destructive' | 'warning' | 'success'> = {
+  queued: 'muted',
+  downloading: 'accent',
+  failed: 'destructive',
+  cancelled: 'warning',
+  review: 'warning',
+  approved: 'success',
+  transferring: 'accent',
+  done: 'success',
+};
+
+const STATUS_LABEL: Record<Status, string> = {
+  queued: 'Queued',
+  downloading: 'Downloading',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  review: 'Review',
+  approved: 'Approved',
+  transferring: 'Transferring',
+  done: 'Done',
+};
+
+function rowStatus(r: TitleRow): Status {
+  if (r.row_kind === 'job') {
+    if (r.pending) return 'queued';
+    if (r.job_status === 'running') return 'downloading';
+    if (r.job_status === 'failed' || r.job_status === 'error') return 'failed';
+    if (r.job_status === 'cancelled') return 'cancelled';
+    return 'done';
+  }
+  if (r.transfer_status === 'transferring') return 'transferring';
+  if (r.transfer_status === 'failed') return 'failed';
+  if (r.stage === 'transferred' || r.transfer_status === 'done') return 'done';
+  if (r.stage === 'approved') return 'approved';
+  return 'review';
+}
+
+function StatusCell({ r }: { r: TitleRow }) {
+  const s = rowStatus(r);
+  if (s === 'downloading') {
+    const pct = Math.round(r.overall_percent ?? 0);
+    return (
+      <div className='min-w-[10rem]'>
+        <Badge variant='accent' className='gap-1.5'>
+          <Loader2 className='h-3 w-3 animate-spin' />
+          {r.step_label || 'Downloading'} {pct > 0 ? `${pct}%` : ''}
+        </Badge>
+        <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
+          <div
+            className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500'
+            style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+          />
+        </div>
+      </div>
+    );
+  }
+  if (s === 'transferring') {
     const pct = Math.round(r.transfer_percent || 0);
     return (
-      <Badge variant='accent' className='gap-1.5' title='Transferring to the media server'>
+      <Badge variant='accent' className='gap-1.5'>
         <Loader2 className='h-3 w-3 animate-spin' /> Transferring {pct > 0 ? `${pct}%` : ''}
       </Badge>
     );
   }
-  if (r.stage === 'transferred' || r.transfer_status === 'done')
-    return (
-      <Badge variant='success' className='gap-1.5'>
-        <CheckCircle2 className='h-3 w-3' /> Done
-      </Badge>
-    );
-  if (r.transfer_status === 'failed')
-    return <Badge variant='destructive'>Transfer failed</Badge>;
-  if (r.stage === 'approved') return <Badge variant='success'>Approved</Badge>;
-  return <Badge variant='warning'>Review</Badge>;
+  return <Badge variant={STATUS_VARIANT[s]}>{STATUS_LABEL[s]}</Badge>;
 }
 
 function statusRank(r: TitleRow): number {
@@ -133,11 +217,15 @@ type SortCol = 'title' | 'type' | 'status' | 'when';
 function whenLabel(ts: number | null): string {
   if (!ts) return '—';
   const d = new Date(ts * 1000);
-  return (
-    d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
-    ', ' +
-    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  );
+  // German format, 24h clock: DD.MM.YYYY HH:mm
+  return d.toLocaleString('de-DE', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 }
 
 function titleWithYear(r: TitleRow): string {
@@ -437,8 +525,8 @@ export default function Library() {
           <tr className='border-t border-border bg-black/20'>
             <td colSpan={7} className='px-3 py-2'>
               {r.job_id ? (
-                <pre className='ansi-log max-h-72 overflow-auto rounded-md bg-black/50 p-3 text-[11px] leading-relaxed'>
-                  {logs[r.job_id] ?? 'Loading logs…'}
+                <pre className='ansi-log max-h-72 overflow-auto rounded-md bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground'>
+                  <AnsiLog text={logs[r.job_id] ?? 'Loading logs…'} />
                 </pre>
               ) : (
                 <p className='text-xs text-muted-foreground'>No log available for this title.</p>
@@ -670,6 +758,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
   const [busy, setBusy] = useState<string | null>(null);
   const [canvasW, setCanvasW] = useState(800);
+  const [canvasH, setCanvasH] = useState(160);
+  const [dragging, setDragging] = useState(false);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const engCanvas = useRef<HTMLCanvasElement>(null);
@@ -677,6 +767,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const engAudio = useRef<HTMLAudioElement | null>(null);
   const gerAudio = useRef<HTMLAudioElement | null>(null);
   const dragRef = useRef<{ x: number; delay: number } | null>(null);
+  const playheadRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number | null>(null);
 
   const duration = info?.duration ?? 0;
   const viewStart = Math.max(0, center - windowSec / 2);
@@ -690,6 +782,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         r.current = null;
       }
     }
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (playheadRef.current) playheadRef.current.style.opacity = '0';
     setPlaying('none');
   }
 
@@ -728,19 +825,28 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   // Keep the canvases the width of their container.
   useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const compute = () => setCanvasW(Math.max(320, el.clientWidth));
+    const compute = () => {
+      const el = wrapRef.current;
+      if (el) setCanvasW(Math.max(320, el.clientWidth));
+      // Split the remaining viewport height between the two lanes.
+      setCanvasH(Math.max(120, Math.floor((window.innerHeight - 340) / 2)));
+    };
     compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(el);
-    return () => ro.disconnect();
+    const el = wrapRef.current;
+    const ro = el ? new ResizeObserver(compute) : null;
+    if (ro && el) ro.observe(el);
+    window.addEventListener('resize', compute);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', compute);
+    };
   }, [loading]);
 
   // Windowed waveform fetch (debounced) — decode only the visible slice so it
   // stays fast on weak hardware. German is fetched already delay-shifted.
   useEffect(() => {
     if (engStream == null && gerStream == null) return;
+    if (dragging) return; // don't re-fetch mid-drag — keep it smooth
     const bins = Math.max(200, Math.round(canvasW));
     const t = setTimeout(async () => {
       try {
@@ -760,7 +866,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     }, 180);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, engStream, gerStream, viewStart, windowSec, delayMs, canvasW]);
+  }, [path, engStream, gerStream, viewStart, windowSec, delayMs, canvasW, dragging]);
 
   function drawPeaks(canvas: HTMLCanvasElement | null, peaks: Uint8Array | null, color: string) {
     if (!canvas) return;
@@ -798,15 +904,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   function onGerDown(e: React.MouseEvent) {
     dragRef.current = { x: e.clientX, delay: delayMs };
+    setDragging(true);
     const onMove = (ev: MouseEvent) => {
       const d = dragRef.current;
       if (!d) return;
-      const pxPerSec = canvasW / windowSec;
-      const dxSec = (ev.clientX - d.x) / pxPerSec;
+      const pps = canvasW / windowSec;
+      const dxSec = (ev.clientX - d.x) / pps;
       setDelayMs(Math.round(d.delay + dxSec * 1000));
     };
     const onUp = () => {
       dragRef.current = null;
+      setDragging(false);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
@@ -823,18 +931,31 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const dur = Math.min(windowSec, 30);
     if (which !== 'ger' && engStream != null) {
       const a = new Audio(api.audioClipUrl(path, engStream, viewStart, dur));
-      a.onended = () => setPlaying('none');
+      a.onended = () => stopAll();
       engAudio.current = a;
       a.play().catch(() => {});
     }
     if (which !== 'eng' && gerStream != null) {
       const gs = Math.max(0, viewStart - delayMs / 1000);
       const a = new Audio(api.audioClipUrl(path, gerStream, gs, dur));
-      a.onended = () => setPlaying('none');
+      a.onended = () => stopAll();
       gerAudio.current = a;
       a.play().catch(() => {});
     }
     setPlaying(which);
+    // Animate the playhead across the window while it plays.
+    const primary = which === 'ger' ? gerAudio : engAudio;
+    const tick = () => {
+      const a = primary.current;
+      const line = playheadRef.current;
+      if (a && line) {
+        const frac = Math.min(1, a.currentTime / windowSec);
+        line.style.opacity = '1';
+        line.style.transform = `translateX(${frac * canvasW}px)`;
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
   }
 
   async function approve() {
@@ -880,34 +1001,39 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         </div>
       </div>
 
-      <div className='flex-1 overflow-auto p-4 md:p-6'>
+      <div className='flex flex-1 flex-col overflow-hidden p-4 md:p-6'>
         {loading ? (
           <div className='space-y-3'>
             <Skeleton className='h-24 w-full' />
             <Skeleton className='h-24 w-full' />
           </div>
         ) : (
-          <div className='mx-auto max-w-6xl space-y-4'>
-            <p className='text-sm text-muted-foreground'>
+          <div className='flex min-h-0 flex-1 flex-col gap-3'>
+            <p className='text-xs text-muted-foreground'>
               The English track (blue) is locked to the HQ picture. Drag the German track (pink) left/right
               until the waveforms line up, or nudge in milliseconds. Play both to hear the match, then approve.
             </p>
 
-            <div ref={wrapRef} className='space-y-2'>
+            <div ref={wrapRef} className='relative flex min-h-0 flex-1 flex-col gap-1'>
               <div className='flex items-center gap-2 text-xs text-sky-400'>
                 <Languages className='h-3.5 w-3.5' /> English (reference)
               </div>
-              <canvas ref={engCanvas} width={canvasW} height={90} className='w-full rounded-md bg-black/40' />
+              <canvas ref={engCanvas} width={canvasW} height={canvasH} className='w-full rounded-md bg-black/40' />
               <div className='flex items-center gap-2 text-xs text-pink-400'>
                 <AudioLines className='h-3.5 w-3.5' /> German (drag to align)
               </div>
               <canvas
                 ref={gerCanvas}
                 width={canvasW}
-                height={90}
+                height={canvasH}
                 onMouseDown={onGerDown}
                 style={{ transform: `translateX(${((delayMs - fetchedDelay) / 1000) * pxPerSec}px)` }}
                 className='w-full cursor-ew-resize rounded-md bg-black/40'
+              />
+              <div
+                ref={playheadRef}
+                className='pointer-events-none absolute top-0 bottom-0 left-0 w-0.5 bg-white/80'
+                style={{ opacity: 0, transform: 'translateX(0px)' }}
               />
             </div>
 
