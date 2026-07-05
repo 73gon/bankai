@@ -29,6 +29,7 @@ import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { formatBytes, timeAgo } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 
 type SortKey = 'name' | 'date' | 'size' | 'status';
 
@@ -96,11 +97,39 @@ function statusRank(r: TitleRow): number {
   return 6; // transferred
 }
 
+type FilterKey = 'all' | 'active' | 'review' | 'approved' | 'transferred' | 'failed';
+
+const FILTERS: { key: FilterKey; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'active', label: 'Downloading' },
+  { key: 'review', label: 'Review' },
+  { key: 'approved', label: 'Approved' },
+  { key: 'transferred', label: 'On server' },
+  { key: 'failed', label: 'Failed' },
+];
+
+const PAGE_SIZE = 12;
+
+function rowCategory(r: TitleRow): FilterKey {
+  if (r.row_kind === 'job') {
+    if (r.pending || r.job_status === 'running') return 'active';
+    if (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled')
+      return 'failed';
+    return 'transferred'; // finished job with no local file (already on server)
+  }
+  if (r.transfer_status === 'transferring') return 'approved';
+  if (r.stage === 'transferred' || r.transfer_status === 'done') return 'transferred';
+  if (r.stage === 'approved') return 'approved';
+  return 'review';
+}
+
 export default function Library() {
   const [rows, setRows] = useState<TitleRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [sort, setSort] = useState<SortKey>('status');
   const [filter, setFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<FilterKey>('all');
+  const [page, setPage] = useState(0);
 
   const [review, setReview] = useState<TitleRow | null>(null);
   const [del, setDel] = useState<TitleRow | null>(null);
@@ -126,7 +155,11 @@ export default function Library() {
   }, []);
 
   const filtered = useMemo(() => {
-    const list = rows.filter((e) => e.title.toLowerCase().includes(filter.toLowerCase()));
+    const list = rows.filter(
+      (e) =>
+        e.title.toLowerCase().includes(filter.toLowerCase()) &&
+        (statusFilter === 'all' || rowCategory(e) === statusFilter),
+    );
     list.sort((a, b) => {
       if (sort === 'name') return a.title.localeCompare(b.title);
       if (sort === 'size') return (b.size ?? 0) - (a.size ?? 0);
@@ -137,7 +170,29 @@ export default function Library() {
       return (b.mtime ?? 0) - (a.mtime ?? 0);
     });
     return list;
-  }, [rows, filter, sort]);
+  }, [rows, filter, sort, statusFilter]);
+
+  // Per-filter counts for the chip labels.
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: rows.length };
+    for (const r of rows) {
+      const k = rowCategory(r);
+      c[k] = (c[k] ?? 0) + 1;
+    }
+    return c;
+  }, [rows]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const pageRows = useMemo(
+    () => filtered.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE),
+    [filtered, safePage],
+  );
+
+  // Reset to the first page whenever the view changes.
+  useEffect(() => {
+    setPage(0);
+  }, [filter, statusFilter, sort]);
 
   function toggleSelect(path: string) {
     setSelected((prev) => {
@@ -417,6 +472,24 @@ export default function Library() {
         </div>
       </header>
 
+      <div className='flex flex-wrap items-center gap-1.5'>
+        {FILTERS.map((f) => (
+          <button
+            key={f.key}
+            onClick={() => setStatusFilter(f.key)}
+            className={cn(
+              'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+              statusFilter === f.key
+                ? 'border-primary bg-primary text-primary-foreground'
+                : 'border-border text-muted-foreground hover:bg-secondary hover:text-foreground',
+            )}
+          >
+            {f.label}
+            <span className='ml-1.5 opacity-70'>{counts[f.key] ?? 0}</span>
+          </button>
+        ))}
+      </div>
+
       {!loading && filtered.length > 0 && (
         <div className='flex flex-wrap items-center gap-3 rounded-md border bg-card/40 px-3 py-2'>
           <label className='flex cursor-pointer items-center gap-2 text-sm'>
@@ -468,11 +541,41 @@ export default function Library() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((r) => (
+              {pageRows.map((r) => (
                 <RowView key={r.id} r={r} />
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {!loading && filtered.length > PAGE_SIZE && (
+        <div className='flex items-center justify-between gap-3 text-sm'>
+          <span className='text-xs text-muted-foreground'>
+            {safePage * PAGE_SIZE + 1}–{Math.min(filtered.length, (safePage + 1) * PAGE_SIZE)} of{' '}
+            {filtered.length}
+          </span>
+          <div className='flex items-center gap-2'>
+            <Button
+              size='sm'
+              variant='secondary'
+              disabled={safePage === 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+            >
+              Prev
+            </Button>
+            <span className='text-xs text-muted-foreground'>
+              Page {safePage + 1} / {pageCount}
+            </span>
+            <Button
+              size='sm'
+              variant='secondary'
+              disabled={safePage >= pageCount - 1}
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            >
+              Next
+            </Button>
+          </div>
         </div>
       )}
 
