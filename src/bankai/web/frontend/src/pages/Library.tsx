@@ -6,11 +6,8 @@ import {
   Pause,
   ArrowLeft,
   Loader2,
-  Minus,
-  Plus,
   RotateCcw,
   CheckCircle2,
-  Send,
   UploadCloud,
   Clock,
   AlertCircle,
@@ -21,6 +18,8 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsUpDown,
+  ZoomIn,
+  ZoomOut,
   Languages,
   AudioLines,
 } from 'lucide-react';
@@ -36,19 +35,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
-
-function stageBadge(stage: string | null) {
-  switch (stage) {
-    case 'approved':
-      return <Badge variant='success'>Approved</Badge>;
-    case 'transferred':
-      return <Badge variant='accent'>Transferred</Badge>;
-    case 'review':
-      return <Badge variant='warning'>Review</Badge>;
-    default:
-      return null;
-  }
-}
 
 function StatusCell({ r }: { r: TitleRow }) {
   if (r.row_kind === 'job') {
@@ -86,7 +72,25 @@ function StatusCell({ r }: { r: TitleRow }) {
     if (s === 'done' || s === 'success') return <Badge variant='success'>Done</Badge>;
     return <Badge variant='muted'>{s}</Badge>;
   }
-  return stageBadge(r.stage) ?? <Badge variant='muted'>Review</Badge>;
+  // Library row: transfer state is folded into the status here.
+  if (r.transfer_status === 'transferring') {
+    const pct = Math.round(r.transfer_percent || 0);
+    return (
+      <Badge variant='accent' className='gap-1.5' title='Transferring to the media server'>
+        <Loader2 className='h-3 w-3 animate-spin' /> Transferring {pct > 0 ? `${pct}%` : ''}
+      </Badge>
+    );
+  }
+  if (r.stage === 'transferred' || r.transfer_status === 'done')
+    return (
+      <Badge variant='success' className='gap-1.5'>
+        <CheckCircle2 className='h-3 w-3' /> Done
+      </Badge>
+    );
+  if (r.transfer_status === 'failed')
+    return <Badge variant='destructive'>Transfer failed</Badge>;
+  if (r.stage === 'approved') return <Badge variant='success'>Approved</Badge>;
+  return <Badge variant='warning'>Review</Badge>;
 }
 
 function statusRank(r: TitleRow): number {
@@ -148,7 +152,9 @@ export default function Library() {
   const [sortCol, setSortCol] = useState<SortCol>('when');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState(10);
+  const [autoSize, setAutoSize] = useState(10);
+  const [pageChoice, setPageChoice] = useState<string>('auto');
+  const pageSize = pageChoice === 'auto' ? autoSize : parseInt(pageChoice, 10);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [redoing, setRedoing] = useState<Set<string>>(new Set());
@@ -182,7 +188,7 @@ export default function Library() {
       const rowH = 60;
       const headH = 42;
       const h = el.clientHeight - headH;
-      setPageSize(Math.max(4, Math.floor(h / rowH)));
+      setAutoSize(Math.max(4, Math.floor(h / rowH)));
     };
     compute();
     const ro = new ResizeObserver(compute);
@@ -288,16 +294,6 @@ export default function Library() {
     }
   }
 
-  async function retryJob(id: string) {
-    try {
-      await api.retryJob(id);
-      toast.success('Retrying');
-      load(true);
-    } catch (e: any) {
-      toast.error(e.message);
-    }
-  }
-
   async function redo(r: TitleRow) {
     const key = r.path || r.title;
     setRedoing((s) => new Set(s).add(r.id));
@@ -340,42 +336,6 @@ export default function Library() {
     return <span className='text-xs text-muted-foreground'>—</span>;
   }
 
-  function TransferCell({ r }: { r: TitleRow }) {
-    if (r.row_kind !== 'library') return <span className='text-muted-foreground'>—</span>;
-    const st = r.transfer_status;
-    if (st === 'transferring') {
-      const pct = Math.round(r.transfer_percent || 0);
-      return (
-        <Badge variant='accent' className='gap-1.5' title='Transfer in progress'>
-          <Loader2 className='h-3 w-3 animate-spin' />
-          {pct > 0 ? `Sending ${pct}%` : 'Sending…'}
-        </Badge>
-      );
-    }
-    if (st === 'done' || r.stage === 'transferred') {
-      return (
-        <Badge variant='success' className='gap-1.5' title='Transferred to the media server'>
-          <CheckCircle2 className='h-3 w-3' /> Done
-        </Badge>
-      );
-    }
-    if (st === 'failed') {
-      return (
-        <Button size='sm' variant='destructive' onClick={() => transferOne(r.path!)} title='Retry transfer'>
-          <RotateCcw className='h-4 w-4' /> Retry
-        </Button>
-      );
-    }
-    if (r.stage === 'approved') {
-      return (
-        <Button size='sm' variant='secondary' onClick={() => transferOne(r.path!)} title='Send to media server'>
-          <UploadCloud className='h-4 w-4' /> Send
-        </Button>
-      );
-    }
-    return <span className='text-xs text-muted-foreground'>—</span>;
-  }
-
   function Poster({ r }: { r: TitleRow }) {
     if (r.poster)
       return (
@@ -401,7 +361,6 @@ export default function Library() {
     const isLib = r.row_kind === 'library';
     const isJob = r.row_kind === 'job';
     const canCancel = isJob && (r.pending || r.job_status === 'running');
-    const canRetry = isJob && (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled');
     const isOpen = expanded === r.id;
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
@@ -433,9 +392,6 @@ export default function Library() {
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
           </td>
-          <td className='px-2 py-2 align-middle'>
-            <TransferCell r={r} />
-          </td>
           <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>
             {whenLabel(r.done_at)}
           </td>
@@ -464,9 +420,9 @@ export default function Library() {
                   <X className='h-4 w-4' />
                 </Button>
               )}
-              {canRetry && (
-                <Button size='icon' variant='ghost' onClick={() => retryJob(r.job_id!)} title='Retry'>
-                  <RotateCcw className='h-4 w-4' />
+              {isLib && (r.stage === 'approved' || r.transfer_status === 'failed') && (
+                <Button size='icon' variant='ghost' onClick={() => transferOne(r.path!)} title='Send to media server'>
+                  <UploadCloud className='h-4 w-4' />
                 </Button>
               )}
               {isLib && (
@@ -479,9 +435,9 @@ export default function Library() {
         </tr>
         {isOpen && (
           <tr className='border-t border-border bg-black/20'>
-            <td colSpan={8} className='px-3 py-2'>
+            <td colSpan={7} className='px-3 py-2'>
               {r.job_id ? (
-                <pre className='max-h-72 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-3 text-[11px] leading-relaxed text-muted-foreground'>
+                <pre className='ansi-log max-h-72 overflow-auto rounded-md bg-black/50 p-3 text-[11px] leading-relaxed'>
                   {logs[r.job_id] ?? 'Loading logs…'}
                 </pre>
               ) : (
@@ -585,8 +541,7 @@ export default function Library() {
                 <SortHeader col='type' label='Type' className='text-left' />
                 <SortHeader col='status' label='Status' className='text-left' />
                 <th className='px-2 py-2 text-left font-medium'>Sync</th>
-                <th className='px-2 py-2 text-left font-medium'>Transfer</th>
-                <SortHeader col='when' label='When' className='text-left' />
+                <SortHeader col='when' label='Time' className='text-left' />
                 <th className='px-2 py-2 text-right font-medium'>Actions</th>
               </tr>
             </thead>
@@ -599,12 +554,30 @@ export default function Library() {
         </div>
       )}
 
-      {!loading && filtered.length > pageSize && (
+      {!loading && (
         <div className='flex items-center justify-between gap-3 text-sm'>
-          <span className='text-xs text-muted-foreground'>
-            {safePage * pageSize + 1}–{Math.min(filtered.length, (safePage + 1) * pageSize)} of{' '}
-            {filtered.length}
-          </span>
+          <div className='flex items-center gap-2 text-xs text-muted-foreground'>
+            <span>
+              {filtered.length === 0
+                ? '0'
+                : `${safePage * pageSize + 1}–${Math.min(filtered.length, (safePage + 1) * pageSize)}`}{' '}
+              of {filtered.length}
+            </span>
+            <span>·</span>
+            <span>Per page</span>
+            <Select value={pageChoice} onValueChange={(v) => setPageChoice(v)}>
+              <SelectTrigger className='h-7 w-[86px]'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value='auto'>Auto</SelectItem>
+                <SelectItem value='10'>10</SelectItem>
+                <SelectItem value='25'>25</SelectItem>
+                <SelectItem value='50'>50</SelectItem>
+                <SelectItem value='100'>100</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div className='flex items-center gap-2'>
             <Button
               size='sm'
@@ -651,7 +624,7 @@ export default function Library() {
 
       {/* Review studio */}
       {review && review.path && (
-        <ReviewStudio
+        <WaveformReview
           entry={review}
           onClose={() => {
             setReview(null);
@@ -663,250 +636,220 @@ export default function Library() {
   );
 }
 
-function formatTime(s: number): string {
-  if (!isFinite(s) || s < 0) s = 0;
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = Math.floor(s % 60);
-  const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
-  return `${h > 0 ? h + ':' : ''}${mm}:${String(sec).padStart(2, '0')}`;
+// --------------------------------------------------------------------------
+// Waveform review — lightweight audio A/B aligner (no video transcode)
+// --------------------------------------------------------------------------
+
+interface Wave {
+  sr: number;
+  duration: number;
+  peaks: Uint8Array;
 }
 
-/**
- * Video player that supports seeking for transcoded HEVC/4K previews.
- *
- * Direct streams use native controls (HTTP range requests give real seeking).
- * Transcoded streams have no known duration and aren't natively seekable, so we
- * drive a custom scrubber off the known media duration and re-request the
- * transcode from the chosen offset (the backend accepts a `t` start time).
- */
-function Player({
-  videoRef,
-  path,
-  audioIdx,
-  duration,
-  useTranscode,
-}: {
-  videoRef: { current: HTMLVideoElement | null };
-  path: string;
-  audioIdx: number;
-  duration: number | null;
-  useTranscode: boolean;
-}) {
-  const [base, setBase] = useState(0); // transcode start offset (seconds)
-  const [cur, setCur] = useState(0); // displayed playhead (seconds)
-  const [playing, setPlaying] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const total = duration ?? 0;
+function decodePeaks(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
 
-  const src = useTranscode ? api.transcodeUrl(path, audioIdx, base) : api.streamUrl(path);
+function fmtClock(s: number): string {
+  if (!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
 
-  // Reset when the file or playback mode changes.
-  useEffect(() => {
-    setBase(0);
-    setCur(0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, useTranscode]);
+function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => void }) {
+  const path = entry.path as string;
+  const [info, setInfo] = useState<MediaInfo | null>(null);
+  const [engStream, setEngStream] = useState<number | null>(null);
+  const [gerStream, setGerStream] = useState<number | null>(null);
+  const [eng, setEng] = useState<Wave | null>(null);
+  const [ger, setGer] = useState<Wave | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [delayMs, setDelayMs] = useState(0);
+  const [savedDelay, setSavedDelay] = useState(0);
+  const [windowSec, setWindowSec] = useState(20);
+  const [center, setCenter] = useState(60);
+  const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [canvasW, setCanvasW] = useState(800);
 
-  // When the audio track changes in transcode mode, reload from the current spot.
-  useEffect(() => {
-    if (!useTranscode) return;
-    const v = videoRef.current;
-    setBase((b) => (v ? b + v.currentTime : b));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioIdx]);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const engCanvas = useRef<HTMLCanvasElement>(null);
+  const gerCanvas = useRef<HTMLCanvasElement>(null);
+  const engAudio = useRef<HTMLAudioElement | null>(null);
+  const gerAudio = useRef<HTMLAudioElement | null>(null);
+  const dragRef = useRef<{ x: number; delay: number } | null>(null);
 
-  // Reload the element and resume when the source (base offset / audio) changes.
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.load();
-    if (playing) v.play().catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [src]);
+  const duration = info?.duration ?? eng?.duration ?? ger?.duration ?? 0;
+  const viewStart = Math.max(0, center - windowSec / 2);
 
-  function displayTime(): number {
-    const v = videoRef.current;
-    const local = v ? v.currentTime : 0;
-    return useTranscode ? base + local : local;
-  }
-
-  function seekTo(t: number) {
-    const clamped = Math.max(0, total ? Math.min(total, t) : t);
-    if (useTranscode) {
-      setBase(clamped);
-      setCur(clamped);
-    } else {
-      const v = videoRef.current;
-      if (v) v.currentTime = clamped;
-      setCur(clamped);
-    }
-  }
-
-  // Keyboard: space = play/pause, ← / → = seek 10s.
-  useEffect(() => {
-    function onKey(ev: KeyboardEvent) {
-      const tag = (ev.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      const v = videoRef.current;
-      if (!v) return;
-      if (ev.key === ' ') {
-        ev.preventDefault();
-        v.paused ? v.play() : v.pause();
-      } else if (ev.key === 'ArrowLeft') {
-        ev.preventDefault();
-        seekTo(displayTime() - 10);
-      } else if (ev.key === 'ArrowRight') {
-        ev.preventDefault();
-        seekTo(displayTime() + 10);
+  function stopAll() {
+    for (const r of [engAudio, gerAudio]) {
+      if (r.current) {
+        r.current.pause();
+        r.current.src = '';
+        r.current = null;
       }
     }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [useTranscode, base, total]);
-
-  function togglePlay() {
-    const v = videoRef.current;
-    if (!v) return;
-    v.paused ? v.play() : v.pause();
+    setPlaying('none');
   }
 
-  return (
-    <div className='space-y-2'>
-      <video
-        ref={videoRef}
-        src={src}
-        controls={!useTranscode}
-        autoPlay={playing}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onTimeUpdate={() => {
-          if (!dragging) setCur(displayTime());
-        }}
-        className='max-h-[70vh] w-full rounded-md bg-black'
-      />
-      {useTranscode && (
-        <>
-          <div className='flex items-center gap-3'>
-            <Button size='icon' variant='secondary' onClick={togglePlay}>
-              {playing ? <Pause className='h-4 w-4' /> : <Play className='h-4 w-4' />}
-            </Button>
-            <span className='w-14 shrink-0 text-right font-mono text-xs text-muted-foreground'>{formatTime(cur)}</span>
-            <Slider
-              value={[Math.min(cur, total || cur)]}
-              min={0}
-              max={total || 1}
-              step={1}
-              onValueChange={(v) => {
-                setDragging(true);
-                setCur(v[0]);
-              }}
-              onValueCommit={(v) => {
-                setDragging(false);
-                seekTo(v[0]);
-              }}
-              className='flex-1'
-            />
-            <span className='w-14 shrink-0 font-mono text-xs text-muted-foreground'>{formatTime(total)}</span>
-          </div>
-          <p className='text-[11px] text-muted-foreground'>
-            Transcoded preview (HEVC/4K). Seeking re-encodes from the chosen point.
-          </p>
-        </>
-      )}
-    </div>
-  );
-}
-
-function ReviewStudio({ entry, onClose }: { entry: TitleRow; onClose: () => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [info, setInfo] = useState<MediaInfo | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [delay, setDelay] = useState(0);
-  const [savedDelay, setSavedDelay] = useState(0);
-  const [audioIdx, setAudioIdx] = useState(0);
-  const [useTranscode, setUseTranscode] = useState(false);
-  const [repacking, setRepacking] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const path = entry.path as string;
-
-  async function loadInfo() {
-    setLoading(true);
-    try {
-      const m = await api.mediaInfo(path);
-      setInfo(m);
-      setDelay(m.delay_ms);
-      setSavedDelay(m.delay_ms);
-      setUseTranscode(!m.browser_playable);
-      const ger = m.audio_tracks.find((t) => t.is_german);
-      setAudioIdx(ger ? ger.order : 0);
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }
   useEffect(() => {
-    loadInfo();
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const m = await api.mediaInfo(path);
+        if (cancelled) return;
+        setInfo(m);
+        setDelayMs(m.delay_ms);
+        setSavedDelay(m.delay_ms);
+        const g = m.audio_tracks.find((t) => t.is_german);
+        const e =
+          m.audio_tracks.find((t) => t.language === 'eng' && !t.is_german) ??
+          m.audio_tracks.find((t) => !t.is_german) ??
+          m.audio_tracks[0];
+        const gi = g ? g.index : null;
+        const ei = e ? e.index : null;
+        setGerStream(gi);
+        setEngStream(ei);
+        setCenter(Math.min(120, (m.duration ?? 240) / 2));
+        const tasks: Promise<void>[] = [];
+        if (ei != null)
+          tasks.push(
+            api.waveform(path, ei).then((w) => {
+              if (!cancelled) setEng({ sr: w.sr, duration: w.duration, peaks: decodePeaks(w.peaks) });
+            }),
+          );
+        if (gi != null)
+          tasks.push(
+            api.waveform(path, gi).then((w) => {
+              if (!cancelled) setGer({ sr: w.sr, duration: w.duration, peaks: decodePeaks(w.peaks) });
+            }),
+          );
+        await Promise.all(tasks);
+      } catch (e: any) {
+        if (!cancelled) toast.error(e.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      stopAll();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry.path]);
+  }, [path]);
 
-  const previewDelta = delay - savedDelay;
-
-  // Keyboard shortcuts for delay nudging ([ / ]). Playback keys live in the Player.
+  // Keep the canvases the width of their container.
   useEffect(() => {
-    function onKey(ev: KeyboardEvent) {
-      const tag = (ev.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (ev.key === '[') setDelay((d) => d - 10);
-      else if (ev.key === ']') setDelay((d) => d + 10);
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+    const el = wrapRef.current;
+    if (!el) return;
+    const compute = () => setCanvasW(Math.max(320, el.clientWidth));
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [loading]);
 
-  async function repack() {
-    setRepacking(true);
-    try {
-      const r = await api.repack(path, delay);
-      toast.success(r.message || 'Repacked');
-      await loadInfo();
-      if (videoRef.current) videoRef.current.load();
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setRepacking(false);
+  function drawWave(
+    canvas: HTMLCanvasElement | null,
+    wave: Wave | null,
+    shiftSec: number,
+    color: string,
+  ) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    // faint grid every second
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    const pxPerSec = W / windowSec;
+    for (let s = Math.ceil(viewStart); s < viewStart + windowSec; s++) {
+      const x = (s - viewStart) * pxPerSec;
+      ctx.fillRect(x, 0, 1, H);
     }
+    if (wave) {
+      ctx.fillStyle = color;
+      const sr = wave.sr;
+      for (let x = 0; x < W; x++) {
+        const t = viewStart + (x / W) * windowSec - shiftSec;
+        const idx = Math.floor(t * sr);
+        let v = 0;
+        if (idx >= 0 && idx < wave.peaks.length) v = wave.peaks[idx];
+        const h = (v / 127) * (H / 2 - 2);
+        ctx.fillRect(x, H / 2 - h, 1, h * 2);
+      }
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(0, H / 2, W, 1);
+    // playhead at center
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(W / 2, 0, 1, H);
   }
 
-  async function persistDelay() {
-    try {
-      await api.setDelay(path, delay);
-      setSavedDelay(delay);
-    } catch (e: any) {
-      toast.error(e.message);
+  useEffect(() => {
+    drawWave(engCanvas.current, eng, 0, '#38bdf8');
+    drawWave(gerCanvas.current, ger, delayMs / 1000, '#f472b6');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eng, ger, delayMs, windowSec, center, canvasW]);
+
+  function onGerDown(e: React.MouseEvent) {
+    dragRef.current = { x: e.clientX, delay: delayMs };
+    const onMove = (ev: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const pxPerSec = canvasW / windowSec;
+      const dxSec = (ev.clientX - d.x) / pxPerSec;
+      setDelayMs(Math.round(d.delay + dxSec * 1000));
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function zoom(factor: number) {
+    setWindowSec((w) => Math.min(600, Math.max(1, Math.round(w * factor))));
+  }
+
+  function playSection(which: 'both' | 'eng' | 'ger') {
+    stopAll();
+    const dur = Math.min(windowSec, 30);
+    if (which !== 'ger' && engStream != null) {
+      const a = new Audio(api.audioClipUrl(path, engStream, viewStart, dur));
+      a.onended = () => setPlaying('none');
+      engAudio.current = a;
+      a.play().catch(() => {});
     }
+    if (which !== 'eng' && gerStream != null) {
+      const gs = Math.max(0, viewStart - delayMs / 1000);
+      const a = new Audio(api.audioClipUrl(path, gerStream, gs, dur));
+      a.onended = () => setPlaying('none');
+      gerAudio.current = a;
+      a.play().catch(() => {});
+    }
+    setPlaying(which);
   }
 
   async function approve() {
     setBusy('approve');
     try {
+      if (delayMs !== savedDelay) {
+        const r = await api.repack(path, delayMs);
+        if (!r.ok) throw new Error(r.message);
+        setSavedDelay(delayMs);
+      }
       await api.approve(path);
-      toast.success('Approved — ready to transfer');
-      await loadInfo();
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function transfer() {
-    setBusy('transfer');
-    try {
-      await api.transfer(path);
-      toast.success('Transferred to server');
+      toast.success('Approved — ready to send to server');
       onClose();
     } catch (e: any) {
       toast.error(e.message);
@@ -915,6 +858,8 @@ function ReviewStudio({ entry, onClose }: { entry: TitleRow; onClose: () => void
     }
   }
 
+  const drift = delayMs - savedDelay;
+
   return (
     <div className='fixed inset-0 z-50 flex flex-col bg-background'>
       <div className='flex items-center justify-between gap-3 border-b border-border/50 px-4 py-3 md:px-6'>
@@ -922,139 +867,129 @@ function ReviewStudio({ entry, onClose }: { entry: TitleRow; onClose: () => void
           <Button size='icon' variant='ghost' onClick={onClose} title='Close'>
             <ArrowLeft className='h-5 w-5' />
           </Button>
-          <h2 className='truncate text-lg font-semibold'>{entry.name}</h2>
-          {info && stageBadge(info.stage)}
+          <h2 className='truncate text-lg font-semibold'>{entry.title}</h2>
         </div>
-        <div className='flex items-center gap-2'>
-          {info?.stage === 'approved' ? (
-            <Button onClick={transfer} disabled={busy === 'transfer'}>
-              {busy === 'transfer' ? <Loader2 className='h-4 w-4 animate-spin' /> : <Send className='h-4 w-4' />}
-              Transfer to server
-            </Button>
-          ) : info?.stage === 'transferred' ? (
-            <Badge variant='accent'>Already transferred</Badge>
-          ) : (
-            <Button onClick={approve} disabled={busy === 'approve'} variant='default'>
-              {busy === 'approve' ? <Loader2 className='h-4 w-4 animate-spin' /> : <CheckCircle2 className='h-4 w-4' />}
-              Approve
-            </Button>
-          )}
+        <div className='flex items-center gap-3'>
+          <div className='rounded-md border border-border bg-card px-3 py-1.5 text-sm'>
+            Delay <span className='font-mono font-semibold'>{delayMs > 0 ? '+' : ''}{delayMs} ms</span>
+            {drift !== 0 && (
+              <span className='ml-1 text-xs text-amber-400'>(unsaved {drift > 0 ? '+' : ''}{drift})</span>
+            )}
+          </div>
+          <Button onClick={approve} disabled={busy === 'approve'}>
+            {busy === 'approve' ? <Loader2 className='h-4 w-4 animate-spin' /> : <CheckCircle2 className='h-4 w-4' />}
+            Approve
+          </Button>
         </div>
       </div>
 
       <div className='flex-1 overflow-auto p-4 md:p-6'>
-        <div className='mx-auto max-w-5xl space-y-4'>
-          <p className='text-sm text-muted-foreground'>QC the German dub timing, then approve and transfer.</p>
+        {loading ? (
+          <div className='space-y-3'>
+            <Skeleton className='h-24 w-full' />
+            <Skeleton className='h-24 w-full' />
+          </div>
+        ) : (
+          <div className='mx-auto max-w-6xl space-y-4'>
+            <p className='text-sm text-muted-foreground'>
+              The English track (blue) is locked to the HQ picture. Drag the German track (pink) left/right
+              until the waveforms line up, or nudge in milliseconds. Play both to hear the match, then approve.
+            </p>
 
-          {loading ? (
-            <Skeleton className='aspect-video w-full' />
-          ) : (
-            <>
-              <Player
-                videoRef={videoRef}
-                path={path}
-                audioIdx={audioIdx}
-                duration={info?.duration ?? null}
-                useTranscode={useTranscode}
+            <div ref={wrapRef} className='space-y-2'>
+              <div className='flex items-center gap-2 text-xs text-sky-400'>
+                <Languages className='h-3.5 w-3.5' /> English (reference)
+              </div>
+              <canvas ref={engCanvas} width={canvasW} height={90} className='w-full rounded-md bg-black/40' />
+              <div className='flex items-center gap-2 text-xs text-pink-400'>
+                <AudioLines className='h-3.5 w-3.5' /> German (drag to align)
+              </div>
+              <canvas
+                ref={gerCanvas}
+                width={canvasW}
+                height={90}
+                onMouseDown={onGerDown}
+                className='w-full cursor-ew-resize rounded-md bg-black/40'
               />
+            </div>
 
-            <div className='grid gap-4 md:grid-cols-2'>
-              {/* Audio track + transcode */}
-              <div className='space-y-3'>
-                <div className='flex items-center gap-2 text-sm font-medium'>
-                  <AudioLines className='h-4 w-4' /> Audio track
-                </div>
-                <Select value={String(audioIdx)} onValueChange={(v) => setAudioIdx(Number(v))}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {info?.audio_tracks.map((t) => (
-                      <SelectItem key={t.order} value={String(t.order)}>
-                        {t.is_german ? '🇩🇪 ' : ''}
-                        {t.language || 'und'} · {t.codec}
-                        {t.title ? ` · ${t.title}` : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <label className='flex items-center gap-2 text-xs text-muted-foreground'>
-                  <input type='checkbox' checked={useTranscode} onChange={(e) => setUseTranscode(e.target.checked)} />
-                  Transcode (needed for 4K/HEVC)
-                </label>
-                <div className='flex flex-wrap gap-1.5'>
-                  {info?.has_german ? (
-                    <Badge variant='success' className='gap-1'>
-                      <Languages className='h-3 w-3' /> German present
-                    </Badge>
-                  ) : (
-                    <Badge variant='destructive'>No German track</Badge>
-                  )}
-                  {info?.video_codec && <Badge variant='muted'>{info.video_codec}</Badge>}
-                  {info?.width && (
-                    <Badge variant='muted'>
-                      {info.width}×{info.height}
-                    </Badge>
-                  )}
-                </div>
+            {/* Timeline / pan */}
+            <div className='flex items-center gap-3'>
+              <span className='w-12 shrink-0 text-right font-mono text-xs text-muted-foreground'>
+                {fmtClock(viewStart)}
+              </span>
+              <Slider
+                value={[Math.min(center, duration || center)]}
+                min={0}
+                max={duration || 1}
+                step={0.5}
+                onValueChange={(v) => setCenter(v[0])}
+                className='flex-1'
+              />
+              <span className='w-12 shrink-0 font-mono text-xs text-muted-foreground'>{fmtClock(duration)}</span>
+            </div>
+
+            <div className='flex flex-wrap items-center gap-3'>
+              {/* Zoom */}
+              <div className='flex items-center gap-1'>
+                <Button size='icon' variant='secondary' onClick={() => zoom(2)} title='Zoom out'>
+                  <ZoomOut className='h-4 w-4' />
+                </Button>
+                <span className='w-20 text-center text-xs text-muted-foreground'>
+                  {windowSec >= 60 ? `${(windowSec / 60).toFixed(1)} min` : `${windowSec}s`} view
+                </span>
+                <Button size='icon' variant='secondary' onClick={() => zoom(0.5)} title='Zoom in'>
+                  <ZoomIn className='h-4 w-4' />
+                </Button>
               </div>
 
-              {/* Delay adjust */}
-              <div className='space-y-3'>
-                <div className='flex items-center justify-between text-sm font-medium'>
-                  <span>German audio delay</span>
-                  <span className='font-mono text-primary-foreground'>
-                    {delay > 0 ? '+' : ''}
-                    {delay} ms
-                  </span>
-                </div>
-                <div className='flex items-center gap-2'>
-                  <Button size='icon' variant='outline' onClick={() => setDelay((d) => d - 100)}>
-                    <Minus className='h-4 w-4' />
-                  </Button>
-                  <Slider
-                    value={[delay]}
-                    min={-2000}
-                    max={2000}
-                    step={10}
-                    onValueChange={(v) => setDelay(v[0])}
-                    onValueCommit={persistDelay}
-                    className='flex-1'
-                  />
-                  <Button size='icon' variant='outline' onClick={() => setDelay((d) => d + 100)}>
-                    <Plus className='h-4 w-4' />
-                  </Button>
-                </div>
-                <div className='flex items-center gap-2'>
-                  <Input
-                    type='number'
-                    step={10}
-                    value={delay}
-                    onChange={(e) => setDelay(Number(e.target.value))}
-                    onBlur={persistDelay}
-                    className='w-28'
-                  />
-                  <Button size='sm' variant='ghost' onClick={() => setDelay(0)}>
-                    <RotateCcw className='h-4 w-4' /> Reset
-                  </Button>
-                </div>
-                {previewDelta !== 0 && (
-                  <p className='text-xs text-amber-300'>
-                    Preview offset {previewDelta > 0 ? '+' : ''}
-                    {previewDelta} ms — repack to bake it into the file.
-                  </p>
-                )}
-                <Button onClick={repack} disabled={repacking} className='w-full'>
-                  {repacking ? <Loader2 className='h-4 w-4 animate-spin' /> : <AudioLines className='h-4 w-4' />}
-                  Repack with {delay > 0 ? '+' : ''}
-                  {delay} ms
+              {/* Fine nudge */}
+              <div className='flex items-center gap-1'>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 100)}>-100</Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 10)}>-10</Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 1)}>-1</Button>
+                <span className='px-1 text-xs text-muted-foreground'>ms</span>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 1)}>+1</Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 10)}>+10</Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 100)}>+100</Button>
+              </div>
+
+              {savedDelay !== delayMs && (
+                <Button size='sm' variant='ghost' onClick={() => setDelayMs(savedDelay)} title='Reset to saved'>
+                  <RotateCcw className='h-4 w-4' /> Reset
                 </Button>
-                <p className='text-[11px] text-muted-foreground'>Shortcuts: space = play/pause, ←/→ = seek 10s, [ / ] = ∓10 ms.</p>
+              )}
+
+              {/* Playback */}
+              <div className='ml-auto flex items-center gap-2'>
+                {playing !== 'none' ? (
+                  <Button size='sm' variant='secondary' onClick={stopAll}>
+                    <Pause className='h-4 w-4' /> Stop
+                  </Button>
+                ) : (
+                  <>
+                    <Button size='sm' variant='secondary' onClick={() => playSection('eng')}>
+                      <Play className='h-4 w-4' /> English
+                    </Button>
+                    <Button size='sm' variant='secondary' onClick={() => playSection('ger')}>
+                      <Play className='h-4 w-4' /> German
+                    </Button>
+                    <Button size='sm' onClick={() => playSection('both')}>
+                      <Play className='h-4 w-4' /> Play both
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
-            </>
-          )}
-        </div>
+
+            {(engStream == null || gerStream == null) && (
+              <p className='text-xs text-amber-400'>
+                {gerStream == null ? 'No German audio track found. ' : ''}
+                {engStream == null ? 'No English/reference track found.' : ''}
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

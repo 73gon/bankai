@@ -29,6 +29,9 @@ log = get_logger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# In-memory cache of downsampled audio waveforms keyed by (path, mtime, stream).
+_WAVEFORM_CACHE: dict[tuple, dict] = {}
+
 
 def _norm_title(s: str) -> str:
     """Loosely normalise a title/filename so a queue job and its finished
@@ -452,7 +455,7 @@ def create_app() -> Any:
                     "id": e.path,
                     "title": clean,
                     "kind": e.kind,
-                    "year": _extract_year(e.name),
+                    "year": _extract_year(e.name) or posters_mod.cached_year(poster_key),
                     "poster": posters_mod.cached(poster_key),
                     "done_at": e.mtime,
                     "path": e.path,
@@ -510,7 +513,7 @@ def create_app() -> Any:
                     "id": j["id"],
                     "title": clean,
                     "kind": "episode" if is_ep else "movie",
-                    "year": _extract_year(j.get("title", "")),
+                    "year": _extract_year(j.get("title", "")) or posters_mod.cached_year(poster_key),
                     "poster": posters_mod.cached(poster_key),
                     "done_at": j.get("finished_at") or j.get("started_at"),
                     "path": None,
@@ -681,6 +684,99 @@ def create_app() -> Any:
                 proc.kill()
 
         return StreamingResponse(stream(), media_type="video/mp4")
+
+    # ------------------------------------------------------------------
+    # Audio alignment (waveform review)
+    # ------------------------------------------------------------------
+    @app.get("/api/media/waveform")
+    def media_waveform(path: str = Query(...), stream: int = Query(..., ge=0)) -> dict:
+        """Downsampled peak envelope for one audio track (base64 uint8 peaks).
+
+        Computed once per file+track and cached, so the browser can zoom/pan/
+        offset entirely client-side without re-decoding — important on weak
+        hardware.
+        """
+        import array
+        import base64
+        import subprocess
+
+        p = _safe_path(path)
+        try:
+            st = p.stat()
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail="not found") from exc
+        key = (str(p), st.st_mtime_ns, stream)
+        hit = _WAVEFORM_CACHE.get(key)
+        if hit is not None:
+            return hit
+        ffmpeg = media_mod.ffmpeg_bin()
+        if ffmpeg is None:
+            raise HTTPException(status_code=501, detail="ffmpeg not available")
+        ar = 1000  # decode rate (Hz)
+        sps = 50  # output peaks per second
+        binsz = ar // sps
+        cmd = [
+            ffmpeg, "-v", "error", "-i", str(p),
+            "-map", f"0:{stream}", "-ac", "1", "-ar", str(ar),
+            "-f", "s16le", "pipe:1",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=600)
+        if proc.returncode != 0 or not proc.stdout:
+            raise HTTPException(status_code=422, detail="could not decode audio track")
+        pcm = array.array("h")
+        pcm.frombytes(proc.stdout[: len(proc.stdout) - (len(proc.stdout) % 2)])
+        peaks = bytearray()
+        n = len(pcm)
+        for i in range(0, n, binsz):
+            chunk = pcm[i : i + binsz]
+            if not chunk:
+                continue
+            hi = max(chunk)
+            lo = min(chunk)
+            m = hi if hi >= -lo else -lo
+            peaks.append(min(127, (m * 127) // 32768))
+        out = {
+            "sr": sps,
+            "duration": n / ar,
+            "peaks": base64.b64encode(bytes(peaks)).decode("ascii"),
+        }
+        _WAVEFORM_CACHE[key] = out
+        return out
+
+    @app.get("/api/media/audioclip")
+    def media_audioclip(
+        path: str = Query(...),
+        stream: int = Query(..., ge=0),
+        start: float = Query(0.0, ge=0.0),
+        dur: float = Query(10.0, gt=0.0, le=120.0),
+    ) -> Response:
+        """Stream a short MP3 clip of one audio track for A/B playback."""
+        import subprocess
+
+        p = _safe_path(path)
+        ffmpeg = media_mod.ffmpeg_bin()
+        if ffmpeg is None:
+            raise HTTPException(status_code=501, detail="ffmpeg not available")
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-ss", str(start), "-t", str(dur), "-i", str(p),
+            "-map", f"0:{stream}", "-ac", "2",
+            "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "pipe:1",
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+        def stream_clip():
+            try:
+                assert proc.stdout is not None
+                while True:
+                    chunk = proc.stdout.read(1024 * 64)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                proc.kill()
+
+        return StreamingResponse(stream_clip(), media_type="audio/mpeg")
 
     # ------------------------------------------------------------------
     # Review / approval workflow

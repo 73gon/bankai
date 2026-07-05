@@ -214,6 +214,12 @@ export const api = {
   deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
   transcodeUrl: (path: string, audio = 0, t = 0) => `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}&t=${t}`,
+  waveform: (path: string, stream: number) =>
+    request<{ sr: number; duration: number; peaks: string }>(
+      `/api/media/waveform?path=${encodeURIComponent(path)}&stream=${stream}`,
+    ),
+  audioClipUrl: (path: string, stream: number, start: number, dur: number) =>
+    `/api/media/audioclip?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}`,
 
   setDelay: (path: string, delay_ms: number) => request('/api/review/delay', { method: 'POST', body: JSON.stringify({ path, delay_ms }) }),
   repack: (path: string, delay_ms: number) =>
