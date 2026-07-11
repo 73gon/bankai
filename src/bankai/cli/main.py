@@ -1238,8 +1238,8 @@ def _do_search(query: str, *, site: str | None, limit: int, render: bool = True)
     return results
 
 
-@app.command()
-def extract(
+@app.command("extract-audio")
+def extract_audio(
     url: str = typer.Argument(..., help="Stream URL to extract audio from."),
     out_dir: str = typer.Option(..., "--out-dir", help="Directory to write the audio into."),
     site: str = typer.Option("unknown", "--site", help="Backend name (metadata only)."),

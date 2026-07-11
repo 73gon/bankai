@@ -135,7 +135,7 @@ class ExtractWorker(Worker):
         prefix = s.remote_extract_cmd.strip() or "bankai"
         tag = hashlib.sha1(url.encode()).hexdigest()[:12]
         remote_out = f"{rdir}/{tag}"
-        inner = [prefix, "extract", _shq(url), "--site", _shq(site), "--out-dir", _shq(remote_out), "--json"]
+        inner = [prefix, "extract-audio", _shq(url), "--site", _shq(site), "--out-dir", _shq(remote_out), "--json"]
         if want_video:
             inner.append("--want-video")
         if max_height:
