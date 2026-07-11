@@ -8,10 +8,10 @@ import Server from '@/pages/Server';
 import Settings from '@/pages/Settings';
 
 const NAV = [
-  { to: '/', label: 'Discover', icon: Compass, end: true },
+  { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/search', label: 'Search', icon: SearchIcon },
-  { to: '/library', label: 'Queue', icon: ListVideo },
-  { to: '/server', label: 'Library', icon: HardDrive },
+  { to: '/queue', label: 'Queue', icon: ListVideo },
+  { to: '/library', label: 'Library', icon: HardDrive },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -35,11 +35,10 @@ export default function App() {
           <Brand />
         </div>
         <nav className='flex flex-1 flex-row gap-1 overflow-x-auto md:mt-4 md:flex-col md:overflow-visible'>
-          {NAV.map(({ to, label, icon: Icon, end }) => (
+          {NAV.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
-              end={end}
               className={({ isActive }) =>
                 cn(
                   'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
@@ -59,11 +58,12 @@ export default function App() {
       <main className='flex-1 px-4 py-6 md:px-8 md:py-8'>
         <div className='w-full animate-fade-in'>
           <Routes>
-            <Route path='/' element={<Discover />} />
+            <Route path='/' element={<Navigate to='/discover' replace />} />
+            <Route path='/discover' element={<Discover />} />
             <Route path='/search' element={<Search />} />
-            <Route path='/queue' element={<Navigate to='/library' replace />} />
-            <Route path='/library' element={<Library />} />
-            <Route path='/server' element={<Server />} />
+            <Route path='/queue' element={<Library />} />
+            <Route path='/library' element={<Server />} />
+            <Route path='/server' element={<Navigate to='/library' replace />} />
             <Route path='/settings' element={<Settings />} />
           </Routes>
         </div>

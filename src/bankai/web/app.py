@@ -248,8 +248,9 @@ def create_app() -> Any:
     @app.get("/api/discover/trending")
     async def discover_trending(kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
-        new = await discover_mod.new_releases(k)
-        browse = await discover_mod.trending(k)
+        # Over-fetch so ~100 survive the released/not-on-server filters.
+        new = await discover_mod.new_releases(k, limit=40)
+        browse = await discover_mod.trending(k, limit=200)
         merged: list = []
         seen: set = set()
         for it in [*new, *browse]:
@@ -258,7 +259,7 @@ def create_app() -> Any:
                 continue
             seen.add(key)
             merged.append(it)
-        merged = _filter_discover(merged, k)
+        merged = _filter_discover(merged, k)[:100]
         return {
             "configured": discover_mod.is_configured(),
             "items": [discover_mod.to_dict(i) for i in merged],
