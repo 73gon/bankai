@@ -165,7 +165,7 @@ def failure_reason(job: BgJob) -> str | None:
     single clean ``Reason`` instead of a wall of stack frames.
     """
     try:
-        text = job.log_path.read_text(errors="replace")
+        text = job.log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     lines = text.splitlines()
@@ -388,7 +388,7 @@ def _pid_alive(pid: int) -> bool:
 
 def _read_log_tail(path: Path, *, lines: int = 200) -> list[str]:
     try:
-        return path.read_text(errors="replace").splitlines()[-lines:]
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
     except Exception:
         return []
 
@@ -542,7 +542,7 @@ def tail(job: BgJob, *, lines: int = 50) -> str:
     if not job.log_path.exists():
         return "(no log yet)"
     try:
-        data = job.log_path.read_text(errors="replace")
+        data = job.log_path.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         return f"(log unreadable: {exc})"
     out = data.splitlines()[-lines:]
