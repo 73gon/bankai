@@ -1,5 +1,5 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { Compass, Search as SearchIcon, Library as LibraryIcon, Server as ServerIcon, Settings as SettingsIcon } from 'lucide-react';
+import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
@@ -10,8 +10,8 @@ import Settings from '@/pages/Settings';
 const NAV = [
   { to: '/', label: 'Discover', icon: Compass, end: true },
   { to: '/search', label: 'Search', icon: SearchIcon },
-  { to: '/library', label: 'Queue', icon: LibraryIcon },
-  { to: '/server', label: 'Server', icon: ServerIcon },
+  { to: '/library', label: 'Queue', icon: ListVideo },
+  { to: '/server', label: 'Library', icon: HardDrive },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 

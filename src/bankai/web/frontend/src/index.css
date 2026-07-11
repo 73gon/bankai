@@ -7,25 +7,47 @@
 
 @layer base {
   :root {
-    /* Deep dark espresso background with a terracotta accent. */
-    --background: 22 32% 4%;
-    --foreground: 28 18% 90%;
-    --card: 22 24% 7%;
-    --card-foreground: 28 18% 90%;
-    --primary: 18 72% 52%;
-    --primary-foreground: 22 40% 9%;
-    --secondary: 22 16% 13%;
-    --secondary-foreground: 28 16% 88%;
-    --muted: 22 14% 11%;
-    --muted-foreground: 26 12% 60%;
-    --accent: 18 45% 22%;
-    --accent-foreground: 28 22% 92%;
-    --destructive: 0 65% 46%;
-    --destructive-foreground: 28 22% 94%;
-    --border: 22 16% 15%;
-    --input: 22 16% 15%;
-    --ring: 18 72% 52%;
-    --radius: 0.6rem;
+    /* Eigenpair Mono — light (monochrome, Resend/Vercel/Linear inspired). */
+    --background: 0.99 0 0;
+    --foreground: 0.145 0 0;
+    --card: 1 0 0;
+    --card-foreground: 0.145 0 0;
+    --primary: 0.205 0 0;
+    --primary-foreground: 0.985 0 0;
+    --secondary: 0.97 0 0;
+    --secondary-foreground: 0.205 0 0;
+    --muted: 0.97 0 0;
+    --muted-foreground: 0.556 0 0;
+    --accent: 0.97 0 0;
+    --accent-foreground: 0.205 0 0;
+    --destructive: 0.577 0.245 27.325;
+    --destructive-foreground: 0.985 0 0;
+    --border: 0.922 0 0;
+    --input: 0.922 0 0;
+    --ring: 0.708 0 0;
+    --radius: 0.625rem;
+  }
+
+  .dark {
+    /* Eigenpair Mono — dark. Border/input use solid grays equivalent to the
+       spec's translucent whites (avoids double-alpha with Tailwind /opacity). */
+    --background: 0.07 0 0;
+    --foreground: 0.985 0 0;
+    --card: 0.09 0 0;
+    --card-foreground: 0.985 0 0;
+    --primary: 0.985 0 0;
+    --primary-foreground: 0.145 0 0;
+    --secondary: 0.155 0 0;
+    --secondary-foreground: 0.985 0 0;
+    --muted: 0.155 0 0;
+    --muted-foreground: 0.6 0 0;
+    --accent: 0.205 0 0;
+    --accent-foreground: 0.985 0 0;
+    --destructive: 0.704 0.191 22.216;
+    --destructive-foreground: 0.985 0 0;
+    --border: 0.27 0 0;
+    --input: 0.32 0 0;
+    --ring: 0.556 0 0;
   }
 
   * {
@@ -33,11 +55,18 @@
   }
 
   body {
-    @apply bg-background text-foreground font-sans antialiased;
-    background-image:
-      radial-gradient(55rem 36rem at 85% -12%, hsl(18 60% 26% / 0.12), transparent),
-      radial-gradient(45rem 28rem at -8% 108%, hsl(22 40% 18% / 0.10), transparent);
-    background-attachment: fixed;
+    /* UI chrome (nav, buttons, tables, labels) defaults to Geist Mono. */
+    @apply bg-background text-foreground font-mono antialiased;
+  }
+
+  /* Display / headings: Libre Baskerville serif. */
+  h1, h2, h3, h4 {
+    @apply font-serif;
+  }
+
+  /* Body copy: Geist sans. */
+  p {
+    @apply font-sans;
   }
 
   ::-webkit-scrollbar {
@@ -51,7 +80,7 @@
 
 @layer utilities {
   .glass {
-    @apply bg-card/70 backdrop-blur-xl border border-border;
+    @apply bg-card/80 backdrop-blur-xl border border-border;
   }
   .ansi-log {
     white-space: pre-wrap;

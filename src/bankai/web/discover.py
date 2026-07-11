@@ -38,6 +38,7 @@ class DiscoverItem:
     poster_url: str | None = None
     overview: str | None = None
     is_new: bool = False
+    release_date: str | None = None  # ISO date (YYYY-MM-DD) when known
 
 
 def is_configured() -> bool:
@@ -94,7 +95,14 @@ def _abs_image(url: object) -> str | None:
 
 def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
     name = rec.get("name") or rec.get("title") or rec.get("slug") or "Untitled"
-    year = _to_int(rec.get("year")) or _to_int((rec.get("first_air_time") or "")[:4])
+    date = (
+        rec.get("first_air_time")
+        or rec.get("release_date")
+        or rec.get("firstAired")
+        or rec.get("date")
+    )
+    date_s = str(date)[:10] if date else None
+    year = _to_int(rec.get("year")) or _to_int((date_s or "")[:4])
     poster = rec.get("image_url") or rec.get("image") or rec.get("thumbnail")
     return DiscoverItem(
         name=str(name),
@@ -103,6 +111,7 @@ def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
         year=year,
         poster_url=_abs_image(poster),
         overview=rec.get("overview"),
+        release_date=date_s,
     )
 
 
@@ -221,6 +230,7 @@ async def new_releases(kind: str, *, limit: int = 24) -> list[DiscoverItem]:
                         poster_url=base.poster_url,
                         overview=base.overview,
                         is_new=True,
+                        release_date=base.release_date,
                     )
                 )
                 if len(items) >= limit:
@@ -269,6 +279,25 @@ async def german_title(tvdb_id: int, *, kind: str) -> str | None:
 
 def to_dict(item: DiscoverItem) -> dict:
     return asdict(item)
+
+
+def is_released(item: DiscoverItem, *, today: datetime.date | None = None) -> bool:
+    """True if the title has already been released.
+
+    Uses the exact release date when TVDB provides one, otherwise falls back
+    to the year. Titles with an unknown date *and* year are treated as
+    released (we don't hide indiscriminately). Lets Discover drop upcoming
+    titles the user can't download yet.
+    """
+    today = today or datetime.date.today()
+    if item.release_date:
+        try:
+            return datetime.date.fromisoformat(item.release_date) <= today
+        except ValueError:
+            pass
+    if item.year is not None:
+        return item.year <= today.year
+    return True
 
 
 # ---------------------------------------------------------------------------

@@ -221,6 +221,30 @@ def create_app() -> Any:
     # ------------------------------------------------------------------
     # Discover
     # ------------------------------------------------------------------
+    def _server_have(kind: str) -> set[str]:
+        """Normalised names already present on the server library (both the
+        German-dub target and, if configured, other server dirs)."""
+        have: set[str] = set()
+        try:
+            for t in media_mod.scan_server(kind):
+                have.add(_norm_title(t.name))
+        except Exception:  # noqa: BLE001 - fail-soft; never break Discover
+            pass
+        return have
+
+    def _filter_discover(items: list, kind: str) -> list:
+        """Hide upcoming (not-yet-released) titles and anything already on the
+        server, so Discover only shows things worth downloading now."""
+        have = _server_have(kind)
+        out = []
+        for it in items:
+            if not discover_mod.is_released(it):
+                continue
+            if _norm_title(it.name) in have:
+                continue
+            out.append(it)
+        return out
+
     @app.get("/api/discover/trending")
     async def discover_trending(kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
@@ -234,6 +258,7 @@ def create_app() -> Any:
                 continue
             seen.add(key)
             merged.append(it)
+        merged = _filter_discover(merged, k)
         return {
             "configured": discover_mod.is_configured(),
             "items": [discover_mod.to_dict(i) for i in merged],
@@ -243,6 +268,7 @@ def create_app() -> Any:
     async def discover_search(q: str = Query(...), kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
         items = await discover_mod.search(q, kind=k)
+        items = _filter_discover(items, k)
         return {
             "configured": discover_mod.is_configured(),
             "items": [discover_mod.to_dict(i) for i in items],
