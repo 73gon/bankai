@@ -22,7 +22,7 @@ def configure_logging(level: int | str = logging.INFO, **handler_kwargs: Any) ->
         rich_tracebacks=False,
         show_time=True,
         show_path=False,
-        markup=True,
+        markup=False,
         **handler_kwargs,
     )
     logging.basicConfig(
