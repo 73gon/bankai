@@ -96,7 +96,12 @@ class QBittorrentClient:
             "autoTMM": "false",
         }
         if save_path is not None:
-            data["savepath"] = str(save_path)
+            # qBittorrent runs on a POSIX host, so the save path must use
+            # forward slashes. On Windows ``str(Path("/downloads/bankai"))``
+            # yields ``\downloads\bankai`` which qBittorrent then treats as a
+            # single literal directory name -- producing bogus folders like
+            # ``downloads/\downloads\bankai``. Normalise to forward slashes.
+            data["savepath"] = str(save_path).replace("\\", "/")
         if magnet:
             data["urls"] = magnet
         elif torrent_url:
