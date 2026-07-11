@@ -1238,6 +1238,48 @@ def _do_search(query: str, *, site: str | None, limit: int, render: bool = True)
     return results
 
 
+@app.command()
+def extract(
+    url: str = typer.Argument(..., help="Stream URL to extract audio from."),
+    out_dir: str = typer.Option(..., "--out-dir", help="Directory to write the audio into."),
+    site: str = typer.Option("unknown", "--site", help="Backend name (metadata only)."),
+    hint: str = typer.Option("ytdlp", "--hint", help="'ytdlp' or 'playwright'."),
+    want_video: bool = typer.Option(False, "--want-video", help="Download video too (for visual sync)."),
+    max_height: int | None = typer.Option(None, "--max-height", help="Cap video height when --want-video."),
+    as_json: bool = typer.Option(False, "--json", help="Print a single JSON result line on stdout."),
+) -> None:
+    """Extract the German audio for ONE stream URL into --out-dir.
+
+    Standalone (no pipeline/DB) so it can be invoked over SSH on a host with a
+    real display (Xvfb) to delegate extraction from a headless machine.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from bankai.processor.extractor import extract_url
+
+    outp = _Path(out_dir)
+    outp.mkdir(parents=True, exist_ok=True)
+
+    async def go() -> Any:
+        return await extract_url(
+            url, outp, site=site, hint=hint, want_video=want_video, max_height=max_height
+        )
+
+    result = asyncio.run(go())
+    payload = {
+        "path": str(result.path),
+        "codec": result.codec,
+        "extractor": result.extractor,
+        "has_video": result.has_video,
+        "duration_ms": result.duration_ms,
+    }
+    if as_json:
+        print(_json.dumps(payload))
+    else:
+        console.print(payload)
+
+
 @metadata_app.command("search")
 def metadata_search(
     query: str = typer.Argument(..., help="Movie or show title to look up."),

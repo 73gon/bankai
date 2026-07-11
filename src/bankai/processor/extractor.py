@@ -71,46 +71,27 @@ class ExtractWorker(Worker):
         site = ctx.job.payload.get("site", "unknown")
         want_video = bool(ctx.job.payload.get("want_video", False))
         max_height = ctx.job.payload.get("max_height")
-        backend_pref = get_settings().scraper.backend  # "ytdlp" | "playwright" | "auto"
 
         out_dir = ctx.work_dir / f"job-{ctx.job.id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        try_ytdlp = backend_pref in ("ytdlp", "auto") and hint != "playwright"
-        try_playwright = backend_pref in ("playwright", "auto")
-
-        result: ExtractResult | None = None
-        last_err: Exception | None = None
-
-        if try_ytdlp:
-            try:
-                result = await self._ytdlp.extract(
-                    url, out_dir, want_video=want_video, max_height=max_height
-                )
-            except YtDlpError as exc:
-                log.warning("[extract] yt-dlp failed for %s: %s", url, exc)
-                last_err = exc
-                if not try_playwright:
-                    raise WorkerError(f"yt-dlp failed: {exc}") from exc
-
-        if result is None and try_playwright:
-            log.info(
-                "[extract] yt-dlp couldn't handle %s \u2014 switching to Playwright "
-                "(opens headless Chromium, captures the real media URL, then "
-                "yt-dlp downloads it; this can take several minutes for full movies)",
-                url,
+        remote = get_settings().scraper.remote_extract_ssh.strip()
+        if remote:
+            # Delegate to a host with a real display (voe-style hosters need one).
+            result = await self._extract_remote(
+                url, site=site, hint=hint, want_video=want_video, max_height=max_height
             )
-            try:
-                result = await self._playwright.extract(
-                    url, out_dir, ytdlp=self._ytdlp, want_video=want_video,
-                    max_height=max_height,
-                )
-            except PlaywrightError as exc:
-                log.error("[extract] playwright fallback failed for %s: %s", url, exc)
-                raise WorkerError(f"playwright fallback failed: {exc}") from exc
-
-        if result is None:
-            raise WorkerError(f"no extractor available (last error: {last_err})")
+        else:
+            result = await extract_url(
+                url,
+                out_dir,
+                site=site,
+                hint=hint,
+                want_video=want_video,
+                max_height=max_height,
+                ytdlp=self._ytdlp,
+                playwright=self._playwright,
+            )
 
         assert ctx.job.id is not None
         artifact = ctx.repo.add_artifact(
@@ -131,6 +112,76 @@ class ExtractWorker(Worker):
             "extractor": result.extractor,
             "has_video": result.has_video,
         }
+
+    async def _extract_remote(
+        self,
+        url: str,
+        *,
+        site: str,
+        hint: str,
+        want_video: bool,
+        max_height: int | None,
+    ) -> ExtractResult:
+        """Run the extraction on a remote host (which has a real display) via
+        SSH, then read the produced audio back through a local mount/share."""
+        import hashlib
+        import json as _json
+
+        s = get_settings().scraper
+        rdir = s.remote_extract_dir.rstrip("/") or "/tmp/bankai-extract"
+        ldir = s.remote_extract_local.rstrip("/")
+        if not ldir:
+            raise PermanentWorkerError("scraper.remote_extract_local not configured")
+        prefix = s.remote_extract_cmd.strip() or "bankai"
+        tag = hashlib.sha1(url.encode()).hexdigest()[:12]
+        remote_out = f"{rdir}/{tag}"
+        inner = [prefix, "extract", _shq(url), "--site", _shq(site), "--out-dir", _shq(remote_out), "--json"]
+        if want_video:
+            inner.append("--want-video")
+        if max_height:
+            inner += ["--max-height", str(int(max_height))]
+        remote_cmd = " ".join(inner)
+        ssh_cmd = [
+            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+            s.remote_extract_ssh, remote_cmd,
+        ]
+        log.info("[extract] delegating to %s (remote display): %s", s.remote_extract_ssh, remote_cmd)
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out, err = await proc.communicate()
+        out_s = out.decode(errors="replace")
+        if proc.returncode != 0:
+            raise WorkerError(
+                f"remote extract failed (rc={proc.returncode}): {err.decode(errors='replace')[-600:]}"
+            )
+        payload = None
+        for line in reversed(out_s.splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    payload = _json.loads(line)
+                    break
+                except ValueError:
+                    continue
+        if not payload or not payload.get("path"):
+            raise WorkerError(f"remote extract: no JSON result (stdout tail: {out_s[-400:]})")
+        remote_path = str(payload["path"])
+        local_path = ldir + remote_path[len(rdir):] if remote_path.startswith(rdir) else remote_path
+        p = Path(local_path.replace("\\", "/"))
+        for _ in range(30):  # wait for the file to appear over the share
+            if p.exists():
+                break
+            await asyncio.sleep(1)
+        if not p.exists():
+            raise WorkerError(f"remote extract produced {remote_path} but local {p} is not visible")
+        return ExtractResult(
+            path=p,
+            codec=payload.get("codec"),
+            duration_ms=payload.get("duration_ms"),
+            extractor="remote:" + str(payload.get("extractor", "?")),
+            has_video=bool(payload.get("has_video", False)),
+        )
 
 
 # ---- result type -----------------------------------------------------------
@@ -153,6 +204,65 @@ class ExtractResult:
         self.duration_ms = duration_ms
         self.extractor = extractor
         self.has_video = has_video
+
+
+def _shq(s: str) -> str:
+    """POSIX single-quote a string for embedding in a remote SSH command."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+async def extract_url(
+    url: str,
+    out_dir: Path,
+    *,
+    site: str = "unknown",
+    hint: str = "ytdlp",
+    want_video: bool = False,
+    max_height: int | None = None,
+    ytdlp: YtDlpRunner | None = None,
+    playwright: PlaywrightRunner | None = None,
+) -> ExtractResult:
+    """Extract the audio (yt-dlp first, Playwright fallback) for one stream URL.
+
+    Self-contained (no DB/context) so it can back both the pipeline worker and
+    the ``bankai extract`` CLI used for remote delegation.
+    """
+    ytdlp = ytdlp or YtDlpRunner()
+    playwright = playwright or PlaywrightRunner()
+    backend_pref = get_settings().scraper.backend  # "ytdlp" | "playwright" | "auto"
+    try_ytdlp = backend_pref in ("ytdlp", "auto") and hint != "playwright"
+    try_playwright = backend_pref in ("playwright", "auto")
+
+    result: ExtractResult | None = None
+    last_err: Exception | None = None
+
+    if try_ytdlp:
+        try:
+            result = await ytdlp.extract(url, out_dir, want_video=want_video, max_height=max_height)
+        except YtDlpError as exc:
+            log.warning("[extract] yt-dlp failed for %s: %s", url, exc)
+            last_err = exc
+            if not try_playwright:
+                raise WorkerError(f"yt-dlp failed: {exc}") from exc
+
+    if result is None and try_playwright:
+        log.info(
+            "[extract] yt-dlp couldn't handle %s \u2014 switching to Playwright "
+            "(opens Chromium, captures the real media URL, then yt-dlp downloads "
+            "it; this can take several minutes for full movies)",
+            url,
+        )
+        try:
+            result = await playwright.extract(
+                url, out_dir, ytdlp=ytdlp, want_video=want_video, max_height=max_height
+            )
+        except PlaywrightError as exc:
+            log.error("[extract] playwright fallback failed for %s: %s", url, exc)
+            raise WorkerError(f"playwright fallback failed: {exc}") from exc
+
+    if result is None:
+        raise WorkerError(f"no extractor available (last error: {last_err})")
+    return result
 
 
 # ---- yt-dlp ----------------------------------------------------------------

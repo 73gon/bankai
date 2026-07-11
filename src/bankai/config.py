@@ -80,6 +80,15 @@ class ScraperSettings(BaseModel):
     # When true, the CLI prompts you to pick from search results before
     # running the pipeline. When false, it auto-picks the top match.
     interactive_pick: bool = False
+    # Delegate the German-audio extraction to a remote host over SSH. Needed
+    # when the local host can't run a real browser (e.g. a headless Windows
+    # service): voe-style hosters require a display. The remote host runs
+    # ``bankai extract`` (it starts its own Xvfb) and writes the audio into a
+    # directory the local host can read back (e.g. an SMB share).
+    remote_extract_ssh: str = ""  # e.g. "malik@192.168.178.29"
+    remote_extract_cmd: str = ""  # remote invocation prefix, e.g. "cd /home/malik/bankai && .venv/bin/bankai"
+    remote_extract_dir: str = ""  # remote output dir, e.g. "/mnt/media/downloads/bankai/extract"
+    remote_extract_local: str = ""  # local path mapping to remote_extract_dir, e.g. "//192.168.178.29/downloads/bankai/extract"
 
 
 class MetadataSettings(BaseModel):
