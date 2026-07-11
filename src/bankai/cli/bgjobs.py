@@ -145,37 +145,55 @@ class BgJob:
         return True
 
 
-_FAILURE_REASON_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))\b:?\s*(.*)$")
+_FAILURE_REASON_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning))\b:?\s*(.*)$"
+)
+# A continuation of a wrapped exception message ends when we hit a blank line,
+# a new traceback frame / box border, a log timestamp, or a BANKAI marker.
+_REASON_BOUNDARY_RE = re.compile(
+    r'^(?:[+|\u2502\u2570\u256d\u2500]|\d{4}-\d\d-\d\d|BANKAI_|File ")'
+)
 
 
 def failure_reason(job: BgJob) -> str | None:
     """Best-effort human-readable failure reason from a failed job's log.
 
-    Pulls the exception summary (e.g. ``PermanentWorkerError: no candidate
-    met selector criteria ...``) out of the rich traceback so the UI can show
-    a one-line ``Reason`` instead of a wall of stack frames.
+    ``rich`` renders the exception summary (e.g. ``PermanentWorkerError: no
+    candidate met selector criteria ...``) below the traceback box and wraps
+    it across lines at the console width. We locate the last such summary and
+    stitch the wrapped continuation lines back together so the UI can show a
+    single clean ``Reason`` instead of a wall of stack frames.
     """
     try:
         text = job.log_path.read_text(errors="replace")
     except OSError:
         return None
-    reason: str | None = None
-    for raw in text.splitlines():
-        line = raw.strip().strip("|").strip()
-        m = _FAILURE_REASON_RE.match(line)
-        if m:
-            msg = (m.group(2) or "").strip()
-            reason = f"{m.group(1)}: {msg}" if msg else m.group(1)
-    if not reason:
-        for raw in reversed(text.splitlines()):
+    lines = text.splitlines()
+    last_idx: int | None = None
+    for i, raw in enumerate(lines):
+        if _FAILURE_REASON_RE.match(raw.strip()):
+            last_idx = i
+    if last_idx is None:
+        for raw in reversed(lines):
             s = raw.strip().strip("|").strip()
             if s.startswith("ERROR") or " ERROR " in s:
-                reason = s.split("ERROR", 1)[-1].strip(" :")
-                break
-    if reason:
-        reason = re.sub(r"\s+", " ", reason).strip()
-        if len(reason) > 240:
-            reason = reason[:237] + "..."
+                return _shorten_reason(s.split("ERROR", 1)[-1].strip(" :"))
+        return None
+    parts = [lines[last_idx].strip()]
+    for raw in lines[last_idx + 1 :]:
+        s = raw.strip()
+        if not s or _REASON_BOUNDARY_RE.match(s) or _FAILURE_REASON_RE.match(s):
+            break
+        parts.append(s)
+    return _shorten_reason(" ".join(parts))
+
+
+def _shorten_reason(reason: str) -> str | None:
+    reason = re.sub(r"\s+", " ", reason).strip()
+    if not reason:
+        return None
+    if len(reason) > 400:
+        reason = reason[:397] + "..."
     return reason
 
 
