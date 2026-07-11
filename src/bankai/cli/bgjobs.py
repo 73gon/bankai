@@ -447,6 +447,8 @@ def spawn(*, kind: str, title: str, args: list[str]) -> BgJob:
     env.pop("NO_COLOR", None)
     env.setdefault("FORCE_COLOR", "1")
     env.setdefault("TERM", "xterm-256color")
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("BANKAI_BG_JOB_ID", job.id)
     if sys.platform == "win32":
         DETACHED = 0x00000008
@@ -498,6 +500,11 @@ def _supervise(job_id: str, args: list[str]) -> int:
     env.pop("NO_COLOR", None)
     env.setdefault("FORCE_COLOR", "1")
     env.setdefault("TERM", "xterm-256color")
+    # Log messages contain Unicode (arrows, ellipses). Under a Windows service
+    # the child's stdout defaults to cp1252, which raises UnicodeEncodeError
+    # inside the log handler. Force UTF-8 so the log stream never crashes.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("BANKAI_BG_JOB_ID", job.id)
     job.log_path.parent.mkdir(parents=True, exist_ok=True)
     with job.log_path.open("wb") as log_fh:
