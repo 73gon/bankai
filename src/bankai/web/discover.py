@@ -39,6 +39,7 @@ class DiscoverItem:
     overview: str | None = None
     is_new: bool = False
     release_date: str | None = None  # ISO date (YYYY-MM-DD) when known
+    status: str | None = None  # TVDB status name e.g. "Released", "Announced"
 
 
 def is_configured() -> bool:
@@ -104,6 +105,13 @@ def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
     date_s = str(date)[:10] if date else None
     year = _to_int(rec.get("year")) or _to_int((date_s or "")[:4])
     poster = rec.get("image_url") or rec.get("image") or rec.get("thumbnail")
+    status_raw = rec.get("status")
+    if isinstance(status_raw, dict):
+        status = status_raw.get("name")
+    elif isinstance(status_raw, str):
+        status = status_raw
+    else:
+        status = None
     return DiscoverItem(
         name=str(name),
         kind=kind,
@@ -112,6 +120,7 @@ def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
         poster_url=_abs_image(poster),
         overview=rec.get("overview"),
         release_date=date_s,
+        status=str(status) if status else None,
     )
 
 
@@ -231,6 +240,7 @@ async def new_releases(kind: str, *, limit: int = 24) -> list[DiscoverItem]:
                         overview=base.overview,
                         is_new=True,
                         release_date=base.release_date,
+                        status=base.status,
                     )
                 )
                 if len(items) >= limit:
@@ -284,12 +294,18 @@ def to_dict(item: DiscoverItem) -> dict:
 def is_released(item: DiscoverItem, *, today: datetime.date | None = None) -> bool:
     """True if the title has already been released.
 
-    Uses the exact release date when TVDB provides one, otherwise falls back
-    to the year. Titles with an unknown date *and* year are treated as
-    released (we don't hide indiscriminately). Lets Discover drop upcoming
-    titles the user can't download yet.
+    Prefers TVDB's ``status`` (e.g. "Released" vs "Announced" / "Filming /
+    Post-Production" / "Pre-Production"), which is the only reliable signal on
+    list records (they carry no date). Falls back to the exact release date,
+    then the year. Lets Discover drop upcoming titles the user can't download.
     """
     today = today or datetime.date.today()
+    st = (item.status or "").strip().lower()
+    if st:
+        # Any hint of an in-progress / future production => not released yet.
+        if any(h in st for h in _UNRELEASED_HINTS):
+            return False
+        return True
     if item.release_date:
         try:
             return datetime.date.fromisoformat(item.release_date) <= today
@@ -298,6 +314,23 @@ def is_released(item: DiscoverItem, *, today: datetime.date | None = None) -> bo
     if item.year is not None:
         return item.year <= today.year
     return True
+
+
+_UNRELEASED_HINTS = (
+    "announc",
+    "plan",
+    "pre-prod",
+    "pre prod",
+    "post-prod",
+    "post prod",
+    "filming",
+    "production",
+    "upcoming",
+    "rumor",
+    "develop",
+    "cancel",
+    "unreleased",
+)
 
 
 # ---------------------------------------------------------------------------
