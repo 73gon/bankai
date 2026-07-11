@@ -855,7 +855,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // prefetch the video clip for this window. Never re-fetch mid-drag.
   useEffect(() => {
     if (dragging) return;
-    const bins = Math.max(200, Math.round(canvasW));
+    // Backend caps bins at 4000 — never request more or it 422s (which would
+    // silently leave a lane blank). English uses 1x, German a wider buffer.
+    const MAX_BINS = 4000;
+    const bins = Math.min(MAX_BINS, Math.max(200, Math.round(canvasW)));
     const t = setTimeout(async () => {
       try {
         if (engStream != null) {
@@ -865,7 +868,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         if (gerStream != null) {
           const trackStart = Math.max(0, viewStart - delayMs / 1000 - windowSec / 2);
           const bufDur = windowSec * 2;
-          const w = await api.waveform(path, gerStream, trackStart, bufDur, bins * 2);
+          const w = await api.waveform(path, gerStream, trackStart, bufDur, Math.min(MAX_BINS, bins * 2));
           setGerBuf({ peaks: decodePeaks(w.peaks), trackStart, dur: bufDur });
         }
       } catch {
