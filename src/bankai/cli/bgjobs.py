@@ -145,6 +145,40 @@ class BgJob:
         return True
 
 
+_FAILURE_REASON_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))\b:?\s*(.*)$")
+
+
+def failure_reason(job: BgJob) -> str | None:
+    """Best-effort human-readable failure reason from a failed job's log.
+
+    Pulls the exception summary (e.g. ``PermanentWorkerError: no candidate
+    met selector criteria ...``) out of the rich traceback so the UI can show
+    a one-line ``Reason`` instead of a wall of stack frames.
+    """
+    try:
+        text = job.log_path.read_text(errors="replace")
+    except OSError:
+        return None
+    reason: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip().strip("|").strip()
+        m = _FAILURE_REASON_RE.match(line)
+        if m:
+            msg = (m.group(2) or "").strip()
+            reason = f"{m.group(1)}: {msg}" if msg else m.group(1)
+    if not reason:
+        for raw in reversed(text.splitlines()):
+            s = raw.strip().strip("|").strip()
+            if s.startswith("ERROR") or " ERROR " in s:
+                reason = s.split("ERROR", 1)[-1].strip(" :")
+                break
+    if reason:
+        reason = re.sub(r"\s+", " ", reason).strip()
+        if len(reason) > 240:
+            reason = reason[:237] + "..."
+    return reason
+
+
 @dataclass(frozen=True, slots=True)
 class ProgressPart:
     label: str

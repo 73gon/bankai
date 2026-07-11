@@ -110,6 +110,7 @@ export interface TitleRow {
   series: string | null;
   season: number | null;
   stage: string | null;
+  reason: string | null;
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;
@@ -201,6 +202,7 @@ export const api = {
     request('/api/queue/show', { method: 'POST', body: JSON.stringify(body) }),
   cancelJob: (id: string) => request(`/api/queue/${id}/cancel`, { method: 'POST' }),
   retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: 'POST' }),
+  deleteJob: (id: string) => request(`/api/queue/${id}`, { method: 'DELETE' }),
   jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
 
   library: () => request<{ entries: LibraryEntry[]; library: string }>('/api/library'),

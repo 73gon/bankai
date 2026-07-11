@@ -382,6 +382,16 @@ export default function Library() {
     }
   }
 
+  async function deleteJob(id: string) {
+    try {
+      await api.deleteJob(id);
+      toast.success('Removed');
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
   async function redo(r: TitleRow) {
     const key = r.path || r.title;
     setRedoing((s) => new Set(s).add(r.id));
@@ -449,6 +459,7 @@ export default function Library() {
     const isLib = r.row_kind === 'library';
     const isJob = r.row_kind === 'job';
     const canCancel = isJob && (r.pending || r.job_status === 'running');
+    const canDelete = isJob && (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled');
     const isOpen = expanded === r.id;
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
@@ -477,11 +488,25 @@ export default function Library() {
           <td className='px-2 py-2 align-middle'>
             <StatusCell r={r} />
           </td>
+          <td className='max-w-[18rem] px-2 py-2 align-middle text-xs text-muted-foreground'>
+            {r.reason ? (
+              <span className='block truncate text-destructive' title={r.reason}>{r.reason}</span>
+            ) : (
+              <span className='text-muted-foreground/50'>-</span>
+            )}
+          </td>
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
           </td>
           <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>
             {whenLabel(r.done_at)}
+          </td>
+          <td className='max-w-[20rem] px-2 py-2 align-middle text-xs text-muted-foreground'>
+            {r.path ? (
+              <span className='block truncate font-mono' title={r.path}>{r.path}</span>
+            ) : (
+              <span className='text-muted-foreground/50'>-</span>
+            )}
           </td>
           <td className='px-2 py-2 align-middle' onClick={stop}>
             <div className='flex items-center justify-end gap-1'>
@@ -508,6 +533,11 @@ export default function Library() {
                   <X className='h-4 w-4' />
                 </Button>
               )}
+              {canDelete && (
+                <Button size='icon' variant='ghost' onClick={() => deleteJob(r.job_id!)} title='Remove — delete this failed job'>
+                  <Trash2 className='h-4 w-4 text-red-400' />
+                </Button>
+              )}
               {isLib && (r.stage === 'approved' || r.transfer_status === 'failed') && (
                 <Button size='icon' variant='ghost' onClick={() => transferOne(r.path!)} title='Send to media server'>
                   <UploadCloud className='h-4 w-4' />
@@ -523,7 +553,7 @@ export default function Library() {
         </tr>
         {isOpen && (
           <tr className='border-t border-border bg-black/20'>
-            <td colSpan={7} className='px-3 py-2'>
+            <td colSpan={9} className='px-3 py-2'>
               {r.job_id ? (
                 <pre className='ansi-log max-h-72 overflow-auto rounded-md bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground'>
                   <AnsiLog text={logs[r.job_id] ?? 'Loading logs…'} />
@@ -628,8 +658,10 @@ export default function Library() {
                 <SortHeader col='title' label='Title' className='text-left' />
                 <SortHeader col='type' label='Type' className='text-left' />
                 <SortHeader col='status' label='Status' className='text-left' />
+                <th className='px-2 py-2 text-left font-medium'>Reason</th>
                 <th className='px-2 py-2 text-left font-medium'>Sync</th>
                 <SortHeader col='when' label='Time' className='text-left' />
+                <th className='px-2 py-2 text-left font-medium'>Path</th>
                 <th className='px-2 py-2 text-right font-medium'>Actions</th>
               </tr>
             </thead>

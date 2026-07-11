@@ -131,6 +131,7 @@ def snapshot() -> list[dict]:
                 "finished_at": j.finished_at,
                 "exit_code": j.exit_code,
                 "final_path": j.final_path,
+                "reason": bgjobs.failure_reason(j) if j.status == "failed" else None,
                 "step": snap.step,
                 "total_steps": snap.total_steps,
                 "step_label": snap.step_label,

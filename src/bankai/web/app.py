@@ -409,6 +409,20 @@ def create_app() -> Any:
             raise HTTPException(status_code=404, detail="job not found")
         return webjobs.enqueue(kind=job.kind, title=job.title, args=job.args)
 
+    @app.delete("/api/queue/{job_id}")
+    def queue_delete(job_id: str) -> dict:
+        from bankai.cli import bgjobs
+
+        if webjobs.cancel_pending(job_id):
+            return {"deleted": True, "pending": True}
+        job = bgjobs.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.status == "running":
+            job.cancel()
+        ok = job.delete()
+        return {"deleted": ok, "pending": False}
+
     @app.get("/api/jobs/{job_id}/log")
     def job_log(job_id: str, lines: int = Query(200, ge=1, le=5000)) -> dict:
         from bankai.cli import bgjobs
@@ -574,7 +588,7 @@ def create_app() -> Any:
                     "year": _extract_year(j.get("title", "")) or posters_mod.cached_year(poster_key),
                     "poster": posters_mod.cached(poster_key),
                     "done_at": j.get("finished_at") or j.get("started_at"),
-                    "path": None,
+                    "path": j.get("final_path"),
                     "rel_path": None,
                     "name": j.get("title", ""),
                     "size": None,
@@ -582,6 +596,7 @@ def create_app() -> Any:
                     "series": None,
                     "season": None,
                     "stage": None,
+                    "reason": j.get("reason"),
                     "delay_ms": 0,
                     "needs_sync_review": False,
                     "sync_confidence": None,
