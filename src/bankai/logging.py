@@ -19,7 +19,7 @@ def configure_logging(level: int | str = logging.INFO, **handler_kwargs: Any) ->
         return
     handler = RichHandler(
         console=make_console(),
-        rich_tracebacks=True,
+        rich_tracebacks=False,
         show_time=True,
         show_path=False,
         markup=True,

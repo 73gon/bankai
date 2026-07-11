@@ -65,6 +65,7 @@ app = typer.Typer(
     add_completion=False,
     invoke_without_command=True,
     no_args_is_help=False,
+    pretty_exceptions_enable=False,
 )
 jobs_app = typer.Typer(name="jobs", help="Inspect and manage queued jobs.", no_args_is_help=True)
 config_app = typer.Typer(name="config", help="View/edit configuration.", no_args_is_help=True)
@@ -2112,7 +2113,18 @@ def _run_pipeline(
 
     async def go() -> None:
         settings = get_settings()
-        result = await _run_worker_once(worker, settings.paths.work_dir, payload=payload)
+        try:
+            result = await _run_worker_once(worker, settings.paths.work_dir, payload=payload)
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            # Keep the full stack trace only at DEBUG (visible with --verbose)
+            # and surface a single clean line for humans and the UI parser.
+            log.debug("pipeline traceback", exc_info=True)
+            log.error("Job failed \u2014 %s", reason)
+            # Bare reason on its own unwrapped line so the Reason column and
+            # log parser can pick it up cleanly (no box, no wrapping).
+            print(reason, flush=True)
+            raise typer.Exit(code=1) from exc
         console.print_json(data=result or {})
 
     asyncio.run(go())
