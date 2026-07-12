@@ -196,16 +196,10 @@ def create_app() -> Any:
     )
     from fastapi.staticfiles import StaticFiles
 
-    app = FastAPI(title="bankai", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    from contextlib import asynccontextmanager
 
-    @app.on_event("startup")
-    async def _tune_threadpool() -> None:
+    @asynccontextmanager
+    async def _lifespan(_app: Any):
         # Sync endpoints (media probing/transcoding, library scans) run in the
         # anyio threadpool. Give it headroom so a burst of review clips or many
         # open tabs can't starve lightweight endpoints like /api/health.
@@ -215,6 +209,21 @@ def create_app() -> Any:
             anyio.to_thread.current_default_thread_limiter().total_tokens = 96
         except Exception:  # noqa: BLE001 - best effort
             pass
+        yield
+
+    app = FastAPI(
+        title="bankai",
+        version=__version__,
+        docs_url="/api/docs",
+        openapi_url="/api/openapi.json",
+        lifespan=_lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # ------------------------------------------------------------------
     # Path safety
