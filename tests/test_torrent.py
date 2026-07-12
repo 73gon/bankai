@@ -32,6 +32,7 @@ def _c(
         download_url="magnet:?xt=urn:btih:" + ("0" * 40),
         info_url=None,
         magnet_uri="magnet:?xt=urn:btih:" + ("0" * 40),
+        info_hash=None,
         size_bytes=int(size_gib * (1024**3)),
         seeders=seeders,
         leechers=0,

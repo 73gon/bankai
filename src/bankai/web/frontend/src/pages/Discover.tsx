@@ -142,13 +142,36 @@ export default function Discover() {
     if (!selected) return;
     setBusyUrl(r.url);
     try {
-      await api.queueMovie({
-        title: selected.name,
-        german: german ?? undefined,
-        url: r.url,
-        site: r.site,
-      });
-      toast.success(`Queued ${selected.name}`);
+      let year = selected.year ?? undefined;
+      try {
+        await api.queueMovie({
+          title: selected.name,
+          german: german ?? undefined,
+          url: r.url,
+          site: r.site,
+          year,
+        });
+      } catch (err: any) {
+        if (err?.message === 'year_required') {
+          const entered = window.prompt(`Enter the release year for "${selected.name}":`, '');
+          const y = entered ? parseInt(entered.trim(), 10) : NaN;
+          if (!y || y < 1900 || y > 2100) {
+            toast.error('A valid release year is required to queue this movie.');
+            return;
+          }
+          year = y;
+          await api.queueMovie({
+            title: selected.name,
+            german: german ?? undefined,
+            url: r.url,
+            site: r.site,
+            year,
+          });
+        } else {
+          throw err;
+        }
+      }
+      toast.success(`Queued ${selected.name}${year ? ` (${year})` : ''}`);
       setSelected(null);
     } catch (e: any) {
       toast.error(e.message);

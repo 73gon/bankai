@@ -109,6 +109,7 @@ class MovieQueueRequest(BaseModel):
     german: str | None = None
     url: str | None = None
     site: str = "filmpalast"
+    year: int | None = None
 
 
 class ShowQueueRequest(BaseModel):
@@ -358,9 +359,28 @@ def create_app() -> Any:
     def queue_movie(req: MovieQueueRequest) -> dict:
         from bankai.backend import BatchMovie, build_movie_args
 
-        movie = BatchMovie(title=req.title, german_title=req.german, url=req.url)
+        year = req.year
+        if year is None:
+            # Resolve the release year from TVDB so the library filename is
+            # never "(unknown)". If TVDB has no year either, tell the client to
+            # ask the user -- the year is mandatory.
+            try:
+                import asyncio as _asyncio
+
+                from bankai.metadata.tvdb import get_title_aliases
+                from bankai.queue.models import MediaKind
+
+                aliases = _asyncio.run(get_title_aliases(req.title, kind=MediaKind.MOVIE))
+                year = next((a.year for a in aliases if a.year), None)
+            except Exception:  # noqa: BLE001 -- TVDB is best-effort here.
+                year = None
+        if year is None:
+            raise HTTPException(status_code=422, detail="year_required")
+        movie = BatchMovie(
+            title=req.title, german_title=req.german, url=req.url, year=year
+        )
         args = build_movie_args(movie, site=req.site)
-        return webjobs.enqueue(kind="movie", title=req.title, args=args)
+        return webjobs.enqueue(kind="movie", title=f"{req.title} ({year})", args=args)
 
     @app.post("/api/queue/show")
     async def queue_show(req: ShowQueueRequest) -> dict:

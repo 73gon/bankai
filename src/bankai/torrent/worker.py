@@ -159,7 +159,12 @@ class TorrentWorker(Worker):
         # hashes). For magnets: parse xt=urn:btih:. For .torrent URLs:
         # fetch the file and SHA1 the bencoded `info` dict.
         magnet_hash: str | None = None
-        if link.startswith("magnet:"):
+        # Most reliable: Prowlarr reports the info-hash directly. Prefer it so
+        # we always track the exact torrent we picked, even when other
+        # same-title torrents already exist in qBittorrent.
+        if chosen.candidate.info_hash:
+            magnet_hash = chosen.candidate.info_hash.lower()
+        elif link.startswith("magnet:"):
             import re as _re
 
             m = _re.search(r"xt=urn:btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})", link)
@@ -341,7 +346,13 @@ class TorrentWorker(Worker):
                 "and",
             }
             content_tokens = norm_tokens - stop
-            pool = new_hashes if new_hashes else [t.hash for t in listings]
+            # Never fall back to a torrent that already existed before we
+            # added ours -- that is how the pipeline used to lock onto an
+            # unrelated same-title torrent (e.g. a leftover 2160p) and then
+            # wait forever. Only fuzzy-match among genuinely new hashes.
+            pool = new_hashes if new_hashes else [
+                t.hash for t in listings if t.hash not in before_hashes
+            ]
             min_match = 1 if new_hashes else 2
             best: tuple[int, str] | None = None
             for t in listings:

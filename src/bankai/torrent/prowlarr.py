@@ -35,6 +35,7 @@ class TorrentCandidate:
     download_url: str
     info_url: str | None
     magnet_uri: str | None
+    info_hash: str | None
     size_bytes: int
     seeders: int
     leechers: int
@@ -104,6 +105,7 @@ class ProwlarrClient:
             download_url=row.get("downloadUrl") or row.get("guid", ""),
             info_url=row.get("infoUrl"),
             magnet_uri=row.get("magnetUrl"),
+            info_hash=((row.get("infoHash") or "").lower() or None),
             size_bytes=int(row.get("size") or 0),
             seeders=int(row.get("seeders") or 0),
             leechers=int(row.get("leechers") or 0),

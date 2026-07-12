@@ -116,7 +116,33 @@ function cleanLog(raw: string): string {
   return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
 }
 
-// Memoised so the 3s table refresh doesn't churn the <pre> (which used to reset
+// Truncated cell with a hover tooltip showing the full text. The inner element
+// is width-capped so truncation actually happens in an auto-layout table, and
+// a native `title` provides the full value on hover (never clipped by the
+// table's own overflow container, unlike an absolutely-positioned popover).
+function TruncCell({
+  text,
+  mono,
+  danger,
+  width = '16rem',
+}: {
+  text: string | null | undefined;
+  mono?: boolean;
+  danger?: boolean;
+  width?: string;
+}) {
+  if (!text) return <span className='text-muted-foreground/40'>-</span>;
+  return (
+    <div
+      className={cn('truncate cursor-help', mono && 'font-mono', danger && 'text-destructive')}
+      style={{ maxWidth: width }}
+      title={text}
+    >
+      {text}
+    </div>
+  );
+}
+
 // the user's scroll position). Only auto-scrolls to the bottom when the user is
 // already near it, so reading earlier lines isn't interrupted.
 const LogPanel = memo(function LogPanel({ text }: { text: string }) {
@@ -476,26 +502,34 @@ export default function Library() {
 
   function SyncCell({ r }: { r: TitleRow }) {
     if (r.row_kind !== 'library') return <span className='text-muted-foreground'>—</span>;
-    if (r.needs_sync_review)
+    const c = r.sync_confidence;
+    if (c == null) {
+      if (r.needs_sync_review)
+        return (
+          <Badge variant='warning' title='Audio sync needs a manual check — open Review.'>
+            Check sync
+          </Badge>
+        );
       return (
-        <Badge
-          variant='warning'
-          title={
-            'Automatic audio sync was low-confidence' +
-            (r.sync_confidence != null ? ` (${Math.round(r.sync_confidence * 100)}%)` : '') +
-            '. Open Review to check and nudge the German delay.'
-          }
-        >
-          Check sync
+        <Badge variant='muted' title='No automatic audio sync was applied.'>
+          Not synced
         </Badge>
       );
-    if (r.sync_confidence != null)
-      return (
-        <span className='text-xs text-muted-foreground' title='Automatic sync confidence'>
-          {Math.round(r.sync_confidence * 100)}%
-        </span>
-      );
-    return <span className='text-xs text-muted-foreground'>—</span>;
+    }
+    const pct = Math.round(c * 100);
+    const acc =
+      c >= 0.9
+        ? { label: 'Spot on', variant: 'success' as const }
+        : c >= 0.75
+          ? { label: 'Probably on spot', variant: 'success' as const }
+          : c >= 0.5
+            ? { label: 'Slightly off', variant: 'warning' as const }
+            : { label: 'Completely off', variant: 'destructive' as const };
+    return (
+      <Badge variant={acc.variant} title={`Automatic sync confidence ${pct}%`}>
+        {acc.label}
+      </Badge>
+    );
   }
 
   function Poster({ r }: { r: TitleRow }) {
@@ -552,12 +586,8 @@ export default function Library() {
           <td className='px-2 py-2 align-middle'>
             <StatusCell r={r} />
           </td>
-          <td className='max-w-[18rem] px-2 py-2 align-middle text-xs text-muted-foreground'>
-            {r.reason ? (
-              <span className='block truncate text-destructive' title={r.reason}>{r.reason}</span>
-            ) : (
-              <span className='text-muted-foreground/50'>-</span>
-            )}
+          <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>
+            <TruncCell text={r.reason} danger width='18rem' />
           </td>
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
@@ -565,12 +595,8 @@ export default function Library() {
           <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>
             {whenLabel(r.done_at)}
           </td>
-          <td className='max-w-[20rem] px-2 py-2 align-middle text-xs text-muted-foreground'>
-            {r.path ? (
-              <span className='block truncate font-mono' title={r.path}>{r.path}</span>
-            ) : (
-              <span className='text-muted-foreground/50'>-</span>
-            )}
+          <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>
+            <TruncCell text={r.path} mono width='20rem' />
           </td>
           <td className='px-2 py-2 align-middle' onClick={stop}>
             <div className='flex items-center justify-end gap-1'>

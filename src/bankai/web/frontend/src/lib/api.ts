@@ -196,7 +196,7 @@ export const api = {
     ),
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
-  queueMovie: (body: { title: string; german?: string; url?: string; site?: string }) =>
+  queueMovie: (body: { title: string; german?: string; url?: string; site?: string; year?: number }) =>
     request('/api/queue/movie', { method: 'POST', body: JSON.stringify(body) }),
   queueShow: (body: { show: string; season: number; episodes?: number[]; site?: string }) =>
     request('/api/queue/show', { method: 'POST', body: JSON.stringify(body) }),
