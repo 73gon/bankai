@@ -387,21 +387,11 @@ def create_app() -> Any:
     def queue_movie(req: MovieQueueRequest) -> dict:
         from bankai.backend import BatchMovie, build_movie_args
 
+        # The year MUST come from the exact title the user selected (its TVDB
+        # entry) or an explicit user prompt. We deliberately do NOT fuzzy-search
+        # TVDB by name to guess a year -- that once resolved "Obsession 2026" to
+        # a different "Obsession (2019)" and downloaded the wrong movie.
         year = req.year
-        if year is None:
-            # Resolve the release year from TVDB so the library filename is
-            # never "(unknown)". If TVDB has no year either, tell the client to
-            # ask the user -- the year is mandatory.
-            try:
-                import asyncio as _asyncio
-
-                from bankai.metadata.tvdb import get_title_aliases
-                from bankai.queue.models import MediaKind
-
-                aliases = _asyncio.run(get_title_aliases(req.title, kind=MediaKind.MOVIE))
-                year = next((a.year for a in aliases if a.year), None)
-            except Exception:  # noqa: BLE001 -- TVDB is best-effort here.
-                year = None
         if year is None:
             raise HTTPException(status_code=422, detail="year_required")
         movie = BatchMovie(

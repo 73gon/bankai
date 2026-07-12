@@ -294,25 +294,27 @@ def to_dict(item: DiscoverItem) -> dict:
 def is_released(item: DiscoverItem, *, today: datetime.date | None = None) -> bool:
     """True if the title has already been released.
 
-    Prefers TVDB's ``status`` (e.g. "Released" vs "Announced" / "Filming /
-    Post-Production" / "Pre-Production"), which is the only reliable signal on
-    list records (they carry no date). Falls back to the exact release date,
-    then the year. Lets Discover drop upcoming titles the user can't download.
+    The release *date* is authoritative: anything dated in the future is hidden.
+    When no date is available a future year is likewise treated as unreleased,
+    and a past year as released. Only for the ambiguous current-year-without-date
+    case do we consult TVDB's status hint as a last resort. This keeps upcoming
+    titles out of Discover even when TVDB's ``status`` is stale or missing.
     """
     today = today or datetime.date.today()
-    st = (item.status or "").strip().lower()
-    if st:
-        # Any hint of an in-progress / future production => not released yet.
-        if any(h in st for h in _UNRELEASED_HINTS):
-            return False
-        return True
     if item.release_date:
         try:
             return datetime.date.fromisoformat(item.release_date) <= today
         except ValueError:
             pass
     if item.year is not None:
-        return item.year <= today.year
+        if item.year > today.year:
+            return False
+        if item.year < today.year:
+            return True
+    # Current year without a date, or no year at all: use the status hint.
+    st = (item.status or "").strip().lower()
+    if any(h in st for h in _UNRELEASED_HINTS):
+        return False
     return True
 
 

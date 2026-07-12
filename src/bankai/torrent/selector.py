@@ -107,13 +107,13 @@ class TorrentSelector:
             # leading title segment (before the year tag).
             if not all(t in cand_set for t in q_main):
                 continue
-            # Reject candidates whose leading title carries *extra* trailing
-            # words beyond the query (e.g. query "Smile" vs release
-            # "Smile 2") — a same-prefix sequel is a different movie.
-            if q_year and not query_is_episodic and len(cand_tokens) > len(q_main):
-                extra = cand_tokens[len(q_main):]
-                # A lone numeric token right after the title means a sequel.
-                if extra and extra[0].isdigit():
+            # Reject candidates whose title carries *extra* content words the
+            # query doesn't have -- e.g. query "Obsession" vs release "Toxic
+            # Obsession", or "Smile" vs "Smile 2". That's a different movie, not
+            # just a release tag. Common leading articles are ignored.
+            if q_year and not query_is_episodic:
+                extra_words = (cand_set - set(q_main)) - {"the", "a", "an"}
+                if extra_words:
                     continue
             # If the query carries a year, the candidate must mention the
             # same year somewhere in its full title.
