@@ -78,8 +78,10 @@ def transfer_with_rsync(
 ) -> TransferResult:
     settings = get_settings()
     rsync = shutil.which(settings.transfer.rsync_binary)
-    if rsync is None:
-        raise TransferError(f"rsync not found: {settings.transfer.rsync_binary}")
+    # rsync is ideal for network moves, but on a native-Windows host the
+    # destination is a local drive and rsync is usually absent -- fall back to
+    # a verified copy-then-remove instead of failing the whole transfer.
+    use_native = rsync is None
     result = TransferResult()
     items = plan_transfer(paths, kind=kind)
     if not items:
@@ -97,18 +99,21 @@ def transfer_with_rsync(
             continue
         item.destination.parent.mkdir(parents=True, exist_ok=True)
         progress(f"MOVE {item.source} -> {item.destination}")
-        cmd = [
-            rsync,
-            "-a",
-            "--human-readable",
-            "--info=progress2",
-            "--ignore-existing",
-            "--remove-source-files",
-            str(item.source),
-            str(item.destination.parent) + os.sep,
-        ]
         try:
-            _run_rsync(cmd, progress=progress)
+            if use_native:
+                _native_move(item.source, item.destination, progress=progress)
+            else:
+                cmd = [
+                    rsync,
+                    "-a",
+                    "--human-readable",
+                    "--info=progress2",
+                    "--ignore-existing",
+                    "--remove-source-files",
+                    str(item.source),
+                    str(item.destination.parent) + os.sep,
+                ]
+                _run_rsync(cmd, progress=progress)
         except TransferError as exc:
             result.failed.append((item, str(exc)))
             progress(f"FAILED {item.source}: {exc}")
@@ -236,6 +241,29 @@ def _run_rsync(cmd: list[str], *, progress: ProgressCallback) -> None:
     code = proc.wait()
     if code != 0:
         raise TransferError(f"rsync exited with {code}")
+
+
+def _native_move(source: Path, destination: Path, *, progress: ProgressCallback) -> None:
+    """Copy ``source`` to ``destination`` (verifying size), then remove the
+    source. Used when rsync is unavailable (e.g. a native-Windows host writing
+    to a local drive). Writes to a ``.part`` temp first for an atomic finish.
+    """
+    tmp = destination.with_name(destination.name + ".part")
+    try:
+        tmp.unlink(missing_ok=True)
+        progress("BANKAI_PROGRESS stage=transfer pct=0.0 status=copying")
+        shutil.copy2(source, tmp)
+        src_size = source.stat().st_size
+        if tmp.stat().st_size != src_size:
+            raise TransferError("size mismatch after copy")
+        os.replace(tmp, destination)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise TransferError(f"copy failed: {exc}") from exc
+    try:
+        source.unlink(missing_ok=True)
+    except OSError:
+        pass  # copy succeeded; leaving the source is non-fatal
 
 
 def _emit_transfer_progress(
