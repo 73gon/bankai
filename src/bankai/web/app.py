@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import mimetypes
 import re
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,22 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # In-memory cache of downsampled audio waveforms keyed by (path, mtime, stream).
 _WAVEFORM_CACHE: dict[tuple, dict] = {}
+
+# Cap concurrent ffmpeg transcodes. Review scrubbing + many open browser tabs
+# used to spawn dozens of ffmpeg at once, exhausting the request threadpool and
+# hanging the whole server. Requests that can't get a slot fail fast with 503
+# so the client can show a loader and retry instead of blocking everything.
+_FFMPEG_SLOTS = threading.BoundedSemaphore(4)
+
+
+@contextmanager
+def _ffmpeg_slot():
+    if not _FFMPEG_SLOTS.acquire(timeout=1.0):
+        raise HTTPException(status_code=503, detail="transcoder busy")
+    try:
+        yield
+    finally:
+        _FFMPEG_SLOTS.release()
 
 
 def _clips_dir() -> Path:
@@ -185,6 +203,18 @@ def create_app() -> Any:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.on_event("startup")
+    async def _tune_threadpool() -> None:
+        # Sync endpoints (media probing/transcoding, library scans) run in the
+        # anyio threadpool. Give it headroom so a burst of review clips or many
+        # open tabs can't starve lightweight endpoints like /api/health.
+        try:
+            import anyio.to_thread
+
+            anyio.to_thread.current_default_thread_limiter().total_tokens = 96
+        except Exception:  # noqa: BLE001 - best effort
+            pass
 
     # ------------------------------------------------------------------
     # Path safety
@@ -841,7 +871,8 @@ def create_app() -> Any:
             "-f", "s16le", "pipe:1",
         ]
         try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=60)
+            with _ffmpeg_slot():
+                proc = subprocess.run(cmd, capture_output=True, timeout=60)
         except subprocess.TimeoutExpired as exc:
             raise HTTPException(status_code=504, detail="waveform decode timed out") from exc
         if proc.returncode != 0:
@@ -891,16 +922,17 @@ def create_app() -> Any:
         st = p.stat()
 
         def build(out: Path) -> None:
-            subprocess.run(
-                [
-                    ffmpeg, "-hide_banner", "-loglevel", "error",
-                    "-ss", str(start), "-t", str(dur), "-i", str(p),
-                    "-map", f"0:{stream}", "-ac", "2",
-                    "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "-y", str(out),
-                ],
-                timeout=120,
-                check=False,
-            )
+            with _ffmpeg_slot():
+                subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error",
+                        "-ss", str(start), "-t", str(dur), "-i", str(p),
+                        "-map", f"0:{stream}", "-ac", "2",
+                        "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "-y", str(out),
+                    ],
+                    timeout=120,
+                    check=False,
+                )
 
         key = f"{p}|{st.st_mtime_ns}|aud|{stream}|{round(start, 2)}|{round(dur, 2)}"
         clip = _cached_clip(key, "mp3", build)
@@ -928,19 +960,20 @@ def create_app() -> Any:
         st = p.stat()
 
         def build(out: Path) -> None:
-            subprocess.run(
-                [
-                    ffmpeg, "-hide_banner", "-loglevel", "error",
-                    "-ss", str(start), "-t", str(dur), "-i", str(p),
-                    "-map", "0:v:0", "-an",
-                    "-vf", f"scale=-2:{height}",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                    "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                    "-f", "mp4", "-y", str(out),
-                ],
-                timeout=300,
-                check=False,
-            )
+            with _ffmpeg_slot():
+                subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error",
+                        "-ss", str(start), "-t", str(dur), "-i", str(p),
+                        "-map", "0:v:0", "-an",
+                        "-vf", f"scale=-2:{height}",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                        "-f", "mp4", "-y", str(out),
+                    ],
+                    timeout=300,
+                    check=False,
+                )
 
         key = f"{p}|{st.st_mtime_ns}|vid|{round(start, 2)}|{round(dur, 2)}|{height}"
         clip = _cached_clip(key, "mp4", build)

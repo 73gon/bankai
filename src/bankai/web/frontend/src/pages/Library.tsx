@@ -887,6 +887,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // playhead to move it; playback starts from here.
   const [seekFrac, setSeekFrac] = useState(0);
   const [, setSeeking] = useState(false);
+  const [videoLoading, setVideoLoading] = useState(true);
+  const [gerLoading, setGerLoading] = useState(false);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const engCanvas = useRef<HTMLCanvasElement>(null);
@@ -986,32 +988,51 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     // silently leave a lane blank). English uses 1x, German a wider buffer.
     const MAX_BINS = 4000;
     const bins = Math.min(MAX_BINS, Math.max(200, Math.round(canvasW)));
-    const t = setTimeout(async () => {
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const fetchAll = async (attempt: number): Promise<void> => {
       try {
         if (engStream != null) {
           const w = await api.waveform(path, engStream, viewStart, windowSec, bins);
-          setEngPeaks(decodePeaks(w.peaks));
+          if (!cancelled) setEngPeaks(decodePeaks(w.peaks));
         }
         if (gerStream != null) {
+          if (!cancelled) setGerLoading(true);
           const trackStart = Math.max(0, viewStart - delayMs / 1000 - windowSec / 2);
           const bufDur = windowSec * 2;
           const w = await api.waveform(path, gerStream, trackStart, bufDur, Math.min(MAX_BINS, bins * 2));
-          setGerBuf({ peaks: decodePeaks(w.peaks), trackStart, dur: bufDur });
+          if (!cancelled) setGerBuf({ peaks: decodePeaks(w.peaks), trackStart, dur: bufDur });
         }
+        if (!cancelled) setGerLoading(false);
       } catch {
-        /* transient — ignore */
+        // Likely 503 (transcoder busy) — retry a few times before giving up.
+        if (!cancelled && attempt < 4) {
+          retryTimer = setTimeout(() => fetchAll(attempt + 1), 600);
+        } else if (!cancelled) {
+          setGerLoading(false);
+        }
       }
-    }, 160);
-    return () => clearTimeout(t);
+    };
+    const t = setTimeout(() => fetchAll(0), 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+      if (retryTimer) clearTimeout(retryTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging]);
 
-  // Prefetch the video clip whenever the view or quality moves (cached).
+  // Prefetch the video clip when the view/quality settles (debounced so
+  // dragging the timeline doesn't spawn a transcode per pixel).
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    v.src = api.videoClipUrl(path, viewStart, clipLen, quality);
-    v.load();
+    setVideoLoading(true);
+    const t = setTimeout(() => {
+      v.src = api.videoClipUrl(path, viewStart, clipLen, quality);
+      v.load();
+    }, 350);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, viewStart, windowSec, quality]);
 
@@ -1276,14 +1297,21 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         ) : (
           <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2'>
             {/* Video preview grows to fill the space above the waveforms */}
-            <div className='flex min-h-0 flex-1 items-center justify-center'>
+            <div className='relative flex min-h-0 flex-1 items-center justify-center'>
               <video
                 ref={videoRef}
                 muted
                 playsInline
                 preload='auto'
+                onLoadedData={() => setVideoLoading(false)}
+                onError={() => setVideoLoading(false)}
                 className='max-h-full w-auto rounded-md bg-black object-contain'
               />
+              {videoLoading && (
+                <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
+                  <Loader2 className='h-8 w-8 animate-spin text-muted-foreground' />
+                </div>
+              )}
             </div>
 
             <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
@@ -1330,13 +1358,20 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   <span key={i}>{b}</span>
                 ))}
               </div>
-              <canvas
-                ref={gerCanvas}
-                width={canvasW}
-                height={canvasH}
-                onMouseDown={onGerDown}
-                className='w-full cursor-ew-resize rounded-md bg-black/40'
-              />
+              <div className='relative'>
+                <canvas
+                  ref={gerCanvas}
+                  width={canvasW}
+                  height={canvasH}
+                  onMouseDown={onGerDown}
+                  className='w-full cursor-ew-resize rounded-md bg-black/40'
+                />
+                {gerLoading && (
+                  <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
+                    <Loader2 className='h-5 w-5 animate-spin text-pink-400' />
+                  </div>
+                )}
+              </div>
               <div
                 ref={playheadRef}
                 onMouseDown={onSeekDown}
@@ -1399,19 +1434,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               </div>
 
               {/* Waveform lane height */}
-              <div className='flex items-center gap-1'>
+              <div className='flex items-center gap-2'>
                 <span className='text-xs text-muted-foreground'>Bars</span>
-                <select
-                  value={canvasH}
-                  onChange={(e) => setCanvasH(parseInt(e.target.value, 10))}
-                  className='rounded-md border border-border bg-card px-2 py-1 text-xs'
-                  title='Waveform lane height'
-                >
-                  <option value={120}>Small</option>
-                  <option value={160}>Medium</option>
-                  <option value={240}>Large</option>
-                  <option value={340}>Huge</option>
-                </select>
+                <Slider
+                  value={[canvasH]}
+                  min={100}
+                  max={640}
+                  step={20}
+                  onValueChange={(v) => setCanvasH(v[0])}
+                  className='w-32'
+                />
+                <span className='w-9 text-right font-mono text-xs text-muted-foreground'>{canvasH}px</span>
               </div>
 
               {/* Fine nudge */}
