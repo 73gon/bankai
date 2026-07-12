@@ -108,6 +108,21 @@ def cancel_pending(job_id: str) -> bool:
         return True
 
 
+def _job_reason(j: "bgjobs.BgJob") -> str | None:
+    """Human-readable reason for a failed job.
+
+    Falls back to a clear message when the log holds no exception -- e.g. the
+    job process was interrupted (service restart) or timed out, which would
+    otherwise leave the Reason column blank.
+    """
+    if j.status != "failed":
+        return None
+    return bgjobs.failure_reason(j) or (
+        "Stopped before completing \u2014 no error was logged "
+        "(the job was likely interrupted or timed out)"
+    )
+
+
 def snapshot() -> list[dict]:
     """Unified list of running/finished jobs + pending, newest first.
 
@@ -131,7 +146,7 @@ def snapshot() -> list[dict]:
                 "finished_at": j.finished_at,
                 "exit_code": j.exit_code,
                 "final_path": j.final_path,
-                "reason": bgjobs.failure_reason(j) if j.status == "failed" else None,
+                "reason": _job_reason(j),
                 "step": snap.step,
                 "total_steps": snap.total_steps,
                 "step_label": snap.step_label,

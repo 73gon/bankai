@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Library as LibraryIcon,
   Trash2,
@@ -98,6 +98,45 @@ function AnsiLog({ text }: { text: string }) {
   push(text.slice(last));
   return <>{nodes}</>;
 }
+
+// Strip machine-only protocol markers and Rich's wide level/timestamp padding
+// so the log reads like a concise human activity feed instead of a firehose of
+// identical progress lines.
+const LOG_NOISE_RE = /BANKAI_(?:STAGE|PROGRESS)\b/;
+function cleanLog(raw: string): string {
+  const out: string[] = [];
+  for (let line of raw.split('\n')) {
+    if (LOG_NOISE_RE.test(line)) continue;
+    // Collapse Rich's padded "[HH:MM:SS] INFO     msg" / "           INFO   msg"
+    // gutter into a compact "HH:MM:SS  msg".
+    line = line.replace(/^(\x1b\[[0-9;]*m)*\[(\d\d:\d\d:\d\d)\]\s+\w+\s+/, '$2  ');
+    line = line.replace(/^(\x1b\[[0-9;]*m)*\s{6,}\w+\s{2,}/, '          ');
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
+}
+
+// Memoised so the 3s table refresh doesn't churn the <pre> (which used to reset
+// the user's scroll position). Only auto-scrolls to the bottom when the user is
+// already near it, so reading earlier lines isn't interrupted.
+const LogPanel = memo(function LogPanel({ text }: { text: string }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const cleaned = useMemo(() => cleanLog(text), [text]);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }, [cleaned]);
+  return (
+    <pre
+      ref={ref}
+      className='ansi-log max-h-72 overflow-auto rounded-md bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground'
+    >
+      <AnsiLog text={cleaned || '(no output yet)'} />
+    </pre>
+  );
+});
 
 // Fixed set of statuses a row can be in.
 type Status =
@@ -267,6 +306,31 @@ export default function Library() {
     const t = setInterval(() => load(true), 3000);
     return () => clearInterval(t);
   }, []);
+
+  // Live-refresh the log of the currently expanded job so running jobs show
+  // progress. LogPanel preserves scroll unless the user is at the bottom.
+  const rowsRef = useRef<TitleRow[]>(rows);
+  rowsRef.current = rows;
+  useEffect(() => {
+    if (!expanded) return;
+    const jobId = rowsRef.current.find((r) => r.id === expanded)?.job_id;
+    if (!jobId) return;
+    let cancelled = false;
+    const fetchLog = async () => {
+      try {
+        const res = await api.jobLog(jobId);
+        if (!cancelled) setLogs((l) => ({ ...l, [jobId]: res.log || '(no log output)' }));
+      } catch {
+        /* keep the last log we have */
+      }
+    };
+    fetchLog();
+    const t = setInterval(fetchLog, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [expanded]);
 
   // Size the page to however many rows fit the viewport (no window scroll).
   useEffect(() => {
@@ -555,9 +619,7 @@ export default function Library() {
           <tr className='border-t border-border bg-black/20'>
             <td colSpan={9} className='px-3 py-2'>
               {r.job_id ? (
-                <pre className='ansi-log max-h-72 overflow-auto rounded-md bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground'>
-                  <AnsiLog text={logs[r.job_id] ?? 'Loading logs…'} />
-                </pre>
+                <LogPanel text={logs[r.job_id] ?? 'Loading logs…'} />
               ) : (
                 <p className='text-xs text-muted-foreground'>No log available for this title.</p>
               )}
