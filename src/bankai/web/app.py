@@ -246,10 +246,33 @@ def create_app() -> Any:
             out.append(it)
         return out
 
+    def _apply_availability(items: list, kind: str, cap: int = 100) -> list[dict]:
+        """Drop titles confirmed to have no working filmpalast mirror (backfill
+        from the pool), schedule background checks for unchecked ones, and mark
+        each survivor with its availability so the UI can show a checkmark."""
+        from bankai.web import availability as avail
+
+        out: list[dict] = []
+        for it in items:
+            st = avail.get_status(it.name) if kind == "movie" else None
+            if st and st["status"] == "unavailable":
+                continue  # hide it; the next pool item backfills the slot
+            d = discover_mod.to_dict(it)
+            d["available"] = bool(st and st["status"] == "available")
+            d["checked"] = bool(st and st["status"] in ("available", "unavailable"))
+            if st and st.get("url"):
+                d["filmpalast_url"] = st["url"]
+            out.append(d)
+            if kind == "movie" and (st is None or st["status"] == "unknown"):
+                avail.schedule(it.name)
+            if len(out) >= cap:
+                break
+        return out
+
     @app.get("/api/discover/trending")
     async def discover_trending(kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
-        # Over-fetch so ~100 survive the released/not-on-server filters.
+        # Over-fetch so ~100 survive the released/not-on-server/mirror filters.
         new = await discover_mod.new_releases(k, limit=40)
         browse = await discover_mod.trending(k, limit=200)
         merged: list = []
@@ -260,10 +283,10 @@ def create_app() -> Any:
                 continue
             seen.add(key)
             merged.append(it)
-        merged = _filter_discover(merged, k)[:100]
+        merged = _filter_discover(merged, k)
         return {
             "configured": discover_mod.is_configured(),
-            "items": [discover_mod.to_dict(i) for i in merged],
+            "items": _apply_availability(merged, k, cap=100),
         }
 
     @app.get("/api/discover/search")
@@ -273,7 +296,7 @@ def create_app() -> Any:
         items = _filter_discover(items, k)
         return {
             "configured": discover_mod.is_configured(),
-            "items": [discover_mod.to_dict(i) for i in items],
+            "items": _apply_availability(items, k, cap=100),
         }
 
     @app.get("/api/discover/poster")

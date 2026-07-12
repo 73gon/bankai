@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon } from 'lucide-react';
+import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type DiscoverItem, type SearchResult } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -42,6 +42,14 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
           New
         </span>
       )}
+      {item.available && (
+        <span
+          className='absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-white shadow ring-2 ring-black/20'
+          title='Verified: a German dub is available on filmpalast'
+        >
+          <Check className='h-3.5 w-3.5' strokeWidth={3} />
+        </span>
+      )}
       <div className='absolute inset-0 flex items-center justify-center bg-primary/20 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100'>
         <Plus className='h-7 w-7' />
       </div>
@@ -77,6 +85,31 @@ export default function Discover() {
       })
       .catch((e) => toast.error(e.message))
       .finally(() => setLoading(false));
+  }, [kind]);
+
+  // Availability (working filmpalast mirror) is checked in the background, so
+  // re-fetch a handful of times: verified titles gain a checkmark and ones
+  // with no mirror drop out and get backfilled to keep the grid full.
+  useEffect(() => {
+    if (kind !== 'movie') return;
+    let n = 0;
+    let stop = false;
+    const t = setInterval(async () => {
+      n += 1;
+      try {
+        const r = await api.discoverTrending(kind);
+        if (stop) return;
+        setItems(r.items);
+        const pending = r.items.filter((it) => !it.checked).length;
+        if (pending === 0 || n >= 10) clearInterval(t);
+      } catch {
+        /* ignore transient errors */
+      }
+    }, 6000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
   }, [kind]);
 
   // Names already present on the media server, to hide from discovery.

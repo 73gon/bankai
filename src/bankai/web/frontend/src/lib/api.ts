@@ -42,6 +42,9 @@ export interface DiscoverItem {
   poster_url: string | null;
   overview: string | null;
   is_new?: boolean;
+  available?: boolean;
+  checked?: boolean;
+  filmpalast_url?: string;
 }
 
 export interface SearchResult {
