@@ -690,6 +690,7 @@ def create_app() -> Any:
             "video_codec": info.video_codec,
             "width": info.width,
             "height": info.height,
+            "video_fps": info.video_fps,
             "has_german": info.has_german,
             "browser_playable": info.browser_playable,
             "stage": state.stage,
@@ -707,6 +708,8 @@ def create_app() -> Any:
                     "channels": t.channels,
                     "default": t.default,
                     "is_german": t.is_german,
+                    "sample_rate": t.sample_rate,
+                    "duration": t.duration,
                 }
                 for t in info.audio_tracks
             ],

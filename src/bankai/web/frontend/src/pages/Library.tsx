@@ -22,7 +22,7 @@ import {
   AudioLines,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type MediaInfo, type TitleRow } from '@/lib/api';
+import { api, type MediaInfo, type TitleRow, type AudioTrack } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -879,8 +879,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
   const [busy, setBusy] = useState<string | null>(null);
   const [canvasW, setCanvasW] = useState(800);
-  const [canvasH, setCanvasH] = useState(160);
+  const [canvasH, setCanvasH] = useState(192);
   const [dragging, setDragging] = useState(false);
+  // Playback quality for the video preview (px height). 360p..1080p.
+  const [quality, setQuality] = useState(480);
+  // Seek position within the current window, 0..1. Click a lane / drag the
+  // playhead to move it; playback starts from here.
+  const [seekFrac, setSeekFrac] = useState(0);
+  const [, setSeeking] = useState(false);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const engCanvas = useRef<HTMLCanvasElement>(null);
@@ -895,7 +901,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const duration = info?.duration ?? 0;
   const viewStart = Math.max(0, center - windowSec / 2);
   const pxPerSec = canvasW / windowSec;
-  const playDur = Math.min(windowSec, 30);
+  // Clip covering the visible window (capped) so we can seek within it.
+  const clipLen = Math.min(windowSec, 90);
 
   function stopAll() {
     for (const r of [engAudio, gerAudio]) {
@@ -910,7 +917,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    if (playheadRef.current) playheadRef.current.style.opacity = '0';
+    if (playheadRef.current) {
+      playheadRef.current.style.opacity = '1';
+      playheadRef.current.style.transform = `translateX(${seekFrac * canvasW}px)`;
+    }
     setPlaying('none');
   }
 
@@ -953,9 +963,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const compute = () => {
       const el = wrapRef.current;
       if (el) setCanvasW(Math.max(320, el.clientWidth));
-      // Thin, fixed-height lanes — full width for detail; controls stay in a
-      // fixed footer so they're always visible/clickable.
-      setCanvasH(96);
+      // Tall lanes so the played region lines up clearly with the waveform.
+      setCanvasH(192);
     };
     compute();
     const el = wrapRef.current;
@@ -999,14 +1008,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging]);
 
-  // Prefetch the video clip whenever the view moves (browser + server cache it).
+  // Prefetch the video clip whenever the view or quality moves (cached).
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    v.src = api.videoClipUrl(path, viewStart, playDur, 480);
+    v.src = api.videoClipUrl(path, viewStart, clipLen, quality);
     v.load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, viewStart, windowSec]);
+  }, [path, viewStart, windowSec, quality]);
 
   function drawGrid(ctx: CanvasRenderingContext2D, W: number, H: number) {
     ctx.clearRect(0, 0, W, H);
@@ -1077,20 +1086,29 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }, [gerBuf, delayMs, canvasW, canvasH, windowSec, center]);
 
   function onGerDown(e: React.MouseEvent) {
+    const startX = e.clientX;
+    const origDelay = delayMs;
     dragRef.current = { x: e.clientX, delay: delayMs };
+    let moved = false;
     setDragging(true);
     const onMove = (ev: MouseEvent) => {
       const d = dragRef.current;
       if (!d) return;
+      if (Math.abs(ev.clientX - startX) > 3) moved = true;
       const pps = canvasW / windowSec;
       const dxSec = (ev.clientX - d.x) / pps;
       setDelayMs(Math.round(d.delay + dxSec * 1000));
     };
-    const onUp = () => {
+    const onUp = (ev: MouseEvent) => {
       dragRef.current = null;
       setDragging(false);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      if (!moved) {
+        // A click (not a drag) means "seek here", not "re-align".
+        setDelayMs(origDelay);
+        seekFromClientX(ev.clientX);
+      }
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -1102,44 +1120,90 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   function playSection(which: 'both' | 'eng' | 'ger') {
     stopAll();
-    const dur = playDur;
+    const startOffset = seekFrac * windowSec; // seconds into the window
+    const startT = viewStart + startOffset; // absolute reference time
+    const dur = Math.max(1, Math.min(clipLen - startOffset, windowSec - startOffset));
     if (which !== 'ger' && engStream != null) {
-      const a = new Audio(api.audioClipUrl(path, engStream, viewStart, dur));
+      const a = new Audio(api.audioClipUrl(path, engStream, startT, dur));
       a.onended = () => stopAll();
       engAudio.current = a;
       a.play().catch(() => {});
     }
     if (which !== 'eng' && gerStream != null) {
-      const gs = Math.max(0, viewStart - delayMs / 1000);
+      const gs = Math.max(0, startT - delayMs / 1000);
       const a = new Audio(api.audioClipUrl(path, gerStream, gs, dur));
       a.onended = () => stopAll();
       gerAudio.current = a;
       a.play().catch(() => {});
     }
-    // The picture always follows the reference (English) timeline.
+    // The picture follows the reference (English) timeline; seek into the clip.
     const v = videoRef.current;
     if (v) {
       try {
-        v.currentTime = 0;
+        v.currentTime = startOffset;
       } catch {
         /* not seekable yet */
       }
       v.play().catch(() => {});
     }
     setPlaying(which);
-    // Animate the playhead across the window while it plays.
+    // Animate the playhead from the seek position while it plays.
     const tick = () => {
-      const clock = videoRef.current ?? engAudio.current ?? gerAudio.current;
       const line = playheadRef.current;
-      if (clock && line) {
-        const frac = Math.min(1, clock.currentTime / dur);
+      let posSec = startOffset;
+      const vv = videoRef.current;
+      if (vv && !vv.paused && vv.currentTime > 0) posSec = vv.currentTime;
+      else if (engAudio.current) posSec = startOffset + engAudio.current.currentTime;
+      else if (gerAudio.current) posSec = startOffset + gerAudio.current.currentTime;
+      const frac = Math.min(1, posSec / windowSec);
+      if (line) {
         line.style.opacity = '1';
         line.style.transform = `translateX(${frac * canvasW}px)`;
+      }
+      if (frac >= 1) {
+        stopAll();
+        return;
       }
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
   }
+
+  // Set the seek position from a pointer X (relative to the lane), and support
+  // click-drag to scrub precisely.
+  function seekFromClientX(clientX: number) {
+    const canvas = engCanvas.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    setSeekFrac(frac);
+  }
+
+  function onSeekDown(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (playing !== 'none') stopAll();
+    seekFromClientX(e.clientX);
+    setSeeking(true);
+    const onMove = (ev: MouseEvent) => seekFromClientX(ev.clientX);
+    const onUp = () => {
+      setSeeking(false);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  // Keep the playhead parked at the seek position whenever we're not playing.
+  useEffect(() => {
+    if (playing !== 'none') return;
+    const line = playheadRef.current;
+    if (line) {
+      line.style.opacity = '1';
+      line.style.transform = `translateX(${seekFrac * canvasW}px)`;
+    }
+  }, [seekFrac, canvasW, playing, windowSec, loading]);
 
   async function approve() {
     setBusy('approve');
@@ -1160,6 +1224,24 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   const drift = delayMs - savedDelay;
+
+  const engTrack = info?.audio_tracks.find((t) => t.index === engStream) ?? null;
+  const gerTrack = info?.audio_tracks.find((t) => t.index === gerStream) ?? null;
+  // Length drift between the reference (HQ) and German audio hints at a
+  // frame-rate/speed mismatch (e.g. 25fps PAL vs 23.976) even before aligning.
+  const lenDrift =
+    engTrack?.duration != null && gerTrack?.duration != null
+      ? engTrack.duration - gerTrack.duration
+      : null;
+  const trackMeta = (t: AudioTrack | null, videoFps: number | null | undefined) => {
+    const bits: string[] = [];
+    if (t?.codec) bits.push(t.codec.toUpperCase());
+    if (t?.channels) bits.push(`${t.channels}ch`);
+    if (t?.sample_rate) bits.push(`${(t.sample_rate / 1000).toFixed(1)} kHz`);
+    if (t?.duration != null) bits.push(`len ${fmtClock(t.duration)}`);
+    if (videoFps) bits.push(`${videoFps} fps`);
+    return bits;
+  };
 
   return (
     <div className='fixed inset-0 z-50 flex flex-col bg-background'>
@@ -1204,16 +1286,46 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
               <div className='flex items-center justify-between px-1 text-xs'>
                 <span className='flex items-center gap-2 text-sky-400'>
-                  <Languages className='h-3.5 w-3.5' /> English (reference)
+                  <Languages className='h-3.5 w-3.5' /> English (reference · HQ video)
                 </span>
                 <span className='font-mono text-muted-foreground'>
                   {fmtClock(viewStart)} – {fmtClock(viewStart + windowSec)}
                 </span>
               </div>
-              <canvas ref={engCanvas} width={canvasW} height={canvasH} className='w-full rounded-md bg-black/40' />
-              <div className='flex items-center gap-2 px-1 text-xs text-pink-400'>
-                <AudioLines className='h-3.5 w-3.5' /> German (grab &amp; drag to align)
-                {gerStream != null && !gerBuf && <Loader2 className='h-3 w-3 animate-spin' />}
+              <div className='flex flex-wrap items-center gap-x-3 px-1 text-[10px] font-mono text-muted-foreground'>
+                {trackMeta(engTrack, info?.video_fps).map((b, i) => (
+                  <span key={i}>{b}</span>
+                ))}
+              </div>
+              <canvas
+                ref={engCanvas}
+                width={canvasW}
+                height={canvasH}
+                onMouseDown={onSeekDown}
+                className='w-full cursor-crosshair rounded-md bg-black/40'
+              />
+              <div className='flex items-center justify-between px-1 text-xs'>
+                <span className='flex items-center gap-2 text-pink-400'>
+                  <AudioLines className='h-3.5 w-3.5' /> German (filmpalast · drag to align, click to seek)
+                  {gerStream != null && !gerBuf && <Loader2 className='h-3 w-3 animate-spin' />}
+                </span>
+                {lenDrift != null && (
+                  <span
+                    className={cn(
+                      'font-mono',
+                      Math.abs(lenDrift) > 1 ? 'text-amber-400' : 'text-muted-foreground',
+                    )}
+                    title='Length difference between the HQ and German audio — a large value suggests a frame-rate/speed drift.'
+                  >
+                    Δlen {lenDrift > 0 ? '+' : ''}
+                    {lenDrift.toFixed(2)}s
+                  </span>
+                )}
+              </div>
+              <div className='flex flex-wrap items-center gap-x-3 px-1 text-[10px] font-mono text-muted-foreground'>
+                {trackMeta(gerTrack, null).map((b, i) => (
+                  <span key={i}>{b}</span>
+                ))}
               </div>
               <canvas
                 ref={gerCanvas}
@@ -1224,9 +1336,13 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               />
               <div
                 ref={playheadRef}
-                className='pointer-events-none absolute inset-y-0 left-0 w-0.5 bg-white/80'
-                style={{ opacity: 0, transform: 'translateX(0px)' }}
-              />
+                onMouseDown={onSeekDown}
+                className='absolute inset-y-0 left-0 w-2 -ml-1 cursor-ew-resize'
+                style={{ opacity: 1, transform: 'translateX(0px)' }}
+              >
+                <div className='absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-white/90' />
+                <div className='absolute -top-0.5 left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-sm bg-white shadow' />
+              </div>
             </div>
           </div>
         )}
@@ -1261,6 +1377,22 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 <Button size='icon' variant='secondary' onClick={() => zoom(0.5)} title='Zoom in'>
                   <ZoomIn className='h-4 w-4' />
                 </Button>
+              </div>
+
+              {/* Video quality */}
+              <div className='flex items-center gap-1'>
+                <span className='text-xs text-muted-foreground'>Quality</span>
+                <select
+                  value={quality}
+                  onChange={(e) => setQuality(parseInt(e.target.value, 10))}
+                  className='rounded-md border border-border bg-card px-2 py-1 text-xs'
+                  title='Video preview quality'
+                >
+                  <option value={360}>360p</option>
+                  <option value={480}>480p</option>
+                  <option value={720}>720p</option>
+                  <option value={1080}>1080p</option>
+                </select>
               </div>
 
               {/* Fine nudge */}

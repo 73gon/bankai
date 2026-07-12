@@ -34,6 +34,8 @@ class AudioTrack:
     channels: int | None
     default: bool
     is_german: bool
+    sample_rate: int | None = None
+    duration: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,7 @@ class MediaInfo:
     audio_tracks: list[AudioTrack]
     has_german: bool
     browser_playable: bool
+    video_fps: float | None = None
 
 
 def _which(name: str) -> str | None:
@@ -132,6 +135,7 @@ def _parse_probe(path: Path, size: int, data: dict) -> MediaInfo:
     video_codec: str | None = None
     width: int | None = None
     height: int | None = None
+    video_fps: float | None = None
     tracks: list[AudioTrack] = []
     audio_order = 0
     for stream in data.get("streams") or []:
@@ -140,6 +144,7 @@ def _parse_probe(path: Path, size: int, data: dict) -> MediaInfo:
             video_codec = stream.get("codec_name")
             width = _to_int(stream.get("width"))
             height = _to_int(stream.get("height"))
+            video_fps = _parse_fps(stream)
         elif codec_type == "audio":
             tags = stream.get("tags") or {}
             lang = (tags.get("language") or "").strip().lower() or None
@@ -156,6 +161,8 @@ def _parse_probe(path: Path, size: int, data: dict) -> MediaInfo:
                     channels=_to_int(stream.get("channels")),
                     default=bool(disp.get("default")),
                     is_german=is_de,
+                    sample_rate=_to_int(stream.get("sample_rate")),
+                    duration=_track_duration(stream),
                 )
             )
             audio_order += 1
@@ -170,6 +177,7 @@ def _parse_probe(path: Path, size: int, data: dict) -> MediaInfo:
         audio_tracks=tracks,
         has_german=has_german,
         browser_playable=_browser_playable(path, video_codec),
+        video_fps=video_fps,
     )
 
 
@@ -208,6 +216,41 @@ def _to_int(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _parse_fps(stream: dict) -> float | None:
+    """Frames-per-second from an ffprobe video stream (e.g. '24000/1001')."""
+    rate = stream.get("r_frame_rate") or stream.get("avg_frame_rate")
+    if not rate or rate in ("0/0", "0"):
+        return None
+    try:
+        if "/" in str(rate):
+            num, den = str(rate).split("/")
+            d = float(den)
+            return round(float(num) / d, 3) if d else None
+        return round(float(rate), 3)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _track_duration(stream: dict) -> float | None:
+    """Duration of an audio stream in seconds.
+
+    MKV audio streams usually carry no ``duration`` field; the real length lives
+    in a ``DURATION`` tag formatted ``HH:MM:SS.fraction``.
+    """
+    d = _to_float(stream.get("duration"))
+    if d:
+        return d
+    tags = stream.get("tags") or {}
+    raw = tags.get("DURATION") or tags.get("duration")
+    if raw:
+        try:
+            h, m, s = str(raw).split(":")
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        except (ValueError, IndexError):
+            return None
+    return None
 
 
 # --------------------------------------------------------------------------

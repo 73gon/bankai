@@ -137,6 +137,8 @@ export interface AudioTrack {
   channels: number | null;
   default: boolean;
   is_german: boolean;
+  sample_rate: number | null;
+  duration: number | null;
 }
 
 export interface MediaInfo {
@@ -146,6 +148,7 @@ export interface MediaInfo {
   video_codec: string | null;
   width: number | null;
   height: number | null;
+  video_fps: number | null;
   has_german: boolean;
   browser_playable: boolean;
   stage: string;
