@@ -879,7 +879,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
   const [busy, setBusy] = useState<string | null>(null);
   const [canvasW, setCanvasW] = useState(800);
-  const [canvasH, setCanvasH] = useState(192);
+  const [canvasH, setCanvasH] = useState(160);
   const [dragging, setDragging] = useState(false);
   // Playback quality for the video preview (px height). 360p..1080p.
   const [quality, setQuality] = useState(480);
@@ -963,8 +963,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const compute = () => {
       const el = wrapRef.current;
       if (el) setCanvasW(Math.max(320, el.clientWidth));
-      // Tall lanes so the played region lines up clearly with the waveform.
-      setCanvasH(192);
     };
     compute();
     const el = wrapRef.current;
@@ -1250,7 +1248,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           <Button size='icon' variant='ghost' onClick={onClose} title='Close'>
             <ArrowLeft className='h-5 w-5' />
           </Button>
-          <h2 className='truncate text-lg font-semibold'>{entry.title}</h2>
+          <h2 className='truncate text-lg font-semibold'>
+            {entry.title}
+            {entry.year ? <span className='ml-1 text-muted-foreground'>({entry.year})</span> : null}
+          </h2>
         </div>
         <div className='flex items-center gap-3'>
           <div className='rounded-md border border-border bg-card px-3 py-1.5 text-sm'>
@@ -1274,14 +1275,16 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           </div>
         ) : (
           <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2'>
-            {/* Video preview — the English HQ picture for this window */}
-            <video
-              ref={videoRef}
-              muted
-              playsInline
-              preload='auto'
-              className='mx-auto h-[34vh] w-auto shrink-0 rounded-md bg-black object-contain'
-            />
+            {/* Video preview grows to fill the space above the waveforms */}
+            <div className='flex min-h-0 flex-1 items-center justify-center'>
+              <video
+                ref={videoRef}
+                muted
+                playsInline
+                preload='auto'
+                className='max-h-full w-auto rounded-md bg-black object-contain'
+              />
+            </div>
 
             <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
               <div className='flex items-center justify-between px-1 text-xs'>
@@ -1392,6 +1395,22 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   <option value={480}>480p</option>
                   <option value={720}>720p</option>
                   <option value={1080}>1080p</option>
+                </select>
+              </div>
+
+              {/* Waveform lane height */}
+              <div className='flex items-center gap-1'>
+                <span className='text-xs text-muted-foreground'>Bars</span>
+                <select
+                  value={canvasH}
+                  onChange={(e) => setCanvasH(parseInt(e.target.value, 10))}
+                  className='rounded-md border border-border bg-card px-2 py-1 text-xs'
+                  title='Waveform lane height'
+                >
+                  <option value={120}>Small</option>
+                  <option value={160}>Medium</option>
+                  <option value={240}>Large</option>
+                  <option value={340}>Huge</option>
                 </select>
               </div>
 

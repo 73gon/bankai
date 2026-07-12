@@ -115,7 +115,14 @@ def _probe_uncached(path: Path, size: int) -> MediaInfo | None:
         str(path),
     ]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        out = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
     except (subprocess.SubprocessError, OSError) as exc:
         log.warning("ffprobe failed for %s: %s", path, exc)
         return None
@@ -494,7 +501,14 @@ def repack_audio_delay(
     cmd.append(str(p))
 
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        out = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3600,
+        )
     except (subprocess.SubprocessError, OSError) as exc:
         tmp.unlink(missing_ok=True)
         return RepackResult(False, f"mkvmerge failed: {exc}")
