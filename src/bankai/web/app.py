@@ -247,34 +247,39 @@ def create_app() -> Any:
         return out
 
     def _apply_availability(items: list, kind: str, cap: int = 100) -> list[dict]:
-        """Drop titles confirmed to have no working filmpalast mirror (backfill
-        from the pool), schedule background checks for unchecked ones, and mark
-        each survivor with its availability so the UI can show a checkmark."""
+        """Drop titles confirmed to have no working filmpalast mirror, backfill
+        from deeper in the pool, schedule background checks for every unchecked
+        pool item, and mark survivors with availability for the UI checkmark."""
+        if kind != "movie":
+            return [discover_mod.to_dict(i) for i in items[:cap]]
         from bankai.web import availability as avail
 
         out: list[dict] = []
         for it in items:
-            st = avail.get_status(it.name) if kind == "movie" else None
+            st = avail.get_status(it.name)
+            # Schedule a check for anything unresolved -- including items beyond
+            # the first `cap` so they're ready to backfill on the next refresh.
+            if st is None or st["status"] == "unknown":
+                avail.schedule(it.name)
             if st and st["status"] == "unavailable":
-                continue  # hide it; the next pool item backfills the slot
+                continue  # hide it; a later pool item takes the slot
+            if len(out) >= cap:
+                continue
             d = discover_mod.to_dict(it)
             d["available"] = bool(st and st["status"] == "available")
             d["checked"] = bool(st and st["status"] in ("available", "unavailable"))
             if st and st.get("url"):
                 d["filmpalast_url"] = st["url"]
             out.append(d)
-            if kind == "movie" and (st is None or st["status"] == "unknown"):
-                avail.schedule(it.name)
-            if len(out) >= cap:
-                break
         return out
 
     @app.get("/api/discover/trending")
     async def discover_trending(kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
-        # Over-fetch so ~100 survive the released/not-on-server/mirror filters.
-        new = await discover_mod.new_releases(k, limit=40)
-        browse = await discover_mod.trending(k, limit=200)
+        # Over-fetch a large pool so ~100 survive the released / not-on-server /
+        # working-mirror filters (many trending titles have no filmpalast dub).
+        new = await discover_mod.new_releases(k, limit=80)
+        browse = await discover_mod.trending(k, limit=300)
         merged: list = []
         seen: set = set()
         for it in [*new, *browse]:
