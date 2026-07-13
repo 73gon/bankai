@@ -1,14 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import {
-  Compass,
-  Search as SearchIcon,
-  ListVideo,
-  HardDrive,
-  Settings as SettingsIcon,
-  PanelLeft,
-  PanelLeftClose,
-} from 'lucide-react';
+import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Discover from '@/pages/Discover';
@@ -46,9 +38,7 @@ function useSidebarState() {
 }
 
 function BrandMark() {
-  return (
-    <span className='font-mono text-[0.95rem] font-semibold tracking-[0.02em] text-foreground'>bankai</span>
-  );
+  return <span className='font-mono text-[0.95rem] font-semibold tracking-[0.02em] text-foreground'>bankai</span>;
 }
 
 export default function App() {
@@ -66,12 +56,7 @@ export default function App() {
           )}
         >
           {/* Header row: brand + collapse toggle (desktop) */}
-          <div
-            className={cn(
-              'hidden md:flex md:items-center',
-              collapsed ? 'md:justify-center md:px-0' : 'md:justify-between md:px-1',
-            )}
-          >
+          <div className={cn('hidden md:flex md:items-center', collapsed ? 'md:justify-center md:px-0' : 'md:justify-between md:px-1')}>
             {collapsed ? (
               <button
                 type='button'
@@ -103,12 +88,7 @@ export default function App() {
 
           <div className='hidden md:my-3 md:block md:h-px md:bg-border/70' />
 
-          <nav
-            className={cn(
-              'flex flex-1 flex-row gap-1 overflow-x-auto md:mt-0 md:flex-col md:overflow-visible',
-              collapsed && 'md:items-center',
-            )}
-          >
+          <nav className={cn('flex flex-1 flex-row gap-1 overflow-x-auto md:mt-0 md:flex-col md:overflow-visible', collapsed && 'md:items-center')}>
             {NAV.map(({ to, label, icon: Icon }) => {
               const link = (
                 <NavLink

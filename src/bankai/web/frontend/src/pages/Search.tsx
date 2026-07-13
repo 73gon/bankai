@@ -12,10 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 
 // Parse "S02E01" / "Staffel 2" / "Season 2" out of a filmpalast title or URL.
 function parseSeason(s: string): number | null {
-  const m =
-    s.match(/s(\d{1,2})\s*e\d{1,3}/i) ||
-    s.match(/\bstaffel\s*(\d+)/i) ||
-    s.match(/\bseason\s*(\d+)/i);
+  const m = s.match(/s(\d{1,2})\s*e\d{1,3}/i) || s.match(/\bstaffel\s*(\d+)/i) || s.match(/\bseason\s*(\d+)/i);
   return m ? Number(m[1]) : null;
 }
 
@@ -139,13 +136,7 @@ export default function Search() {
     setPicked(null);
     // A pasted stream link is used directly instead of searching.
     if (selected.kind === 'movie' && /^https?:\/\/\S+$/i.test(term)) {
-      const site = /aniworld/i.test(term)
-        ? 'aniworld'
-        : /bs\.to/i.test(term)
-          ? 'bs'
-          : /kinox/i.test(term)
-            ? 'kinox'
-            : 'filmpalast';
+      const site = /aniworld/i.test(term) ? 'aniworld' : /bs\.to/i.test(term) ? 'bs' : /kinox/i.test(term) ? 'kinox' : 'filmpalast';
       setFilmResults([{ site, title: selected.name, year: selected.year ?? null, kind: 'movie', url: term }]);
       return;
     }

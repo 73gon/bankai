@@ -15,12 +15,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel
 
 from bankai import __version__
 from bankai.config import get_settings, reset_settings_cache
 from bankai.logging import get_logger
-from fastapi import HTTPException
 from bankai.queue.models import MediaKind
 from bankai.web import discover as discover_mod
 from bankai.web import jobs as webjobs
@@ -164,6 +164,7 @@ class SettingRequest(BaseModel):
     key: str
     value: Any
 
+
 # Settings keys the web UI is allowed to edit (safe subset).
 SAFE_SETTING_KEYS: set[str] = {
     "metadata.tvdb_api_key",
@@ -190,18 +191,17 @@ def _is_secret_key(key: str) -> bool:
 
 
 def create_app() -> Any:
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import (
         FileResponse,
         HTMLResponse,
-        JSONResponse,
         Response,
         StreamingResponse,
     )
     from fastapi.staticfiles import StaticFiles
-
-    from contextlib import asynccontextmanager
 
     @asynccontextmanager
     async def _lifespan(_app: Any):
@@ -212,7 +212,7 @@ def create_app() -> Any:
             import anyio.to_thread
 
             anyio.to_thread.current_default_thread_limiter().total_tokens = 96
-        except Exception:  # noqa: BLE001 - best effort
+        except Exception:
             pass
         yield
 
@@ -273,7 +273,7 @@ def create_app() -> Any:
         try:
             for t in media_mod.scan_server(kind):
                 have.add(_norm_title(t.name))
-        except Exception:  # noqa: BLE001 - fail-soft; never break Discover
+        except Exception:
             pass
         return have
 
@@ -286,7 +286,7 @@ def create_app() -> Any:
                 nt = _norm_title(j.get("title", ""))
                 if nt:
                     names.add(nt)
-        except Exception:  # noqa: BLE001 - fail-soft; never break Discover
+        except Exception:
             pass
         return names
 
@@ -433,10 +433,7 @@ def create_app() -> Any:
             "found": True,
             "site": result.site,
             "query": result.query,
-            "episodes": [
-                {"season": e.season, "episode": e.episode, "title": e.title, "url": e.url}
-                for e in sorted(result.episodes, key=lambda e: e.episode)
-            ],
+            "episodes": [{"season": e.season, "episode": e.episode, "title": e.title, "url": e.url} for e in sorted(result.episodes, key=lambda e: e.episode)],
         }
 
     # ------------------------------------------------------------------
@@ -457,9 +454,7 @@ def create_app() -> Any:
         year = req.year
         if year is None:
             raise HTTPException(status_code=422, detail="year_required")
-        movie = BatchMovie(
-            title=req.title, german_title=req.german, url=req.url, year=year
-        )
+        movie = BatchMovie(title=req.title, german_title=req.german, url=req.url, year=year)
         args = build_movie_args(movie, site=req.site)
         return webjobs.enqueue(kind="movie", title=f"{req.title} ({year})", args=args)
 
@@ -480,9 +475,21 @@ def create_app() -> Any:
         for ep in episodes:
             q = f"{req.show} S{req.season:02d}E{ep.episode:02d}"
             args = [
-                "run", q, "--url", ep.url, "--site", result.site,
-                "--kind", "episode", "--season", str(req.season),
-                "--episode", str(ep.episode), "--series-title", req.show, "--auto",
+                "run",
+                q,
+                "--url",
+                ep.url,
+                "--site",
+                result.site,
+                "--kind",
+                "episode",
+                "--season",
+                str(req.season),
+                "--episode",
+                str(ep.episode),
+                "--series-title",
+                req.show,
+                "--auto",
             ]
             if ep.title:
                 args.extend(["--episode-title", ep.title])
@@ -551,9 +558,7 @@ def create_app() -> Any:
                 tkey = e.path
             tinfo = transfers.get(tkey)
             if tinfo and tinfo["status"] != state.transfer_status:
-                state = review_mod.set_transfer(
-                    e.path, tinfo["status"], percent=tinfo.get("percent")
-                )
+                state = review_mod.set_transfer(e.path, tinfo["status"], percent=tinfo.get("percent"))
             out.append(
                 {
                     "kind": e.kind,
@@ -570,11 +575,7 @@ def create_app() -> Any:
                     "sync_confidence": state.sync_confidence,
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
-                    "transfer_percent": (
-                        tinfo.get("percent", state.transfer_percent)
-                        if tinfo
-                        else state.transfer_percent
-                    ),
+                    "transfer_percent": (tinfo.get("percent", state.transfer_percent) if tinfo else state.transfer_percent),
                 }
             )
         return {"entries": out, "library": str(get_settings().output.directory)}
@@ -591,6 +592,9 @@ def create_app() -> Any:
         entries = media_mod.scan_library()
         transfers = webjobs.transfer_states()
         jobs = webjobs.snapshot()  # already excludes transfer jobs
+        # Tombstones for files the user explicitly deleted (stage="deleted"),
+        # keyed by resolved path — used to relabel their finished job row.
+        deleted_paths = {k for k, st in review_mod.all_states().items() if st.stage == "deleted"}
         # Map normalised title -> newest job, so a finished library row can
         # still surface its download log (expandable row) and be re-run.
         job_by_norm: dict[str, dict] = {}
@@ -615,12 +619,8 @@ def create_app() -> Any:
             norm = _norm_title(e.name)
             lib_norms.add(norm)
             clean = _clean_title(e.name)
-            poster_key = ("show:" if e.kind == "episode" else "movie:") + (
-                _norm_title(e.series or clean) if e.kind == "episode" else norm
-            )
-            posters_mod.ensure(
-                poster_key, e.series or clean, "series" if e.kind == "episode" else "movie"
-            )
+            poster_key = ("show:" if e.kind == "episode" else "movie:") + (_norm_title(e.series or clean) if e.kind == "episode" else norm)
+            posters_mod.ensure(poster_key, e.series or clean, "series" if e.kind == "episode" else "movie")
             related = job_by_norm.get(norm)
             rows.append(
                 {
@@ -638,17 +638,13 @@ def create_app() -> Any:
                     "mtime": e.mtime,
                     "series": e.series,
                     "season": e.season,
-                    "stage": state.stage,
+                    "stage": "review" if state.stage == "deleted" else state.stage,
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
-                    "transfer_percent": (
-                        tinfo.get("percent", state.transfer_percent)
-                        if tinfo
-                        else state.transfer_percent
-                    ),
+                    "transfer_percent": (tinfo.get("percent", state.transfer_percent) if tinfo else state.transfer_percent),
                     "job_id": related["id"] if related else None,
                     "job_status": None,
                     "step_label": None,
@@ -680,6 +676,11 @@ def create_app() -> Any:
             is_ep = j.get("kind") == "show"
             poster_key = ("show:" if is_ep else "movie:") + _norm_title(clean)
             posters_mod.ensure(poster_key, clean, "series" if is_ep else "movie")
+            fp = j.get("final_path")
+            try:
+                is_deleted = bool(fp) and str(Path(fp).resolve()) in deleted_paths
+            except OSError:
+                is_deleted = fp in deleted_paths
             rows.append(
                 {
                     "row_kind": "job",
@@ -696,7 +697,7 @@ def create_app() -> Any:
                     "mtime": j.get("started_at"),
                     "series": None,
                     "season": None,
-                    "stage": None,
+                    "stage": "deleted" if is_deleted else None,
                     "reason": j.get("reason"),
                     "reason_detail": j.get("reason_detail"),
                     "delay_ms": 0,
@@ -706,7 +707,7 @@ def create_app() -> Any:
                     "transfer_status": "idle",
                     "transfer_percent": 0.0,
                     "job_id": j["id"],
-                    "job_status": j.get("status"),
+                    "job_status": "deleted" if is_deleted else j.get("status"),
                     "step_label": j.get("step_label"),
                     "overall_percent": j.get("overall_percent"),
                     "total_steps": j.get("total_steps"),
@@ -786,7 +787,9 @@ def create_app() -> Any:
             p.unlink()
         except OSError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        review_mod.forget(str(p))
+        # Keep a tombstone (stage="deleted") so the title shows as "Deleted"
+        # rather than reverting to its finished job's "Done" row.
+        review_mod.set_stage(str(p), "deleted")
         # Remove the now-empty movie/show folder(s) left behind, up to (but not
         # including) the library root, so no dead folders linger.
         try:
@@ -829,9 +832,7 @@ def create_app() -> Any:
             "Accept-Ranges": "bytes",
             "Content-Length": str(length),
         }
-        return StreamingResponse(
-            iter_file(), status_code=206, headers=headers, media_type=content_type
-        )
+        return StreamingResponse(iter_file(), status_code=206, headers=headers, media_type=content_type)
 
     @app.get("/api/media/transcode")
     def media_transcode(
@@ -844,17 +845,35 @@ def create_app() -> Any:
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
         cmd = [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
         ]
         if t > 0:
             cmd += ["-ss", str(t)]
         cmd += [
-            "-i", str(p),
-            "-map", "0:v:0", "-map", f"0:a:{audio}?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-            "-f", "mp4", "pipe:1",
+            "-i",
+            str(p),
+            "-map",
+            "0:v:0",
+            "-map",
+            f"0:a:{audio}?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+            "-f",
+            "mp4",
+            "pipe:1",
         ]
         import subprocess
 
@@ -910,9 +929,24 @@ def create_app() -> Any:
         # Decode at a rate that yields a few samples per output bin.
         ar = max(200, min(8000, int(bins * 4 / dur)))
         cmd = [
-            ffmpeg, "-v", "error", "-ss", str(start), "-t", str(dur), "-i", str(p),
-            "-map", f"0:{stream}", "-ac", "1", "-ar", str(ar),
-            "-f", "s16le", "pipe:1",
+            ffmpeg,
+            "-v",
+            "error",
+            "-ss",
+            str(start),
+            "-t",
+            str(dur),
+            "-i",
+            str(p),
+            "-map",
+            f"0:{stream}",
+            "-ac",
+            "1",
+            "-ar",
+            str(ar),
+            "-f",
+            "s16le",
+            "pipe:1",
         ]
         try:
             with _ffmpeg_slot():
@@ -969,10 +1003,28 @@ def create_app() -> Any:
             with _ffmpeg_slot():
                 subprocess.run(
                     [
-                        ffmpeg, "-hide_banner", "-loglevel", "error",
-                        "-ss", str(start), "-t", str(dur), "-i", str(p),
-                        "-map", f"0:{stream}", "-ac", "2",
-                        "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "-y", str(out),
+                        ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-ss",
+                        str(start),
+                        "-t",
+                        str(dur),
+                        "-i",
+                        str(p),
+                        "-map",
+                        f"0:{stream}",
+                        "-ac",
+                        "2",
+                        "-c:a",
+                        "libmp3lame",
+                        "-b:a",
+                        "128k",
+                        "-f",
+                        "mp3",
+                        "-y",
+                        str(out),
                     ],
                     timeout=120,
                     check=False,
@@ -1007,13 +1059,35 @@ def create_app() -> Any:
             with _ffmpeg_slot():
                 subprocess.run(
                     [
-                        ffmpeg, "-hide_banner", "-loglevel", "error",
-                        "-ss", str(start), "-t", str(dur), "-i", str(p),
-                        "-map", "0:v:0", "-an",
-                        "-vf", f"scale=-2:{height}",
-                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                        "-f", "mp4", "-y", str(out),
+                        ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-ss",
+                        str(start),
+                        "-t",
+                        str(dur),
+                        "-i",
+                        str(p),
+                        "-map",
+                        "0:v:0",
+                        "-an",
+                        "-vf",
+                        f"scale=-2:{height}",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-crf",
+                        "28",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        "-f",
+                        "mp4",
+                        "-y",
+                        str(out),
                     ],
                     timeout=300,
                     check=False,
@@ -1142,9 +1216,7 @@ def create_app() -> Any:
                 {
                     "name": se.name,
                     "season": se.season,
-                    "episodes": [
-                        {"name": e.name, "path": e.path, "size": e.size} for e in se.episodes
-                    ],
+                    "episodes": [{"name": e.name, "path": e.path, "size": e.size} for e in se.episodes],
                 }
                 for se in seasons
             ],
@@ -1167,9 +1239,7 @@ def create_app() -> Any:
             raise HTTPException(status_code=400, detail="path required")
         key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
         s = get_settings()
-        current = [
-            str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
-        ]
+        current = [str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)]
         if path not in current:
             current.append(path)
         from bankai.cli.main import _set_config_value
@@ -1185,9 +1255,7 @@ def create_app() -> Any:
             raise HTTPException(status_code=400, detail="kind must be movie or show")
         key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
         s = get_settings()
-        current = [
-            str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
-        ]
+        current = [str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)]
         current = [p for p in current if p != req.path.strip()]
         from bankai.cli.main import _set_config_value
 
@@ -1246,7 +1314,7 @@ def create_app() -> Any:
                     msg = await asyncio.wait_for(ws.receive_json(), timeout=0.01)
                     if isinstance(msg, dict) and "follow" in msg:
                         follow_job = msg.get("follow") or None
-                except (asyncio.TimeoutError, ValueError):
+                except (TimeoutError, ValueError):
                     pass
                 payload: dict[str, Any] = {"type": "queue", "jobs": webjobs.snapshot()}
                 if follow_job:
@@ -1282,13 +1350,10 @@ def create_app() -> Any:
                 return FileResponse(candidate)
             return FileResponse(STATIC_DIR / "index.html")
     else:
+
         @app.get("/")
         def placeholder() -> Any:
-            return HTMLResponse(
-                "<h1>bankai web</h1><p>Frontend assets not built yet. "
-                "Run the Vite build and place output in "
-                f"<code>{STATIC_DIR}</code>.</p>"
-            )
+            return HTMLResponse(f"<h1>bankai web</h1><p>Frontend assets not built yet. Run the Vite build and place output in <code>{STATIC_DIR}</code>.</p>")
 
     return app
 

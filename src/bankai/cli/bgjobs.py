@@ -35,9 +35,7 @@ def jobs_root() -> Path:
     if base:
         candidates.append(Path(base))
     elif os.name == "nt":
-        candidates.append(
-            Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home())
-        )
+        candidates.append(Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home()))
     else:
         candidates.append(Path.home() / ".local" / "state")
     candidates.append(Path(tempfile.gettempdir()) / "bankai-state")
@@ -145,14 +143,10 @@ class BgJob:
         return True
 
 
-_FAILURE_REASON_RE = re.compile(
-    r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning))\b:?\s*(.*)$"
-)
+_FAILURE_REASON_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning))\b:?\s*(.*)$")
 # A continuation of a wrapped exception message ends when we hit a blank line,
 # a new traceback frame / box border, a log timestamp, or a BANKAI marker.
-_REASON_BOUNDARY_RE = re.compile(
-    r'^(?:[+|\u2502\u2570\u256d\u2500]|\d{4}-\d\d-\d\d|BANKAI_|File ")'
-)
+_REASON_BOUNDARY_RE = re.compile(r'^(?:[+|\u2502\u2570\u256d\u2500]|\d{4}-\d\d-\d\d|BANKAI_|File ")')
 
 
 def failure_reason(job: BgJob) -> str | None:
@@ -549,7 +543,7 @@ def tail(job: BgJob, *, lines: int = 50) -> str:
     return "\n".join(out)
 
 
-def render_tail(job: BgJob, *, lines: int = 50) -> "Any":
+def render_tail(job: BgJob, *, lines: int = 50) -> Any:
     """Return a Rich-renderable that preserves ANSI colours from the log.
 
     Background workers run with ``FORCE_COLOR=1``, so the log file on

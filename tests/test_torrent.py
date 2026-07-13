@@ -133,9 +133,7 @@ def test_find_video_files_filters_extensions(tmp_path: Path) -> None:
 
 
 def test_episode_search_queries_prefers_season_pack() -> None:
-    qs = episode_search_queries(
-        {"query": "Arcane S01E01", "season": 1, "series_title": "Arcane"}
-    )
+    qs = episode_search_queries({"query": "Arcane S01E01", "season": 1, "series_title": "Arcane"})
     assert qs == ["Arcane S01", "Arcane S01E01"]
 
 

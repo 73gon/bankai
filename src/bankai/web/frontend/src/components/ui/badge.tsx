@@ -2,23 +2,20 @@ import * as React from 'react';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
-const badgeVariants = cva(
-  'inline-flex items-center rounded-full border px-2.5 py-0.5 text-[0.7rem] font-medium tracking-wide transition-colors',
-  {
-    variants: {
-      variant: {
-        default: 'border-white/10 bg-white/[0.06] text-foreground',
-        secondary: 'border-white/10 bg-white/[0.05] text-secondary-foreground',
-        success: 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300',
-        muted: 'border-white/10 bg-white/[0.03] text-muted-foreground',
-        warning: 'border-amber-500/30 bg-amber-500/15 text-amber-300',
-        destructive: 'border-red-500/30 bg-destructive/15 text-red-300',
-        accent: 'border-orange-500/30 bg-orange-500/15 text-orange-200',
-      },
+const badgeVariants = cva('inline-flex items-center rounded-full border px-2.5 py-0.5 text-[0.7rem] font-medium tracking-wide transition-colors', {
+  variants: {
+    variant: {
+      default: 'border-white/10 bg-white/[0.06] text-foreground',
+      secondary: 'border-white/10 bg-white/[0.05] text-secondary-foreground',
+      success: 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300',
+      muted: 'border-white/10 bg-white/[0.03] text-muted-foreground',
+      warning: 'border-amber-500/30 bg-amber-500/15 text-amber-300',
+      destructive: 'border-red-500/30 bg-destructive/15 text-red-300',
+      accent: 'border-orange-500/30 bg-orange-500/15 text-orange-200',
     },
-    defaultVariants: { variant: 'default' },
   },
-);
+  defaultVariants: { variant: 'default' },
+});
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement>, VariantProps<typeof badgeVariants> {}
 

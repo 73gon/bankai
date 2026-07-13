@@ -67,16 +67,14 @@ async def _check(name: str) -> None:
     key = _key(name)
     try:
         async with _SEM:
-            results = await search_stream_sources(
-                name, site="filmpalast", limit=8, kind=MediaKind.MOVIE
-            )
+            results = await search_stream_sources(name, site="filmpalast", limit=8, kind=MediaKind.MOVIE)
         match = next((r for r in results if _matches(name, r.title)), None)
         _CACHE[key] = {
             "status": "available" if match else "unavailable",
             "url": match.url if match else None,
             "ts": time.time(),
         }
-    except Exception as exc:  # noqa: BLE001 - fail-soft; never break Discover
+    except Exception as exc:
         log.debug("availability check failed for %r: %s", name, exc)
         _CACHE[key] = {"status": "unknown", "url": None, "ts": time.time()}
     finally:

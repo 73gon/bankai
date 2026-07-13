@@ -69,15 +69,11 @@ class TorrentSelector:
 
     # ---- public API --------------------------------------------------------
 
-    def select(
-        self, candidates: list[TorrentCandidate], *, query: str | None = None
-    ) -> ScoredCandidate | None:
+    def select(self, candidates: list[TorrentCandidate], *, query: str | None = None) -> ScoredCandidate | None:
         scored = self.rank(candidates, query=query)
         return scored[0] if scored else None
 
-    def rank(
-        self, candidates: list[TorrentCandidate], *, query: str | None = None
-    ) -> list[ScoredCandidate]:
+    def rank(self, candidates: list[TorrentCandidate], *, query: str | None = None) -> list[ScoredCandidate]:
         filtered = self._filter_by_query(candidates, query) if query else candidates
         scored = [s for s in (self._score(c) for c in filtered) if s is not None]
         scored.sort(key=lambda s: s.score, reverse=True)
@@ -85,9 +81,7 @@ class TorrentSelector:
 
     # ---- title relevance --------------------------------------------------
 
-    def _filter_by_query(
-        self, candidates: list[TorrentCandidate], query: str
-    ) -> list[TorrentCandidate]:
+    def _filter_by_query(self, candidates: list[TorrentCandidate], query: str) -> list[TorrentCandidate]:
         q_tokens, q_year = _query_tokens(query)
         # Drop trivial query-side stopwords too short to be informative.
         q_main = [t for t in q_tokens if len(t) >= 2]
@@ -135,9 +129,7 @@ class TorrentSelector:
         if size_gib < s.min_size_gib or size_gib > s.max_size_gib:
             return None
         res = c.resolution
-        if s.preferred_resolutions and (
-            res is None or res not in [r.lower() for r in s.preferred_resolutions]
-        ):
+        if s.preferred_resolutions and (res is None or res not in [r.lower() for r in s.preferred_resolutions]):
             return None
 
         score = 0.0

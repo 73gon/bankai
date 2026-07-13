@@ -77,14 +77,9 @@ async def estimate_visual_timeline(
         _ffprobe_duration(reference),
         _ffprobe_duration(source),
     )
-    ref_frames = await _select_reference_frames(
-        reference, ref_dur, sample_count, min_detail=min_detail
-    )
+    ref_frames = await _select_reference_frames(reference, ref_dur, sample_count, min_detail=min_detail)
     if len(ref_frames) < min_matches:
-        raise VisualSyncError(
-            f"only {len(ref_frames)} discriminative reference frames found "
-            f"(need {min_matches})"
-        )
+        raise VisualSyncError(f"only {len(ref_frames)} discriminative reference frames found (need {min_matches})")
 
     matches: list[VisualMatch] = []
     for ref_time, ref_hash in ref_frames:
@@ -106,9 +101,7 @@ async def estimate_visual_timeline(
     offsets = [m.source_time - m.reference_time for m in matches]
     median_offset = _median(offsets)
     spread = _median([abs(o - median_offset) for o in offsets])  # MAD
-    slope = _theil_sen_slope(
-        [m.reference_time for m in matches], [m.source_time for m in matches]
-    )
+    slope = _theil_sen_slope([m.reference_time for m in matches], [m.source_time for m in matches])
     confidence = _confidence(matches, spread=spread, sample_count=len(ref_frames))
     return VisualTimeline(
         slope=slope,
@@ -132,9 +125,7 @@ def _sample_times(duration: float, count: int) -> list[float]:
     return [start + i * step for i in range(count)]
 
 
-async def _select_reference_frames(
-    reference: Path, duration: float, count: int, *, min_detail: float
-) -> list[tuple[float, int]]:
+async def _select_reference_frames(reference: Path, duration: float, count: int, *, min_detail: float) -> list[tuple[float, int]]:
     """Pick ``count`` discriminative reference frames (high pixel variance).
 
     We over-sample candidate timestamps, hash each and measure its detail
@@ -174,9 +165,7 @@ async def _find_best_match(
     if end <= start:
         raise VisualSyncError("empty visual search window")
 
-    best = await _scan_window(
-        source, reference_time, reference_hash, start, end, coarse_step_seconds
-    )
+    best = await _scan_window(source, reference_time, reference_hash, start, end, coarse_step_seconds)
     if best is None:
         return None
     # Refine around the coarse best with progressively finer steps.
@@ -185,9 +174,7 @@ async def _find_best_match(
         step = max(step / 6.0, fine_step_seconds)
         lo = max(0.0, best.source_time - step * 6.0)
         hi = min(source_duration, best.source_time + step * 6.0)
-        refined = await _scan_window(
-            source, reference_time, reference_hash, lo, hi, step
-        )
+        refined = await _scan_window(source, reference_time, reference_hash, lo, hi, step)
         if refined is not None and refined.distance <= best.distance:
             best = refined
     return best

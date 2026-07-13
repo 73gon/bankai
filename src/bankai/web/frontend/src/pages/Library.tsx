@@ -41,10 +41,22 @@ import { cn } from '@/lib/utils';
 
 // --- ANSI colour rendering for job logs -----------------------------------
 const ANSI_FG: Record<number, string> = {
-  30: '#6b7280', 31: '#f87171', 32: '#4ade80', 33: '#fbbf24',
-  34: '#60a5fa', 35: '#e879f9', 36: '#22d3ee', 37: '#e5e7eb',
-  90: '#9ca3af', 91: '#fca5a5', 92: '#86efac', 93: '#fde047',
-  94: '#93c5fd', 95: '#f0abfc', 96: '#67e8f9', 97: '#ffffff',
+  30: '#6b7280',
+  31: '#f87171',
+  32: '#4ade80',
+  33: '#fbbf24',
+  34: '#60a5fa',
+  35: '#e879f9',
+  36: '#22d3ee',
+  37: '#e5e7eb',
+  90: '#9ca3af',
+  91: '#fca5a5',
+  92: '#86efac',
+  93: '#fde047',
+  94: '#93c5fd',
+  95: '#f0abfc',
+  96: '#67e8f9',
+  97: '#ffffff',
 };
 
 function ansi256(n: number): string {
@@ -128,7 +140,10 @@ function cleanLog(raw: string): string {
     if (bare) lastKey = bare;
     out.push(line);
   }
-  return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
+  return out
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s+$/, '');
 }
 
 // Truncated cell with a hover tooltip showing the full text. The inner element
@@ -152,10 +167,7 @@ function TruncCell({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div
-          className={cn('truncate cursor-default', mono && 'font-mono', danger && 'text-destructive')}
-          style={{ maxWidth: width }}
-        >
+        <div className={cn('truncate cursor-default', mono && 'font-mono', danger && 'text-destructive')} style={{ maxWidth: width }}>
           {text}
         </div>
       </TooltipTrigger>
@@ -197,15 +209,7 @@ const LogPanel = memo(function LogPanel({ text }: { text: string }) {
 });
 
 // Fixed set of statuses a row can be in.
-type Status =
-  | 'queued'
-  | 'downloading'
-  | 'failed'
-  | 'cancelled'
-  | 'review'
-  | 'approved'
-  | 'transferring'
-  | 'done';
+type Status = 'queued' | 'downloading' | 'failed' | 'cancelled' | 'review' | 'approved' | 'transferring' | 'done' | 'deleted';
 
 const STATUS_VARIANT: Record<Status, 'muted' | 'accent' | 'destructive' | 'warning' | 'success'> = {
   queued: 'muted',
@@ -216,6 +220,7 @@ const STATUS_VARIANT: Record<Status, 'muted' | 'accent' | 'destructive' | 'warni
   approved: 'success',
   transferring: 'accent',
   done: 'success',
+  deleted: 'muted',
 };
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -227,6 +232,7 @@ const STATUS_LABEL: Record<Status, string> = {
   approved: 'Approved',
   transferring: 'Transferring',
   done: 'Done',
+  deleted: 'Deleted',
 };
 
 function rowStatus(r: TitleRow): Status {
@@ -235,8 +241,10 @@ function rowStatus(r: TitleRow): Status {
     if (r.job_status === 'running') return 'downloading';
     if (r.job_status === 'failed' || r.job_status === 'error') return 'failed';
     if (r.job_status === 'cancelled') return 'cancelled';
+    if (r.job_status === 'deleted' || r.stage === 'deleted') return 'deleted';
     return 'done';
   }
+  if (r.stage === 'deleted') return 'deleted';
   if (r.transfer_status === 'transferring') return 'transferring';
   if (r.transfer_status === 'failed') return 'failed';
   if (r.stage === 'transferred' || r.transfer_status === 'done') return 'done';
@@ -335,7 +343,10 @@ function StatusMultiSelect({
   const label =
     selected.size === 0
       ? 'All statuses'
-      : all.filter((s) => selected.has(s)).map((s) => STATUS_LABEL[s]).join(', ');
+      : all
+          .filter((s) => selected.has(s))
+          .map((s) => STATUS_LABEL[s])
+          .join(', ');
   return (
     <div ref={ref} className='relative'>
       <button
@@ -357,9 +368,7 @@ function StatusMultiSelect({
                 <span
                   className={cn(
                     'flex h-4 w-4 items-center justify-center rounded border',
-                    selected.has(s)
-                      ? 'border-primary bg-primary text-primary-foreground'
-                      : 'border-input',
+                    selected.has(s) ? 'border-primary bg-primary text-primary-foreground' : 'border-input',
                   )}
                 >
                   {selected.has(s) && <Check className='h-3 w-3' strokeWidth={3} />}
@@ -370,10 +379,7 @@ function StatusMultiSelect({
             </button>
           ))}
           {selected.size > 0 && (
-            <button
-              onClick={onClear}
-              className='mt-1 w-full rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-secondary'
-            >
+            <button onClick={onClear} className='mt-1 w-full rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-secondary'>
               Clear all
             </button>
           )}
@@ -482,9 +488,7 @@ export default function Library() {
 
   const filtered = useMemo(() => {
     const list = rows.filter(
-      (e) =>
-        titleWithYear(e).toLowerCase().includes(filter.toLowerCase()) &&
-        (statusFilters.size === 0 || statusFilters.has(rowStatus(e))),
+      (e) => titleWithYear(e).toLowerCase().includes(filter.toLowerCase()) && (statusFilters.size === 0 || statusFilters.has(rowStatus(e))),
     );
     const dir = sortDir === 'asc' ? 1 : -1;
     list.sort((a, b) => {
@@ -501,10 +505,7 @@ export default function Library() {
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, pageCount - 1);
-  const pageRows = useMemo(
-    () => filtered.slice(safePage * pageSize, safePage * pageSize + pageSize),
-    [filtered, safePage, pageSize],
-  );
+  const pageRows = useMemo(() => filtered.slice(safePage * pageSize, safePage * pageSize + pageSize), [filtered, safePage, pageSize]);
   useEffect(() => {
     setPage(0);
   }, [filter, statusFilters, sortCol, sortDir, pageSize]);
@@ -620,22 +621,10 @@ export default function Library() {
   }
 
   function Poster({ r }: { r: TitleRow }) {
-    if (r.poster)
-      return (
-        <img
-          src={r.poster}
-          alt=''
-          loading='lazy'
-          className='h-14 w-10 shrink-0 rounded object-cover'
-        />
-      );
+    if (r.poster) return <img src={r.poster} alt='' loading='lazy' className='h-14 w-10 shrink-0 rounded object-cover' />;
     return (
       <div className='flex h-14 w-10 shrink-0 items-center justify-center rounded bg-secondary/60'>
-        {r.kind === 'episode' ? (
-          <LibraryIcon className='h-4 w-4 text-muted-foreground' />
-        ) : (
-          <Film className='h-4 w-4 text-muted-foreground' />
-        )}
+        {r.kind === 'episode' ? <LibraryIcon className='h-4 w-4 text-muted-foreground' /> : <Film className='h-4 w-4 text-muted-foreground' />}
       </div>
     );
   }
@@ -649,10 +638,7 @@ export default function Library() {
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
-        <tr
-          className='cursor-pointer border-t border-border hover:bg-secondary/30'
-          onClick={() => toggleExpand(r)}
-        >
+        <tr className='cursor-pointer border-t border-border hover:bg-secondary/70' onClick={() => toggleExpand(r)}>
           <td className='px-2 py-2 align-middle'>
             <Poster r={r} />
           </td>
@@ -665,9 +651,7 @@ export default function Library() {
               )}
               <span className='truncate font-medium'>{titleWithYear(r)}</span>
             </div>
-            {isLib && r.size ? (
-              <div className='pl-5 text-xs text-muted-foreground'>{formatBytes(r.size)}</div>
-            ) : null}
+            {isLib && r.size ? <div className='pl-5 text-xs text-muted-foreground'>{formatBytes(r.size)}</div> : null}
           </td>
           <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>{typeLabel(r)}</td>
           <td className='px-2 py-2 align-middle'>
@@ -679,9 +663,7 @@ export default function Library() {
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
           </td>
-          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>
-            {whenLabel(r.done_at)}
-          </td>
+          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>{whenLabel(r.done_at)}</td>
           <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>
             <TruncCell text={r.path} mono width='20rem' />
           </td>
@@ -699,11 +681,7 @@ export default function Library() {
                 disabled={redoing.has(r.id)}
                 title='Redo — re-run the pipeline for this title'
               >
-                {redoing.has(r.id) ? (
-                  <Loader2 className='h-4 w-4 animate-spin' />
-                ) : (
-                  <RefreshCw className='h-4 w-4' />
-                )}
+                {redoing.has(r.id) ? <Loader2 className='h-4 w-4 animate-spin' /> : <RefreshCw className='h-4 w-4' />}
               </Button>
               {canCancel && (
                 <Button size='icon' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel'>
@@ -747,10 +725,7 @@ export default function Library() {
     const active = sortCol === col;
     return (
       <th className={cn('px-2 py-2 font-medium', className)}>
-        <button
-          onClick={() => sortBy(col)}
-          className='inline-flex items-center gap-1 hover:text-foreground'
-        >
+        <button onClick={() => sortBy(col)} className='inline-flex items-center gap-1 hover:text-foreground'>
           {label}
           {active ? (
             sortDir === 'asc' ? (
@@ -783,41 +758,24 @@ export default function Library() {
       <header className='flex flex-wrap items-center justify-between gap-3'>
         <div>
           <h1 className='text-2xl font-semibold'>Queue</h1>
-          <p className='text-sm text-muted-foreground'>
-            Every title in one table — downloads, review, sync and transfer.
-          </p>
+          <p className='text-sm text-muted-foreground'>Every title in one table — downloads, review, sync and transfer.</p>
         </div>
       </header>
 
       {/* Collapsible filter bar */}
       <div className='rounded-lg border border-border bg-card/40'>
-        <button
-          onClick={() => setFiltersOpen((o) => !o)}
-          className='flex w-full items-center justify-between px-3 py-2 text-sm font-medium'
-        >
+        <button onClick={() => setFiltersOpen((o) => !o)} className='flex w-full items-center justify-between px-3 py-2 text-sm font-medium'>
           <span className='flex items-center gap-2'>
             <Filter className='h-4 w-4 text-muted-foreground' />
             Filters
-            {(statusFilters.size > 0 || filter) && (
-              <Badge variant='accent'>{statusFilters.size + (filter ? 1 : 0)}</Badge>
-            )}
+            {(statusFilters.size > 0 || filter) && <Badge variant='accent'>{statusFilters.size + (filter ? 1 : 0)}</Badge>}
           </span>
           {filtersOpen ? <ChevronUp className='h-4 w-4' /> : <ChevronDown className='h-4 w-4' />}
         </button>
         {filtersOpen && (
           <div className='flex flex-wrap items-center gap-3 border-t border-border px-3 py-3'>
-            <Input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder='Search title…'
-              className='w-56'
-            />
-            <StatusMultiSelect
-              selected={statusFilters}
-              onToggle={toggleFilter}
-              onClear={() => setStatusFilters(new Set())}
-              counts={counts}
-            />
+            <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Search title…' className='w-56' />
+            <StatusMultiSelect selected={statusFilters} onToggle={toggleFilter} onClear={() => setStatusFilters(new Set())} counts={counts} />
             {(statusFilters.size > 0 || filter) && (
               <Button
                 variant='ghost'
@@ -871,10 +829,8 @@ export default function Library() {
         <div className='flex items-center justify-between gap-3 text-sm'>
           <div className='flex items-center gap-2 text-xs text-muted-foreground'>
             <span>
-              {filtered.length === 0
-                ? '0'
-                : `${safePage * pageSize + 1}–${Math.min(filtered.length, (safePage + 1) * pageSize)}`}{' '}
-              of {filtered.length}
+              {filtered.length === 0 ? '0' : `${safePage * pageSize + 1}–${Math.min(filtered.length, (safePage + 1) * pageSize)}`} of{' '}
+              {filtered.length}
             </span>
             <span>·</span>
             <span>Per page</span>
@@ -892,23 +848,13 @@ export default function Library() {
             </Select>
           </div>
           <div className='flex items-center gap-2'>
-            <Button
-              size='sm'
-              variant='secondary'
-              disabled={safePage === 0}
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-            >
+            <Button size='sm' variant='secondary' disabled={safePage === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>
               Prev
             </Button>
             <span className='text-xs text-muted-foreground'>
               Page {safePage + 1} / {pageCount}
             </span>
-            <Button
-              size='sm'
-              variant='secondary'
-              disabled={safePage >= pageCount - 1}
-              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-            >
+            <Button size='sm' variant='secondary' disabled={safePage >= pageCount - 1} onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}>
               Next
             </Button>
           </div>
@@ -1109,10 +1055,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         setSavedDelay(m.delay_ms);
         setStretch(1);
         const g = m.audio_tracks.find((t) => t.is_german);
-        const e =
-          m.audio_tracks.find((t) => t.language === 'eng' && !t.is_german) ??
-          m.audio_tracks.find((t) => !t.is_german) ??
-          m.audio_tracks[0];
+        const e = m.audio_tracks.find((t) => t.language === 'eng' && !t.is_german) ?? m.audio_tracks.find((t) => !t.is_german) ?? m.audio_tracks[0];
         const gi = g ? g.index : null;
         const ei = e ? e.index : null;
         setGerStream(gi);
@@ -1507,22 +1450,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const gerTrack = info?.audio_tracks.find((t) => t.index === gerStream) ?? null;
   // Length drift between the reference (HQ) and German audio hints at a
   // frame-rate/speed mismatch (e.g. 25fps PAL vs 23.976) even before aligning.
-  const lenDrift =
-    engTrack?.duration != null && gerTrack?.duration != null
-      ? engTrack.duration - gerTrack.duration
-      : null;
+  const lenDrift = engTrack?.duration != null && gerTrack?.duration != null ? engTrack.duration - gerTrack.duration : null;
   // Suggested stretch to make the German track match the reference length.
   // atempo>1 speeds up (German currently longer); <1 slows down.
-  const suggestedStretch =
-    engTrack?.duration && gerTrack?.duration && engTrack.duration > 0
-      ? gerTrack.duration / engTrack.duration
-      : null;
+  const suggestedStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
   // Flag a real drift: length differs by more than ~2s AND more than ~0.1%.
-  const driftSuspected =
-    suggestedStretch != null &&
-    lenDrift != null &&
-    Math.abs(lenDrift) > 2 &&
-    Math.abs(suggestedStretch - 1) > 0.001;
+  const driftSuspected = suggestedStretch != null && lenDrift != null && Math.abs(lenDrift) > 2 && Math.abs(suggestedStretch - 1) > 0.001;
   const stretchPct = ((stretch - 1) * 100).toFixed(2);
   const trackMeta = (t: AudioTrack | null, videoFps: number | null | undefined) => {
     const bits: string[] = [];
@@ -1548,9 +1481,16 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         </div>
         <div className='flex items-center gap-3'>
           <div className='rounded-md border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm'>
-            Delay <span className='font-mono font-semibold'>{delayMs > 0 ? '+' : ''}{delayMs} ms</span>
+            Delay{' '}
+            <span className='font-mono font-semibold'>
+              {delayMs > 0 ? '+' : ''}
+              {delayMs} ms
+            </span>
             {drift !== 0 && (
-              <span className='ml-1 text-xs text-amber-400'>(unsaved {drift > 0 ? '+' : ''}{drift})</span>
+              <span className='ml-1 text-xs text-amber-400'>
+                (unsaved {drift > 0 ? '+' : ''}
+                {drift})
+              </span>
             )}
           </div>
           <Button onClick={approve} disabled={busy === 'approve'}>
@@ -1628,10 +1568,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 </span>
                 {lenDrift != null && (
                   <span
-                    className={cn(
-                      'font-mono',
-                      Math.abs(lenDrift) > 1 ? 'text-amber-400' : 'text-muted-foreground',
-                    )}
+                    className={cn('font-mono', Math.abs(lenDrift) > 1 ? 'text-amber-400' : 'text-muted-foreground')}
                     title='Length difference between the HQ and German audio — a large value suggests a frame-rate/speed drift.'
                   >
                     Δlen {lenDrift > 0 ? '+' : ''}
@@ -1657,12 +1594,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   >
                     <Minus className='h-3 w-3' />
                   </Button>
-                  <span
-                    className={cn(
-                      'w-[8.5rem] text-center font-mono',
-                      stretch !== 1 ? 'text-foreground' : 'text-muted-foreground',
-                    )}
-                  >
+                  <span className={cn('w-[8.5rem] text-center font-mono', stretch !== 1 ? 'text-foreground' : 'text-muted-foreground')}>
                     ×{stretch.toFixed(4)} ({stretch >= 1 ? '+' : ''}
                     {stretchPct}%)
                   </span>
@@ -1688,18 +1620,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   </Button>
                 )}
                 {stretch !== 1 && (
-                  <Button
-                    size='sm'
-                    variant='ghost'
-                    className='h-6'
-                    onClick={() => setStretch(1)}
-                  >
+                  <Button size='sm' variant='ghost' className='h-6' onClick={() => setStretch(1)}>
                     Reset
                   </Button>
                 )}
-                {driftSuspected && (
-                  <span className='text-amber-400'>drift likely — dub length differs</span>
-                )}
+                {driftSuspected && <span className='text-amber-400'>drift likely — dub length differs</span>}
               </div>
               <div className='relative'>
                 <canvas
@@ -1729,9 +1654,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           <div className='shrink-0 space-y-3 border-t border-border bg-card px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.6)]'>
             {/* Timeline / pan */}
             <div className='flex items-center gap-3'>
-              <span className='w-12 shrink-0 text-right font-mono text-xs text-muted-foreground'>
-                {fmtClock(viewStart)}
-              </span>
+              <span className='w-12 shrink-0 text-right font-mono text-xs text-muted-foreground'>{fmtClock(viewStart)}</span>
               <Slider
                 value={[Math.min(center, duration || center)]}
                 min={0}
@@ -1789,26 +1712,31 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               {/* Waveform lane height */}
               <div className='flex items-center gap-2'>
                 <span className='text-xs text-muted-foreground'>Bars</span>
-                <Slider
-                  value={[canvasH]}
-                  min={100}
-                  max={640}
-                  step={20}
-                  onValueChange={(v) => setCanvasH(v[0])}
-                  className='w-32'
-                />
+                <Slider value={[canvasH]} min={100} max={640} step={20} onValueChange={(v) => setCanvasH(v[0])} className='w-32' />
                 <span className='w-9 text-right font-mono text-xs text-muted-foreground'>{canvasH}px</span>
               </div>
 
               {/* Fine nudge */}
               <div className='flex items-center gap-1'>
-                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 100)}>-100</Button>
-                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 10)}>-10</Button>
-                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 1)}>-1</Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 100)}>
+                  -100
+                </Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 10)}>
+                  -10
+                </Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d - 1)}>
+                  -1
+                </Button>
                 <span className='px-1 text-xs text-muted-foreground'>ms</span>
-                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 1)}>+1</Button>
-                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 10)}>+10</Button>
-                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 100)}>+100</Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 1)}>
+                  +1
+                </Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 10)}>
+                  +10
+                </Button>
+                <Button size='sm' variant='secondary' onClick={() => setDelayMs((d) => d + 100)}>
+                  +100
+                </Button>
               </div>
 
               {savedDelay !== delayMs && (

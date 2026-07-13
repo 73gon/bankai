@@ -22,7 +22,7 @@ log = get_logger(__name__)
 
 _BASE_URL = "https://api4.thetvdb.com/v4"
 _ARTWORK_BASE = "https://artworks.thetvdb.com"
-_CACHE: dict[str, tuple[float, list["DiscoverItem"]]] = {}
+_CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
 # Keys currently being refreshed in the background (stale-while-revalidate),
 # so we never launch duplicate refreshes for the same key.
 _REFRESHING: set[str] = set()
@@ -96,12 +96,7 @@ def _abs_image(url: object) -> str | None:
 
 def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
     name = rec.get("name") or rec.get("title") or rec.get("slug") or "Untitled"
-    date = (
-        rec.get("first_air_time")
-        or rec.get("release_date")
-        or rec.get("firstAired")
-        or rec.get("date")
-    )
+    date = rec.get("first_air_time") or rec.get("release_date") or rec.get("firstAired") or rec.get("date")
     date_s = str(date)[:10] if date else None
     year = _to_int(rec.get("year")) or _to_int((date_s or "")[:4])
     poster = rec.get("image_url") or rec.get("image") or rec.get("thumbnail")
@@ -270,9 +265,7 @@ async def german_title(tvdb_id: int, *, kind: str) -> str | None:
         headers = {"Authorization": f"Bearer {token}"}
         for lang in ("deu", "ger"):
             try:
-                r = await client.get(
-                    f"{entity}/{tvdb_id}/translations/{lang}", headers=headers
-                )
+                r = await client.get(f"{entity}/{tvdb_id}/translations/{lang}", headers=headers)
                 if r.status_code != 200:
                     continue
                 name = (r.json().get("data") or {}).get("name")
@@ -340,7 +333,7 @@ _UNRELEASED_HINTS = (
 # ---------------------------------------------------------------------------
 
 
-async def _build_feed(kind: str) -> list["DiscoverItem"]:
+async def _build_feed(kind: str) -> list[DiscoverItem]:
     """Merge new-releases + browse into the deduped Discover feed."""
     new = await new_releases(kind)
     browse = await trending(kind)
@@ -355,7 +348,7 @@ async def _build_feed(kind: str) -> list["DiscoverItem"]:
     return merged
 
 
-async def discover_feed(kind: str) -> tuple[list["DiscoverItem"], bool]:
+async def discover_feed(kind: str) -> tuple[list[DiscoverItem], bool]:
     """Return the Discover feed, fresh or stale-while-revalidate.
 
     * Warm + fresh cache  -> returned immediately (fresh=True).
@@ -417,4 +410,3 @@ def prewarm() -> None:
                 log.debug("discover prewarm failed for %s: %s", kind, exc)
 
     threading.Thread(target=_warm, daemon=True).start()
-

@@ -123,10 +123,7 @@ export default function Discover() {
       .catch(() => setServerNames(new Set()));
   }, [kind]);
 
-  const visibleItems = useMemo(
-    () => items.filter((it) => !serverNames.has(normalizeTitle(it.name))),
-    [items, serverNames],
-  );
+  const visibleItems = useMemo(() => items.filter((it) => !serverNames.has(normalizeTitle(it.name))), [items, serverNames]);
 
   async function openItem(item: DiscoverItem) {
     setSelected(item);
@@ -163,16 +160,8 @@ export default function Discover() {
     // Accept a pasted stream link directly (no search) — recognise a URL and
     // build a single result the user can queue as-is.
     if (/^https?:\/\/\S+$/i.test(term)) {
-      const site = /aniworld/i.test(term)
-        ? 'aniworld'
-        : /bs\.to/i.test(term)
-          ? 'bs'
-          : /kinox/i.test(term)
-            ? 'kinox'
-            : 'filmpalast';
-      setFilmResults([
-        { site, title: selected?.name ?? term, year: selected?.year ?? null, kind: 'movie', url: term },
-      ]);
+      const site = /aniworld/i.test(term) ? 'aniworld' : /bs\.to/i.test(term) ? 'bs' : /kinox/i.test(term) ? 'kinox' : 'filmpalast';
+      setFilmResults([{ site, title: selected?.name ?? term, year: selected?.year ?? null, kind: 'movie', url: term }]);
       return;
     }
     setLoadingFilm(true);

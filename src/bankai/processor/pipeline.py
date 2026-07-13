@@ -117,7 +117,7 @@ class PipelineWorker(Worker):
                         query=payload.get("query", ""),
                         final_path=str(planned_out),
                     )
-                except Exception:  # noqa: BLE001 -- notifications are best-effort.
+                except Exception:
                     log.debug("[pipeline] skip-notify failed", exc_info=True)
                 return {
                     "status": "skipped",
@@ -186,9 +186,7 @@ class PipelineWorker(Worker):
             max_height=get_settings().sync.visual_max_height or None,
         )
         extract_attempt_index = 0
-        extract_attempt_index, extract_result = await self._run_extract_attempts(
-            ctx, extract_attempts, extract_attempt_index
-        )
+        extract_attempt_index, extract_result = await self._run_extract_attempts(ctx, extract_attempts, extract_attempt_index)
         audio_path, visual_source = await self._prepare_german_source(ctx, extract_result)
 
         # ---- 2. Torrent HQ video ---------------------------------------
@@ -220,16 +218,9 @@ class PipelineWorker(Worker):
                 extract_attempt_index += 1
                 if extract_attempt_index >= len(extract_attempts):
                     raise
-                log.warning(
-                    "[pipeline] extracted audio looked like a placeholder; retrying extract "
-                    "with the next source attempt"
-                )
-                extract_attempt_index, extract_result = await self._run_extract_attempts(
-                    ctx, extract_attempts, extract_attempt_index
-                )
-                audio_path, visual_source = await self._prepare_german_source(
-                    ctx, extract_result
-                )
+                log.warning("[pipeline] extracted audio looked like a placeholder; retrying extract with the next source attempt")
+                extract_attempt_index, extract_result = await self._run_extract_attempts(ctx, extract_attempts, extract_attempt_index)
+                audio_path, visual_source = await self._prepare_german_source(ctx, extract_result)
         synced_audio = sync_result["path"]
 
         # ---- 4. Remux ---------------------------------------------------
@@ -460,9 +451,7 @@ class PipelineWorker(Worker):
                 sync_payload["tempo"] = drift
                 log.info("[visual-sync] applying speed drift correction tempo=%.5f", drift)
             else:
-                log.info(
-                    "[visual-sync] detected speed drift ratio=%.5f (not auto-corrected)", drift
-                )
+                log.info("[visual-sync] detected speed drift ratio=%.5f (not auto-corrected)", drift)
                 visual_meta["needs_review"] = True
 
         # source_time = reference_time + offset. Positive offset means the
@@ -483,9 +472,7 @@ class PipelineWorker(Worker):
             )
         return sync_payload, visual_meta
 
-    async def _prepare_german_source(
-        self, ctx: WorkerContext, extract_result: dict[str, Any]
-    ) -> tuple[str, str | None]:
+    async def _prepare_german_source(self, ctx: WorkerContext, extract_result: dict[str, Any]) -> tuple[str, str | None]:
         """Return ``(dub_audio_path, visual_source_path)``.
 
         When visual sync is enabled and the extracted German media carries a
@@ -685,4 +672,3 @@ async def _demux_audio(media: Path, out: Path) -> None:
     _, stderr = await proc.communicate()
     if proc.returncode != 0 or not out.exists():
         raise RuntimeError(f"ffmpeg demux failed: {stderr.decode(errors='ignore')[:300]}")
-

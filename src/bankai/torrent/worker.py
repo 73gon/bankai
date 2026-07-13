@@ -128,9 +128,7 @@ class TorrentWorker(Worker):
                 break
 
         if chosen is None:
-            raise PermanentWorkerError(
-                f"no candidate met selector criteria (tried {', '.join(attempts) or 'nothing'})"
-            )
+            raise PermanentWorkerError(f"no candidate met selector criteria (tried {', '.join(attempts) or 'nothing'})")
         log.info(
             "[torrent] picked %s (score=%.1f, reasons=%s)",
             chosen.candidate.title,
@@ -149,9 +147,7 @@ class TorrentWorker(Worker):
         # exact new torrent (fuzzy name match was unreliable when older
         # torrents in the same category shared release tags like
         # "1080p BluRay" with the new one).
-        before_listing = await self._qbit.list_torrents(
-            category=ctx.job.payload.get("category") or qbit_settings.category
-        )
+        before_listing = await self._qbit.list_torrents(category=ctx.job.payload.get("category") or qbit_settings.category)
         before_hashes = {t.hash for t in before_listing}
 
         # Extract the info-hash up-front so we can find the torrent even
@@ -350,9 +346,7 @@ class TorrentWorker(Worker):
             # added ours -- that is how the pipeline used to lock onto an
             # unrelated same-title torrent (e.g. a leftover 2160p) and then
             # wait forever. Only fuzzy-match among genuinely new hashes.
-            pool = new_hashes if new_hashes else [
-                t.hash for t in listings if t.hash not in before_hashes
-            ]
+            pool = new_hashes if new_hashes else [t.hash for t in listings if t.hash not in before_hashes]
             min_match = 1 if new_hashes else 2
             best: tuple[int, str] | None = None
             for t in listings:

@@ -69,9 +69,7 @@ async def test_build_mkvmerge_command_omits_sync_when_zero_delay() -> None:
     assert "--sync" not in cmd
 
 
-async def test_remux_worker_invokes_mkvmerge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_remux_worker_invokes_mkvmerge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     video = tmp_path / "v.mkv"
     audio = tmp_path / "a.aac"
     out = tmp_path / "out.mkv"
@@ -91,8 +89,7 @@ async def test_remux_worker_invokes_mkvmerge(
                 # Second call = ``mkvmerge -J`` for verification.
                 if "-J" in cmd:
                     return (
-                        b'{"tracks":[{"id":0,"type":"video"},'
-                        b'{"id":1,"type":"audio"},{"id":2,"type":"audio"}]}',
+                        b'{"tracks":[{"id":0,"type":"video"},{"id":1,"type":"audio"},{"id":2,"type":"audio"}]}',
                         b"",
                     )
                 out.write_bytes(b"MUXED")
@@ -118,9 +115,7 @@ async def test_remux_worker_invokes_mkvmerge(
             },
         )
     )
-    ctx = WorkerContext(
-        job=job, repo=repo, work_dir=tmp_path / "work", cancel_token=asyncio.Event()
-    )
+    ctx = WorkerContext(job=job, repo=repo, work_dir=tmp_path / "work", cancel_token=asyncio.Event())
 
     worker = RemuxWorker()
     result = await worker.run(ctx)

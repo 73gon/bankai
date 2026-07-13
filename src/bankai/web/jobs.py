@@ -72,11 +72,7 @@ def _norm_job_title(title: str) -> str:
 def _running_titles() -> set[str]:
     """Normalised titles of movie/show jobs currently running, so we never
     start a second copy that would collide on the shared extract directory."""
-    return {
-        _norm_job_title(j.title)
-        for j in bgjobs.list_jobs()
-        if j.status == "running" and j.kind != "transfer"
-    }
+    return {_norm_job_title(j.title) for j in bgjobs.list_jobs() if j.status == "running" and j.kind != "transfer"}
 
 
 def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
@@ -141,7 +137,7 @@ def cancel_pending(job_id: str) -> bool:
         return True
 
 
-def _job_reason(j: "bgjobs.BgJob") -> str | None:
+def _job_reason(j: bgjobs.BgJob) -> str | None:
     """Human-readable reason for a failed job.
 
     Falls back to a clear message when the log holds no exception -- e.g. the
@@ -150,10 +146,7 @@ def _job_reason(j: "bgjobs.BgJob") -> str | None:
     """
     if j.status != "failed":
         return None
-    return bgjobs.failure_reason(j) or (
-        "Stopped before completing \u2014 no error was logged "
-        "(the job was likely interrupted or timed out)"
-    )
+    return bgjobs.failure_reason(j) or ("Stopped before completing \u2014 no error was logged (the job was likely interrupted or timed out)")
 
 
 def snapshot() -> list[dict]:
@@ -276,7 +269,5 @@ def transfer_states() -> dict[str, dict]:
             key = str(Path(target).resolve())
         except OSError:
             key = target
-        by_path.setdefault(
-            key, {"status": "transferring", "percent": 0.0, "id": item.id, "exit_code": None}
-        )
+        by_path.setdefault(key, {"status": "transferring", "percent": 0.0, "id": item.id, "exit_code": None})
     return by_path

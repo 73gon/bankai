@@ -21,10 +21,7 @@ def run_server(*, host: str | None = None, port: int | None = None) -> None:
     try:
         import uvicorn
     except ImportError as exc:  # pragma: no cover
-        raise SystemExit(
-            "uvicorn is not installed. Install the web extra:\n"
-            "  pip install 'bankai[web]'"
-        ) from exc
+        raise SystemExit("uvicorn is not installed. Install the web extra:\n  pip install 'bankai[web]'") from exc
 
     settings = get_settings()
     bind_host = host or settings.web.host

@@ -86,4 +86,3 @@ def test_confidence_low_for_scattered_offsets() -> None:
 def test_variance_flat_frame_is_zero() -> None:
     assert _variance(bytes([100] * 16)) == 0.0
     assert _variance(bytes([0, 255] * 8)) > 0.0
-

@@ -147,9 +147,7 @@ async def test_filmpalast_search_falls_back_to_shorter_query() -> None:
     await backend._client.aclose()
     backend._client = httpx.AsyncClient(base_url="http://example.invalid", transport=transport)
     try:
-        results = await backend.search(
-            "Green Book - Eine besondere Freundschaft", kind=MediaKind.MOVIE
-        )
+        results = await backend.search("Green Book - Eine besondere Freundschaft", kind=MediaKind.MOVIE)
     finally:
         await backend.aclose()
 

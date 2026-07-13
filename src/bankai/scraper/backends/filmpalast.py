@@ -46,9 +46,7 @@ class FilmpalastBackend:
 
     # ---- search ------------------------------------------------------------
 
-    async def search(
-        self, query: str, *, kind: MediaKind | None = None, limit: int = 20
-    ) -> list[SearchResult]:
+    async def search(self, query: str, *, kind: MediaKind | None = None, limit: int = 20) -> list[SearchResult]:
         results = await self._raw_search(query, limit=limit)
         if results:
             return results
@@ -69,9 +67,7 @@ class FilmpalastBackend:
             raise ScraperError(f"filmpalast search failed: HTTP {resp.status_code}")
         return self._parse_search(resp.text, limit=limit)
 
-    async def _search_fallback(
-        self, query: str, *, kind: MediaKind | None, limit: int
-    ) -> list[SearchResult]:
+    async def _search_fallback(self, query: str, *, kind: MediaKind | None, limit: int) -> list[SearchResult]:
         for variant in _query_variants(query):
             try:
                 hits = await self._raw_search(variant, limit=limit)
@@ -134,11 +130,7 @@ class FilmpalastBackend:
                 poster = urljoin(self._base, poster)
             year_match = _YEAR_RE.search(title)
             year = int(year_match.group(0)) if year_match else None
-            kind = (
-                MediaKind.EPISODE
-                if _EPISODE_RE.search(href) or _EPISODE_RE.search(title)
-                else MediaKind.MOVIE
-            )
+            kind = MediaKind.EPISODE if _EPISODE_RE.search(href) or _EPISODE_RE.search(title) else MediaKind.MOVIE
             results.append(
                 SearchResult(
                     site=self.site_id,

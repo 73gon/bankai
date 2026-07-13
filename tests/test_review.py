@@ -25,9 +25,7 @@ def test_default_state_has_no_sync_flag(tmp_path: Path) -> None:
 
 def test_set_sync_review_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "movie.mkv"
-    review_mod.set_sync_review(
-        path, needs_review=True, confidence=0.42, applied_delay_ms=-1200
-    )
+    review_mod.set_sync_review(path, needs_review=True, confidence=0.42, applied_delay_ms=-1200)
     st = review_mod.get_state(path)
     assert st.needs_sync_review is True
     assert st.sync_confidence == 0.42

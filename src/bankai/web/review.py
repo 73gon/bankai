@@ -141,9 +141,7 @@ def set_sync_review(
     return ReviewState(**raw)
 
 
-def set_transfer(
-    path: str | Path, status: str, *, percent: float | None = None
-) -> ReviewState:
+def set_transfer(path: str | Path, status: str, *, percent: float | None = None) -> ReviewState:
     """Update the per-entry transfer status shown in the library column.
 
     ``status`` is one of ``idle|transferring|done|failed``. When ``done`` the

@@ -160,11 +160,7 @@ def format_transfer_summary(result: TransferResult) -> str:
 def _iter_transfer_files(path: Path) -> list[tuple[Path, Path]]:
     if path.is_file():
         return [(path, path.parent)]
-    files = [
-        child
-        for child in path.rglob("*")
-        if child.is_file() and child.suffix.casefold() in _VIDEO_EXTENSIONS
-    ]
+    files = [child for child in path.rglob("*") if child.is_file() and child.suffix.casefold() in _VIDEO_EXTENSIONS]
     return [(child, path) for child in sorted(files)]
 
 

@@ -79,11 +79,7 @@ function ShowRow({ it }: { it: ServerTitle }) {
                     onClick={() => setOpenSeasons((s) => ({ ...s, [se.name]: !sOpen }))}
                     className='flex w-full items-center gap-1.5 rounded px-1 py-1 text-left text-xs font-medium text-muted-foreground hover:bg-secondary/30'
                   >
-                    {sOpen ? (
-                      <ChevronDown className='h-3.5 w-3.5 shrink-0' />
-                    ) : (
-                      <ChevronRight className='h-3.5 w-3.5 shrink-0' />
-                    )}
+                    {sOpen ? <ChevronDown className='h-3.5 w-3.5 shrink-0' /> : <ChevronRight className='h-3.5 w-3.5 shrink-0' />}
                     {se.name}
                     <Badge variant='muted'>{se.episodes.length}</Badge>
                   </button>
@@ -92,10 +88,7 @@ function ShowRow({ it }: { it: ServerTitle }) {
                       <p className='pl-6 text-xs text-muted-foreground/70'>No files.</p>
                     ) : (
                       se.episodes.map((ep) => (
-                        <div
-                          key={ep.path}
-                          className='flex items-center justify-between gap-3 rounded px-2 py-1 pl-6 hover:bg-secondary/30'
-                        >
+                        <div key={ep.path} className='flex items-center justify-between gap-3 rounded px-2 py-1 pl-6 hover:bg-secondary/30'>
                           <span className='truncate text-xs' title={ep.path}>
                             {ep.name}
                           </span>

@@ -72,10 +72,7 @@ class SyncSettings(BaseModel):
 
 class ScraperSettings(BaseModel):
     backend: Literal["ytdlp", "playwright", "auto"] = "auto"
-    user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
-    )
+    user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
     request_timeout_seconds: float = 30.0
     # When true, the CLI prompts you to pick from search results before
     # running the pipeline. When false, it auto-picks the top match.
@@ -178,12 +175,8 @@ class WebSettings(BaseModel):
     transcode_fallback: bool = True
     # Directories on the media server scanned by the "Server" page to
     # show which titles already exist there.
-    server_movie_dirs: list[Path] = Field(
-        default_factory=lambda: [Path("/mnt/media12/movies"), Path("/mnt/remote_media/movies")]
-    )
-    server_show_dirs: list[Path] = Field(
-        default_factory=lambda: [Path("/mnt/media12/shows"), Path("/mnt/remote_media/shows")]
-    )
+    server_movie_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/movies"), Path("/mnt/remote_media/movies")])
+    server_show_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/shows"), Path("/mnt/remote_media/shows")])
     # Seconds to cache TVDB discover/trending responses and ffprobe data.
     cache_ttl_seconds: int = 900
 

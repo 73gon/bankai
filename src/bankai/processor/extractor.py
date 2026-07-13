@@ -78,9 +78,7 @@ class ExtractWorker(Worker):
         remote = get_settings().scraper.remote_extract_ssh.strip()
         if remote:
             # Delegate to a host with a real display (voe-style hosters need one).
-            result = await self._extract_remote(
-                url, site=site, hint=hint, want_video=want_video, max_height=max_height
-            )
+            result = await self._extract_remote(url, site=site, hint=hint, want_video=want_video, max_height=max_height)
         else:
             result = await extract_url(
                 url,
@@ -142,19 +140,20 @@ class ExtractWorker(Worker):
             inner += ["--max-height", str(int(max_height))]
         remote_cmd = " ".join(inner)
         ssh_cmd = [
-            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-            s.remote_extract_ssh, remote_cmd,
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            s.remote_extract_ssh,
+            remote_cmd,
         ]
         log.info("[extract] delegating to %s (remote display): %s", s.remote_extract_ssh, remote_cmd)
-        proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
+        proc = await asyncio.create_subprocess_exec(*ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await proc.communicate()
         out_s = out.decode(errors="replace")
         if proc.returncode != 0:
-            raise WorkerError(
-                f"remote extract failed (rc={proc.returncode}): {err.decode(errors='replace')[-600:]}"
-            )
+            raise WorkerError(f"remote extract failed (rc={proc.returncode}): {err.decode(errors='replace')[-600:]}")
         payload = None
         for line in reversed(out_s.splitlines()):
             line = line.strip()
@@ -167,7 +166,7 @@ class ExtractWorker(Worker):
         if not payload or not payload.get("path"):
             raise WorkerError(f"remote extract: no JSON result (stdout tail: {out_s[-400:]})")
         remote_path = str(payload["path"])
-        local_path = ldir + remote_path[len(rdir):] if remote_path.startswith(rdir) else remote_path
+        local_path = ldir + remote_path[len(rdir) :] if remote_path.startswith(rdir) else remote_path
         p = Path(local_path.replace("\\", "/"))
         for _ in range(30):  # wait for the file to appear over the share
             if p.exists():
@@ -253,9 +252,7 @@ async def extract_url(
             url,
         )
         try:
-            result = await playwright.extract(
-                url, out_dir, ytdlp=ytdlp, want_video=want_video, max_height=max_height
-            )
+            result = await playwright.extract(url, out_dir, ytdlp=ytdlp, want_video=want_video, max_height=max_height)
         except PlaywrightError as exc:
             log.error("[extract] playwright fallback failed for %s: %s", url, exc)
             raise WorkerError(f"playwright fallback failed: {exc}") from exc
@@ -283,16 +280,23 @@ class YtDlpRunner:
         self._extra_opts = ydl_opts or {}
 
     async def extract(
-        self, url: str, out_dir: Path, *, referer: str | None = None,
-        want_video: bool = False, max_height: int | None = None,
+        self,
+        url: str,
+        out_dir: Path,
+        *,
+        referer: str | None = None,
+        want_video: bool = False,
+        max_height: int | None = None,
     ) -> ExtractResult:
-        return await asyncio.to_thread(
-            self._extract_sync, url, out_dir, referer, want_video, max_height
-        )
+        return await asyncio.to_thread(self._extract_sync, url, out_dir, referer, want_video, max_height)
 
     def _extract_sync(
-        self, url: str, out_dir: Path, referer: str | None = None,
-        want_video: bool = False, max_height: int | None = None,
+        self,
+        url: str,
+        out_dir: Path,
+        referer: str | None = None,
+        want_video: bool = False,
+        max_height: int | None = None,
     ) -> ExtractResult:
         try:
             from yt_dlp import YoutubeDL
@@ -306,10 +310,7 @@ class YtDlpRunner:
         # thumbnails); keep full-quality audio for the dub.
         if want_video:
             if max_height and max_height > 0:
-                fmt = (
-                    f"bestvideo[height<={max_height}]+bestaudio/"
-                    f"best[height<={max_height}]/best"
-                )
+                fmt = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best"
             else:
                 fmt = "bestvideo+bestaudio/best"
         else:
@@ -394,15 +395,14 @@ class YtDlpRunner:
                 raise YtDlpError(f"yt-dlp finished but no output file in {out_dir}")
             path = candidates[0]
         codec = (info.get("acodec") or info.get("ext")) if isinstance(info, dict) else None
-        duration = (
-            int(info["duration"] * 1000)
-            if isinstance(info, dict) and isinstance(info.get("duration"), (int, float))
-            else None
-        )
+        duration = int(info["duration"] * 1000) if isinstance(info, dict) and isinstance(info.get("duration"), (int, float)) else None
         vcodec = info.get("vcodec") if isinstance(info, dict) else None
         has_video = bool(vcodec and vcodec != "none")
         return ExtractResult(
-            path=path, codec=codec, duration_ms=duration, extractor="ytdlp",
+            path=path,
+            codec=codec,
+            duration_ms=duration,
+            extractor="ytdlp",
             has_video=has_video,
         )
 
@@ -527,8 +527,13 @@ class PlaywrightRunner:
         self._user_agent = user_agent
 
     async def extract(
-        self, url: str, out_dir: Path, *, ytdlp: YtDlpRunner | None = None,
-        want_video: bool = False, max_height: int | None = None,
+        self,
+        url: str,
+        out_dir: Path,
+        *,
+        ytdlp: YtDlpRunner | None = None,
+        want_video: bool = False,
+        max_height: int | None = None,
     ) -> ExtractResult:
         captured, final_url = await self._capture(url)
         if not captured:
@@ -539,9 +544,7 @@ class PlaywrightRunner:
         # ``captured``; pick the one with the longest duration via a yt-dlp
         # metadata-only probe (cheap; no download).
         chosen = await self._pick_longest(captured, runner)
-        log.info(
-            "[playwright] selected media URL (longest of %d candidates): %s", len(captured), chosen
-        )
+        log.info("[playwright] selected media URL (longest of %d candidates): %s", len(captured), chosen)
         # Use the final (post-redirect) player URL as the Referer/Origin
         # source — for hosters like voe the manifest CDN validates against
         # the player domain we actually landed on, not the link we started
@@ -553,7 +556,10 @@ class PlaywrightRunner:
         # Referer/Origin reliably, while ffmpeg honours -headers.
         try:
             return await runner.extract(
-                chosen, out_dir, referer=referer, want_video=want_video,
+                chosen,
+                out_dir,
+                referer=referer,
+                want_video=want_video,
                 max_height=max_height,
             )
         except YtDlpError as exc:
@@ -598,17 +604,9 @@ class PlaywrightRunner:
 
         def _consider(href: str, ct: str = "") -> None:
             lower = href.lower()
-            if any(
-                bad in lower
-                for bad in ("blank.mp4", "/dummy", "preview", "trailer", "intro")
-            ):
+            if any(bad in lower for bad in ("blank.mp4", "/dummy", "preview", "trailer", "intro")):
                 return
-            if (
-                ".m3u8" in lower
-                or ".mp4" in lower
-                or "video/" in ct
-                or "application/vnd.apple.mpegurl" in ct
-            ):
+            if ".m3u8" in lower or ".mp4" in lower or "video/" in ct or "application/vnd.apple.mpegurl" in ct:
                 captured.append(href)
                 if ".m3u8" in lower or "mpegurl" in ct:
                     got_manifest.set()
@@ -621,17 +619,12 @@ class PlaywrightRunner:
         try:
             async with async_playwright() as pw:
                 if headful:
-                    browser = await pw.chromium.launch(
-                        headless=False, args=_CHROMIUM_ARGS, env={**os.environ}
-                    )
+                    browser = await pw.chromium.launch(headless=False, args=_CHROMIUM_ARGS, env={**os.environ})
                 else:
                     # No display available — fall back to headless. Anti-bot
                     # hosters (voe) may not yield a stream this way, but
                     # yt-dlp hosters and simpler players still work.
-                    log.warning(
-                        "[playwright] no virtual display available (Xvfb missing); "
-                        "running headless \u2014 voe-style hosters may not load"
-                    )
+                    log.warning("[playwright] no virtual display available (Xvfb missing); running headless \u2014 voe-style hosters may not load")
                     browser = await pw.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
                 try:
                     ctx = await browser.new_context(
@@ -672,9 +665,7 @@ class PlaywrightRunner:
                     # the first page is the player.
                     resp = None
                     try:
-                        resp = await page.goto(
-                            url, wait_until="domcontentloaded", timeout=25_000
-                        )
+                        resp = await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
                     except Exception as exc:
                         log.warning(
                             "[playwright] navigation did not finish for %s: %s; continuing",
@@ -690,9 +681,7 @@ class PlaywrightRunner:
                         except Exception:
                             body = ""
                         if any(m in body for m in _DEAD_PAGE_MARKERS):
-                            raise PlaywrightError(
-                                f"hoster link is dead (404 not-found page): {url}"
-                            )
+                            raise PlaywrightError(f"hoster link is dead (404 not-found page): {url}")
                     # Give a JS redirect a chance to fire and the player load.
                     final_url = page.url
                     if final_url != url:
@@ -709,9 +698,7 @@ class PlaywrightRunner:
 
                     # Adaptive wait: poll until a manifest is captured or the
                     # capture window elapses, re-pressing play periodically.
-                    deadline = asyncio.get_event_loop().time() + max(
-                        self._capture_seconds, 20.0
-                    )
+                    deadline = asyncio.get_event_loop().time() + max(self._capture_seconds, 20.0)
                     while asyncio.get_event_loop().time() < deadline:
                         if got_manifest.is_set():
                             # Let a couple more variants arrive, then stop.
@@ -811,11 +798,7 @@ async def _ffmpeg_pull(url: str, out_dir: Path, *, referer: str) -> ExtractResul
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "playwright-direct.mp4"
     origin = f"{urlparse(referer).scheme}://{urlparse(referer).netloc}"
-    headers = (
-        f"Referer: {referer}\r\n"
-        f"Origin: {origin}\r\n"
-        f"User-Agent: {get_settings().scraper.user_agent}\r\n"
-    )
+    headers = f"Referer: {referer}\r\nOrigin: {origin}\r\nUser-Agent: {get_settings().scraper.user_agent}\r\n"
     cmd = [
         "ffmpeg",
         "-y",
@@ -846,9 +829,7 @@ async def _ffmpeg_pull(url: str, out_dir: Path, *, referer: str) -> ExtractResul
         " ".join([*cmd[:8], "...", "-i", url, "...", str(out_path)]),
     )
     log.info("BANKAI_PROGRESS stage=stream pct=0.0 status=ffmpeg")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-    )
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     _, stderr = await proc.communicate()
     if proc.returncode != 0 or not out_path.exists():
         tail = (stderr or b"").decode("utf-8", "replace")

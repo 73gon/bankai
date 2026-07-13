@@ -91,10 +91,7 @@ class RemuxWorker(Worker):
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode not in (0, 1):  # mkvmerge returns 1 for warnings
-            raise WorkerError(
-                f"mkvmerge failed (rc={proc.returncode}): "
-                f"{stderr.decode(errors='ignore')[:500] or stdout.decode(errors='ignore')[:500]}"
-            )
+            raise WorkerError(f"mkvmerge failed (rc={proc.returncode}): {stderr.decode(errors='ignore')[:500] or stdout.decode(errors='ignore')[:500]}")
 
         if not out_p.exists():
             raise WorkerError(f"mkvmerge succeeded but output missing: {out_p}")

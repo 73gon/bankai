@@ -354,9 +354,7 @@ _SERVER_CACHE: dict[str, tuple[float, list[ServerTitle]]] = {}
 
 def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
     settings = get_settings()
-    dirs = (
-        settings.web.server_movie_dirs if kind == "movie" else settings.web.server_show_dirs
-    )
+    dirs = settings.web.server_movie_dirs if kind == "movie" else settings.web.server_show_dirs
     cache_key = kind
     ttl = settings.web.cache_ttl_seconds
     if use_cache:
@@ -432,14 +430,8 @@ def scan_server_show(show_dir: Path) -> list[ServerSeason]:
     loose: list[ServerEpisode] = []
     for child in sorted(p.iterdir(), key=lambda c: c.name.casefold()):
         if child.is_dir():
-            eps = [
-                _server_episode(f)
-                for f in sorted(child.rglob("*"), key=lambda c: c.name.casefold())
-                if f.is_file() and f.suffix.lower() in _VIDEO_EXTS
-            ]
-            seasons.append(
-                ServerSeason(name=child.name, season=_season_number(child.name), episodes=eps)
-            )
+            eps = [_server_episode(f) for f in sorted(child.rglob("*"), key=lambda c: c.name.casefold()) if f.is_file() and f.suffix.lower() in _VIDEO_EXTS]
+            seasons.append(ServerSeason(name=child.name, season=_season_number(child.name), episodes=eps))
         elif child.is_file() and child.suffix.lower() in _VIDEO_EXTS:
             loose.append(_server_episode(child))
     if loose:
@@ -598,15 +590,31 @@ def repack_audio_drift(
     tmp = p.with_suffix(p.suffix + ".repack.mkv")
     # 1) Extract + time-stretch the target track (pitch-preserving atempo).
     ff_cmd = [
-        ff, "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(p), "-map", f"0:{target.index}",
-        "-filter:a", _atempo_chain(atempo),
-        "-c:a", "aac", "-b:a", "384k", str(stretched),
+        ff,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(p),
+        "-map",
+        f"0:{target.index}",
+        "-filter:a",
+        _atempo_chain(atempo),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "384k",
+        str(stretched),
     ]
     try:
         ff_out = subprocess.run(
-            ff_cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=3600,
+            ff_cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3600,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         stretched.unlink(missing_ok=True)
@@ -620,14 +628,26 @@ def repack_audio_drift(
         )
     # 2) Remux: keep everything except the old target audio, append stretched.
     cmd = [
-        mkv, "-o", str(tmp),
-        "--audio-tracks", f"!{target.index}", str(p),
-        "--sync", f"0:{delay_ms}", "--default-track", "0:yes", str(stretched),
+        mkv,
+        "-o",
+        str(tmp),
+        "--audio-tracks",
+        f"!{target.index}",
+        str(p),
+        "--sync",
+        f"0:{delay_ms}",
+        "--default-track",
+        "0:yes",
+        str(stretched),
     ]
     try:
         out = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=3600,
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3600,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         tmp.unlink(missing_ok=True)

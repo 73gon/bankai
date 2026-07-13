@@ -71,9 +71,7 @@ async def _ffprobe_duration(path: Path) -> float:
         "default=noprint_wrappers=1:nokey=1",
         str(path),
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise SyncError(f"ffprobe failed: {stderr.decode(errors='ignore')[:200]}")
@@ -151,9 +149,7 @@ class SyncWorker(Worker):
             elif mode == "manual":
                 if manual_offset is None:
                     raise PermanentWorkerError("sync mode=manual requires offset_seconds")
-                result = await self._apply_offset(
-                    audio_path, out_path, float(manual_offset), method="manual"
-                )
+                result = await self._apply_offset(audio_path, out_path, float(manual_offset), method="manual")
             else:  # auto
                 if not reference:
                     raise PermanentWorkerError("sync mode=auto requires 'reference'")
@@ -187,8 +183,7 @@ class SyncWorker(Worker):
                     ratio_name = _classify_ratio(audio_dur, video_dur)
                     if ratio_name is None:
                         log.warning(
-                            "[sync] duration mismatch %.3fs but no known fps ratio; "
-                            "passthrough (manual offset may be required)",
+                            "[sync] duration mismatch %.3fs but no known fps ratio; passthrough (manual offset may be required)",
                             delta,
                         )
                         shutil.copyfile(audio_path, out_path)
@@ -225,9 +220,7 @@ class SyncWorker(Worker):
             "method": result.method,
         }
 
-    async def _apply_offset(
-        self, src: Path, dst: Path, offset: float, *, method: str
-    ) -> SyncResult:
+    async def _apply_offset(self, src: Path, dst: Path, offset: float, *, method: str) -> SyncResult:
         # ffmpeg: ``-itsoffset`` shifts the input timeline. Positive values
         # delay the audio (audio starts later than video).
         cmd = [
