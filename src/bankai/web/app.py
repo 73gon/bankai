@@ -140,6 +140,11 @@ class ShowQueueRequest(BaseModel):
 class DelayRequest(BaseModel):
     path: str
     delay_ms: int
+    # Optional drift correction: time-stretch the German track by this factor
+    # (atempo, pitch-preserving) before applying the constant delay. 1.0 / None
+    # means "no stretch" (constant-delay repack only).
+    atempo: float | None = None
+    track_index: int | None = None
 
 
 class PathRequest(BaseModel):
@@ -1030,7 +1035,15 @@ def create_app() -> Any:
     @app.post("/api/review/repack")
     def review_repack(req: DelayRequest) -> dict:
         p = _safe_path(req.path)
-        result = media_mod.repack_audio_delay(p, delay_ms=req.delay_ms)
+        if req.atempo is not None and abs(req.atempo - 1.0) > 1e-4:
+            result = media_mod.repack_audio_drift(
+                p,
+                delay_ms=req.delay_ms,
+                atempo=req.atempo,
+                track_index=req.track_index,
+            )
+        else:
+            result = media_mod.repack_audio_delay(p, delay_ms=req.delay_ms)
         if not result.ok:
             raise HTTPException(status_code=422, detail=result.message)
         review_mod.set_delay(str(p), req.delay_ms)

@@ -539,3 +539,116 @@ def repack_audio_delay(
         delay_ms=delay_ms,
         log=log_lines[-20:],
     )
+
+
+def _atempo_chain(factor: float) -> str:
+    """Build an ``atempo`` filter chain for ``factor`` (each stage 0.5..2.0)."""
+    stages: list[float] = []
+    f = factor
+    while f > 2.0:
+        stages.append(2.0)
+        f /= 2.0
+    while f < 0.5:
+        stages.append(0.5)
+        f /= 0.5
+    stages.append(f)
+    return ",".join(f"atempo={s:.6f}" for s in stages)
+
+
+def repack_audio_drift(
+    path: Path,
+    *,
+    delay_ms: int,
+    atempo: float,
+    track_index: int | None = None,
+) -> RepackResult:
+    """Fix a *drift* on one audio track by time-stretching it, then delaying.
+
+    ``atempo`` > 1 speeds the track up (shorter), < 1 slows it down (longer) —
+    the classic PAL/NTSC speed mismatch that makes a German dub slide out of
+    sync over the runtime. The target track (German by default, or
+    ``track_index``) is re-encoded through ``atempo`` (pitch preserved), the
+    original track is dropped, and the stretched track is merged back with the
+    constant ``delay_ms`` applied on top. Video/subtitles/other audio are
+    remuxed untouched (no video re-encode).
+    """
+    p = Path(path)
+    if not p.is_file():
+        return RepackResult(False, f"file not found: {p}")
+    if not (0.5 <= atempo <= 2.0):
+        # Guard against absurd factors; real drift is a couple of percent.
+        return RepackResult(False, f"stretch factor {atempo} out of range (0.5–2.0)")
+    ff = ffmpeg_bin()
+    mkv = mkvmerge_bin()
+    if ff is None:
+        return RepackResult(False, "ffmpeg not found")
+    if mkv is None:
+        return RepackResult(False, "mkvmerge not found")
+    info = probe(p, use_cache=False)
+    if info is None:
+        return RepackResult(False, "could not probe file")
+    if track_index is not None:
+        target = next((t for t in info.audio_tracks if t.index == track_index), None)
+    else:
+        target = next((t for t in info.audio_tracks if t.is_german), None)
+    if target is None:
+        return RepackResult(False, "no audio track found to stretch")
+
+    stretched = p.with_suffix(p.suffix + ".ger_stretch.mka")
+    tmp = p.with_suffix(p.suffix + ".repack.mkv")
+    # 1) Extract + time-stretch the target track (pitch-preserving atempo).
+    ff_cmd = [
+        ff, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(p), "-map", f"0:{target.index}",
+        "-filter:a", _atempo_chain(atempo),
+        "-c:a", "aac", "-b:a", "384k", str(stretched),
+    ]
+    try:
+        ff_out = subprocess.run(
+            ff_cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=3600,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        stretched.unlink(missing_ok=True)
+        return RepackResult(False, f"ffmpeg stretch failed: {exc}")
+    if ff_out.returncode != 0 or not stretched.exists():
+        stretched.unlink(missing_ok=True)
+        return RepackResult(
+            False,
+            f"ffmpeg stretch rc={ff_out.returncode}",
+            log=(ff_out.stderr or "").splitlines()[-20:],
+        )
+    # 2) Remux: keep everything except the old target audio, append stretched.
+    cmd = [
+        mkv, "-o", str(tmp),
+        "--audio-tracks", f"!{target.index}", str(p),
+        "--sync", f"0:{delay_ms}", "--default-track", "0:yes", str(stretched),
+    ]
+    try:
+        out = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=3600,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        tmp.unlink(missing_ok=True)
+        stretched.unlink(missing_ok=True)
+        return RepackResult(False, f"mkvmerge failed: {exc}")
+    log_lines = (out.stdout or "").splitlines() + (out.stderr or "").splitlines()
+    if out.returncode >= 2 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        stretched.unlink(missing_ok=True)
+        return RepackResult(False, f"mkvmerge rc={out.returncode}", log=log_lines[-20:])
+    try:
+        tmp.replace(p)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        stretched.unlink(missing_ok=True)
+        return RepackResult(False, f"could not overwrite original: {exc}")
+    stretched.unlink(missing_ok=True)
+    _PROBE_CACHE.pop(str(p.resolve()), None)
+    return RepackResult(
+        True,
+        f"stretched German audio ×{atempo:.4f} + {delay_ms} ms delay",
+        delay_ms=delay_ms,
+        log=log_lines[-20:],
+    )

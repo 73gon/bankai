@@ -233,10 +233,10 @@ export const api = {
     `/api/media/videoclip?path=${encodeURIComponent(path)}&start=${start}&dur=${dur}&height=${height}`,
 
   setDelay: (path: string, delay_ms: number) => request('/api/review/delay', { method: 'POST', body: JSON.stringify({ path, delay_ms }) }),
-  repack: (path: string, delay_ms: number) =>
+  repack: (path: string, delay_ms: number, opts?: { atempo?: number; track_index?: number | null }) =>
     request<{ ok: boolean; message: string; delay_ms: number }>('/api/review/repack', {
       method: 'POST',
-      body: JSON.stringify({ path, delay_ms }),
+      body: JSON.stringify({ path, delay_ms, atempo: opts?.atempo ?? null, track_index: opts?.track_index ?? null }),
     }),
   approve: (path: string) => request('/api/review/approve', { method: 'POST', body: JSON.stringify({ path }) }),
   transfer: (path: string) => request('/api/review/transfer', { method: 'POST', body: JSON.stringify({ path }) }),

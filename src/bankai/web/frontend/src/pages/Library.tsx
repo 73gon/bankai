@@ -22,6 +22,8 @@ import {
   ZoomOut,
   Languages,
   AudioLines,
+  Minus,
+  Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type MediaInfo, type TitleRow, type AudioTrack } from '@/lib/api';
@@ -978,6 +980,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [loading, setLoading] = useState(true);
   const [delayMs, setDelayMs] = useState(0);
   const [savedDelay, setSavedDelay] = useState(0);
+  // Drift correction: time-stretch factor for the German track (atempo). 1 =
+  // no stretch. >1 speeds it up (shorter), <1 slows it down (longer). Applied
+  // on top of the constant delay so a dub that slowly slides out of sync
+  // (e.g. PAL 25fps vs 23.976) can be corrected.
+  const [stretch, setStretch] = useState(1);
   const [windowSec, setWindowSec] = useState(30);
   const [center, setCenter] = useState(60);
   const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
@@ -1100,6 +1107,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         setInfo(m);
         setDelayMs(m.delay_ms);
         setSavedDelay(m.delay_ms);
+        setStretch(1);
         const g = m.audio_tracks.find((t) => t.is_german);
         const e =
           m.audio_tracks.find((t) => t.language === 'eng' && !t.is_german) ??
@@ -1214,14 +1222,18 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   // Draw one lane from a wide track-time buffer. `delaySec` shifts the buffer
-  // (0 for the reference/English lane, delayMs for German). The visible slice
-  // is re-normalised to its own peak so both lanes fill the lane height evenly
-  // regardless of how loud the rest of the buffer is.
+  // (0 for the reference/English lane, delayMs for German). `stretch` previews
+  // drift correction: the window's left edge stays anchored (aligned by the
+  // delay) and time advances by `stretch` across it, so the user can line up
+  // the left edge with the delay then stretch to match the right edge. The
+  // visible slice is re-normalised to its own peak so both lanes fill the lane
+  // height evenly regardless of how loud the rest of the buffer is.
   function drawLane(
     canvas: HTMLCanvasElement | null,
     buf: { peaks: Uint8Array; start: number; dur: number } | null,
     delaySec: number,
     color: string,
+    stretch = 1,
   ) {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -1233,9 +1245,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       const bn = buf.peaks.length;
       const vals = new Float32Array(W);
       let vmax = 0;
+      const anchor = viewStart - delaySec;
       for (let x = 0; x < W; x++) {
         const viewTime = viewStart + (x / W) * windowSec;
-        const trackTime = viewTime - delaySec;
+        const trackTime = anchor + (viewTime - viewStart) * stretch;
         const bi = Math.floor(((trackTime - buf.start) / buf.dur) * bn);
         const v = bi >= 0 && bi < bn ? buf.peaks[bi] : 0;
         vals[x] = v;
@@ -1258,7 +1271,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   function drawGer() {
-    drawLane(gerCanvas.current, gerBuf, delayMs / 1000, '#f472b6');
+    drawLane(gerCanvas.current, gerBuf, delayMs / 1000, '#f472b6', stretch);
   }
 
   useEffect(() => {
@@ -1270,7 +1283,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   useEffect(() => {
     drawGer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gerBuf, delayMs, canvasW, canvasH, windowSec, center]);
+  }, [gerBuf, delayMs, stretch, canvasW, canvasH, windowSec, center]);
 
   function onGerDown(e: React.MouseEvent) {
     const startX = e.clientX;
@@ -1469,10 +1482,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   async function approve() {
     setBusy('approve');
     try {
-      if (delayMs !== savedDelay) {
-        const r = await api.repack(path, delayMs);
+      if (delayMs !== savedDelay || stretch !== 1) {
+        const r = await api.repack(path, delayMs, {
+          atempo: stretch !== 1 ? stretch : undefined,
+          track_index: gerStream,
+        });
         if (!r.ok) throw new Error(r.message);
         setSavedDelay(delayMs);
+        setStretch(1); // stretch is now baked into the file
       }
       await api.approve(path);
       toast.success('Approved — ready to send to server');
@@ -1494,6 +1511,19 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     engTrack?.duration != null && gerTrack?.duration != null
       ? engTrack.duration - gerTrack.duration
       : null;
+  // Suggested stretch to make the German track match the reference length.
+  // atempo>1 speeds up (German currently longer); <1 slows down.
+  const suggestedStretch =
+    engTrack?.duration && gerTrack?.duration && engTrack.duration > 0
+      ? gerTrack.duration / engTrack.duration
+      : null;
+  // Flag a real drift: length differs by more than ~2s AND more than ~0.1%.
+  const driftSuspected =
+    suggestedStretch != null &&
+    lenDrift != null &&
+    Math.abs(lenDrift) > 2 &&
+    Math.abs(suggestedStretch - 1) > 0.001;
+  const stretchPct = ((stretch - 1) * 100).toFixed(2);
   const trackMeta = (t: AudioTrack | null, videoFps: number | null | undefined) => {
     const bits: string[] = [];
     if (t?.codec) bits.push(t.codec.toUpperCase());
@@ -1613,6 +1643,63 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 {trackMeta(gerTrack, null).map((b, i) => (
                   <span key={i}>{b}</span>
                 ))}
+              </div>
+              {/* Drift correction (time-stretch) — auto-suggested, manual override */}
+              <div className='flex flex-wrap items-center gap-2 px-1 text-xs'>
+                <span className='text-muted-foreground'>Drift</span>
+                <div className='flex items-center gap-1'>
+                  <Button
+                    size='icon'
+                    variant='outline'
+                    className='h-6 w-6'
+                    title='Slow German down (−0.05%)'
+                    onClick={() => setStretch((s) => Math.max(0.5, +(s - 0.0005).toFixed(6)))}
+                  >
+                    <Minus className='h-3 w-3' />
+                  </Button>
+                  <span
+                    className={cn(
+                      'w-[8.5rem] text-center font-mono',
+                      stretch !== 1 ? 'text-foreground' : 'text-muted-foreground',
+                    )}
+                  >
+                    ×{stretch.toFixed(4)} ({stretch >= 1 ? '+' : ''}
+                    {stretchPct}%)
+                  </span>
+                  <Button
+                    size='icon'
+                    variant='outline'
+                    className='h-6 w-6'
+                    title='Speed German up (+0.05%)'
+                    onClick={() => setStretch((s) => Math.min(2, +(s + 0.0005).toFixed(6)))}
+                  >
+                    <Plus className='h-3 w-3' />
+                  </Button>
+                </div>
+                {driftSuspected && suggestedStretch != null && (
+                  <Button
+                    size='sm'
+                    variant='secondary'
+                    className='h-6'
+                    onClick={() => setStretch(+suggestedStretch.toFixed(6))}
+                    title='Stretch the German track to match the reference length'
+                  >
+                    Suggest ×{suggestedStretch.toFixed(4)}
+                  </Button>
+                )}
+                {stretch !== 1 && (
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    className='h-6'
+                    onClick={() => setStretch(1)}
+                  >
+                    Reset
+                  </Button>
+                )}
+                {driftSuspected && (
+                  <span className='text-amber-400'>drift likely — dub length differs</span>
+                )}
               </div>
               <div className='relative'>
                 <canvas
