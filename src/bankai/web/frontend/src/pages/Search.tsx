@@ -30,6 +30,15 @@ function siteLabel(site: string): string {
   return site;
 }
 
+function uniqueShowSources(results: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  return results.filter((result) => {
+    if (seen.has(result.site)) return false;
+    seen.add(result.site);
+    return true;
+  });
+}
+
 function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) {
   const [err, setErr] = useState(false);
   return (
@@ -387,7 +396,7 @@ export default function Search() {
               <div className='space-y-1.5'>
                 <span className='text-xs text-muted-foreground'>Source matches</span>
                 <div className='flex max-h-28 flex-wrap gap-2 overflow-auto py-0.5'>
-                  {filmResults.map((r) => {
+                  {uniqueShowSources(filmResults).map((r) => {
                     const active = picked?.site === r.site && picked?.url === r.url;
                     return (
                       <button
