@@ -16,6 +16,8 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsUpDown,
+  Filter,
+  Check,
   ZoomIn,
   ZoomOut,
   Languages,
@@ -28,6 +30,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Slider } from '@/components/ui/slider';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -143,13 +146,17 @@ function TruncCell({
 }) {
   if (!text) return <span className='text-muted-foreground/40'>-</span>;
   return (
-    <div
-      className={cn('truncate cursor-help', mono && 'font-mono', danger && 'text-destructive')}
-      style={{ maxWidth: width }}
-      title={text}
-    >
-      {text}
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div
+          className={cn('truncate cursor-default', mono && 'font-mono', danger && 'text-destructive')}
+          style={{ maxWidth: width }}
+        >
+          {text}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent className={cn(mono && 'font-mono')}>{text}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -281,29 +288,6 @@ function statusRank(r: TitleRow): number {
   return 6; // transferred
 }
 
-type FilterKey = 'active' | 'review' | 'approved' | 'done' | 'failed';
-
-const FILTERS: { key: FilterKey; label: string }[] = [
-  { key: 'active', label: 'Downloading' },
-  { key: 'review', label: 'Review' },
-  { key: 'approved', label: 'Approved' },
-  { key: 'done', label: 'Done' },
-  { key: 'failed', label: 'Failed' },
-];
-
-function rowCategory(r: TitleRow): FilterKey {
-  if (r.row_kind === 'job') {
-    if (r.pending || r.job_status === 'running') return 'active';
-    if (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled')
-      return 'failed';
-    return 'done'; // finished job with no local file (already on server)
-  }
-  if (r.transfer_status === 'transferring') return 'approved';
-  if (r.stage === 'transferred' || r.transfer_status === 'done') return 'done';
-  if (r.stage === 'approved') return 'approved';
-  return 'review';
-}
-
 type SortCol = 'title' | 'type' | 'status' | 'when';
 
 function whenLabel(ts: number | null): string {
@@ -324,11 +308,87 @@ function titleWithYear(r: TitleRow): string {
   return r.year ? `${r.title} (${r.year})` : r.title;
 }
 
+// Multi-select dropdown of every row status (a lightweight popover — no
+// external dependency). Selecting none means "all".
+function StatusMultiSelect({
+  selected,
+  onToggle,
+  onClear,
+  counts,
+}: {
+  selected: Set<Status>;
+  onToggle: (s: Status) => void;
+  onClear: () => void;
+  counts: Record<string, number>;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const all = Object.keys(STATUS_LABEL) as Status[];
+  const label =
+    selected.size === 0
+      ? 'All statuses'
+      : all.filter((s) => selected.has(s)).map((s) => STATUS_LABEL[s]).join(', ');
+  return (
+    <div ref={ref} className='relative'>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className='flex h-9 min-w-[12rem] max-w-[20rem] items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm transition-colors hover:bg-secondary/40'
+      >
+        <span className='truncate text-left text-muted-foreground'>{label}</span>
+        <ChevronsUpDown className='h-4 w-4 shrink-0 opacity-50' />
+      </button>
+      {open && (
+        <div className='absolute z-50 mt-1 w-64 rounded-md border border-border bg-card p-1 shadow-lg'>
+          {all.map((s) => (
+            <button
+              key={s}
+              onClick={() => onToggle(s)}
+              className='flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-secondary'
+            >
+              <span className='flex items-center gap-2'>
+                <span
+                  className={cn(
+                    'flex h-4 w-4 items-center justify-center rounded border',
+                    selected.has(s)
+                      ? 'border-primary bg-primary text-primary-foreground'
+                      : 'border-input',
+                  )}
+                >
+                  {selected.has(s) && <Check className='h-3 w-3' strokeWidth={3} />}
+                </span>
+                {STATUS_LABEL[s]}
+              </span>
+              <span className='text-xs text-muted-foreground'>{counts[s] ?? 0}</span>
+            </button>
+          ))}
+          {selected.size > 0 && (
+            <button
+              onClick={onClear}
+              className='mt-1 w-full rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-secondary'
+            >
+              Clear all
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Library() {
   const [rows, setRows] = useState<TitleRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
-  const [statusFilters, setStatusFilters] = useState<Set<FilterKey>>(new Set());
+  const [statusFilters, setStatusFilters] = useState<Set<Status>>(new Set());
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [sortCol, setSortCol] = useState<SortCol>('when');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(0);
@@ -414,7 +474,7 @@ export default function Library() {
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const r of rows) {
-      const k = rowCategory(r);
+      const k = rowStatus(r);
       c[k] = (c[k] ?? 0) + 1;
     }
     return c;
@@ -424,7 +484,7 @@ export default function Library() {
     const list = rows.filter(
       (e) =>
         titleWithYear(e).toLowerCase().includes(filter.toLowerCase()) &&
-        (statusFilters.size === 0 || statusFilters.has(rowCategory(e))),
+        (statusFilters.size === 0 || statusFilters.has(rowStatus(e))),
     );
     const dir = sortDir === 'asc' ? 1 : -1;
     list.sort((a, b) => {
@@ -449,7 +509,7 @@ export default function Library() {
     setPage(0);
   }, [filter, statusFilters, sortCol, sortDir, pageSize]);
 
-  function toggleFilter(k: FilterKey) {
+  function toggleFilter(k: Status) {
     setStatusFilters((prev) => {
       const n = new Set(prev);
       n.has(k) ? n.delete(k) : n.add(k);
@@ -727,32 +787,50 @@ export default function Library() {
             Every title in one table — downloads, review, sync and transfer.
           </p>
         </div>
-        <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Search…' className='w-56' />
       </header>
 
-      <div className='flex flex-wrap items-center gap-1.5'>
-        {FILTERS.map((f) => (
-          <button
-            key={f.key}
-            onClick={() => toggleFilter(f.key)}
-            className={cn(
-              'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-              statusFilters.has(f.key)
-                ? 'border-primary bg-primary text-primary-foreground'
-                : 'border-border text-muted-foreground hover:bg-secondary hover:text-foreground',
+      {/* Collapsible filter bar */}
+      <div className='rounded-lg border border-border bg-card/40'>
+        <button
+          onClick={() => setFiltersOpen((o) => !o)}
+          className='flex w-full items-center justify-between px-3 py-2 text-sm font-medium'
+        >
+          <span className='flex items-center gap-2'>
+            <Filter className='h-4 w-4 text-muted-foreground' />
+            Filters
+            {(statusFilters.size > 0 || filter) && (
+              <Badge variant='accent'>{statusFilters.size + (filter ? 1 : 0)}</Badge>
             )}
-          >
-            {f.label}
-            <span className='ml-1.5 opacity-70'>{counts[f.key] ?? 0}</span>
-          </button>
-        ))}
-        {statusFilters.size > 0 && (
-          <button
-            onClick={() => setStatusFilters(new Set())}
-            className='px-2 py-1 text-xs text-muted-foreground hover:text-foreground'
-          >
-            Clear
-          </button>
+          </span>
+          {filtersOpen ? <ChevronUp className='h-4 w-4' /> : <ChevronDown className='h-4 w-4' />}
+        </button>
+        {filtersOpen && (
+          <div className='flex flex-wrap items-center gap-3 border-t border-border px-3 py-3'>
+            <Input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder='Search title…'
+              className='w-56'
+            />
+            <StatusMultiSelect
+              selected={statusFilters}
+              onToggle={toggleFilter}
+              onClear={() => setStatusFilters(new Set())}
+              counts={counts}
+            />
+            {(statusFilters.size > 0 || filter) && (
+              <Button
+                variant='ghost'
+                size='sm'
+                onClick={() => {
+                  setStatusFilters(new Set());
+                  setFilter('');
+                }}
+              >
+                Reset
+              </Button>
+            )}
+          </div>
         )}
       </div>
 
@@ -1413,7 +1491,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         )}
 
         {!loading && (
-          <div className='shrink-0 space-y-2 border-t border-border/50 bg-card/30 px-3 py-2'>
+          <div className='shrink-0 space-y-3 border-t border-border bg-card px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.6)]'>
             {/* Timeline / pan */}
             <div className='flex items-center gap-3'>
               <span className='w-12 shrink-0 text-right font-mono text-xs text-muted-foreground'>

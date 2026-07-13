@@ -1,6 +1,7 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
 import Library from '@/pages/Library';
@@ -25,6 +26,7 @@ function Brand() {
 
 export default function App() {
   return (
+    <TooltipProvider delayDuration={150}>
     <div className='flex min-h-screen flex-col md:flex-row'>
       {/* Sidebar (desktop) / top bar (mobile) */}
       <aside className='sticky top-0 z-30 flex shrink-0 flex-row items-center gap-1 border-b border-border bg-background px-3 py-2 md:h-screen md:w-60 md:flex-col md:items-stretch md:gap-2 md:border-b-0 md:border-r md:px-3 md:py-5'>
@@ -69,5 +71,6 @@ export default function App() {
         </div>
       </main>
     </div>
+    </TooltipProvider>
   );
 }
