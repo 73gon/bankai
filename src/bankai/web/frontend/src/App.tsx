@@ -1,7 +1,16 @@
+import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon } from 'lucide-react';
+import {
+  Compass,
+  Search as SearchIcon,
+  ListVideo,
+  HardDrive,
+  Settings as SettingsIcon,
+  PanelLeft,
+  PanelLeftClose,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { TooltipProvider } from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
 import Library from '@/pages/Library';
@@ -16,61 +25,130 @@ const NAV = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
-function Brand() {
+const SIDEBAR_KEY = 'bankai:sidebar-collapsed';
+
+function useSidebarState() {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed]);
+  return [collapsed, setCollapsed] as const;
+}
+
+function BrandMark() {
   return (
-    <div className='flex items-center gap-2 px-2 py-1'>
-      <div className='font-mono text-base font-semibold tracking-wide'>bankai</div>
-    </div>
+    <span className='font-mono text-[0.95rem] font-semibold tracking-[0.02em] text-foreground'>bankai</span>
   );
 }
 
 export default function App() {
+  const [collapsed, setCollapsed] = useSidebarState();
+
   return (
     <TooltipProvider delayDuration={150}>
-    <div className='flex min-h-screen flex-col md:flex-row'>
-      {/* Sidebar (desktop) / top bar (mobile) */}
-      <aside className='sticky top-0 z-30 flex shrink-0 flex-row items-center gap-1 border-b border-border bg-background px-3 py-2 md:h-screen md:w-60 md:flex-col md:items-stretch md:gap-2 md:border-b-0 md:border-r md:px-3 md:py-5'>
-        <div className='hidden md:block'>
-          <Brand />
-        </div>
-        <div className='md:hidden'>
-          <Brand />
-        </div>
-        <nav className='flex flex-1 flex-row gap-1 overflow-x-auto md:mt-4 md:flex-col md:overflow-visible'>
-          {NAV.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                )
-              }
-            >
-              <Icon className='h-4 w-4 shrink-0' />
-              <span className='hidden md:inline'>{label}</span>
-            </NavLink>
-          ))}
-        </nav>
-      </aside>
+      <div className='flex min-h-screen flex-col md:flex-row'>
+        {/* Sidebar (desktop) / top bar (mobile) */}
+        <aside
+          className={cn(
+            'sticky top-0 z-30 flex shrink-0 flex-row items-center gap-1 border-b border-border/70 bg-background/70 px-3 py-2 backdrop-blur-xl',
+            'md:h-screen md:flex-col md:items-stretch md:gap-1 md:border-b-0 md:border-r md:py-4 md:transition-[width] md:duration-200',
+            collapsed ? 'md:w-[4.75rem] md:px-2.5' : 'md:w-60 md:px-3',
+          )}
+        >
+          {/* Header row: brand + collapse toggle (desktop) */}
+          <div
+            className={cn(
+              'hidden md:flex md:items-center md:px-1',
+              collapsed ? 'md:justify-center' : 'md:justify-between',
+            )}
+          >
+            {collapsed ? (
+              <button
+                type='button'
+                onClick={() => setCollapsed(false)}
+                aria-label='Expand sidebar'
+                className='flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground'
+              >
+                <PanelLeft className='h-[18px] w-[18px]' />
+              </button>
+            ) : (
+              <>
+                <BrandMark />
+                <button
+                  type='button'
+                  onClick={() => setCollapsed(true)}
+                  aria-label='Collapse sidebar'
+                  className='flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground'
+                >
+                  <PanelLeftClose className='h-[18px] w-[18px]' />
+                </button>
+              </>
+            )}
+          </div>
 
-      <main className='flex-1 px-4 py-6 md:px-8 md:py-8'>
-        <div className='w-full animate-fade-in'>
-          <Routes>
-            <Route path='/' element={<Navigate to='/discover' replace />} />
-            <Route path='/discover' element={<Discover />} />
-            <Route path='/search' element={<Search />} />
-            <Route path='/queue' element={<Library />} />
-            <Route path='/library' element={<Server />} />
-            <Route path='/server' element={<Navigate to='/library' replace />} />
-            <Route path='/settings' element={<Settings />} />
-          </Routes>
-        </div>
-      </main>
-    </div>
+          {/* Brand (mobile top bar) */}
+          <div className='flex items-center px-1 md:hidden'>
+            <BrandMark />
+          </div>
+
+          <div className='hidden md:my-3 md:block md:h-px md:bg-border/70' />
+
+          <nav className='flex flex-1 flex-row gap-1 overflow-x-auto md:mt-0 md:flex-col md:overflow-visible'>
+            {NAV.map(({ to, label, icon: Icon }) => {
+              const link = (
+                <NavLink
+                  key={to}
+                  to={to}
+                  className={({ isActive }) =>
+                    cn(
+                      'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all',
+                      collapsed && 'md:justify-center md:px-0',
+                      isActive
+                        ? 'border border-border bg-gradient-to-b from-secondary to-muted text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.06)]'
+                        : 'border border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                    )
+                  }
+                >
+                  <Icon className='h-[18px] w-[18px] shrink-0' />
+                  <span className={cn('md:inline', collapsed && 'md:hidden')}>{label}</span>
+                </NavLink>
+              );
+              return collapsed ? (
+                <Tooltip key={to}>
+                  <TooltipTrigger asChild>{link}</TooltipTrigger>
+                  <TooltipContent side='right'>{label}</TooltipContent>
+                </Tooltip>
+              ) : (
+                link
+              );
+            })}
+          </nav>
+        </aside>
+
+        <main className='flex-1 px-4 py-6 md:px-8 md:py-8'>
+          <div className='mx-auto w-full max-w-[1400px] animate-fade-in'>
+            <Routes>
+              <Route path='/' element={<Navigate to='/discover' replace />} />
+              <Route path='/discover' element={<Discover />} />
+              <Route path='/search' element={<Search />} />
+              <Route path='/queue' element={<Library />} />
+              <Route path='/library' element={<Server />} />
+              <Route path='/server' element={<Navigate to='/library' replace />} />
+              <Route path='/settings' element={<Settings />} />
+            </Routes>
+          </div>
+        </main>
+      </div>
     </TooltipProvider>
   );
 }

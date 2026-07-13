@@ -25,29 +25,29 @@
     --border: 0.922 0 0;
     --input: 0.922 0 0;
     --ring: 0.708 0 0;
-    --radius: 0.5rem;
+    --radius: 0.625rem;
   }
 
   .dark {
     /* Eigenpair Mono — dark. Border/input use solid grays equivalent to the
        spec's translucent whites (avoids double-alpha with Tailwind /opacity). */
-    --background: 0.07 0 0;
+    --background: 0.055 0 0;
     --foreground: 0.985 0 0;
-    --card: 0.09 0 0;
+    --card: 0.084 0 0;
     --card-foreground: 0.985 0 0;
     --primary: 0.985 0 0;
     --primary-foreground: 0.145 0 0;
-    --secondary: 0.155 0 0;
+    --secondary: 0.15 0 0;
     --secondary-foreground: 0.985 0 0;
-    --muted: 0.155 0 0;
-    --muted-foreground: 0.6 0 0;
+    --muted: 0.15 0 0;
+    --muted-foreground: 0.62 0 0;
     --accent: 0.205 0 0;
     --accent-foreground: 0.985 0 0;
     --destructive: 0.704 0.191 22.216;
     --destructive-foreground: 0.985 0 0;
-    --border: 0.27 0 0;
-    --input: 0.32 0 0;
-    --ring: 0.556 0 0;
+    --border: 0.235 0 0;
+    --input: 0.285 0 0;
+    --ring: 0.62 0 0;
   }
 
   * {
@@ -57,6 +57,13 @@
   body {
     /* UI chrome (nav, buttons, tables, labels) defaults to Geist Mono. */
     @apply bg-background text-foreground font-mono antialiased;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(ellipse 90% 55% at 50% -25%, oklch(0.19 0 0 / 0.55), transparent 62%),
+      radial-gradient(ellipse 55% 45% at 100% 0%, oklch(0.16 0 0 / 0.35), transparent 55%),
+      radial-gradient(ellipse 45% 40% at 0% 8%, oklch(0.14 0 0 / 0.28), transparent 55%);
+    background-attachment: fixed;
+    background-repeat: no-repeat;
   }
 
   /* Display / headings: Libre Baskerville serif. */
@@ -74,13 +81,49 @@
     height: 10px;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-secondary rounded-full;
+    background: oklch(var(--border));
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.32 0 0);
+    background-clip: padding-box;
   }
 }
 
 @layer utilities {
   .glass {
-    @apply bg-card/80 backdrop-blur-xl border border-border;
+    background:
+      linear-gradient(180deg, oklch(0.115 0 0 / 0.72), oklch(0.09 0 0 / 0.72));
+    @apply backdrop-blur-xl border border-border;
+    box-shadow:
+      0 1px 0 0 oklch(1 0 0 / 0.04) inset,
+      0 1px 2px oklch(0 0 0 / 0.5),
+      0 16px 40px -24px oklch(0 0 0 / 0.85);
+  }
+  /* Slightly raised surface used for interactive cards. */
+  .surface {
+    background:
+      linear-gradient(180deg, oklch(0.12 0 0 / 0.85), oklch(0.095 0 0 / 0.85));
+    @apply border border-border;
+    box-shadow:
+      0 1px 0 0 oklch(1 0 0 / 0.045) inset,
+      0 2px 3px oklch(0 0 0 / 0.4);
+  }
+  .surface-hover {
+    @apply transition-all duration-200;
+  }
+  .surface-hover:hover {
+    border-color: oklch(0.34 0 0);
+    box-shadow:
+      0 1px 0 0 oklch(1 0 0 / 0.06) inset,
+      0 8px 28px -16px oklch(0 0 0 / 0.9);
+    transform: translateY(-1px);
+  }
+  /* Mono uppercase micro-label ("SOFTWARE"-style eyebrow). */
+  .label-mono {
+    @apply font-mono text-[0.7rem] font-medium uppercase tracking-[0.14em] text-muted-foreground;
   }
   .ansi-log {
     white-space: pre-wrap;
