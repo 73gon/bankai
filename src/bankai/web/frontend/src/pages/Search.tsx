@@ -10,7 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
-// Parse "S02E01" / "Staffel 2" / "Season 2" out of a filmpalast title or URL.
+// Parse "S02E01" / "Staffel 2" / "Season 2" out of a source title or URL.
 function parseSeason(s: string): number | null {
   const m = s.match(/s(\d{1,2})\s*e\d{1,3}/i) || s.match(/\bstaffel\s*(\d+)/i) || s.match(/\bseason\s*(\d+)/i);
   return m ? Number(m[1]) : null;
@@ -22,6 +22,12 @@ function cleanSeriesTitle(s: string): string {
     .replace(/\s*[\(\[]?\b(19|20)\d{2}\b[\)\]]?/g, '')
     .replace(/\s*[-–:]?\s*(s\d{1,2}\s*e\d{1,3}|staffel\s*\d+|season\s*\d+).*$/i, '')
     .trim();
+}
+
+function siteLabel(site: string): string {
+  if (site === 'burningseries' || site === 'bs.to') return 'Burning Series';
+  if (site === 'filmpalast') return 'Filmpalast';
+  return site;
 }
 
 function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) {
@@ -54,7 +60,7 @@ export default function Search() {
   const [configured, setConfigured] = useState(true);
   const debounce = useRef<number | undefined>(undefined);
 
-  // selected TVDB title -> resolve German name -> filmpalast matches
+  // selected TVDB title -> resolve German name -> matching stream sources
   const [selected, setSelected] = useState<DiscoverItem | null>(null);
   const [german, setGerman] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -68,7 +74,7 @@ export default function Search() {
   const [episodes, setEpisodes] = useState<EpisodeItem[]>([]);
   const [selectedEps, setSelectedEps] = useState<Set<number>>(new Set());
   const [loadingEps, setLoadingEps] = useState(false);
-  // seasons detected from the filmpalast results + resolved series name
+  // seasons detected from the source results + resolved series name
   const [showSeasons, setShowSeasons] = useState<number[]>([]);
   const [seriesTitle, setSeriesTitle] = useState('');
 
@@ -136,7 +142,13 @@ export default function Search() {
     setPicked(null);
     // A pasted stream link is used directly instead of searching.
     if (selected.kind === 'movie' && /^https?:\/\/\S+$/i.test(term)) {
-      const site = /aniworld/i.test(term) ? 'aniworld' : /bs\.to/i.test(term) ? 'bs' : /kinox/i.test(term) ? 'kinox' : 'filmpalast';
+      const site = /aniworld/i.test(term)
+        ? 'aniworld'
+        : /burningseries|bs\.to|bs\.cine\.to/i.test(term)
+          ? 'burningseries'
+          : /kinox/i.test(term)
+            ? 'kinox'
+            : 'filmpalast';
       setFilmResults([{ site, title: selected.name, year: selected.year ?? null, kind: 'movie', url: term }]);
       return;
     }
@@ -144,7 +156,7 @@ export default function Search() {
     try {
       const r = await api.search(term, selected.kind === 'movie' ? 'movie' : 'show');
       setFilmResults(r.results);
-      if (r.results.length === 0) toast.info('No filmpalast match for that term');
+      if (r.results.length === 0) toast.info('No German stream source matched that term');
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -211,7 +223,7 @@ export default function Search() {
     }
   }
 
-  // When filmpalast results arrive for a show, auto-detect the season(s),
+  // When source results arrive for a show, auto-detect the season(s),
   // resolve the series name, and preselect every episode of the first
   // season so the user only has to confirm (or deselect a few).
   useEffect(() => {
@@ -261,7 +273,7 @@ export default function Search() {
     <div className='space-y-6'>
       <header>
         <h1 className='text-2xl font-semibold'>Search</h1>
-        <p className='text-sm text-muted-foreground'>Find a {kind} on TheTVDB, then match it on filmpalast.</p>
+        <p className='text-sm text-muted-foreground'>Find a {kind} on TheTVDB, then match it to a German stream source.</p>
       </header>
 
       <div className='flex flex-wrap items-center gap-3'>
@@ -317,11 +329,13 @@ export default function Search() {
               {selected?.name}
               {german && german !== selected?.name && <Badge variant='accent'>DE: {german}</Badge>}
             </DialogTitle>
-            <DialogDescription>{loadingFilm ? 'Searching filmpalast…' : 'Pick the matching filmpalast entry to queue.'}</DialogDescription>
+            <DialogDescription>
+              {loadingFilm ? 'Searching German stream sources…' : 'Pick the matching source entry to queue.'}
+            </DialogDescription>
           </DialogHeader>
 
           <div className='space-y-1'>
-            <label className='text-xs text-muted-foreground'>filmpalast search term</label>
+            <label className='text-xs text-muted-foreground'>German source search term</label>
             <div className='flex gap-2'>
               <Input
                 value={searchTerm}
@@ -344,7 +358,7 @@ export default function Search() {
               ))}
             </div>
           ) : filmResults.length === 0 ? (
-            <EmptyState icon={SearchIcon} title='No filmpalast match' description='This title may not be available on filmpalast.' />
+            <EmptyState icon={SearchIcon} title='No German source match' description='This title may not be available from a supported source.' />
           ) : selected?.kind === 'movie' ? (
             <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
               {filmResults.map((r) => (
@@ -356,7 +370,7 @@ export default function Search() {
                         {r.year && <span className='text-xs text-muted-foreground'>{r.year}</span>}
                       </div>
                       <Badge variant='muted' className='mt-1'>
-                        {r.site}
+                        {siteLabel(r.site)}
                       </Badge>
                     </div>
                     <Button size='sm' onClick={() => queueMovie(r)} disabled={busy === r.url}>
@@ -368,11 +382,41 @@ export default function Search() {
               ))}
             </div>
           ) : (
-            // Show flow: season auto-detected, all episodes preselected — just confirm.
+            // Show flow: choose Filmpalast or Burning Series, then select episodes.
             <div className='space-y-3 rounded-lg p-1'>
+              <div className='space-y-1.5'>
+                <span className='text-xs text-muted-foreground'>Source matches</span>
+                <div className='flex max-h-28 flex-wrap gap-2 overflow-auto py-0.5'>
+                  {filmResults.map((r) => {
+                    const active = picked?.site === r.site && picked?.url === r.url;
+                    return (
+                      <button
+                        key={`${r.site}-${r.url}`}
+                        type='button'
+                        onClick={() => {
+                          const cleaned = cleanSeriesTitle(r.title) || searchTerm || r.title;
+                          setSeriesTitle(cleaned);
+                          loadEpisodes(r, season, cleaned, true);
+                        }}
+                        className={
+                          'rounded-md px-2.5 py-1.5 text-left text-xs ring-1 transition-colors ' +
+                          (active
+                            ? 'bg-primary/20 text-foreground ring-primary/50'
+                            : 'bg-secondary/40 text-muted-foreground ring-border/50 hover:text-foreground')
+                        }
+                        title={r.title}
+                      >
+                        <span className='font-medium'>{siteLabel(r.site)}</span>
+                        <span className='ml-1.5 opacity-75'>{r.title}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className='flex flex-wrap items-center gap-2'>
                 <span className='text-sm font-medium'>{seriesTitle || selected?.name}</span>
-                <Badge variant='muted'>{picked?.site || 'filmpalast'}</Badge>
+                <Badge variant='muted'>{siteLabel(picked?.site || 'filmpalast')}</Badge>
               </div>
 
               <div className='flex flex-wrap items-center gap-2'>

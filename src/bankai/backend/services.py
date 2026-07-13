@@ -86,7 +86,21 @@ async def search_stream_sources(
             log.warning("backend %s failed: %s", site, exc)
             return []
     else:
-        backends_to_query = list(scraper_registry.all_backends().items())
+        backends_to_query = [
+            (site_id, backend_cls)
+            for site_id, backend_cls in scraper_registry.all_backends().items()
+            if (
+                (kind == MediaKind.MOVIE and getattr(backend_cls, "supports_movies", False))
+                or (kind == MediaKind.EPISODE and getattr(backend_cls, "supports_series", False))
+                or (
+                    kind is None
+                    and (
+                        getattr(backend_cls, "supports_movies", False)
+                        or getattr(backend_cls, "supports_series", False)
+                    )
+                )
+            )
+        ]
     results: list[SearchResult] = []
     for sid, cls in backends_to_query:
         backend = cls()
@@ -98,7 +112,18 @@ async def search_stream_sources(
         finally:
             await backend.aclose()
         results.extend(hits)
-    return results
+    # Filmpalast remains the default choice, while Burning Series appears next
+    # to it as a show-only alternative. Preserve each backend's relevance order.
+    site_order = {"filmpalast": 0, "burningseries": 1}
+    results.sort(key=lambda result: site_order.get(result.site, 10))
+    seen: set[tuple[str, str]] = set()
+    unique: list[SearchResult] = []
+    for result in results:
+        key = (result.site, result.url)
+        if key not in seen:
+            seen.add(key)
+            unique.append(result)
+    return unique
 
 
 async def title_aliases(query: str, *, kind: MediaKind) -> list[str]:
@@ -182,7 +207,8 @@ def _series_sites() -> list[str]:
     for site_id, cls in scraper_registry.all_backends().items():
         if getattr(cls, "supports_series", False):
             sites.append(site_id)
-    sites.sort(key=lambda s: (s != "filmpalast", s))
+    preferred_order = {"filmpalast": 0, "burningseries": 1}
+    sites.sort(key=lambda site_id: (preferred_order.get(site_id, 10), site_id))
     return sites
 
 

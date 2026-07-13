@@ -4,7 +4,7 @@ Terminal-first pipeline that fuses the **German dub audio** from a streaming
 site with the **HQ video** from a torrent into a single Plex/Jellyfin-ready MKV.
 
 ```
-filmpalast / aniworld   ──►  Playwright + yt-dlp  ──┐
+Filmpalast / Burning Series ──► Playwright + yt-dlp ──┐
                                                     ├──► alass sync ──► mkvmerge ──► /mnt/media/bankai/Movies/Title (Year)/Title (Year).mkv
 Prowlarr ──► qBittorrent ──► HQ video  ─────────────┘
 ```
@@ -56,7 +56,7 @@ BANKAI_FORCE_REINSTALL=1 bash scripts/install.sh
 
 ```bash
 bankai                           # ASCII banner + menu
-bankai run "Finding Nemo 2003"   # auto-search filmpalast, pipeline through
+bankai run "Finding Nemo 2003"   # auto-search German sources, pipeline through
 bankai run "Inception 2010" --url https://filmpalast.to/stream/inception
 bankai batch movies.txt          # queue many movie downloads in the background
 bankai search "matrix"
@@ -70,6 +70,10 @@ bankai history
 bankai doctor
 ```
 
+Show searches combine Filmpalast and Burning Series matches. Burning Series is
+series-only; its episode lookup stays on the German `/de` pages and prefers VOE
+when that mirror is available.
+
 Toggle interactive picking:
 
 ```bash
@@ -82,10 +86,10 @@ bankai config set scraper.interactive_pick true
 | ------------------------------------------ | ------------------------------------------------------------------- |
 | `bankai`                                   | Interactive menu (default when no subcommand).                      |
 | `bankai shell`                             | REPL mode \u2014 type `run "X"`, `search Y`, etc.                   |
-| `bankai run QUERY [--url URL]`             | End-to-end pipeline. Auto-searches filmpalast when `--url` omitted. |
+| `bankai run QUERY [--url URL]`             | End-to-end pipeline. Auto-searches German sources when needed.      |
 | `bankai batch FILE`                        | Queue movie downloads from a text file.                             |
 | `bankai shows SHOW -s N [-e M]`            | Queue a whole show season (or one episode).                         |
-| `bankai search QUERY [--site filmpalast]`  | List matches as a table.                                            |
+| `bankai search QUERY [--site SITE]`        | List matches as a table.                                            |
 | `bankai metadata search QUERY`             | Show TVDB aliases used by lookups.                                  |
 | `bankai transfer PATH...`                  | Background rsync move to the mounted media server.                  |
 | `bankai background list/watch/log/clear`   | Inspect detached movie/show/transfer jobs.                          |

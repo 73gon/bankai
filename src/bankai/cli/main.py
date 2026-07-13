@@ -498,7 +498,9 @@ def _menu_run_show() -> None:
         return
     show = identity.english or identity.german or identity.original
     season = IntPrompt.ask("Season", default=1)
-    site_choice = Prompt.ask("Site (auto/filmpalast/aniworld/bs.to/kinox)", default="auto")
+    site_choice = Prompt.ask(
+        "Site (auto/filmpalast/burningseries/aniworld/bs.to/kinox)", default="auto"
+    )
     site_id = None if site_choice.casefold() in {"", "auto"} else site_choice
 
     result = asyncio.run(list_series_episodes(show, season=season, site=site_id))

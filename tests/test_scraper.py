@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import httpx
@@ -9,15 +10,16 @@ import pytest
 
 from bankai.queue.models import MediaKind
 from bankai.scraper import all_backends, get_backend
+from bankai.scraper.backends.bs_to import BsToBackend, BurningSeriesBackend
 from bankai.scraper.backends.filmpalast import FilmpalastBackend
 from bankai.scraper.base import ScraperBackend
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_registry_lists_all_four_backends() -> None:
+def test_registry_lists_scraper_backends() -> None:
     backends = all_backends()
-    for site_id in ("filmpalast", "kinox", "bs.to", "aniworld"):
+    for site_id in ("filmpalast", "kinox", "burningseries", "bs.to", "aniworld"):
         assert site_id in backends
         cls = get_backend(site_id)
         # Protocol conformance is structural â€” check at least the key members.
@@ -27,6 +29,96 @@ def test_registry_lists_all_four_backends() -> None:
 
 def test_filmpalast_class_satisfies_protocol() -> None:
     assert isinstance(FilmpalastBackend(base_url="http://example.invalid"), ScraperBackend)
+
+
+def test_burningseries_class_satisfies_protocol() -> None:
+    assert isinstance(BurningSeriesBackend(base_url="http://example.invalid"), ScraperBackend)
+    assert BurningSeriesBackend.supports_series is True
+    assert BurningSeriesBackend.supports_movies is False
+    assert BsToBackend.supports_series is False
+
+
+@pytest.mark.asyncio
+async def test_burningseries_search_uses_current_domain_and_deduplicates_index() -> None:
+    html = (FIXTURES / "burningseries" / "series_index.html").read_text(encoding="utf-8")
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    BurningSeriesBackend._index_cache.clear()
+    backend = BurningSeriesBackend(base_url="https://burningseries.ac")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="https://burningseries.ac",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        results = await backend.search("Arcane", kind=MediaKind.EPISODE)
+        movie_results = await backend.search("Arcane", kind=MediaKind.MOVIE)
+    finally:
+        await backend.aclose()
+
+    assert requested_paths == ["/andere-serien"]
+    assert len(results) == 1
+    assert results[0].site == "burningseries"
+    assert results[0].title == "Arcane | League of Legends"
+    assert results[0].url == "https://burningseries.ac/serie/Arcane-League-of-Legends"
+    assert movie_results == []
+
+
+@pytest.mark.asyncio
+async def test_burningseries_lists_only_german_season_episodes() -> None:
+    html = (FIXTURES / "burningseries" / "season_arcane_de.html").read_text(encoding="utf-8")
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    BurningSeriesBackend._index_cache["http://example.invalid"] = (
+        time.time(),
+        [("Arcane | League of Legends", "Arcane-League-of-Legends")],
+    )
+    backend = BurningSeriesBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        episodes = await backend.list_season("Arcane", 2)
+    finally:
+        await backend.aclose()
+
+    assert requested_paths == ["/serie/Arcane-League-of-Legends/2/de"]
+    assert [(ep.season, ep.episode) for ep in episodes] == [(2, 1), (2, 2)]
+    assert all(ep.language == "ger" and ep.url.endswith("/de") for ep in episodes)
+    assert episodes[0].title == "Die Last der Krone"
+
+
+@pytest.mark.asyncio
+async def test_burningseries_resolve_prefers_voe_wrapper() -> None:
+    html = (FIXTURES / "burningseries" / "episode_arcane_de.html").read_text(encoding="utf-8")
+    backend = BurningSeriesBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, text=html, headers={"content-type": "text/html"})
+        ),
+    )
+    try:
+        handle = await backend.resolve_stream(
+            "http://example.invalid/serie/Arcane-League-of-Legends/2/1-Die-Last-der-Krone/de"
+        )
+    finally:
+        await backend.aclose()
+
+    assert handle.site == "burningseries"
+    assert handle.url.endswith("/de/VOE")
+    assert handle.hint == "playwright"
 
 
 @pytest.mark.asyncio
