@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -150,9 +150,15 @@ class SelectorSettings(BaseModel):
     # tokens may still be picked, but matching ones get a bonus. Use an
     # empty list to disable the bonus entirely.
     preferred_audio_languages: list[str] = Field(default_factory=lambda: ["english"])
-    min_seeders: int = 1
-    max_size_gib: float = 80.0
-    min_size_gib: float = 0.5
+    min_seeders: int = Field(default=1, ge=0)
+    max_size_gib: float = Field(default=80.0, gt=0)
+    min_size_gib: float = Field(default=0.5, ge=0)
+
+    @model_validator(mode="after")
+    def validate_size_bounds(self) -> SelectorSettings:
+        if self.min_size_gib > self.max_size_gib:
+            raise ValueError("minimum torrent size cannot exceed the maximum")
+        return self
 
 
 class NotificationsSettings(BaseModel):

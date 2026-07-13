@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from bankai.config import Settings, load_settings, reset_settings_cache
+from bankai.config import SelectorSettings, Settings, load_settings, reset_settings_cache
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +31,11 @@ def test_sync_visual_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert sync.visual_max_height == 480
     assert sync.visual_min_confidence == 0.6
     assert sync.visual_apply_drift is False
+
+
+def test_selector_rejects_inverted_size_bounds() -> None:
+    with pytest.raises(ValueError, match="minimum torrent size"):
+        SelectorSettings(min_size_gib=10, max_size_gib=5)
 
 
 def test_toml_overrides_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

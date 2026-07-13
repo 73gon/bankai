@@ -232,8 +232,8 @@ export const api = {
     ),
   audioClipUrl: (path: string, stream: number, start: number, dur: number) =>
     `/api/media/audioclip?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}`,
-  videoClipUrl: (path: string, start: number, dur: number, height = 480) =>
-    `/api/media/videoclip?path=${encodeURIComponent(path)}&start=${start}&dur=${dur}&height=${height}`,
+  videoClipUrl: (path: string, start: number, dur: number, height = 480, audio?: number | null) =>
+    `/api/media/videoclip?path=${encodeURIComponent(path)}&start=${start}&dur=${dur}&height=${height}${audio == null ? '' : `&audio=${audio}`}`,
 
   setDelay: (path: string, delay_ms: number) => request('/api/review/delay', { method: 'POST', body: JSON.stringify({ path, delay_ms }) }),
   repack: (path: string, delay_ms: number, opts?: { atempo?: number; track_index?: number | null }) =>

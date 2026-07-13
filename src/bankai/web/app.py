@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from bankai import __version__
-from bankai.config import get_settings, reset_settings_cache
+from bankai.config import SelectorSettings, get_settings, reset_settings_cache
 from bankai.logging import get_logger
 from bankai.queue.models import MediaKind
 from bankai.web import discover as discover_mod
@@ -179,11 +179,39 @@ SAFE_SETTING_KEYS: set[str] = {
     "transfer.movies_dir",
     "transfer.shows_dir",
     "scraper.interactive_pick",
+    "selector.max_size_gib",
+    "selector.min_seeders",
+    "selector.min_size_gib",
+    "selector.preferred_resolutions",
     "web.port",
     "web.host",
     "web.max_concurrent_jobs",
     "web.transcode_fallback",
 }
+
+
+def _validate_setting_value(key: str, value: Any) -> Any:
+    """Coerce and validate a web setting before it reaches config.toml."""
+    if not key.startswith("selector."):
+        return value
+
+    field = key.removeprefix("selector.")
+    data = get_settings().selector.model_dump()
+    if field == "preferred_resolutions":
+        if not isinstance(value, list) or not value:
+            raise ValueError("preferred quality must be 1080p or 2160p")
+        preferred = str(value[0]).lower()
+        if preferred not in {"1080p", "2160p"}:
+            raise ValueError("preferred quality must be 1080p or 2160p")
+        other = "1080p" if preferred == "2160p" else "2160p"
+        value = [preferred, other]
+    data[field] = value
+    try:
+        validated = SelectorSettings.model_validate(data)
+    except ValidationError as exc:
+        message = exc.errors()[0].get("msg", "invalid value") if exc.errors() else "invalid value"
+        raise ValueError(str(message)) from exc
+    return getattr(validated, field)
 
 
 def _is_secret_key(key: str) -> bool:
@@ -1043,12 +1071,14 @@ def create_app() -> Any:
         start: float = Query(0.0, ge=0.0),
         dur: float = Query(30.0, gt=0.0, le=120.0),
         height: int = Query(480, ge=180, le=1080),
+        audio: int | None = Query(None, ge=0),
     ) -> Response:
         """Return a short, disk-cached H.264 video clip of the visible window.
 
-        Video-only (no audio — sound comes from the separate audio clips),
-        scaled down and fast-preset so it transcodes quickly and caches for
-        instant replay. This is the HQ English picture (the reference).
+        The reference audio is muxed into this same clip when requested, so
+        the browser plays the HQ picture and English track from one media
+        clock. This avoids false sync offsets caused by separately starting an
+        audio element and a video element.
         """
         import subprocess
 
@@ -1059,6 +1089,11 @@ def create_app() -> Any:
         st = p.stat()
 
         def build(out: Path) -> None:
+            audio_args = (
+                ["-map", f"0:{audio}", "-c:a", "aac", "-b:a", "128k"]
+                if audio is not None
+                else ["-an"]
+            )
             with _ffmpeg_slot():
                 subprocess.run(
                     [
@@ -1074,7 +1109,7 @@ def create_app() -> Any:
                         str(p),
                         "-map",
                         "0:v:0",
-                        "-an",
+                        *audio_args,
                         "-vf",
                         f"scale=-2:{height}",
                         "-c:v",
@@ -1096,7 +1131,7 @@ def create_app() -> Any:
                     check=False,
                 )
 
-        key = f"{p}|{st.st_mtime_ns}|vid|{round(start, 2)}|{round(dur, 2)}|{height}"
+        key = f"{p}|{st.st_mtime_ns}|vid2|{round(start, 2)}|{round(dur, 2)}|{height}|{audio}"
         clip = _cached_clip(key, "mp4", build)
         return FileResponse(clip, media_type="video/mp4")
 
@@ -1297,7 +1332,11 @@ def create_app() -> Any:
             raise HTTPException(status_code=403, detail="key not editable via web")
         from bankai.cli.main import _set_config_value
 
-        path, written = _set_config_value(req.key, req.value)
+        try:
+            value = _validate_setting_value(req.key, req.value)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        path, _written = _set_config_value(req.key, value)
         reset_settings_cache()
         return {"key": req.key, "saved": True, "path": str(path)}
 

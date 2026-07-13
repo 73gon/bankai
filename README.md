@@ -140,10 +140,11 @@ shows_dir = "/mnt/media12/shows"
 rsync_binary = "rsync"
 
 [selector]
-preferred_resolutions    = ["1080p", "720p"]
+preferred_resolutions    = ["2160p", "1080p"] # first choice, then HQ fallback
 preferred_audio_languages = ["english"]   # prefer English HQ video
 min_size_gib             = 5.0
 max_size_gib             = 80.0
+min_seeders              = 3
 
 [notifications]
 webhook_url = "https://discord.com/api/webhooks/..."

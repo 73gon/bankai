@@ -594,13 +594,13 @@ export default function Library() {
     if (c == null) {
       if (r.needs_sync_review)
         return (
-          <Badge variant='warning' title='Audio sync needs a manual check — open Review.'>
-            Check sync
+          <Badge variant='review' title='Automatic alignment was inconclusive — open Review.'>
+            Manual review
           </Badge>
         );
       return (
         <Badge variant='muted' title='No automatic audio sync was applied.'>
-          Not synced
+          Not analyzed
         </Badge>
       );
     }
@@ -609,10 +609,10 @@ export default function Library() {
       c >= 0.9
         ? { label: 'Spot on', variant: 'success' as const }
         : c >= 0.75
-          ? { label: 'Probably on spot', variant: 'success' as const }
+          ? { label: 'Nearly synced', variant: 'info' as const }
           : c >= 0.5
-            ? { label: 'Slightly off', variant: 'warning' as const }
-            : { label: 'Completely off', variant: 'destructive' as const };
+            ? { label: 'Needs tuning', variant: 'warning' as const }
+            : { label: 'Out of sync', variant: 'destructive' as const };
     return (
       <Badge variant={acc.variant} title={`Automatic sync confidence ${pct}%`}>
         {acc.label}
@@ -979,7 +979,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const wrapRef = useRef<HTMLDivElement>(null);
   const engCanvas = useRef<HTMLCanvasElement>(null);
   const gerCanvas = useRef<HTMLCanvasElement>(null);
-  const engAudio = useRef<HTMLAudioElement | null>(null);
   const gerAudio = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const dragRef = useRef<{ x: number; delay: number } | null>(null);
@@ -1007,12 +1006,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   function haltAudioVideo() {
-    for (const r of [engAudio, gerAudio]) {
-      if (r.current) {
-        r.current.pause();
-        r.current.src = '';
-        r.current = null;
-      }
+    if (gerAudio.current) {
+      gerAudio.current.pause();
+      gerAudio.current.src = '';
+      gerAudio.current = null;
     }
     if (videoRef.current) videoRef.current.pause();
     if (rafRef.current != null) {
@@ -1144,12 +1141,15 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (!v) return;
     setVideoLoading(true);
     const t = setTimeout(() => {
-      v.src = api.videoClipUrl(path, viewStart, clipLen, quality);
+      // Keep the HQ reference picture and English track in one clip. A single
+      // browser media clock guarantees that they cannot appear offset simply
+      // because two independently fetched elements started at different times.
+      v.src = api.videoClipUrl(path, viewStart, clipLen, quality, engStream);
       v.load();
     }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, viewStart, windowSec, quality]);
+  }, [path, viewStart, windowSec, quality, engStream]);
 
   function drawGrid(ctx: CanvasRenderingContext2D, W: number, H: number) {
     ctx.clearRect(0, 0, W, H);
@@ -1267,12 +1267,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const startOffset = startFrac * windowSec; // seconds into the window
     const startT = viewStart + startOffset; // absolute reference time
     const dur = Math.max(1, Math.min(clipLen - startOffset, windowSec - startOffset));
-    if (which !== 'ger' && engStream != null) {
-      const a = new Audio(api.audioClipUrl(path, engStream, startT, dur));
-      a.onended = () => stopAll();
-      engAudio.current = a;
-      a.play().catch(() => {});
-    }
     if (which !== 'eng' && gerStream != null) {
       const gs = Math.max(0, startT - delayMs / 1000);
       const a = new Audio(api.audioClipUrl(path, gerStream, gs, dur));
@@ -1283,6 +1277,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     // The picture follows the reference (English) timeline; seek into the clip.
     const v = videoRef.current;
     if (v) {
+      // English is embedded in the preview MP4 and always shares the picture's
+      // timeline. German-only mode deliberately mutes that reference track.
+      v.muted = which === 'ger' || engStream == null;
       try {
         v.currentTime = startOffset;
       } catch {
@@ -1296,7 +1293,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       let posSec = startOffset;
       const vv = videoRef.current;
       if (vv && !vv.paused && vv.currentTime > 0) posSec = vv.currentTime;
-      else if (engAudio.current) posSec = startOffset + engAudio.current.currentTime;
       else if (gerAudio.current) posSec = startOffset + gerAudio.current.currentTime;
       const frac = Math.min(1, posSec / windowSec);
       livePosRef.current = frac;
@@ -1518,7 +1514,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               <div className='relative flex h-full max-h-full items-center justify-center overflow-hidden rounded-lg border border-border/60 bg-black p-1 shadow-inner shadow-black/40'>
                 <video
                   ref={videoRef}
-                  muted
+                  muted={playing === 'ger' || engStream == null}
                   playsInline
                   preload='auto'
                   onLoadedData={() => setVideoLoading(false)}
