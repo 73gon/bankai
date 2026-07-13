@@ -693,6 +693,7 @@ def create_app() -> Any:
                     "season": None,
                     "stage": None,
                     "reason": j.get("reason"),
+                    "reason_detail": j.get("reason_detail"),
                     "delay_ms": 0,
                     "needs_sync_review": False,
                     "sync_confidence": None,

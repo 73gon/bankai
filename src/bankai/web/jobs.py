@@ -19,6 +19,7 @@ from pathlib import Path
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
+from bankai.web import reasons
 
 log = get_logger(__name__)
 _LOCK = threading.RLock()
@@ -168,6 +169,8 @@ def snapshot() -> list[dict]:
         if j.kind == "transfer":
             continue
         snap = bgjobs.progress_snapshot(j)
+        raw_reason = _job_reason(j)
+        cls = reasons.classify_reason(raw_reason)
         out.append(
             {
                 "id": j.id,
@@ -178,7 +181,9 @@ def snapshot() -> list[dict]:
                 "finished_at": j.finished_at,
                 "exit_code": j.exit_code,
                 "final_path": j.final_path,
-                "reason": _job_reason(j),
+                "reason": cls[1] if cls else None,
+                "reason_code": cls[0] if cls else None,
+                "reason_detail": raw_reason,
                 "step": snap.step,
                 "total_steps": snap.total_steps,
                 "step_label": snap.step_label,

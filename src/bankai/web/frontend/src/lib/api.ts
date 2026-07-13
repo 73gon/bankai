@@ -114,6 +114,7 @@ export interface TitleRow {
   season: number | null;
   stage: string | null;
   reason: string | null;
+  reason_detail?: string | null;
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;

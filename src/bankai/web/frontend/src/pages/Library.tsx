@@ -135,11 +135,13 @@ function cleanLog(raw: string): string {
 // table's own overflow container, unlike an absolutely-positioned popover).
 function TruncCell({
   text,
+  tooltip,
   mono,
   danger,
   width = '16rem',
 }: {
   text: string | null | undefined;
+  tooltip?: string | null;
   mono?: boolean;
   danger?: boolean;
   width?: string;
@@ -155,7 +157,7 @@ function TruncCell({
           {text}
         </div>
       </TooltipTrigger>
-      <TooltipContent className={cn(mono && 'font-mono')}>{text}</TooltipContent>
+      <TooltipContent className={cn(mono && 'font-mono')}>{tooltip || text}</TooltipContent>
     </Tooltip>
   );
 }
@@ -670,7 +672,7 @@ export default function Library() {
             <StatusCell r={r} />
           </td>
           <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>
-            <TruncCell text={r.reason} danger width='18rem' />
+            <TruncCell text={r.reason} tooltip={r.reason_detail || r.reason} danger width='18rem' />
           </td>
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
@@ -1012,8 +1014,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const gerAudio = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const dragRef = useRef<{ x: number; delay: number } | null>(null);
-  const playheadRef = useRef<HTMLDivElement>(null);
+  const engHeadRef = useRef<HTMLDivElement>(null);
+  const gerHeadRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
+  const livePosRef = useRef(0);
+  const wasPlayingRef = useRef(false);
+  const seekFracRef = useRef(0);
 
   const duration = info?.duration ?? 0;
   const viewStart = Math.max(0, center - windowSec / 2);
@@ -1021,7 +1027,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // Clip covering the visible window (capped) so we can seek within it.
   const clipLen = Math.min(windowSec, 90);
 
-  function stopAll() {
+  // Move both lane playheads to a fraction (0..1) of the window.
+  function parkHeads(frac: number) {
+    for (const r of [engHeadRef, gerHeadRef]) {
+      if (r.current) {
+        r.current.style.opacity = '1';
+        r.current.style.transform = `translateX(${frac * canvasW}px)`;
+      }
+    }
+  }
+
+  function haltAudioVideo() {
     for (const r of [engAudio, gerAudio]) {
       if (r.current) {
         r.current.pause();
@@ -1034,11 +1050,28 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    if (playheadRef.current) {
-      playheadRef.current.style.opacity = '1';
-      playheadRef.current.style.transform = `translateX(${seekFrac * canvasW}px)`;
-    }
+  }
+
+  // Hard stop — reset the playheads to the parked seek position.
+  function stopAll() {
+    haltAudioVideo();
+    parkHeads(seekFracRef.current);
     setPlaying('none');
+  }
+
+  // Pause, but remember where we are so Play resumes from here (no rewind).
+  function pauseAt() {
+    haltAudioVideo();
+    const f = livePosRef.current;
+    seekFracRef.current = f;
+    setSeekFrac(f);
+    parkHeads(f);
+    setPlaying('none');
+  }
+
+  function togglePlay() {
+    if (playing !== 'none') pauseAt();
+    else playSection('both');
   }
 
   useEffect(() => {
@@ -1254,7 +1287,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   function playSection(which: 'both' | 'eng' | 'ger') {
     stopAll();
-    const startOffset = seekFrac * windowSec; // seconds into the window
+    const startFrac = seekFracRef.current;
+    const startOffset = startFrac * windowSec; // seconds into the window
     const startT = viewStart + startOffset; // absolute reference time
     const dur = Math.max(1, Math.min(clipLen - startOffset, windowSec - startOffset));
     if (which !== 'ger' && engStream != null) {
@@ -1281,19 +1315,16 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       v.play().catch(() => {});
     }
     setPlaying(which);
-    // Animate the playhead from the seek position while it plays.
+    // Animate both lane playheads from the seek position while it plays.
     const tick = () => {
-      const line = playheadRef.current;
       let posSec = startOffset;
       const vv = videoRef.current;
       if (vv && !vv.paused && vv.currentTime > 0) posSec = vv.currentTime;
       else if (engAudio.current) posSec = startOffset + engAudio.current.currentTime;
       else if (gerAudio.current) posSec = startOffset + gerAudio.current.currentTime;
       const frac = Math.min(1, posSec / windowSec);
-      if (line) {
-        line.style.opacity = '1';
-        line.style.transform = `translateX(${frac * canvasW}px)`;
-      }
+      livePosRef.current = frac;
+      parkHeads(frac);
       if (frac >= 1) {
         stopAll();
         return;
@@ -1310,13 +1341,20 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    seekFracRef.current = frac;
     setSeekFrac(frac);
   }
 
+  // Drag the playhead handle to scrub within the window; playback pauses while
+  // dragging and resumes on release (if it was playing).
   function onSeekDown(e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (playing !== 'none') stopAll();
+    wasPlayingRef.current = playing !== 'none';
+    if (playing !== 'none') {
+      haltAudioVideo();
+      setPlaying('none');
+    }
     seekFromClientX(e.clientX);
     setSeeking(true);
     const onMove = (ev: MouseEvent) => seekFromClientX(ev.clientX);
@@ -1324,20 +1362,85 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       setSeeking(false);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      if (wasPlayingRef.current) {
+        wasPlayingRef.current = false;
+        playSection('both');
+      }
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   }
 
-  // Keep the playhead parked at the seek position whenever we're not playing.
+  // Dragging the English (reference) lane pans through the movie — the timeline
+  // slider follows, so you can scrub to any scene. A click (no drag) seeks.
+  function onEngDown(e: React.MouseEvent) {
+    const startX = e.clientX;
+    const startCenter = center;
+    let moved = false;
+    wasPlayingRef.current = playing !== 'none';
+    if (playing !== 'none') {
+      haltAudioVideo();
+      setPlaying('none');
+    }
+    const onMove = (ev: MouseEvent) => {
+      if (Math.abs(ev.clientX - startX) > 3) moved = true;
+      const pps = canvasW / windowSec;
+      const dxSec = (ev.clientX - startX) / pps;
+      const maxC = duration || Number.MAX_SAFE_INTEGER;
+      setCenter(Math.max(windowSec / 2, Math.min(maxC, startCenter - dxSec)));
+    };
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      if (!moved) seekFromClientX(ev.clientX);
+      if (wasPlayingRef.current) {
+        wasPlayingRef.current = false;
+        playSection('both');
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  // Mouse wheel over a lane zooms the time window in/out.
+  function onWheelZoom(e: React.WheelEvent) {
+    zoom(e.deltaY < 0 ? 0.8 : 1.25);
+  }
+
+  // Keep the playheads parked at the seek position whenever we're not playing.
   useEffect(() => {
     if (playing !== 'none') return;
-    const line = playheadRef.current;
-    if (line) {
-      line.style.opacity = '1';
-      line.style.transform = `translateX(${seekFrac * canvasW}px)`;
-    }
+    parkHeads(seekFrac);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seekFrac, canvasW, playing, windowSec, loading]);
+
+  // Keyboard shortcuts: Space = play/pause, +/- = zoom, arrows = pan.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (loading) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        zoom(0.8);
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        zoom(1.25);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setCenter((c) => Math.max(windowSec / 2, c - windowSec * 0.2));
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setCenter((c) => Math.min(duration || c + windowSec, c + windowSec * 0.2));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, playing, windowSec, center, delayMs, duration, engStream, gerStream]);
 
   async function approve() {
     setBusy('approve');
@@ -1432,7 +1535,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
               <div className='flex items-center justify-between px-1 text-xs'>
                 <span className='flex items-center gap-2 text-sky-400'>
-                  <Languages className='h-3.5 w-3.5' /> English (reference · HQ video)
+                  <Languages className='h-3.5 w-3.5' /> English (reference · drag to scrub · scroll to zoom)
                 </span>
                 <span className='font-mono text-muted-foreground'>
                   {fmtClock(viewStart)} – {fmtClock(viewStart + windowSec)}
@@ -1443,13 +1546,25 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   <span key={i}>{b}</span>
                 ))}
               </div>
-              <canvas
-                ref={engCanvas}
-                width={canvasW}
-                height={canvasH}
-                onMouseDown={onSeekDown}
-                className='w-full cursor-crosshair rounded-md bg-black/40'
-              />
+              <div className='relative'>
+                <canvas
+                  ref={engCanvas}
+                  width={canvasW}
+                  height={canvasH}
+                  onMouseDown={onEngDown}
+                  onWheel={onWheelZoom}
+                  className='w-full cursor-grab rounded-md bg-black/40 active:cursor-grabbing'
+                />
+                <div
+                  ref={engHeadRef}
+                  onMouseDown={onSeekDown}
+                  className='absolute inset-y-0 left-0 z-10 -ml-1.5 w-3 cursor-ew-resize'
+                  style={{ transform: `translateX(${seekFrac * canvasW}px)` }}
+                >
+                  <div className='absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-sky-300 shadow-[0_0_6px_rgba(56,189,248,0.9)]' />
+                  <div className='absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-sm bg-sky-300' />
+                </div>
+              </div>
               <div className='flex items-center justify-between px-1 text-xs'>
                 <span className='flex items-center gap-2 text-pink-400'>
                   <AudioLines className='h-3.5 w-3.5' /> German (filmpalast · drag to align, click to seek)
@@ -1479,22 +1594,19 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   width={canvasW}
                   height={canvasH}
                   onMouseDown={onGerDown}
+                  onWheel={onWheelZoom}
                   className='w-full cursor-ew-resize rounded-md bg-black/40'
+                />
+                <div
+                  ref={gerHeadRef}
+                  className='pointer-events-none absolute inset-y-0 left-0 z-10 w-0.5 bg-pink-300 shadow-[0_0_6px_rgba(244,114,182,0.9)]'
+                  style={{ transform: `translateX(${seekFrac * canvasW}px)` }}
                 />
                 {gerLoading && (
                   <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
                     <Loader2 className='h-5 w-5 animate-spin text-pink-400' />
                   </div>
                 )}
-              </div>
-              <div
-                ref={playheadRef}
-                onMouseDown={onSeekDown}
-                className='absolute inset-y-0 left-0 w-2 -ml-1 cursor-ew-resize'
-                style={{ opacity: 1, transform: 'translateX(0px)' }}
-              >
-                <div className='absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-white/90' />
-                <div className='absolute -top-0.5 left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-sm bg-white shadow' />
               </div>
             </div>
           </div>
@@ -1513,6 +1625,19 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 max={duration || 1}
                 step={0.5}
                 onValueChange={(v) => setCenter(v[0])}
+                onPointerDown={() => {
+                  wasPlayingRef.current = playing !== 'none';
+                  if (playing !== 'none') {
+                    haltAudioVideo();
+                    setPlaying('none');
+                  }
+                }}
+                onValueCommit={() => {
+                  if (wasPlayingRef.current) {
+                    wasPlayingRef.current = false;
+                    playSection('both');
+                  }
+                }}
                 className='flex-1'
               />
               <span className='w-12 shrink-0 font-mono text-xs text-muted-foreground'>{fmtClock(duration)}</span>
@@ -1582,8 +1707,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               {/* Playback */}
               <div className='ml-auto flex items-center gap-2'>
                 {playing !== 'none' ? (
-                  <Button size='sm' variant='secondary' onClick={stopAll}>
-                    <Pause className='h-4 w-4' /> Stop
+                  <Button size='sm' variant='secondary' onClick={pauseAt} title='Pause (Space)'>
+                    <Pause className='h-4 w-4' /> Pause
                   </Button>
                 ) : (
                   <>
@@ -1593,7 +1718,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     <Button size='sm' variant='secondary' onClick={() => playSection('ger')}>
                       <Play className='h-4 w-4' /> German
                     </Button>
-                    <Button size='sm' onClick={() => playSection('both')}>
+                    <Button size='sm' onClick={() => playSection('both')} title='Play (Space)'>
                       <Play className='h-4 w-4' /> Play both
                     </Button>
                   </>
