@@ -112,10 +112,10 @@ export default function App() {
                   className={({ isActive }) =>
                     cn(
                       'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all',
-                      collapsed && 'md:justify-center md:px-0',
+                      collapsed && 'md:mx-auto md:h-10 md:w-10 md:justify-center md:gap-0 md:px-0 md:py-0',
                       isActive
-                        ? 'border border-border bg-gradient-to-b from-secondary to-muted text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.06)]'
-                        : 'border border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                        ? 'border border-white/10 bg-gradient-to-b from-white/[0.09] to-white/[0.03] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.08)]'
+                        : 'border border-transparent text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
                     )
                   }
                 >
@@ -136,7 +136,7 @@ export default function App() {
         </aside>
 
         <main className='flex-1 px-4 py-6 md:px-8 md:py-8'>
-          <div className='mx-auto w-full max-w-[1400px] animate-fade-in'>
+          <div className='w-full animate-fade-in'>
             <Routes>
               <Route path='/' element={<Navigate to='/discover' replace />} />
               <Route path='/discover' element={<Discover />} />
