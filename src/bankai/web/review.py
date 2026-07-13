@@ -50,6 +50,12 @@ class ReviewState:
     needs_sync_review: bool = False
     sync_confidence: float | None = None
     auto_delay_ms: int = 0
+    # Frame-rate drift diagnostics captured during visual sync (German source
+    # vs the HQ reference). drift_ratio is the measured source/reference speed
+    # ratio; source_fps/reference_fps are the raw stream frame rates.
+    source_fps: float | None = None
+    reference_fps: float | None = None
+    drift_ratio: float | None = None
     # Transfer is tracked per-entry (shown as a column on the library row)
     # instead of as a standalone queue job.
     transfer_status: str = "idle"  # idle | transferring | done | failed
@@ -120,6 +126,9 @@ def set_sync_review(
     needs_review: bool,
     confidence: float | None = None,
     applied_delay_ms: int = 0,
+    source_fps: float | None = None,
+    reference_fps: float | None = None,
+    drift_ratio: float | None = None,
 ) -> ReviewState:
     """Record the automatic-alignment outcome for a finished library file.
 
@@ -135,6 +144,12 @@ def set_sync_review(
     raw["needs_sync_review"] = bool(needs_review)
     raw["sync_confidence"] = confidence
     raw["auto_delay_ms"] = int(applied_delay_ms)
+    if source_fps is not None:
+        raw["source_fps"] = float(source_fps)
+    if reference_fps is not None:
+        raw["reference_fps"] = float(reference_fps)
+    if drift_ratio is not None:
+        raw["drift_ratio"] = float(drift_ratio)
     raw["updated_at"] = time.time()
     data[key] = raw
     _save(data)

@@ -1451,11 +1451,16 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // Length drift between the reference (HQ) and German audio hints at a
   // frame-rate/speed mismatch (e.g. 25fps PAL vs 23.976) even before aligning.
   const lenDrift = engTrack?.duration != null && gerTrack?.duration != null ? engTrack.duration - gerTrack.duration : null;
-  // Suggested stretch to make the German track match the reference length.
-  // atempo>1 speeds up (German currently longer); <1 slows down.
-  const suggestedStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
-  // Flag a real drift: length differs by more than ~2s AND more than ~0.1%.
-  const driftSuspected = suggestedStretch != null && lenDrift != null && Math.abs(lenDrift) > 2 && Math.abs(suggestedStretch - 1) > 0.001;
+  // Prefer the pipeline's MEASURED frame-drift ratio (from visual sync) — the
+  // definitive signal; otherwise fall back to the crude track-length ratio.
+  const measuredDrift = info?.drift_ratio ?? null;
+  const sourceFps = info?.source_fps ?? null;
+  const durationStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
+  const suggestedStretch = measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0005 ? measuredDrift : durationStretch;
+  // Flag a real drift: a measured frame-drift, or lengths differing by >2s.
+  const driftSuspected =
+    (measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0015) ||
+    (durationStretch != null && lenDrift != null && Math.abs(lenDrift) > 2 && Math.abs(durationStretch - 1) > 0.001);
   const stretchPct = ((stretch - 1) * 100).toFixed(2);
   const trackMeta = (t: AudioTrack | null, videoFps: number | null | undefined) => {
     const bits: string[] = [];
@@ -1577,7 +1582,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 )}
               </div>
               <div className='flex flex-wrap items-center gap-x-3 px-1 text-[10px] font-mono text-muted-foreground'>
-                {trackMeta(gerTrack, null).map((b, i) => (
+                {trackMeta(gerTrack, sourceFps).map((b, i) => (
                   <span key={i}>{b}</span>
                 ))}
               </div>
@@ -1624,7 +1629,13 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     Reset
                   </Button>
                 )}
-                {driftSuspected && <span className='text-amber-400'>drift likely — dub length differs</span>}
+                {driftSuspected && (
+                  <span className='text-amber-400'>
+                    {measuredDrift != null && sourceFps && info?.video_fps
+                      ? `drift measured — German ${sourceFps.toFixed(3)} vs ${info.video_fps} fps`
+                      : 'drift likely — dub length differs'}
+                  </span>
+                )}
               </div>
               <div className='relative'>
                 <canvas

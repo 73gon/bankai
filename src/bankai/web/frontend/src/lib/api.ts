@@ -157,6 +157,9 @@ export interface MediaInfo {
   needs_sync_review: boolean;
   sync_confidence: number | null;
   auto_delay_ms: number;
+  source_fps: number | null;
+  reference_fps: number | null;
+  drift_ratio: number | null;
   audio_tracks: AudioTrack[];
 }
 

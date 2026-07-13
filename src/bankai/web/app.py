@@ -763,6 +763,9 @@ def create_app() -> Any:
             "needs_sync_review": state.needs_sync_review,
             "sync_confidence": state.sync_confidence,
             "auto_delay_ms": state.auto_delay_ms,
+            "source_fps": state.source_fps,
+            "reference_fps": state.reference_fps,
+            "drift_ratio": state.drift_ratio,
             "audio_tracks": [
                 {
                     "index": t.index,

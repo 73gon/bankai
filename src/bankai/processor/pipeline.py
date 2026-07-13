@@ -417,6 +417,14 @@ class PipelineWorker(Worker):
         if not is_video_file(source_candidate):
             log.info("[visual-sync] no German video available for matching; skipping")
             return sync_payload, visual_meta
+        # Capture the German source fps + reference fps so the review UI can
+        # show a definitive frame-rate drift (e.g. 25fps PAL vs 23.976).
+        source_fps = await _probe_fps(source_candidate)
+        reference_fps = await _probe_fps(Path(video_path))
+        if source_fps:
+            visual_meta["source_fps"] = source_fps
+        if reference_fps:
+            visual_meta["reference_fps"] = reference_fps
         try:
             timeline = await estimate_visual_timeline(
                 reference=Path(video_path),
@@ -507,6 +515,9 @@ class PipelineWorker(Worker):
                 needs_review=bool(visual_meta.get("needs_review")),
                 confidence=visual_meta.get("confidence"),
                 applied_delay_ms=int(visual_meta.get("delay_ms", 0) or 0),
+                source_fps=visual_meta.get("source_fps"),
+                reference_fps=visual_meta.get("reference_fps"),
+                drift_ratio=visual_meta.get("drift_ratio"),
             )
         except Exception as exc:  # review flagging is best-effort
             log.debug("[visual-sync] could not record review flag: %s", exc)
@@ -652,6 +663,43 @@ async def _probe_has_video(path: Path) -> bool:
         return False
     stdout, _ = await proc.communicate()
     return proc.returncode == 0 and b"video" in stdout
+
+
+async def _probe_fps(path: Path) -> float | None:
+    """Return the video frame rate (fps) of ``path``, or None if unavailable."""
+    if not path.exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    raw = stdout.decode(errors="ignore").strip()
+    if not raw:
+        return None
+    try:
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            den_f = float(den)
+            return float(num) / den_f if den_f else None
+        return float(raw)
+    except (ValueError, ZeroDivisionError):
+        return None
 
 
 async def _demux_audio(media: Path, out: Path) -> None:
