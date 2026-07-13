@@ -9,6 +9,7 @@ user can fix German dub sync before approving a transfer.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -204,10 +205,17 @@ def _browser_playable(path: Path, video_codec: str | None) -> bool:
 
 
 def _is_german(lang: str | None, title: str | None) -> bool:
+    # Language tag is authoritative (exact match).
     if lang and lang in _GERMAN_TAGS:
         return True
-    if title and any(tag in title.lower() for tag in _GERMAN_TAGS):
-        return True
+    # Title match must be on whole words — a substring check flags English
+    # tracks whose titles merely *contain* the short codes (e.g. "Audio
+    # Description" / "Extended" both contain "de"), which then makes the
+    # "German" button play English audio.
+    if title:
+        tokens = re.findall(r"[a-z]+", title.lower())
+        if any(tok in _GERMAN_TAGS for tok in tokens):
+            return True
     return False
 
 
