@@ -336,7 +336,7 @@ function StatusMultiSelect({
     <div ref={ref} className='relative'>
       <button
         onClick={() => setOpen((o) => !o)}
-        className='flex h-9 min-w-[12rem] max-w-[20rem] items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm transition-colors hover:bg-secondary/40'
+        className='flex h-9 min-w-[12rem] max-w-[20rem] items-center justify-between gap-2 rounded-md border border-white/10 bg-gradient-to-b from-white/[0.02] to-transparent px-3 text-sm transition-colors hover:border-white/20'
       >
         <span className='truncate text-left text-muted-foreground'>{label}</span>
         <ChevronsUpDown className='h-4 w-4 shrink-0 opacity-50' />
@@ -980,7 +980,21 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
   const [busy, setBusy] = useState<string | null>(null);
   const [canvasW, setCanvasW] = useState(800);
-  const [canvasH, setCanvasH] = useState(160);
+  const [canvasH, setCanvasH] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem('bankai:review-bars-height') || '', 10);
+      return Number.isFinite(v) && v >= 100 && v <= 640 ? v : 160;
+    } catch {
+      return 160;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('bankai:review-bars-height', String(canvasH));
+    } catch {
+      /* ignore */
+    }
+  }, [canvasH]);
   const [dragging, setDragging] = useState(false);
   // Playback quality for the video preview (px height). 360p..1080p.
   const [quality, setQuality] = useState(480);
@@ -1376,7 +1390,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           </h2>
         </div>
         <div className='flex items-center gap-3'>
-          <div className='rounded-md border border-border bg-card px-3 py-1.5 text-sm'>
+          <div className='rounded-md border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm'>
             Delay <span className='font-mono font-semibold'>{delayMs > 0 ? '+' : ''}{delayMs} ms</span>
             {drift !== 0 && (
               <span className='ml-1 text-xs text-amber-400'>(unsaved {drift > 0 ? '+' : ''}{drift})</span>
@@ -1524,7 +1538,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 <select
                   value={quality}
                   onChange={(e) => setQuality(parseInt(e.target.value, 10))}
-                  className='rounded-md border border-border bg-card px-2 py-1 text-xs'
+                  className='rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs transition-colors hover:border-white/20'
                   title='Video preview quality'
                 >
                   <option value={360}>360p</option>

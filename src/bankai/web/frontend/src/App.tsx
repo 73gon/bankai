@@ -68,8 +68,8 @@ export default function App() {
           {/* Header row: brand + collapse toggle (desktop) */}
           <div
             className={cn(
-              'hidden md:flex md:items-center md:px-1',
-              collapsed ? 'md:justify-center' : 'md:justify-between',
+              'hidden md:flex md:items-center',
+              collapsed ? 'md:px-0' : 'md:justify-between md:px-1',
             )}
           >
             {collapsed ? (
@@ -77,7 +77,7 @@ export default function App() {
                 type='button'
                 onClick={() => setCollapsed(false)}
                 aria-label='Expand sidebar'
-                className='flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground'
+                className='mx-auto flex h-10 w-10 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-all duration-200 hover:bg-white/[0.04] hover:text-foreground'
               >
                 <PanelLeft className='h-[18px] w-[18px]' />
               </button>
@@ -88,7 +88,7 @@ export default function App() {
                   type='button'
                   onClick={() => setCollapsed(true)}
                   aria-label='Collapse sidebar'
-                  className='flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground'
+                  className='flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-all duration-200 hover:bg-white/[0.04] hover:text-foreground'
                 >
                   <PanelLeftClose className='h-[18px] w-[18px]' />
                 </button>
@@ -111,7 +111,7 @@ export default function App() {
                   to={to}
                   className={({ isActive }) =>
                     cn(
-                      'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all',
+                      'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all duration-200',
                       collapsed && 'md:mx-auto md:h-10 md:w-10 md:justify-center md:gap-0 md:px-0 md:py-0',
                       isActive
                         ? 'border border-white/10 bg-gradient-to-b from-white/[0.09] to-white/[0.03] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.08)]'
