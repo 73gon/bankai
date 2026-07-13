@@ -127,11 +127,25 @@ export default function Search() {
   }
 
   async function reSearch() {
-    if (!selected || !searchTerm.trim()) return;
-    setLoadingFilm(true);
+    if (!selected) return;
+    const term = searchTerm.trim();
+    if (!term) return;
     setPicked(null);
+    // A pasted stream link is used directly instead of searching.
+    if (selected.kind === 'movie' && /^https?:\/\/\S+$/i.test(term)) {
+      const site = /aniworld/i.test(term)
+        ? 'aniworld'
+        : /bs\.to/i.test(term)
+          ? 'bs'
+          : /kinox/i.test(term)
+            ? 'kinox'
+            : 'filmpalast';
+      setFilmResults([{ site, title: selected.name, year: selected.year ?? null, kind: 'movie', url: term }]);
+      return;
+    }
+    setLoadingFilm(true);
     try {
-      const r = await api.search(searchTerm.trim(), selected.kind === 'movie' ? 'movie' : 'show');
+      const r = await api.search(term, selected.kind === 'movie' ? 'movie' : 'show');
       setFilmResults(r.results);
       if (r.results.length === 0) toast.info('No filmpalast match for that term');
     } catch (e: any) {

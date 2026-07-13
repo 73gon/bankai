@@ -272,15 +272,31 @@ def create_app() -> Any:
             pass
         return have
 
+    def _active_titles() -> set[str]:
+        """Normalised titles currently in the queue (running/queued/done) so
+        Discover doesn't re-offer something you're already downloading."""
+        names: set[str] = set()
+        try:
+            for j in webjobs.snapshot():
+                nt = _norm_title(j.get("title", ""))
+                if nt:
+                    names.add(nt)
+        except Exception:  # noqa: BLE001 - fail-soft; never break Discover
+            pass
+        return names
+
     def _filter_discover(items: list, kind: str) -> list:
-        """Hide upcoming (not-yet-released) titles and anything already on the
-        server, so Discover only shows things worth downloading now."""
+        """Hide upcoming (not-yet-released) titles, anything already on the
+        server, and anything already in the queue, so Discover only shows
+        things worth downloading now."""
         have = _server_have(kind)
+        active = _active_titles()
         out = []
         for it in items:
             if not discover_mod.is_released(it):
                 continue
-            if _norm_title(it.name) in have:
+            nt = _norm_title(it.name)
+            if nt in have or nt in active:
                 continue
             out.append(it)
         return out

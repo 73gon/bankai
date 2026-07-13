@@ -87,3 +87,12 @@
     word-break: break-word;
   }
 }
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(420%);
+  }
+}

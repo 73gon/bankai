@@ -103,14 +103,24 @@ function AnsiLog({ text }: { text: string }) {
 // so the log reads like a concise human activity feed instead of a firehose of
 // identical progress lines.
 const LOG_NOISE_RE = /BANKAI_(?:STAGE|PROGRESS)\b/;
+// Wrapped continuations of a progress line (rich word-wraps them, so the
+// leading BANKAI_PROGRESS token is on the previous line only).
+const LOG_FRAGMENT_RE = /^(?:eta|speed|pct|status|downloaded)=/i;
 function cleanLog(raw: string): string {
   const out: string[] = [];
+  let lastKey = '';
   for (let line of raw.split('\n')) {
     if (LOG_NOISE_RE.test(line)) continue;
     // Collapse Rich's padded "[HH:MM:SS] INFO     msg" / "           INFO   msg"
     // gutter into a compact "HH:MM:SS  msg".
     line = line.replace(/^(\x1b\[[0-9;]*m)*\[(\d\d:\d\d:\d\d)\]\s+\w+\s+/, '$2  ');
     line = line.replace(/^(\x1b\[[0-9;]*m)*\s{6,}\w+\s{2,}/, '          ');
+    const bare = line.replace(/\x1b\[[0-9;]*m/g, '').trim();
+    // Drop wrapped progress fragments (eta=/speed=...) that would otherwise
+    // spam the log, and collapse consecutive identical lines.
+    if (bare && LOG_FRAGMENT_RE.test(bare)) continue;
+    if (bare && bare === lastKey) continue;
+    if (bare) lastKey = bare;
     out.push(line);
   }
   return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
@@ -147,16 +157,27 @@ function TruncCell({
 // already near it, so reading earlier lines isn't interrupted.
 const LogPanel = memo(function LogPanel({ text }: { text: string }) {
   const ref = useRef<HTMLPreElement>(null);
+  const pinnedRef = useRef(true); // default: stuck to the bottom (newest)
+  const lastTopRef = useRef(0);
   const cleaned = useMemo(() => cleanLog(text), [text]);
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    lastTopRef.current = el.scrollTop;
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    // Default to the bottom and follow new output; if the user scrolled up to
+    // read, keep their exact position instead of jumping.
+    if (pinnedRef.current) el.scrollTop = el.scrollHeight;
+    else el.scrollTop = lastTopRef.current;
   }, [cleaned]);
   return (
     <pre
       ref={ref}
+      onScroll={onScroll}
       className='ansi-log max-h-72 overflow-auto rounded-md bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground'
     >
       <AnsiLog text={cleaned || '(no output yet)'} />
@@ -223,10 +244,16 @@ function StatusCell({ r }: { r: TitleRow }) {
           {r.step_label || 'Downloading'} {pct > 0 ? `${pct}%` : ''}
         </Badge>
         <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
-          <div
-            className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500'
-            style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-          />
+          {pct > 0 ? (
+            <div
+              className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500'
+              style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+            />
+          ) : (
+            // No determinate percent yet (e.g. extracting) — show motion so it
+            // doesn't look stuck at 0.
+            <div className='h-full w-1/3 animate-[indeterminate_1.3s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500' />
+          )}
         </div>
       </div>
     );

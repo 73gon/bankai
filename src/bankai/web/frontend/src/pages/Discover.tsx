@@ -158,10 +158,26 @@ export default function Discover() {
   }
 
   async function reSearchMovie() {
-    if (!searchTerm.trim()) return;
+    const term = searchTerm.trim();
+    if (!term) return;
+    // Accept a pasted stream link directly (no search) — recognise a URL and
+    // build a single result the user can queue as-is.
+    if (/^https?:\/\/\S+$/i.test(term)) {
+      const site = /aniworld/i.test(term)
+        ? 'aniworld'
+        : /bs\.to/i.test(term)
+          ? 'bs'
+          : /kinox/i.test(term)
+            ? 'kinox'
+            : 'filmpalast';
+      setFilmResults([
+        { site, title: selected?.name ?? term, year: selected?.year ?? null, kind: 'movie', url: term },
+      ]);
+      return;
+    }
     setLoadingFilm(true);
     try {
-      const r = await api.search(searchTerm.trim(), 'movie');
+      const r = await api.search(term, 'movie');
       setFilmResults(r.results);
       if (r.results.length === 0) toast.info('No filmpalast match for that term');
     } catch (e: any) {
