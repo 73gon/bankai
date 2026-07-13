@@ -353,10 +353,13 @@ def create_app() -> Any:
     async def discover_search(q: str = Query(...), kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
         items = await discover_mod.search(q, kind=k)
-        items = _filter_discover(items, k)
+        # An explicit search should surface everything that matches. We only
+        # hide clearly-unreleased titles; the discover mirror/on-server/queued
+        # filters would otherwise hide exactly what the user searched for.
+        items = [i for i in items if discover_mod.is_released(i)]
         return {
             "configured": discover_mod.is_configured(),
-            "items": _apply_availability(items, k, cap=100),
+            "items": [discover_mod.to_dict(i) for i in items],
         }
 
     @app.get("/api/discover/poster")
@@ -778,6 +781,16 @@ def create_app() -> Any:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         review_mod.forget(str(p))
+        # Remove the now-empty movie/show folder(s) left behind, up to (but not
+        # including) the library root, so no dead folders linger.
+        try:
+            root = _library_root().resolve()
+            cur = p.parent.resolve()
+            while cur != root and root in cur.parents and not any(cur.iterdir()):
+                cur.rmdir()
+                cur = cur.parent
+        except OSError:
+            pass
         return {"deleted": True, "path": str(p)}
 
     # ------------------------------------------------------------------

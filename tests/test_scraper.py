@@ -134,9 +134,11 @@ async def test_filmpalast_search_falls_back_to_shorter_query() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.startswith("/search/title/")
-        q = request.url.path[len("/search/title/") :]
+        from urllib.parse import unquote
+
+        q = unquote(request.url.path[len("/search/title/") :])
         queried.append(q)
-        if q == "Green+Book":
+        if q == "Green Book":
             return httpx.Response(200, text=result_html)
         return httpx.Response(200, text="<html></html>")
 
@@ -153,7 +155,7 @@ async def test_filmpalast_search_falls_back_to_shorter_query() -> None:
 
     assert len(results) == 1
     assert "Green Book" in results[0].title
-    assert "Green+Book" in queried
+    assert "Green Book" in queried
 
 
 @pytest.mark.asyncio

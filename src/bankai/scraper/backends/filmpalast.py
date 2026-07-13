@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from typing import ClassVar
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 from selectolax.parser import HTMLParser
 
@@ -59,7 +59,11 @@ class FilmpalastBackend:
         return await self._search_fallback(query, kind=kind, limit=limit)
 
     async def _raw_search(self, query: str, *, limit: int = 20) -> list[SearchResult]:
-        resp = await self._client.get("/search/title/" + query.strip().replace(" ", "+"))
+        # Filmpalast's /search/title/<term> expects a URL-encoded term (spaces
+        # as %20, e.g. .../search/title/Die%20Sch%C3%B6ne%20und%20das%20Biest).
+        # Using "+" for spaces sends a literal plus in the path and returns the
+        # wrong (default) result set, so encode properly with quote().
+        resp = await self._client.get("/search/title/" + quote(query.strip()))
         detect_cloudflare(resp)
         if resp.status_code != 200:
             raise ScraperError(f"filmpalast search failed: HTTP {resp.status_code}")

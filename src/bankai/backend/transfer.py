@@ -123,12 +123,14 @@ def transfer_with_rsync(
         if item.destination.exists():
             result.transferred.append(item)
             progress(f"DONE {item.destination}")
+            _cleanup_empty_source(item.source, Path(settings.output.directory))
         elif item.source.exists():
             result.failed.append((item, "rsync finished but destination file was not created"))
             progress(f"FAILED {item.source}: destination was not created")
         else:
             result.transferred.append(item)
             progress(f"DONE {item.destination}")
+            _cleanup_empty_source(item.source, Path(settings.output.directory))
         completed += 1
         _emit_transfer_progress(progress, completed=completed, total=len(items))
     return result
@@ -264,6 +266,20 @@ def _native_move(source: Path, destination: Path, *, progress: ProgressCallback)
         source.unlink(missing_ok=True)
     except OSError:
         pass  # copy succeeded; leaving the source is non-fatal
+
+
+def _cleanup_empty_source(source: Path, library_root: Path) -> None:
+    """Remove the now-empty movie/show folder left behind after a file is moved
+    out, up to (but not including) the library root — no dead folders linger.
+    """
+    try:
+        root = library_root.resolve()
+        cur = source.parent.resolve()
+        while cur != root and root in cur.parents and not any(cur.iterdir()):
+            cur.rmdir()
+            cur = cur.parent
+    except OSError:
+        pass
 
 
 def _emit_transfer_progress(

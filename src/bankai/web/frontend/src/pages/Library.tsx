@@ -250,18 +250,14 @@ function StatusCell({ r }: { r: TitleRow }) {
           <Loader2 className='h-3 w-3 animate-spin' />
           {r.step_label || 'Downloading'} {pct > 0 ? `${pct}%` : ''}
         </Badge>
-        <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
-          {pct > 0 ? (
+        {pct > 0 && (
+          <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
             <div
               className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500'
               style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
             />
-          ) : (
-            // No determinate percent yet (e.g. extracting) — show motion so it
-            // doesn't look stuck at 0.
-            <div className='h-full w-1/3 animate-[indeterminate_1.3s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500' />
-          )}
-        </div>
+          </div>
+        )}
       </div>
     );
   }

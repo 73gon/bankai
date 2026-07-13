@@ -78,18 +78,24 @@ export default function Search() {
   // Live filter from TVDB as the user types (debounced).
   useEffect(() => {
     window.clearTimeout(debounce.current);
-    if (q.trim().length < 2) {
+    const raw = q.trim();
+    if (raw.length < 2) {
       setItems([]);
       setLoading(false);
       return;
     }
+    // A standalone 4-digit number is treated as a year filter (exactly 4
+    // digits — 3 or 5 don't count). The rest is the title query.
+    const ym = raw.match(/(?<!\d)(\d{4})(?!\d)/);
+    const year = ym ? parseInt(ym[1], 10) : null;
+    const titleQuery = year ? raw.replace(ym![0], '').replace(/\s+/g, ' ').trim() : raw;
     setLoading(true);
     debounce.current = window.setTimeout(() => {
       api
-        .discoverSearch(q.trim(), kind)
+        .discoverSearch(titleQuery || raw, kind)
         .then((r) => {
           setConfigured(r.configured);
-          setItems(r.items);
+          setItems(year ? r.items.filter((i) => i.year === year) : r.items);
         })
         .catch((e) => toast.error(e.message))
         .finally(() => setLoading(false));

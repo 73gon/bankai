@@ -59,15 +59,42 @@ def _running_count() -> int:
     return sum(1 for j in bgjobs.list_jobs() if j.status == "running")
 
 
+def _norm_job_title(title: str) -> str:
+    import re
+
+    t = title.lower()
+    t = re.sub(r"\(\d{4}\)", "", t)
+    t = re.sub(r"[^a-z0-9]+", "", t)
+    return t
+
+
+def _running_titles() -> set[str]:
+    """Normalised titles of movie/show jobs currently running, so we never
+    start a second copy that would collide on the shared extract directory."""
+    return {
+        _norm_job_title(j.title)
+        for j in bgjobs.list_jobs()
+        if j.status == "running" and j.kind != "transfer"
+    }
+
+
 def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
-    """Queue a job. Starts immediately if a slot is free, else pends."""
+    """Queue a job. Starts immediately if a slot is free, else pends.
+
+    Refuses to queue a duplicate of something already running or already
+    pending (same title) — two copies would race on the same extract dir and
+    one would fail with no obvious reason.
+    """
     with _LOCK:
         settings = get_settings()
         limit = max(1, settings.web.max_concurrent_jobs)
+        nt = _norm_job_title(title)
+        pending = _load_pending()
+        if nt and (nt in _running_titles() or any(_norm_job_title(p.title) == nt for p in pending)):
+            return {"status": "duplicate", "title": title}
         if _running_count() < limit:
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
-        pending = _load_pending()
         item = PendingJob(id=uuid.uuid4().hex[:8], kind=kind, title=title, args=args)
         pending.append(item)
         _save_pending(pending)
@@ -82,11 +109,16 @@ def reconcile() -> int:
             return 0
         settings = get_settings()
         limit = max(1, settings.web.max_concurrent_jobs)
+        running_titles = _running_titles()
         started = 0
         while pending and _running_count() < limit:
             item = pending.pop(0)
+            nt = _norm_job_title(item.title)
+            if nt and nt in running_titles:
+                continue  # already running -> drop the duplicate instead of colliding
             try:
                 bgjobs.spawn(kind=item.kind, title=item.title, args=item.args)
+                running_titles.add(nt)
                 started += 1
             except Exception as exc:  # pragma: no cover - spawn failure
                 log.warning("failed to start pending job %s: %s", item.id, exc)
