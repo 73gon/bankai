@@ -635,10 +635,17 @@ export default function Library() {
     const canCancel = isJob && (r.pending || r.job_status === 'running');
     const canDelete = isJob && (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled');
     const isOpen = expanded === r.id;
+    const isDone = rowStatus(r) === 'done';
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
-        <tr className='cursor-pointer border-t border-border hover:bg-secondary/70' onClick={() => toggleExpand(r)}>
+        <tr
+          className={cn(
+            'cursor-pointer border-t border-border',
+            isDone ? 'bg-success/[0.06] hover:bg-success/[0.1]' : 'hover:bg-secondary/70',
+          )}
+          onClick={() => toggleExpand(r)}
+        >
           <td className='px-2 py-2 align-middle'>
             <Poster r={r} />
           </td>

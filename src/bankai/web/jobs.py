@@ -3,8 +3,9 @@
 The web UI enqueues pipeline runs (movies / show episodes) which are
 executed by the existing detached background-job supervisor
 (:mod:`bankai.cli.bgjobs`). To avoid overloading the box, only
-``web.max_concurrent_jobs`` run at once; the rest wait in a persisted
-pending queue and start as slots free up.
+``web.max_concurrent_jobs`` movie/show pipelines run at once; the rest wait in
+a persisted pending queue and start as slots free up. Transfers use a separate
+unrestricted lane so copying an approved file never waits for a download.
 """
 
 from __future__ import annotations
@@ -57,7 +58,12 @@ def _save_pending(items: list[PendingJob]) -> None:
 
 
 def _running_count() -> int:
-    return sum(1 for j in bgjobs.list_jobs() if j.status == "running")
+    """Count pipeline jobs against the configured concurrency limit."""
+    return sum(
+        1
+        for job in bgjobs.list_jobs()
+        if job.status == "running" and job.kind != "transfer"
+    )
 
 
 def _norm_job_title(title: str) -> str:
@@ -70,13 +76,21 @@ def _norm_job_title(title: str) -> str:
 
 
 def _running_titles() -> set[str]:
-    """Normalised titles of movie/show jobs currently running, so we never
-    start a second copy that would collide on the shared extract directory."""
-    return {_norm_job_title(j.title) for j in bgjobs.list_jobs() if j.status == "running" and j.kind != "transfer"}
+    """Normalised titles of all running jobs, including transfers.
+
+    Transfer titles are prefixed with ``Transfer`` and therefore cannot clash
+    with pipeline titles, but including them prevents a double-click from
+    starting two copies of the same approved file.
+    """
+    return {
+        _norm_job_title(job.title)
+        for job in bgjobs.list_jobs()
+        if job.status == "running"
+    }
 
 
 def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
-    """Queue a job. Starts immediately if a slot is free, else pends.
+    """Queue a job. Transfers start immediately; pipelines obey the limit.
 
     Refuses to queue a duplicate of something already running or already
     pending (same title) — two copies would race on the same extract dir and
@@ -89,6 +103,9 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
         pending = _load_pending()
         if nt and (nt in _running_titles() or any(_norm_job_title(p.title) == nt for p in pending)):
             return {"status": "duplicate", "title": title}
+        if kind == "transfer":
+            job = bgjobs.spawn(kind=kind, title=title, args=args)
+            return {"status": "running", "id": job.id, "title": title}
         if _running_count() < limit:
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
@@ -99,7 +116,7 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
 
 
 def reconcile() -> int:
-    """Promote pending jobs into running slots. Returns number started."""
+    """Promote pending jobs, bypassing pipeline slots for transfers."""
     with _LOCK:
         pending = _load_pending()
         if not pending:
@@ -108,6 +125,22 @@ def reconcile() -> int:
         limit = max(1, settings.web.max_concurrent_jobs)
         running_titles = _running_titles()
         started = 0
+
+        # Migrate transfers queued by older releases immediately, even when a
+        # movie/show pipeline currently occupies every configured slot.
+        transfer_items = [item for item in pending if item.kind == "transfer"]
+        pending = [item for item in pending if item.kind != "transfer"]
+        for item in transfer_items:
+            nt = _norm_job_title(item.title)
+            if nt and nt in running_titles:
+                continue
+            try:
+                bgjobs.spawn(kind=item.kind, title=item.title, args=item.args)
+                running_titles.add(nt)
+                started += 1
+            except Exception as exc:  # pragma: no cover - spawn failure
+                log.warning("failed to start pending job %s: %s", item.id, exc)
+
         while pending and _running_count() < limit:
             item = pending.pop(0)
             nt = _norm_job_title(item.title)
