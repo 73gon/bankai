@@ -1,55 +1,290 @@
+@import 'tailwindcss';
 @import '@fontsource-variable/geist';
 @import '@fontsource-variable/geist-mono';
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@custom-variant dark (&:is(.dark *));
+
+/* ---------------------------------------------------------------------------
+   Eigenpair design tokens — monochrome (Resend / Vercel / Linear inspired).
+   Values are full oklch() colours (Tailwind v4 maps them via @theme inline and
+   handles alpha modifiers with color-mix, so no bare-channel trick needed).
+--------------------------------------------------------------------------- */
+:root {
+  --radius: 0.625rem;
+
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0.145 0 0);
+  --foreground-soft: oklch(0.37 0 0);
+  --foreground-muted: oklch(0.556 0 0);
+
+  --accent-active: oklch(0.205 0 0);
+  --accent-active-contrast: oklch(0.985 0 0);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+
+  --primary: var(--accent-active);
+  --primary-foreground: var(--accent-active-contrast);
+
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+
+  --chart-1: oklch(0.205 0 0);
+  --chart-2: oklch(0.38 0 0);
+  --chart-3: oklch(0.52 0 0);
+  --chart-4: oklch(0.66 0 0);
+  --chart-5: oklch(0.8 0 0);
+
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: var(--accent-active);
+  --sidebar-primary-foreground: var(--accent-active-contrast);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+
+  --font-heading: 'Libre Baskerville', Georgia, serif;
+  --font-body: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-ui: 'Geist Mono Variable', ui-monospace, monospace;
+  --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', monospace;
+
+  --button-border-width: 1.5px;
+  --button-border-primary: oklch(1 0 0 / 0.2);
+  --button-border-neutral: oklch(0.78 0 0);
+  --button-transition-duration: 260ms;
+  --button-transition-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dark {
+  --background: oklch(0.07 0 0);
+  --foreground: oklch(0.985 0 0);
+  --foreground-soft: oklch(0.75 0 0);
+  --foreground-muted: oklch(0.6 0 0);
+
+  --accent-active: oklch(0.985 0 0);
+  --accent-active-contrast: oklch(0.145 0 0);
+
+  --card: oklch(0.115 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.115 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+
+  --primary: var(--accent-active);
+  --primary-foreground: var(--accent-active-contrast);
+
+  --secondary: oklch(0.16 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+
+  --muted: oklch(0.155 0 0);
+  --muted-foreground: oklch(0.66 0 0);
+
+  --accent: oklch(0.18 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.556 0 0);
+
+  --chart-1: oklch(0.985 0 0);
+  --chart-2: oklch(0.8 0 0);
+  --chart-3: oklch(0.66 0 0);
+  --chart-4: oklch(0.52 0 0);
+  --chart-5: oklch(0.38 0 0);
+
+  --sidebar: oklch(0.115 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: var(--accent-active);
+  --sidebar-primary-foreground: var(--accent-active-contrast);
+  --sidebar-accent: oklch(0.18 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+
+  --button-border-primary: oklch(0 0 0 / 0.2);
+  --button-border-neutral: oklch(1 0 0 / 0.18);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-foreground-soft: var(--foreground-soft);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: var(--font-body);
+  --font-serif: var(--font-heading);
+  --font-mono: var(--font-mono);
+
+  --animate-fade-in: fade-in 0.2s ease-out;
+}
+
+/* ---------------------------------------------------------------------------
+   Embossed buttons / inputs (eigenpair). Left UNLAYERED so they win over
+   Tailwind utility layers via cascade order. Buttons/inputs opt in by emitting
+   data-slot / data-variant attributes.
+--------------------------------------------------------------------------- */
+[data-slot='button'][data-variant='default'] {
+  font-weight: 500;
+  border: var(--button-border-width) solid var(--button-border-primary);
+  background-image: linear-gradient(180deg, oklch(0.3 0 0) 0%, oklch(0.17 0 0) 100%);
+  transition:
+    border-color var(--button-transition-duration) var(--button-transition-ease),
+    box-shadow var(--button-transition-duration) var(--button-transition-ease),
+    color var(--button-transition-duration) var(--button-transition-ease),
+    filter var(--button-transition-duration) var(--button-transition-ease);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.14),
+    inset 0 0 0 1px oklch(1 0 0 / 0.04),
+    0 1px 2px oklch(0 0 0 / 0.28),
+    0 2px 6px oklch(0 0 0 / 0.12);
+}
+[data-slot='button'][data-variant='default']:hover {
+  filter: brightness(1.08);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.18),
+    inset 0 0 0 1px oklch(1 0 0 / 0.05),
+    0 2px 8px oklch(0 0 0 / 0.32),
+    0 3px 10px oklch(0 0 0 / 0.16);
+}
+.dark [data-slot='button'][data-variant='default'] {
+  border-color: var(--button-border-primary);
+  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(0.9 0 0) 100%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.6),
+    0 0 0 1px oklch(0 0 0 / 0.05),
+    0 1px 2px oklch(0 0 0 / 0.5),
+    0 6px 22px oklch(1 0 0 / 0.14),
+    0 2px 10px oklch(1 0 0 / 0.1);
+}
+.dark [data-slot='button'][data-variant='default']:hover {
+  filter: brightness(1.03);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.7),
+    0 0 0 1px oklch(0 0 0 / 0.06),
+    0 2px 4px oklch(0 0 0 / 0.5),
+    0 10px 34px oklch(1 0 0 / 0.24),
+    0 3px 14px oklch(1 0 0 / 0.16);
+}
+
+[data-slot='button'][data-variant='secondary'],
+[data-slot='button'][data-variant='outline'] {
+  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(0.94 0 0) 100%);
+  color: var(--foreground);
+  border: var(--button-border-width) solid var(--button-border-neutral);
+  transition:
+    border-color var(--button-transition-duration) var(--button-transition-ease),
+    box-shadow var(--button-transition-duration) var(--button-transition-ease),
+    color var(--button-transition-duration) var(--button-transition-ease),
+    filter var(--button-transition-duration) var(--button-transition-ease);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.8),
+    0 1px 2px oklch(0 0 0 / 0.05),
+    0 1px 3px oklch(0 0 0 / 0.04);
+}
+[data-slot='button'][data-variant='secondary']:hover,
+[data-slot='button'][data-variant='outline']:hover {
+  border-color: oklch(0.85 0 0);
+  color: var(--foreground);
+  filter: brightness(0.985);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.9),
+    0 2px 6px oklch(0 0 0 / 0.08);
+}
+.dark [data-slot='button'][data-variant='secondary'],
+.dark [data-slot='button'][data-variant='outline'] {
+  background-image: linear-gradient(180deg, oklch(0.23 0 0) 0%, oklch(0.14 0 0) 100%);
+  color: var(--foreground);
+  border: var(--button-border-width) solid var(--button-border-neutral);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.06),
+    0 1px 2px oklch(0 0 0 / 0.4);
+}
+.dark [data-slot='button'][data-variant='secondary']:hover,
+.dark [data-slot='button'][data-variant='outline']:hover {
+  border-color: oklch(1 0 0 / 0.16);
+  color: var(--foreground);
+  filter: brightness(1.08);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.08),
+    0 2px 6px oklch(0 0 0 / 0.5);
+}
+
+[data-slot='input'],
+[data-slot='textarea'],
+[data-slot='select-trigger'] {
+  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(0.965 0 0) 100%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.9),
+    inset 0 0 0 1px oklch(0 0 0 / 0.02),
+    0 1px 2px oklch(0 0 0 / 0.05);
+}
+.dark [data-slot='input'],
+.dark [data-slot='textarea'],
+.dark [data-slot='select-trigger'] {
+  background-image: linear-gradient(180deg, oklch(0.2 0 0) 0%, oklch(0.14 0 0) 100%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.06),
+    0 1px 2px oklch(0 0 0 / 0.4);
+}
+[data-slot='input']:focus-visible,
+[data-slot='textarea']:focus-visible,
+[data-slot='select-trigger']:focus-visible {
+  border-color: var(--foreground);
+  box-shadow: 0 0 0 3px oklch(0.6 0 0 / 0.18);
+}
 
 @layer base {
-  :root {
-    /* Eigenpair Mono — light (monochrome, Resend/Vercel/Linear inspired). */
-    --background: 0.99 0 0;
-    --foreground: 0.145 0 0;
-    --card: 1 0 0;
-    --card-foreground: 0.145 0 0;
-    --primary: 0.205 0 0;
-    --primary-foreground: 0.985 0 0;
-    --secondary: 0.97 0 0;
-    --secondary-foreground: 0.205 0 0;
-    --muted: 0.97 0 0;
-    --muted-foreground: 0.556 0 0;
-    --accent: 0.97 0 0;
-    --accent-foreground: 0.205 0 0;
-    --destructive: 0.577 0.245 27.325;
-    --destructive-foreground: 0.985 0 0;
-    --border: 0.922 0 0;
-    --input: 0.922 0 0;
-    --ring: 0.708 0 0;
-    --radius: 0.625rem;
-  }
-
-  .dark {
-    /* Eigenpair Mono — dark. Border/input use solid grays equivalent to the
-       spec's translucent whites (avoids double-alpha with Tailwind /opacity). */
-    --background: 0.055 0 0;
-    --foreground: 0.985 0 0;
-    --card: 0.084 0 0;
-    --card-foreground: 0.985 0 0;
-    --primary: 0.985 0 0;
-    --primary-foreground: 0.145 0 0;
-    --secondary: 0.15 0 0;
-    --secondary-foreground: 0.985 0 0;
-    --muted: 0.15 0 0;
-    --muted-foreground: 0.62 0 0;
-    --accent: 0.205 0 0;
-    --accent-foreground: 0.985 0 0;
-    --destructive: 0.704 0.191 22.216;
-    --destructive-foreground: 0.985 0 0;
-    --border: 0.235 0 0;
-    --input: 0.285 0 0;
-    --ring: 0.62 0 0;
-  }
-
   * {
     @apply border-border;
   }
@@ -81,7 +316,7 @@
     height: 10px;
   }
   ::-webkit-scrollbar-thumb {
-    background: oklch(var(--border));
+    background: var(--border);
     border-radius: 9999px;
     border: 2px solid transparent;
     background-clip: padding-box;
@@ -133,6 +368,15 @@
   .ansi-log {
     white-space: pre-wrap;
     word-break: break-word;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 
