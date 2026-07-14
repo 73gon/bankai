@@ -27,6 +27,7 @@ _CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
 # so we never launch duplicate refreshes for the same key.
 _REFRESHING: set[str] = set()
 _REFRESH_LOCK = threading.Lock()
+_REFRESH_TASKS: set[asyncio.Task[None]] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,10 +120,134 @@ def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
     )
 
 
-async def search(query: str, *, kind: str, limit: int = 24) -> list[DiscoverItem]:
+async def _request_data(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, object] | None = None,
+) -> object:
+    """Fetch one TVDB data payload without making search fail as a whole."""
+    try:
+        response = await client.get(endpoint, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json().get("data")
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("TVDB request failed for %s: %s", endpoint, exc)
+        return None
+
+
+def _dedupe_items(items: list[DiscoverItem], limit: int) -> list[DiscoverItem]:
+    unique: list[DiscoverItem] = []
+    seen: set[tuple[object, ...]] = set()
+    for item in items:
+        key: tuple[object, ...]
+        if item.tvdb_id is not None:
+            key = ("tvdb", item.tvdb_id)
+        else:
+            key = ("title", item.name.casefold(), item.year)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+async def _person_movies(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    query: str,
+    limit: int,
+) -> list[DiscoverItem]:
+    """Return movies linked to matching TVDB people (cast or crew).
+
+    TVDB exposes an exact director filter, while all other cast/crew work is
+    represented by movie-linked character records on the extended person
+    response. Combining both paths covers directors as well as actors.
+    """
+    director_data, people_data = await asyncio.gather(
+        _request_data(
+            client,
+            "search",
+            headers=headers,
+            params={"type": "movie", "director": query, "limit": limit},
+        ),
+        _request_data(
+            client,
+            "search",
+            headers=headers,
+            params={"query": query, "type": "person", "limit": 5},
+        ),
+    )
+
+    direct = (
+        [_item_from_record(record, "movie") for record in director_data if isinstance(record, dict)]
+        if isinstance(director_data, list)
+        else []
+    )
+    people = [record for record in people_data if isinstance(record, dict)] if isinstance(people_data, list) else []
+
+    # Prefer exact full-name hits, but keep fuzzy TVDB matches useful for partial
+    # names. Limiting extended lookups keeps a broad name from fanning out into
+    # dozens of API calls.
+    normalized_query = " ".join(query.casefold().split())
+    exact = [
+        record
+        for record in people
+        if " ".join(str(record.get("name") or record.get("title") or "").casefold().split())
+        == normalized_query
+    ]
+    candidates = (exact or people)[:3]
+    person_ids = [
+        person_id
+        for record in candidates
+        if (person_id := _to_int(record.get("tvdb_id") or record.get("id"))) is not None
+    ]
+    extended_data = await asyncio.gather(
+        *(
+            _request_data(client, f"people/{person_id}/extended", headers=headers)
+            for person_id in person_ids
+        )
+    )
+
+    credits: list[DiscoverItem] = []
+    for person in extended_data:
+        if not isinstance(person, dict):
+            continue
+        characters = person.get("characters") or []
+        if not isinstance(characters, list):
+            continue
+        for character in characters:
+            if not isinstance(character, dict):
+                continue
+            movie_id = _to_int(character.get("movieId"))
+            movie = character.get("movie")
+            if movie_id is None or not isinstance(movie, dict) or not movie.get("name"):
+                continue
+            record = {**movie, "tvdb_id": movie_id}
+            credits.append(_item_from_record(record, "movie"))
+
+    credits.sort(key=lambda item: (-(item.year or 0), item.name.casefold()))
+    return _dedupe_items([*direct, *credits], limit)
+
+
+async def search(
+    query: str,
+    *,
+    kind: str,
+    limit: int = 24,
+    search_by: str = "title",
+) -> list[DiscoverItem]:
     if not is_configured() or not query.strip():
         return []
-    cache_key = f"search:{kind}:{query.strip().casefold()}:{limit}"
+    mode = search_by.strip().casefold()
+    if mode not in {"title", "person", "studio"}:
+        return []
+    if kind != "movie" and mode != "title":
+        return []
+    cache_key = f"search:{kind}:{mode}:{query.strip().casefold()}:{limit}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -131,18 +256,26 @@ async def search(query: str, *, kind: str, limit: int = 24) -> list[DiscoverItem
         token = await _login(client)
         if not token:
             return []
-        try:
-            r = await client.get(
+        headers = {"Authorization": f"Bearer {token}"}
+        if mode == "person":
+            items = await _person_movies(client, headers, query.strip(), limit)
+        else:
+            params: dict[str, object] = {"type": tvdb_type, "limit": limit}
+            if mode == "studio":
+                params["company"] = query.strip()
+            else:
+                params["query"] = query.strip()
+            data = await _request_data(
+                client,
                 "search",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"query": query.strip(), "type": tvdb_type, "limit": limit},
+                headers=headers,
+                params=params,
             )
-            r.raise_for_status()
-            data = r.json().get("data") or []
-        except (httpx.HTTPError, ValueError) as exc:
-            log.warning("TVDB search failed: %s", exc)
-            return []
-    items = [_item_from_record(rec, kind) for rec in data if isinstance(rec, dict)]
+            items = (
+                [_item_from_record(record, kind) for record in data if isinstance(record, dict)]
+                if isinstance(data, list)
+                else []
+            )
     _cache_put(cache_key, items)
     return items
 
@@ -306,9 +439,7 @@ def is_released(item: DiscoverItem, *, today: datetime.date | None = None) -> bo
             return True
     # Current year without a date, or no year at all: use the status hint.
     st = (item.status or "").strip().lower()
-    if any(h in st for h in _UNRELEASED_HINTS):
-        return False
-    return True
+    return not any(h in st for h in _UNRELEASED_HINTS)
 
 
 _UNRELEASED_HINTS = (
@@ -390,7 +521,9 @@ def _schedule_refresh(kind: str) -> None:
 
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_run())
+        task = loop.create_task(_run())
+        _REFRESH_TASKS.add(task)
+        task.add_done_callback(_REFRESH_TASKS.discard)
     except RuntimeError:
         threading.Thread(target=lambda: asyncio.run(_run()), daemon=True).start()
 

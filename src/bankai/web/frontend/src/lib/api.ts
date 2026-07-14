@@ -47,6 +47,8 @@ export interface DiscoverItem {
   filmpalast_url?: string;
 }
 
+export type DiscoverSearchBy = 'title' | 'person' | 'studio';
+
 export interface SearchResult {
   site: string;
   title: string;
@@ -194,8 +196,10 @@ export const api = {
   health: () => request<HealthResponse>('/api/health'),
 
   discoverTrending: (kind: string) => request<{ configured: boolean; items: DiscoverItem[] }>(`/api/discover/trending?kind=${kind}`),
-  discoverSearch: (q: string, kind: string) =>
-    request<{ configured: boolean; items: DiscoverItem[] }>(`/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}`),
+  discoverSearch: (q: string, kind: string, by: DiscoverSearchBy = 'title') =>
+    request<{ configured: boolean; items: DiscoverItem[] }>(
+      `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}`,
+    ),
   discoverGerman: (id: number, kind: string) =>
     request<{ tvdb_id: number; kind: string; german: string | null }>(`/api/discover/german?id=${id}&kind=${kind}`),
   posterUrl: (url: string) => `/api/discover/poster?url=${encodeURIComponent(url)}`,

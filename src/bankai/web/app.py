@@ -450,9 +450,18 @@ def create_app() -> Any:
         }
 
     @app.get("/api/discover/search")
-    async def discover_search(q: str = Query(...), kind: str = Query("movie")) -> dict:
+    async def discover_search(
+        q: str = Query(...),
+        kind: str = Query("movie"),
+        search_by: str = Query("title", alias="by"),
+    ) -> dict:
         k = "movie" if kind == "movie" else "show"
-        items = await discover_mod.search(q, kind=k)
+        mode = search_by.strip().casefold()
+        if mode not in {"title", "person", "studio"}:
+            raise HTTPException(status_code=400, detail="by must be title, person, or studio")
+        if k != "movie" and mode != "title":
+            raise HTTPException(status_code=400, detail="person and studio search are only available for movies")
+        items = await discover_mod.search(q, kind=k, search_by=mode)
         # An explicit search should surface everything that matches. We only
         # hide clearly-unreleased titles; the discover mirror/on-server/queued
         # filters would otherwise hide exactly what the user searched for.

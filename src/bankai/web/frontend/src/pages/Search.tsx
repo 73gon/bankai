@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type DiscoverItem, type SearchResult, type EpisodeItem } from '@/lib/api';
+import { api, type DiscoverItem, type DiscoverSearchBy, type SearchResult, type EpisodeItem } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -94,6 +94,7 @@ function Poster({ item, onClick, priority = false, eager = false }: { item: Disc
 
 export default function Search() {
   const [kind, setKind] = useState<'movie' | 'show'>('movie');
+  const [searchBy, setSearchBy] = useState<DiscoverSearchBy>('title');
   const [q, setQ] = useState('');
   const [items, setItems] = useState<DiscoverItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -123,6 +124,7 @@ export default function Search() {
   // Live filter from TVDB as the user types (debounced).
   useEffect(() => {
     window.clearTimeout(debounce.current);
+    let cancelled = false;
     const raw = q.trim();
     if (raw.length < 2) {
       setItems([]);
@@ -131,22 +133,30 @@ export default function Search() {
     }
     // A standalone 4-digit number is treated as a year filter (exactly 4
     // digits — 3 or 5 don't count). The rest is the title query.
-    const ym = raw.match(/(?<!\d)(\d{4})(?!\d)/);
+    const ym = searchBy === 'title' ? raw.match(/(?<!\d)(\d{4})(?!\d)/) : null;
     const year = ym ? parseInt(ym[1], 10) : null;
     const titleQuery = year ? raw.replace(ym![0], '').replace(/\s+/g, ' ').trim() : raw;
     setLoading(true);
     debounce.current = window.setTimeout(() => {
       api
-        .discoverSearch(titleQuery || raw, kind)
+        .discoverSearch(titleQuery || raw, kind, searchBy)
         .then((r) => {
+          if (cancelled) return;
           setConfigured(r.configured);
           setItems(year ? r.items.filter((i) => i.year === year) : r.items);
         })
-        .catch((e) => toast.error(e.message))
-        .finally(() => setLoading(false));
+        .catch((e) => {
+          if (!cancelled) toast.error(e.message);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
     }, 350);
-    return () => window.clearTimeout(debounce.current);
-  }, [q, kind]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(debounce.current);
+    };
+  }, [q, kind, searchBy]);
 
   async function openTitle(item: DiscoverItem) {
     setSelected(item);
@@ -355,7 +365,15 @@ export default function Search() {
     <div className='space-y-6'>
       <header>
         <h1 className='text-2xl font-semibold'>Search</h1>
-        <p className='text-sm text-muted-foreground'>Find a {kind} on TheTVDB, then match it to a German stream source.</p>
+        <p className='text-sm text-muted-foreground'>
+          {kind === 'show'
+            ? 'Find a show on TheTVDB, then match it to a German stream source.'
+            : searchBy === 'person'
+              ? 'Find movies by cast or crew on TheTVDB, then match one to a German stream source.'
+              : searchBy === 'studio'
+                ? 'Find movies from a studio or production company on TheTVDB.'
+                : 'Find a movie on TheTVDB, then match it to a German stream source.'}
+        </p>
       </header>
 
       <div className='flex flex-wrap items-center gap-3'>
@@ -363,6 +381,7 @@ export default function Search() {
           value={kind}
           onValueChange={(v) => {
             setKind(v as 'movie' | 'show');
+            if (v === 'show') setSearchBy('title');
             setItems([]);
             setSelected(null);
           }}
@@ -372,12 +391,37 @@ export default function Search() {
             <TabsTrigger value='show'>Show</TabsTrigger>
           </TabsList>
         </Tabs>
+        {kind === 'movie' && (
+          <Tabs
+            value={searchBy}
+            onValueChange={(value) => {
+              setSearchBy(value as DiscoverSearchBy);
+              setItems([]);
+              setSelected(null);
+            }}
+            aria-label='Search movies by'
+          >
+            <TabsList>
+              <TabsTrigger value='title'>Title</TabsTrigger>
+              <TabsTrigger value='person'>Person</TabsTrigger>
+              <TabsTrigger value='studio'>Studio</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
         <div className='relative flex-1'>
           <SearchIcon className='absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' />
           <Input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder={kind === 'movie' ? 'Start typing a movie…' : 'Start typing a show…'}
+            placeholder={
+              kind === 'show'
+                ? 'Start typing a show…'
+                : searchBy === 'person'
+                  ? 'Type an actor, director, or crew member…'
+                  : searchBy === 'studio'
+                    ? 'Type a studio or production company…'
+                    : 'Start typing a movie…'
+            }
             className='pl-9'
             autoFocus
           />
@@ -395,7 +439,11 @@ export default function Search() {
       ) : q.trim().length < 2 ? (
         <EmptyState icon={SearchIcon} title='Type to search' description='Results appear as you type.' />
       ) : items.length === 0 ? (
-        <EmptyState icon={SearchIcon} title='No results' description='Try a different title.' />
+        <EmptyState
+          icon={SearchIcon}
+          title='No results'
+          description={searchBy === 'person' ? 'Try the person’s full name.' : searchBy === 'studio' ? 'Try the company’s full name.' : 'Try a different title.'}
+        />
       ) : (
         <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6'>
           {items.map((it, index) => (

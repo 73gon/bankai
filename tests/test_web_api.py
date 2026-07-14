@@ -37,6 +37,32 @@ def test_health(client: TestClient) -> None:
     assert "version" in body
 
 
+def test_discover_search_forwards_movie_search_mode(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    async def fake_search(query: str, *, kind: str, search_by: str) -> list[object]:
+        calls.append((query, kind, search_by))
+        return []
+
+    monkeypatch.setattr("bankai.web.discover.search", fake_search)
+    monkeypatch.setattr("bankai.web.discover.is_configured", lambda: True)
+
+    response = client.get("/api/discover/search", params={"q": "Anne Hathaway", "kind": "movie", "by": "person"})
+
+    assert response.status_code == 200
+    assert calls == [("Anne Hathaway", "movie", "person")]
+
+
+def test_discover_search_rejects_non_title_show_mode(client: TestClient) -> None:
+    response = client.get("/api/discover/search", params={"q": "Disney", "kind": "show", "by": "studio"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "person and studio search are only available for movies"
+
+
 def test_library_empty(client: TestClient) -> None:
     r = client.get("/api/library")
     assert r.status_code == 200
