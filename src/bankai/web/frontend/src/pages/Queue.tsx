@@ -13,7 +13,7 @@ function statusBadge(job: Job) {
   if (job.pending) return <Badge variant='muted'>Pending</Badge>;
   switch (job.status) {
     case 'running':
-      return <Badge variant='accent'>Running</Badge>;
+      return job.kind === 'transfer' ? <Badge variant='transfer'>Transferring</Badge> : <Badge variant='info'>Running</Badge>;
     case 'done':
     case 'success':
       return <Badge variant='success'>Done</Badge>;
@@ -29,10 +29,22 @@ function statusBadge(job: Job) {
 
 function StatusIcon({ job }: { job: Job }) {
   if (job.pending) return <Clock className='h-4 w-4 text-muted-foreground' />;
-  if (job.status === 'running') return <Loader2 className='h-4 w-4 animate-spin text-fuchsia-300' />;
-  if (['done', 'success'].includes(job.status)) return <CheckCircle2 className='h-4 w-4 text-emerald-400' />;
-  if (['error', 'failed'].includes(job.status)) return <AlertCircle className='h-4 w-4 text-red-400' />;
+  if (job.status === 'running')
+    return <Loader2 className={`h-4 w-4 animate-spin ${job.kind === 'transfer' ? 'text-transfer' : 'text-info'}`} />;
+  if (['done', 'success'].includes(job.status)) return <CheckCircle2 className='h-4 w-4 text-success' />;
+  if (['error', 'failed'].includes(job.status)) return <AlertCircle className='h-4 w-4 text-destructive' />;
   return <ListVideo className='h-4 w-4 text-muted-foreground' />;
+}
+
+function jobTint(job: Job): string {
+  if (job.pending) return 'bg-muted/25 hover:bg-muted/35';
+  if (job.status === 'running') {
+    return job.kind === 'transfer' ? 'bg-transfer/[0.14] hover:bg-transfer/[0.2]' : 'bg-info/[0.13] hover:bg-info/[0.19]';
+  }
+  if (['done', 'success'].includes(job.status)) return 'bg-success/[0.14] hover:bg-success/[0.2]';
+  if (['error', 'failed'].includes(job.status)) return 'bg-destructive/[0.15] hover:bg-destructive/[0.21]';
+  if (job.status === 'cancelled') return 'bg-warning/[0.13] hover:bg-warning/[0.19]';
+  return 'bg-muted/20 hover:bg-muted/30';
 }
 
 export default function Queue() {
@@ -79,7 +91,7 @@ export default function Queue() {
             const pct = job.overall_percent ?? 0;
             const active = follow === job.id;
             return (
-              <Card key={job.id} className={cn(active && 'ring-1 ring-primary/40')}>
+              <Card key={job.id} className={cn(jobTint(job), active && 'ring-1 ring-primary/40')}>
                 <CardContent className='p-4'>
                   <div className='flex items-center justify-between gap-3'>
                     <button className='flex min-w-0 flex-1 items-center gap-3 text-left' onClick={() => setFollow(active ? null : job.id)}>
@@ -112,7 +124,10 @@ export default function Queue() {
                     <div className='mt-3'>
                       <div className='h-1.5 overflow-hidden rounded-full bg-secondary'>
                         <div
-                          className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500 transition-all'
+                          className={cn(
+                            'h-full rounded-full bg-gradient-to-r transition-all',
+                            job.kind === 'transfer' ? 'from-transfer to-primary' : 'from-info to-primary',
+                          )}
                           style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
                         />
                       </div>

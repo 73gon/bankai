@@ -208,7 +208,13 @@ export const api = {
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
   queueMovie: (body: { title: string; german?: string; url?: string; site?: string; year?: number }) =>
     request('/api/queue/movie', { method: 'POST', body: JSON.stringify(body) }),
-  queueShow: (body: { show: string; season: number; episodes?: number[]; site?: string }) =>
+  queueShow: (body: {
+    show: string;
+    season: number;
+    episodes?: number[];
+    site?: string;
+    custom_episodes?: { episode: number; title?: string; url: string }[];
+  }) =>
     request('/api/queue/show', { method: 'POST', body: JSON.stringify(body) }),
   cancelJob: (id: string) => request(`/api/queue/${id}/cancel`, { method: 'POST' }),
   retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: 'POST' }),

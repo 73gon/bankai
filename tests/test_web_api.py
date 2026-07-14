@@ -12,7 +12,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bankai.config import get_settings, reset_settings_cache
-from bankai.web.app import _parse_range, create_app
+from bankai.web.app import _parse_range, _stream_site_from_url, _waveform_envelope, create_app
 
 
 @pytest.fixture()
@@ -47,6 +47,88 @@ def test_queue_snapshot(client: TestClient) -> None:
     r = client.get("/api/queue")
     assert r.status_code == 200
     assert "jobs" in r.json()
+
+
+def test_queue_show_accepts_custom_episode_mirror_links(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[dict[str, object]] = []
+
+    def fake_enqueue(*, kind: str, title: str, args: list[str]) -> dict:
+        queued.append({"kind": kind, "title": title, "args": args})
+        return {"status": "queued", "title": title}
+
+    monkeypatch.setattr("bankai.web.jobs.enqueue", fake_enqueue)
+    r = client.post(
+        "/api/queue/show",
+        json={
+            "show": "Arcane",
+            "season": 2,
+            "custom_episodes": [
+                {"episode": 1, "title": "Heavy Is the Crown", "url": "https://voe.sx/e/abc123"},
+                {"episode": 2, "url": "https://filmpalast.to/stream/arcane-s02e02"},
+            ],
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["count"] == 2
+    assert [item["title"] for item in queued] == ["Arcane S02E01", "Arcane S02E02"]
+    first_args = queued[0]["args"]
+    second_args = queued[1]["args"]
+    assert isinstance(first_args, list)
+    assert isinstance(second_args, list)
+    assert first_args[first_args.index("--site") + 1] == "unknown"
+    assert first_args[first_args.index("--url") + 1] == "https://voe.sx/e/abc123"
+    assert first_args[first_args.index("--episode-title") + 1] == "Heavy Is the Crown"
+    assert second_args[second_args.index("--site") + 1] == "filmpalast"
+
+
+def test_queue_show_rejects_invalid_or_duplicate_custom_episode_links(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("bankai.web.jobs.enqueue", lambda **_kwargs: {})
+    invalid = client.post(
+        "/api/queue/show",
+        json={"show": "Arcane", "season": 2, "custom_episodes": [{"episode": 1, "url": "voe.sx/no-scheme"}]},
+    )
+    duplicate = client.post(
+        "/api/queue/show",
+        json={
+            "show": "Arcane",
+            "season": 2,
+            "custom_episodes": [
+                {"episode": 1, "url": "https://voe.sx/one"},
+                {"episode": 1, "url": "https://voe.sx/two"},
+            ],
+        },
+    )
+
+    assert invalid.status_code == 400
+    assert duplicate.status_code == 400
+
+
+def test_stream_site_detection_keeps_direct_hosters_direct() -> None:
+    assert _stream_site_from_url("https://voe.sx/e/abc") == "unknown"
+    assert _stream_site_from_url("https://burningseries.ac/serie/Arcane/2/1-title/de") == "burningseries"
+    assert _stream_site_from_url("https://filmpalast.to/stream/title") == "filmpalast"
+    with pytest.raises(ValueError):
+        _stream_site_from_url("javascript:alert(1)")
+
+
+def test_waveform_envelope_is_not_flattened_by_one_outlier() -> None:
+    samples: list[int] = []
+    for _ in range(19):
+        samples.extend([1000, -1000] * 50)
+    samples.extend([32_000] + [0] * 99)
+
+    peaks = _waveform_envelope(samples, 20)
+
+    assert len(peaks) == 20
+    assert min(peaks[:19]) >= 100
+    assert max(_waveform_envelope([0] * 200, 20)) == 0
 
 
 def test_settings_get_masks_secrets(client: TestClient) -> None:

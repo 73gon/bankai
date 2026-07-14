@@ -8,12 +8,14 @@ the prebuilt React frontend from :data:`STATIC_DIR`.
 from __future__ import annotations
 
 import asyncio
+import math
 import mimetypes
 import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
@@ -40,6 +42,64 @@ _WAVEFORM_CACHE: dict[tuple, dict] = {}
 # hanging the whole server. Requests that can't get a slot fail fast with 503
 # so the client can show a loader and retry instead of blocking everything.
 _FFMPEG_SLOTS = threading.BoundedSemaphore(4)
+
+
+def _stream_site_from_url(url: str) -> str:
+    """Return the scraper id for a wrapper URL, or ``unknown`` for a hoster.
+
+    Direct hoster links such as VOE must not be sent through a page scraper;
+    the extractor can consume them directly through yt-dlp/Playwright.
+    """
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("episode URL must be an http(s) link")
+    host = parsed.hostname.lower().rstrip(".")
+
+    def is_host(domain: str) -> bool:
+        return host == domain or host.endswith(f".{domain}")
+
+    if is_host("filmpalast.to"):
+        return "filmpalast"
+    if any(is_host(domain) for domain in ("burningseries.ac", "bs.to", "bs.cine.to")):
+        return "burningseries"
+    if is_host("aniworld.to"):
+        return "aniworld"
+    if is_host("kinox.to"):
+        return "kinox"
+    return "unknown"
+
+
+def _waveform_envelope(samples: Any, bins: int) -> bytearray:
+    """Build a robust, perceived-loudness envelope from signed PCM samples.
+
+    RMS follows sustained audible energy better than a raw maximum. A capped
+    peak contribution keeps transients visible, while percentile scaling stops
+    one click/pop from flattening the rest of the waveform.
+    """
+    n = len(samples)
+    if n == 0 or bins <= 0:
+        return bytearray()
+    binsz = max(1, n // bins)
+    magnitudes: list[int] = []
+    for i in range(0, n, binsz):
+        chunk = samples[i : i + binsz]
+        if not chunk:
+            continue
+        peak = max(abs(int(sample)) for sample in chunk)
+        rms = int(math.sqrt(sum(int(sample) ** 2 for sample in chunk) / len(chunk)))
+        # Prevent a single-sample impulse from dominating an otherwise quiet
+        # bin, but retain enough peak information for consonants and impacts.
+        capped_peak = min(peak, rms * 4) if rms else 0
+        magnitudes.append(round(rms * 0.8 + capped_peak * 0.2))
+        if len(magnitudes) == bins:
+            break
+
+    nonzero = sorted(m for m in magnitudes if m > 0)
+    if not nonzero:
+        return bytearray(len(magnitudes))
+    p95 = nonzero[round((len(nonzero) - 1) * 0.95)]
+    scale = max(p95, 320)
+    return bytearray(min(127, round(magnitude * 127 / scale)) for magnitude in magnitudes)
 
 
 @contextmanager
@@ -130,11 +190,18 @@ class MovieQueueRequest(BaseModel):
     year: int | None = None
 
 
+class CustomEpisodeRequest(BaseModel):
+    episode: int
+    url: str
+    title: str | None = None
+
+
 class ShowQueueRequest(BaseModel):
     show: str
     season: int
     episodes: list[int] | None = None
     site: str | None = None
+    custom_episodes: list[CustomEpisodeRequest] | None = None
 
 
 class DelayRequest(BaseModel):
@@ -489,6 +556,48 @@ def create_app() -> Any:
     @app.post("/api/queue/show")
     async def queue_show(req: ShowQueueRequest) -> dict:
         from bankai.backend import list_series_episodes
+
+        if req.custom_episodes is not None:
+            if not req.custom_episodes:
+                raise HTTPException(status_code=400, detail="no custom episodes supplied")
+            seen: set[int] = set()
+            custom: list[tuple[CustomEpisodeRequest, str]] = []
+            for ep in req.custom_episodes:
+                if ep.episode < 1:
+                    raise HTTPException(status_code=400, detail="episode numbers must be positive")
+                if ep.episode in seen:
+                    raise HTTPException(status_code=400, detail=f"duplicate episode {ep.episode}")
+                seen.add(ep.episode)
+                try:
+                    site = _stream_site_from_url(ep.url)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                custom.append((ep, site))
+
+            queued: list[dict] = []
+            for ep, site in sorted(custom, key=lambda item: item[0].episode):
+                q = f"{req.show.strip()} S{req.season:02d}E{ep.episode:02d}"
+                args = [
+                    "run",
+                    q,
+                    "--url",
+                    ep.url.strip(),
+                    "--site",
+                    site,
+                    "--kind",
+                    "episode",
+                    "--season",
+                    str(req.season),
+                    "--episode",
+                    str(ep.episode),
+                    "--series-title",
+                    req.show.strip(),
+                    "--auto",
+                ]
+                if ep.title:
+                    args.extend(["--episode-title", ep.title.strip()])
+                queued.append(webjobs.enqueue(kind="show", title=q, args=args))
+            return {"queued": queued, "count": len(queued)}
 
         result = await list_series_episodes(req.show, season=req.season, site=req.site)
         if result is None:
@@ -989,22 +1098,7 @@ def create_app() -> Any:
         raw = proc.stdout
         pcm = array.array("h")
         pcm.frombytes(raw[: len(raw) - (len(raw) % 2)])
-        n = len(pcm)
-        binsz = max(1, n // bins)
-        # First pass: per-bin peak magnitude (0..32767).
-        mags: list[int] = []
-        for i in range(0, n, binsz):
-            chunk = pcm[i : i + binsz]
-            if not chunk:
-                continue
-            hi = max(chunk)
-            lo = min(chunk)
-            mags.append(hi if hi >= -lo else -lo)
-        # Normalise the window to full height so quiet passages are still
-        # visible (amplify), with a floor so silence doesn't blow up noise.
-        wmax = max(mags) if mags else 0
-        scale = max(wmax, 1500)
-        peaks = bytearray(min(127, (m * 127) // scale) for m in mags)
+        peaks = _waveform_envelope(pcm, bins)
         out = {
             "start": start,
             "dur": dur,

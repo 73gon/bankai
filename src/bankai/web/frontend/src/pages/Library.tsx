@@ -224,15 +224,15 @@ const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning
 };
 
 const STATUS_ROW_TINT: Record<Status, string> = {
-  queued: 'bg-muted/15 hover:bg-muted/25',
-  downloading: 'bg-info/[0.055] hover:bg-info/[0.1]',
-  failed: 'bg-destructive/[0.07] hover:bg-destructive/[0.12]',
-  cancelled: 'bg-warning/[0.055] hover:bg-warning/[0.1]',
-  review: 'bg-warning/[0.045] hover:bg-warning/[0.085]',
-  approved: 'bg-success/[0.045] hover:bg-success/[0.085]',
-  transferring: 'bg-transfer/[0.06] hover:bg-transfer/[0.11]',
-  done: 'bg-success/[0.06] hover:bg-success/[0.1]',
-  deleted: 'bg-muted/10 hover:bg-muted/20',
+  queued: 'bg-muted/25 hover:bg-muted/35',
+  downloading: 'bg-info/[0.12] hover:bg-info/[0.18]',
+  failed: 'bg-destructive/[0.14] hover:bg-destructive/[0.2]',
+  cancelled: 'bg-warning/[0.12] hover:bg-warning/[0.18]',
+  review: 'bg-warning/[0.1] hover:bg-warning/[0.16]',
+  approved: 'bg-success/[0.1] hover:bg-success/[0.16]',
+  transferring: 'bg-transfer/[0.13] hover:bg-transfer/[0.19]',
+  done: 'bg-success/[0.13] hover:bg-success/[0.19]',
+  deleted: 'bg-muted/20 hover:bg-muted/30',
 };
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -932,6 +932,15 @@ function fmtClock(s: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+function fmtClockMs(s: number): string {
+  if (!isFinite(s) || s < 0) s = 0;
+  const totalMs = Math.round(s * 1000);
+  const m = Math.floor(totalMs / 60_000);
+  const sec = Math.floor((totalMs % 60_000) / 1000);
+  const ms = totalMs % 1000;
+  return `${m}:${String(sec).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
 function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => void }) {
   const path = entry.path as string;
   const [info, setInfo] = useState<MediaInfo | null>(null);
@@ -939,7 +948,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [gerStream, setGerStream] = useState<number | null>(null);
   // Both lanes are fetched as WIDE track-time buffers (3× the view) so panning
   // and zooming redraw instantly from memory (real-time), and each lane is
-  // re-normalised to its own visible peak so quiet dialogue stays readable.
+  // robustly scaled to its visible loudness so quiet dialogue stays readable.
   const [engBuf, setEngBuf] = useState<{ peaks: Uint8Array; start: number; dur: number } | null>(null);
   const [gerBuf, setGerBuf] = useState<{ peaks: Uint8Array; start: number; dur: number } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1206,7 +1215,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (buf && buf.peaks.length) {
       const bn = buf.peaks.length;
       const vals = new Float32Array(W);
-      let vmax = 0;
       const anchor = viewStart - delaySec;
       for (let x = 0; x < W; x++) {
         const viewTime = viewStart + (x / W) * windowSec;
@@ -1214,14 +1222,18 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         const bi = Math.floor(((trackTime - buf.start) / buf.dur) * bn);
         const v = bi >= 0 && bi < bn ? buf.peaks[bi] : 0;
         vals[x] = v;
-        if (v > vmax) vmax = v;
       }
-      // Re-normalise the visible window to its own peak (min floor avoids
-      // amplifying pure silence into full-height noise).
-      const scale = Math.max(vmax, 24);
+      // Use a robust visible-window ceiling: a single click/pop should clip,
+      // not flatten every sustained sound into a tiny line. The square-root
+      // display curve better reflects how quiet-but-audible content is heard.
+      const audible = Array.from(vals)
+        .filter((value) => value > 0)
+        .sort((a, b) => a - b);
+      const robustMax = audible.length ? audible[Math.round((audible.length - 1) * 0.95)] : 0;
+      const scale = Math.max(robustMax, 12);
       ctx.fillStyle = color;
       for (let x = 0; x < W; x++) {
-        const h = Math.min(1, vals[x] / scale) * (H / 2 - 2);
+        const h = Math.sqrt(Math.min(1, vals[x] / scale)) * (H / 2 - 2);
         ctx.fillRect(x, H / 2 - h, 1, h * 2);
       }
     }
@@ -1470,11 +1482,21 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // definitive signal; otherwise fall back to the crude track-length ratio.
   const measuredDrift = info?.drift_ratio ?? null;
   const sourceFps = info?.source_fps ?? null;
+  const referenceFps = info?.reference_fps ?? info?.video_fps ?? null;
+  // Pipeline drift semantics are source-time / reference-time, so PAL versus
+  // 23.976 is 25 / 23.976 = 1.0427 (speed the German track up by that factor).
+  const fpsStretch = sourceFps && referenceFps ? sourceFps / referenceFps : null;
   const durationStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
-  const suggestedStretch = measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0005 ? measuredDrift : durationStretch;
+  const suggestedStretch =
+    measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0005
+      ? measuredDrift
+      : fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0005
+        ? fpsStretch
+        : durationStretch;
   // Flag a real drift: a measured frame-drift, or lengths differing by >2s.
   const driftSuspected =
     (measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0015) ||
+    (fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0015) ||
     (durationStretch != null && lenDrift != null && Math.abs(lenDrift) > 2 && Math.abs(durationStretch - 1) > 0.001);
   const stretchPct = ((stretch - 1) * 100).toFixed(2);
   const trackMeta = (t: AudioTrack | null, videoFps: number | null | undefined) => {
@@ -1482,8 +1504,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (t?.codec) bits.push(t.codec.toUpperCase());
     if (t?.channels) bits.push(`${t.channels}ch`);
     if (t?.sample_rate) bits.push(`${(t.sample_rate / 1000).toFixed(1)} kHz`);
-    if (t?.duration != null) bits.push(`len ${fmtClock(t.duration)}`);
-    if (videoFps) bits.push(`${videoFps} fps`);
+    if (t?.duration != null) bits.push(`len ${fmtClockMs(t.duration)}`);
+    if (videoFps) bits.push(`${videoFps.toFixed(3)} fps`);
     return bits;
   };
 
@@ -1557,7 +1579,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   {fmtClock(viewStart)} – {fmtClock(viewStart + windowSec)}
                 </span>
               </div>
-              <div className='flex flex-wrap items-center gap-x-3 px-1 text-[10px] font-mono text-muted-foreground'>
+              <div className='flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-border/60 bg-secondary/30 px-3 py-1.5 font-mono text-xs text-foreground/80 md:text-sm'>
                 {trackMeta(engTrack, info?.video_fps).map((b, i) => (
                   <span key={i}>{b}</span>
                 ))}
@@ -1596,13 +1618,13 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   </span>
                 )}
               </div>
-              <div className='flex flex-wrap items-center gap-x-3 px-1 text-[10px] font-mono text-muted-foreground'>
+              <div className='flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-border/60 bg-secondary/30 px-3 py-1.5 font-mono text-xs text-foreground/80 md:text-sm'>
                 {trackMeta(gerTrack, sourceFps).map((b, i) => (
                   <span key={i}>{b}</span>
                 ))}
               </div>
               {/* Drift correction (time-stretch) — auto-suggested, manual override */}
-              <div className='flex flex-wrap items-center gap-2 px-1 text-xs'>
+              <div className='flex flex-wrap items-center gap-2 rounded-md border border-border/50 bg-secondary/20 px-2.5 py-1.5 text-xs'>
                 <span className='text-muted-foreground'>Drift</span>
                 <div className='flex items-center gap-1'>
                   <Button
@@ -1628,15 +1650,23 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     <Plus className='h-3 w-3' />
                   </Button>
                 </div>
-                {driftSuspected && suggestedStretch != null && (
+                {sourceFps && referenceFps && fpsStretch != null && (
+                  <span
+                    className='rounded-md bg-background/50 px-2 py-1 font-mono text-foreground'
+                    title='German source FPS divided by the HQ reference FPS. This is only a calculation until you click Use.'
+                  >
+                    FPS ×{fpsStretch.toFixed(4)} = {sourceFps.toFixed(3)} / {referenceFps.toFixed(3)}
+                  </span>
+                )}
+                {suggestedStretch != null && Math.abs(suggestedStretch - 1) > 0.0005 && (
                   <Button
                     size='sm'
                     variant='secondary'
                     className='h-6'
                     onClick={() => setStretch(+suggestedStretch.toFixed(6))}
-                    title='Stretch the German track to match the reference length'
+                    title='Load the suggested factor into the preview; approving applies it to the file'
                   >
-                    Suggest ×{suggestedStretch.toFixed(4)}
+                    Use ×{suggestedStretch.toFixed(4)}
                   </Button>
                 )}
                 {stretch !== 1 && (
@@ -1645,10 +1675,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   </Button>
                 )}
                 {driftSuspected && (
-                  <span className='text-amber-400'>
-                    {measuredDrift != null && sourceFps && info?.video_fps
-                      ? `drift measured — German ${sourceFps.toFixed(3)} vs ${info.video_fps} fps`
-                      : 'drift likely — dub length differs'}
+                  <span className='text-warning'>
+                    {measuredDrift != null && sourceFps && referenceFps
+                      ? `visual drift ×${measuredDrift.toFixed(4)} — German ${sourceFps.toFixed(3)} vs ${referenceFps.toFixed(3)} fps`
+                      : fpsStretch != null && sourceFps && referenceFps
+                        ? `FPS mismatch — German ${sourceFps.toFixed(3)} vs ${referenceFps.toFixed(3)}`
+                        : 'drift likely — dub length differs'}
                   </span>
                 )}
               </div>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Search as SearchIcon, Loader2, Plus, Film, Tv } from 'lucide-react';
+import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type DiscoverItem, type SearchResult, type EpisodeItem } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -27,7 +27,31 @@ function cleanSeriesTitle(s: string): string {
 function siteLabel(site: string): string {
   if (site === 'burningseries' || site === 'bs.to') return 'Burning Series';
   if (site === 'filmpalast') return 'Filmpalast';
+  if (site === 'unknown' || site === 'custom') return 'Custom mirror';
   return site;
+}
+
+function streamSiteFromUrl(raw: string): string {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    const isHost = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+    if (isHost('filmpalast.to')) return 'filmpalast';
+    if (['burningseries.ac', 'bs.to', 'bs.cine.to'].some(isHost)) return 'burningseries';
+    if (isHost('aniworld.to')) return 'aniworld';
+    if (isHost('kinox.to')) return 'kinox';
+  } catch {
+    // The caller validates the full URL before queueing.
+  }
+  return 'unknown';
+}
+
+function validStreamUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw.trim());
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname;
+  } catch {
+    return false;
+  }
 }
 
 function uniqueShowSources(results: SearchResult[]): SearchResult[] {
@@ -86,6 +110,8 @@ export default function Search() {
   // seasons detected from the source results + resolved series name
   const [showSeasons, setShowSeasons] = useState<number[]>([]);
   const [seriesTitle, setSeriesTitle] = useState('');
+  const [customMode, setCustomMode] = useState(false);
+  const [customUrls, setCustomUrls] = useState<Record<number, string>>({});
 
   // Live filter from TVDB as the user types (debounced).
   useEffect(() => {
@@ -124,6 +150,8 @@ export default function Search() {
     setSeriesTitle('');
     setEpisodes([]);
     setSelectedEps(new Set());
+    setCustomMode(false);
+    setCustomUrls({});
     setLoadingFilm(true);
     try {
       let name = item.name;
@@ -149,15 +177,11 @@ export default function Search() {
     const term = searchTerm.trim();
     if (!term) return;
     setPicked(null);
+    setCustomMode(false);
+    setCustomUrls({});
     // A pasted stream link is used directly instead of searching.
     if (selected.kind === 'movie' && /^https?:\/\/\S+$/i.test(term)) {
-      const site = /aniworld/i.test(term)
-        ? 'aniworld'
-        : /burningseries|bs\.to|bs\.cine\.to/i.test(term)
-          ? 'burningseries'
-          : /kinox/i.test(term)
-            ? 'kinox'
-            : 'filmpalast';
+      const site = streamSiteFromUrl(term);
       setFilmResults([{ site, title: selected.name, year: selected.year ?? null, kind: 'movie', url: term }]);
       return;
     }
@@ -249,27 +273,69 @@ export default function Search() {
     setSeriesTitle(cleaned);
     const firstSeason = list[0] ?? 1;
     setSeason(String(firstSeason));
+    setCustomMode(false);
+    setCustomUrls({});
     loadEpisodes(series, String(firstSeason), cleaned, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filmResults, selected]);
 
   function pickSeason(s: number) {
     setSeason(String(s));
-    if (picked) loadEpisodes(picked, String(s), seriesTitle, true);
+    setCustomUrls({});
+    if (picked) loadEpisodes(picked, String(s), seriesTitle, !customMode);
+  }
+
+  function selectCustomSource() {
+    setCustomMode(true);
+    setSelectedEps(new Set(Object.entries(customUrls).filter(([, url]) => url.trim()).map(([episode]) => Number(episode))));
+    const source = picked ?? uniqueShowSources(filmResults)[0];
+    if (!episodes.length && source) {
+      const cleaned = cleanSeriesTitle(source.title) || searchTerm || source.title;
+      setSeriesTitle(cleaned);
+      loadEpisodes(source, season, cleaned, false);
+    }
+  }
+
+  function setCustomEpisodeUrl(episode: number, url: string) {
+    setCustomUrls((current) => ({ ...current, [episode]: url }));
+    setSelectedEps((current) => {
+      const next = new Set(current);
+      url.trim() ? next.add(episode) : next.delete(episode);
+      return next;
+    });
   }
 
   async function queueShow() {
     if (!picked) return;
-    setBusy(picked.url);
+    const selectedEpisodes = Array.from(selectedEps).sort((a, b) => a - b);
+    if (customMode) {
+      if (selectedEpisodes.length === 0) {
+        toast.error('Paste at least one episode mirror link.');
+        return;
+      }
+      const invalid = selectedEpisodes.find((episode) => !validStreamUrl(customUrls[episode] || ''));
+      if (invalid != null) {
+        toast.error(`Episode ${invalid} needs a valid http(s) mirror link.`);
+        return;
+      }
+    }
+    setBusy(customMode ? 'custom' : picked.url);
     try {
       const show = (seriesTitle || picked.title).trim();
       await api.queueShow({
         show,
         season: Number(season) || 1,
-        episodes: selectedEps.size ? Array.from(selectedEps).sort((a, b) => a - b) : undefined,
-        site: picked.site,
+        episodes: customMode ? undefined : selectedEpisodes.length ? selectedEpisodes : undefined,
+        site: customMode ? undefined : picked.site,
+        custom_episodes: customMode
+          ? selectedEpisodes.map((episode) => ({
+              episode,
+              title: episodes.find((item) => item.episode === episode)?.title || undefined,
+              url: customUrls[episode].trim(),
+            }))
+          : undefined,
       });
-      toast.success(`Queued ${show} S${season} (${selectedEps.size || 'all'})`);
+      toast.success(`Queued ${show} S${season} (${customMode ? selectedEpisodes.length : selectedEps.size || 'all'})`);
       setSelected(null);
     } catch (e: any) {
       toast.error(e.message);
@@ -332,7 +398,7 @@ export default function Search() {
       )}
 
       <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
-        <DialogContent className='max-w-2xl'>
+        <DialogContent className='max-h-[90vh] max-w-3xl overflow-y-auto'>
           <DialogHeader>
             <DialogTitle className='flex items-center gap-2'>
               {selected?.name}
@@ -366,7 +432,7 @@ export default function Search() {
                 <Skeleton key={i} className='h-14' />
               ))}
             </div>
-          ) : filmResults.length === 0 ? (
+          ) : filmResults.length === 0 && selected?.kind === 'movie' ? (
             <EmptyState icon={SearchIcon} title='No German source match' description='This title may not be available from a supported source.' />
           ) : selected?.kind === 'movie' ? (
             <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
@@ -391,109 +457,167 @@ export default function Search() {
               ))}
             </div>
           ) : (
-            // Show flow: choose Filmpalast or Burning Series, then select episodes.
+            // Show flow: choose a scraper source or provide one mirror URL per episode.
             <div className='space-y-3 rounded-lg p-1'>
               <div className='space-y-1.5'>
                 <span className='text-xs text-muted-foreground'>Source matches</span>
-                <div className='flex max-h-28 flex-wrap gap-2 overflow-auto py-0.5'>
+                <div className='grid gap-2 py-0.5 sm:grid-cols-3'>
                   {uniqueShowSources(filmResults).map((r) => {
-                    const active = picked?.site === r.site && picked?.url === r.url;
+                    const active = !customMode && picked?.site === r.site && picked?.url === r.url;
                     return (
                       <button
                         key={`${r.site}-${r.url}`}
                         type='button'
                         onClick={() => {
+                          setCustomMode(false);
                           const cleaned = cleanSeriesTitle(r.title) || searchTerm || r.title;
                           setSeriesTitle(cleaned);
                           loadEpisodes(r, season, cleaned, true);
                         }}
                         className={
-                          'rounded-md px-2.5 py-1.5 text-left text-xs ring-1 transition-colors ' +
+                          'min-w-0 rounded-md px-3 py-2 text-left text-xs ring-1 transition-colors ' +
                           (active
                             ? 'bg-primary/20 text-foreground ring-primary/50'
                             : 'bg-secondary/40 text-muted-foreground ring-border/50 hover:text-foreground')
                         }
                         title={r.title}
                       >
-                        <span className='font-medium'>{siteLabel(r.site)}</span>
-                        <span className='ml-1.5 opacity-75'>{r.title}</span>
+                        <span className='block font-medium'>{siteLabel(r.site)}</span>
+                        <span className='block truncate opacity-75'>{r.title}</span>
                       </button>
                     );
                   })}
+                  <button
+                    type='button'
+                    onClick={selectCustomSource}
+                    className={
+                      'rounded-md px-3 py-2 text-left text-xs ring-1 transition-colors ' +
+                      (customMode
+                        ? 'bg-transfer/20 text-foreground ring-transfer/50'
+                        : 'bg-secondary/40 text-muted-foreground ring-border/50 hover:text-foreground')
+                    }
+                  >
+                    <span className='flex items-center gap-1.5 font-medium'>
+                      <Link2 className='h-3.5 w-3.5' /> Custom
+                    </span>
+                    <span className='block opacity-75'>One mirror link per episode</span>
+                  </button>
                 </div>
               </div>
 
               <div className='flex flex-wrap items-center gap-2'>
                 <span className='text-sm font-medium'>{seriesTitle || selected?.name}</span>
-                <Badge variant='muted'>{siteLabel(picked?.site || 'filmpalast')}</Badge>
+                <Badge variant={customMode ? 'transfer' : 'muted'}>{customMode ? 'Custom mirrors' : siteLabel(picked?.site || 'source')}</Badge>
               </div>
 
               <div className='flex flex-wrap items-center gap-2'>
                 <span className='text-xs text-muted-foreground'>Season</span>
-                {(showSeasons.length ? showSeasons : [Number(season) || 1]).map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => pickSeason(s)}
-                    className={
-                      'rounded-md px-2.5 py-1 text-xs font-medium ring-1 transition-colors ' +
-                      (String(s) === season
-                        ? 'bg-primary/20 text-primary-foreground ring-primary/40'
-                        : 'bg-secondary/40 text-muted-foreground ring-border/40 hover:text-foreground')
-                    }
-                  >
-                    S{String(s).padStart(2, '0')}
-                  </button>
-                ))}
-                <div className='flex items-center gap-1'>
+                {showSeasons.length > 0 ? (
+                  showSeasons.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => pickSeason(s)}
+                      className={
+                        'rounded-md px-2.5 py-1 text-xs font-medium ring-1 transition-colors ' +
+                        (String(s) === season
+                          ? 'bg-primary/20 text-primary-foreground ring-primary/40'
+                          : 'bg-secondary/40 text-muted-foreground ring-border/40 hover:text-foreground')
+                      }
+                    >
+                      S{String(s).padStart(2, '0')}
+                    </button>
+                  ))
+                ) : (
                   <Input
                     type='number'
                     min={1}
                     value={season}
                     onChange={(e) => setSeason(e.target.value)}
-                    onBlur={() => picked && loadEpisodes(picked, season, seriesTitle, true)}
+                    onBlur={() => picked && loadEpisodes(picked, season, seriesTitle, !customMode)}
                     className='h-8 w-20'
                   />
-                </div>
+                )}
               </div>
 
               {loadingEps ? (
                 <div className='text-sm text-muted-foreground'>Detecting episodes…</div>
               ) : episodes.length === 0 ? (
-                <div className='text-sm text-muted-foreground'>No episodes found for this season.</div>
+                <div className='rounded-md border border-border/50 bg-secondary/25 p-3 text-sm text-muted-foreground'>
+                  {filmResults.length === 0
+                    ? 'No supported source supplied the episode list. Search a matching show source first, then switch to Custom to paste mirror links.'
+                    : 'No episodes found for this season.'}
+                </div>
               ) : (
                 <>
                   <div className='flex items-center gap-2'>
-                    <Button size='sm' variant='outline' onClick={() => setSelectedEps(new Set(episodes.map((e) => e.episode)))}>
-                      Select all
-                    </Button>
-                    <Button size='sm' variant='outline' onClick={() => setSelectedEps(new Set())}>
-                      Clear
+                    {!customMode && (
+                      <Button size='sm' variant='outline' onClick={() => setSelectedEps(new Set(episodes.map((e) => e.episode)))}>
+                        Select all
+                      </Button>
+                    )}
+                    <Button
+                      size='sm'
+                      variant='outline'
+                      onClick={() => {
+                        setSelectedEps(new Set());
+                        if (customMode) setCustomUrls({});
+                      }}
+                    >
+                      {customMode ? 'Clear links' : 'Clear'}
                     </Button>
                     <span className='text-xs text-muted-foreground'>
-                      {selectedEps.size} of {episodes.length} selected
+                      {customMode ? 'Pasting a link selects its episode' : `${selectedEps.size} of ${episodes.length} selected`}
                     </span>
                   </div>
-                  <div className='flex max-h-[35vh] flex-wrap gap-2 overflow-auto'>
+                  <div className='max-h-[38vh] space-y-2 overflow-y-auto pr-1'>
                     {episodes.map((ep) => {
                       const on = selectedEps.has(ep.episode);
                       return (
-                        <button
+                        <div
                           key={ep.episode}
-                          onClick={() => {
-                            const next = new Set(selectedEps);
-                            on ? next.delete(ep.episode) : next.add(ep.episode);
-                            setSelectedEps(next);
-                          }}
                           className={
-                            'rounded-md px-2.5 py-1 text-xs font-medium ring-1 transition-colors ' +
+                            'grid gap-2 rounded-md p-2.5 ring-1 transition-colors sm:grid-cols-[minmax(12rem,0.8fr)_minmax(16rem,1.2fr)] sm:items-center ' +
                             (on
-                              ? 'bg-primary/20 text-primary-foreground ring-primary/40'
-                              : 'bg-secondary/40 text-muted-foreground ring-border/40 hover:text-foreground')
+                              ? customMode
+                                ? 'bg-transfer/10 ring-transfer/40'
+                                : 'bg-primary/15 ring-primary/40'
+                              : 'bg-secondary/30 ring-border/40')
                           }
-                          title={ep.title || undefined}
                         >
-                          E{String(ep.episode).padStart(2, '0')}
-                        </button>
+                          <button
+                            type='button'
+                            onClick={() => {
+                              const next = new Set(selectedEps);
+                              on ? next.delete(ep.episode) : next.add(ep.episode);
+                              setSelectedEps(next);
+                            }}
+                            className='flex min-w-0 items-center gap-3 rounded-sm text-left'
+                          >
+                            <span
+                              className={
+                                'shrink-0 rounded-md px-2.5 py-1 text-xs font-semibold ring-1 ' +
+                                (on
+                                  ? customMode
+                                    ? 'bg-transfer/20 text-transfer ring-transfer/40'
+                                    : 'bg-primary/20 text-foreground ring-primary/40'
+                                  : 'bg-secondary/50 text-muted-foreground ring-border/50')
+                              }
+                            >
+                              E{String(ep.episode).padStart(2, '0')}
+                            </span>
+                            <span className='min-w-0 truncate text-sm text-foreground'>{ep.title || `Episode ${ep.episode}`}</span>
+                          </button>
+                          {customMode && (
+                            <Input
+                              type='url'
+                              value={customUrls[ep.episode] || ''}
+                              onChange={(event) => setCustomEpisodeUrl(ep.episode, event.target.value)}
+                              placeholder='https://voe.sx/...'
+                              aria-label={`Mirror URL for episode ${ep.episode}`}
+                              className='h-9 font-mono text-xs'
+                            />
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -501,9 +625,9 @@ export default function Search() {
               )}
 
               <div className='flex justify-end'>
-                <Button onClick={queueShow} disabled={!!busy || episodes.length === 0}>
+                <Button onClick={queueShow} disabled={!!busy || episodes.length === 0 || (customMode && selectedEps.size === 0)}>
                   {busy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
-                  Queue {selectedEps.size ? `${selectedEps.size} episode${selectedEps.size === 1 ? '' : 's'}` : 'all'}
+                  Queue {selectedEps.size ? `${selectedEps.size} episode${selectedEps.size === 1 ? '' : 's'}` : customMode ? 'episode links' : 'all'}
                 </Button>
               </div>
             </div>
