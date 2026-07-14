@@ -104,6 +104,8 @@ export interface TitleRow {
   kind: string;
   year: number | null;
   poster: string | null;
+  created_at: number | null;
+  updated_at: number | null;
   done_at: number | null;
   path: string | null;
   rel_path: string | null;

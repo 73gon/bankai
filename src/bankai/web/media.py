@@ -280,6 +280,7 @@ class LibraryEntry:
     rel_path: str
     name: str
     size: int
+    created_at: float
     mtime: float
     series: str | None = None
     season: int | None = None
@@ -310,6 +311,7 @@ def _movie_entry(root: Path, f: Path) -> LibraryEntry:
         rel_path=str(f.relative_to(root)),
         name=f.stem,
         size=st.st_size,
+        created_at=float(getattr(st, "st_birthtime", st.st_ctime)),
         mtime=st.st_mtime,
     )
 
@@ -330,6 +332,7 @@ def _episode_entry(root: Path, shows_dir: Path, f: Path) -> LibraryEntry:
         rel_path=str(f.relative_to(root)),
         name=f.stem,
         size=st.st_size,
+        created_at=float(getattr(st, "st_birthtime", st.st_ctime)),
         mtime=st.st_mtime,
         series=series,
         season=season,

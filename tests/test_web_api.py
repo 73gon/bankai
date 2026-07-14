@@ -49,6 +49,83 @@ def test_queue_snapshot(client: TestClient) -> None:
     assert "jobs" in r.json()
 
 
+def test_titles_exposes_stable_created_and_updated_timestamps(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = 1_700_000_000.0
+    finished = started + 600
+    monkeypatch.setattr(
+        "bankai.web.jobs.snapshot",
+        lambda: [
+            {
+                "id": "finished-job",
+                "kind": "movie",
+                "title": "Finished Movie (2024)",
+                "status": "done",
+                "started_at": started,
+                "finished_at": finished,
+                "final_path": None,
+                "reason": None,
+                "reason_detail": None,
+                "step_label": "Done",
+                "overall_percent": 100.0,
+                "total_steps": 4,
+                "pending": False,
+            },
+            {
+                "id": "running-job",
+                "kind": "movie",
+                "title": "Running Movie (2025)",
+                "status": "running",
+                "started_at": started + 1000,
+                "finished_at": None,
+                "final_path": None,
+                "reason": None,
+                "reason_detail": None,
+                "step_label": "Downloading",
+                "overall_percent": 25.0,
+                "total_steps": 4,
+                "pending": False,
+            },
+        ],
+    )
+    monkeypatch.setattr("bankai.web.jobs.transfer_states", lambda: {})
+    monkeypatch.setattr("bankai.web.posters.ensure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bankai.web.posters.cached", lambda _key: None)
+    monkeypatch.setattr("bankai.web.posters.cached_year", lambda _key: None)
+
+    r = client.get("/api/titles")
+
+    assert r.status_code == 200
+    rows = {row["id"]: row for row in r.json()["rows"]}
+    assert rows["finished-job"]["created_at"] == started
+    assert rows["finished-job"]["updated_at"] == finished
+    assert rows["running-job"]["created_at"] == started + 1000
+    assert rows["running-job"]["updated_at"] == started + 1000
+
+
+def test_titles_library_uses_file_creation_and_modification_times(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "Timestamp Movie (2024).mkv"
+    movie.write_bytes(b"movie")
+    stat = movie.stat()
+    monkeypatch.setattr("bankai.web.jobs.snapshot", lambda: [])
+    monkeypatch.setattr("bankai.web.jobs.transfer_states", lambda: {})
+    monkeypatch.setattr("bankai.web.posters.ensure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bankai.web.posters.cached", lambda _key: None)
+    monkeypatch.setattr("bankai.web.posters.cached_year", lambda _key: None)
+
+    r = client.get("/api/titles")
+
+    assert r.status_code == 200
+    row = r.json()["rows"][0]
+    assert row["created_at"] == pytest.approx(float(getattr(stat, "st_birthtime", stat.st_ctime)))
+    assert row["updated_at"] == pytest.approx(stat.st_mtime)
+
+
 def test_queue_show_accepts_custom_episode_mirror_links(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

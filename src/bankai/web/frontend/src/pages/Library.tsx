@@ -308,9 +308,46 @@ function statusRank(r: TitleRow): number {
   return 6; // transferred
 }
 
-type SortCol = 'title' | 'type' | 'status' | 'when';
+type SortCol = 'title' | 'type' | 'status' | 'created_at' | 'updated_at';
+type SortDir = 'asc' | 'desc';
 
-function whenLabel(ts: number | null): string {
+const QUEUE_PREFERENCES_KEY = 'bankai:queue-table-preferences';
+const SORT_COLUMNS: SortCol[] = ['title', 'type', 'status', 'created_at', 'updated_at'];
+
+interface QueuePreferences {
+  filter: string;
+  statuses: Status[];
+  filtersOpen: boolean;
+  sortCol: SortCol;
+  sortDir: SortDir;
+}
+
+function readQueuePreferences(): QueuePreferences {
+  const fallback: QueuePreferences = {
+    filter: '',
+    statuses: [],
+    filtersOpen: false,
+    sortCol: 'created_at',
+    sortDir: 'desc',
+  };
+  try {
+    const raw = localStorage.getItem(QUEUE_PREFERENCES_KEY);
+    if (!raw) return fallback;
+    const saved = JSON.parse(raw) as Partial<QueuePreferences>;
+    const allStatuses = Object.keys(STATUS_LABEL) as Status[];
+    return {
+      filter: typeof saved.filter === 'string' ? saved.filter : fallback.filter,
+      statuses: Array.isArray(saved.statuses) ? saved.statuses.filter((status): status is Status => allStatuses.includes(status as Status)) : [],
+      filtersOpen: typeof saved.filtersOpen === 'boolean' ? saved.filtersOpen : fallback.filtersOpen,
+      sortCol: SORT_COLUMNS.includes(saved.sortCol as SortCol) ? (saved.sortCol as SortCol) : fallback.sortCol,
+      sortDir: saved.sortDir === 'asc' || saved.sortDir === 'desc' ? saved.sortDir : fallback.sortDir,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function dateTimeLabel(ts: number | null): string {
   if (!ts) return '—';
   const d = new Date(ts * 1000);
   // German format, 24h clock: DD.MM.YYYY HH:mm
@@ -402,13 +439,14 @@ function StatusMultiSelect({
 }
 
 export default function Library() {
+  const [initialPreferences] = useState(readQueuePreferences);
   const [rows, setRows] = useState<TitleRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('');
-  const [statusFilters, setStatusFilters] = useState<Set<Status>>(new Set());
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [sortCol, setSortCol] = useState<SortCol>('when');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [filter, setFilter] = useState(initialPreferences.filter);
+  const [statusFilters, setStatusFilters] = useState<Set<Status>>(() => new Set(initialPreferences.statuses));
+  const [filtersOpen, setFiltersOpen] = useState(initialPreferences.filtersOpen);
+  const [sortCol, setSortCol] = useState<SortCol>(initialPreferences.sortCol);
+  const [sortDir, setSortDir] = useState<SortDir>(initialPreferences.sortDir);
   const [page, setPage] = useState(0);
   const [autoSize, setAutoSize] = useState(10);
   const [pageChoice, setPageChoice] = useState<string>('auto');
@@ -420,6 +458,21 @@ export default function Library() {
   const [review, setReview] = useState<TitleRow | null>(null);
   const [del, setDel] = useState<TitleRow | null>(null);
   const tableWrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      const preferences: QueuePreferences = {
+        filter,
+        statuses: Array.from(statusFilters),
+        filtersOpen,
+        sortCol,
+        sortDir,
+      };
+      localStorage.setItem(QUEUE_PREFERENCES_KEY, JSON.stringify(preferences));
+    } catch {
+      /* localStorage may be unavailable in a locked-down browser. */
+    }
+  }, [filter, statusFilters, filtersOpen, sortCol, sortDir]);
 
   async function load(silent = false) {
     if (!silent) setLoading(true);
@@ -508,8 +561,9 @@ export default function Library() {
       if (sortCol === 'title') d = a.title.localeCompare(b.title);
       else if (sortCol === 'type') d = typeLabel(a).localeCompare(typeLabel(b));
       else if (sortCol === 'status') d = statusRank(a) - statusRank(b);
-      else d = (a.done_at ?? 0) - (b.done_at ?? 0);
-      if (d === 0) d = (a.done_at ?? 0) - (b.done_at ?? 0);
+      else if (sortCol === 'created_at') d = (a.created_at ?? 0) - (b.created_at ?? 0);
+      else d = (a.updated_at ?? 0) - (b.updated_at ?? 0);
+      if (d === 0) d = (a.created_at ?? 0) - (b.created_at ?? 0);
       return d * dir;
     });
     return list;
@@ -682,7 +736,8 @@ export default function Library() {
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
           </td>
-          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>{whenLabel(r.done_at)}</td>
+          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>{dateTimeLabel(r.created_at)}</td>
+          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>{dateTimeLabel(r.updated_at)}</td>
           <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>
             <TruncCell text={r.path} mono width='20rem' />
           </td>
@@ -727,7 +782,7 @@ export default function Library() {
         </tr>
         {isOpen && (
           <tr className='border-t border-border bg-black/20'>
-            <td colSpan={9} className='px-3 py-2'>
+            <td colSpan={10} className='px-3 py-2'>
               {r.job_id ? (
                 <LogPanel text={logs[r.job_id] ?? 'Loading logs…'} />
               ) : (
@@ -830,7 +885,8 @@ export default function Library() {
                 <SortHeader col='status' label='Status' className='text-left' />
                 <th className='px-2 py-2 text-left font-medium'>Reason</th>
                 <th className='px-2 py-2 text-left font-medium'>Sync</th>
-                <SortHeader col='when' label='Time' className='text-left' />
+                <SortHeader col='created_at' label='Created at' className='text-left' />
+                <SortHeader col='updated_at' label='Updated at' className='text-left' />
                 <th className='px-2 py-2 text-left font-medium'>Path</th>
                 <th className='px-2 py-2 text-right font-medium'>Actions</th>
               </tr>

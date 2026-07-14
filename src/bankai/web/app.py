@@ -735,8 +735,12 @@ def create_app() -> Any:
         # Map normalised title -> newest job, so a finished library row can
         # still surface its download log (expandable row) and be re-run.
         job_by_norm: dict[str, dict] = {}
+        created_by_norm: dict[str, float] = {}
         for j in jobs:
             nt = _norm_title(j.get("title", ""))
+            started_at = float(j.get("started_at") or 0)
+            if started_at and (nt not in created_by_norm or started_at < created_by_norm[nt]):
+                created_by_norm[nt] = started_at
             cur = job_by_norm.get(nt)
             if cur is None or (j.get("started_at") or 0) >= (cur.get("started_at") or 0):
                 job_by_norm[nt] = j
@@ -759,6 +763,12 @@ def create_app() -> Any:
             poster_key = ("show:" if e.kind == "episode" else "movie:") + (_norm_title(e.series or clean) if e.kind == "episode" else norm)
             posters_mod.ensure(poster_key, e.series or clean, "series" if e.kind == "episode" else "movie")
             related = job_by_norm.get(norm)
+            created_at = min(e.created_at, created_by_norm.get(norm, e.created_at))
+            updated_at = max(
+                e.mtime,
+                state.updated_at or 0,
+                (related.get("finished_at") or related.get("started_at") or 0) if related else 0,
+            )
             rows.append(
                 {
                     "row_kind": "library",
@@ -767,7 +777,9 @@ def create_app() -> Any:
                     "kind": e.kind,
                     "year": _extract_year(e.name) or posters_mod.cached_year(poster_key),
                     "poster": posters_mod.cached(poster_key),
-                    "done_at": e.mtime,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    "done_at": updated_at,
                     "path": e.path,
                     "rel_path": e.rel_path,
                     "name": e.name,
@@ -826,6 +838,8 @@ def create_app() -> Any:
                     "kind": "episode" if is_ep else "movie",
                     "year": _extract_year(j.get("title", "")) or posters_mod.cached_year(poster_key),
                     "poster": posters_mod.cached(poster_key),
+                    "created_at": j.get("started_at"),
+                    "updated_at": j.get("finished_at") or j.get("started_at"),
                     "done_at": j.get("finished_at") or j.get("started_at"),
                     "path": j.get("final_path"),
                     "rel_path": None,

@@ -63,7 +63,7 @@ function uniqueShowSources(results: SearchResult[]): SearchResult[] {
   });
 }
 
-function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) {
+function Poster({ item, onClick, priority = false, eager = false }: { item: DiscoverItem; onClick: () => void; priority?: boolean; eager?: boolean }) {
   const [err, setErr] = useState(false);
   return (
     <button
@@ -71,7 +71,14 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
       className='group relative aspect-[2/3] overflow-hidden rounded-lg bg-secondary/40 text-left ring-1 ring-border/40 transition-transform hover:-translate-y-1 hover:ring-primary/50'
     >
       {item.poster_url && !err ? (
-        <img src={api.posterUrl(item.poster_url)} onError={() => setErr(true)} className='h-full w-full object-cover' loading='lazy' />
+        <img
+          src={api.posterUrl(item.poster_url)}
+          onError={() => setErr(true)}
+          className='h-full w-full object-cover'
+          loading={eager ? 'eager' : 'lazy'}
+          fetchPriority={priority ? 'high' : 'auto'}
+          decoding='async'
+        />
       ) : (
         <div className='flex h-full w-full items-center justify-center text-muted-foreground'>
           {item.kind === 'movie' ? <Film className='h-8 w-8' /> : <Tv className='h-8 w-8' />}
@@ -391,8 +398,14 @@ export default function Search() {
         <EmptyState icon={SearchIcon} title='No results' description='Try a different title.' />
       ) : (
         <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6'>
-          {items.map((it) => (
-            <Poster key={`${it.kind}-${it.tvdb_id}-${it.name}`} item={it} onClick={() => openTitle(it)} />
+          {items.map((it, index) => (
+            <Poster
+              key={`${it.kind}-${it.tvdb_id}-${it.name}`}
+              item={it}
+              onClick={() => openTitle(it)}
+              priority={index === 0}
+              eager={index < 6}
+            />
           ))}
         </div>
       )}
