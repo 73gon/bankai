@@ -10,10 +10,11 @@ import pytest
 
 from bankai.config import get_settings, reset_settings_cache
 from bankai.db import StateRepository, initialize
-from bankai.processor.pipeline import PipelineWorker
+from bankai.processor.pipeline import PipelineWorker, _resolve_episode_fallback
 from bankai.processor.sync import PlaceholderAudioError
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import Worker, WorkerContext, WorkerError
+from bankai.scraper.base import EpisodeRef, StreamHandle
 
 
 class _FakeWorker(Worker):
@@ -191,3 +192,143 @@ async def test_pipeline_retries_next_extract_attempt_when_hoster_fails(
 
     assert result is not None
     assert [call["hint"] for call in extract.calls] == ["ytdlp", "playwright"]
+
+
+async def test_burningseries_episode_fallback_resolves_exact_filmpalast_voe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFilmpalast:
+        async def list_season(self, show: str, season: int) -> list[EpisodeRef]:
+            assert show == "Arcane - League of Legends"
+            assert season == 2
+            return [
+                EpisodeRef(
+                    site="filmpalast",
+                    series_title=show,
+                    season=2,
+                    episode=1,
+                    title="Episode 1",
+                    url="https://filmpalast.invalid/stream/arcane-s02e01",
+                ),
+                EpisodeRef(
+                    site="filmpalast",
+                    series_title=show,
+                    season=2,
+                    episode=2,
+                    title="Episode 2",
+                    url="https://filmpalast.invalid/stream/arcane-s02e02",
+                ),
+            ]
+
+        async def resolve_stream(self, url: str) -> StreamHandle:
+            assert url.endswith("s02e02")
+            return StreamHandle(
+                site="filmpalast",
+                url="https://voe.sx/direct-arcane-s02e02",
+                hint="ytdlp",
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "bankai.scraper.get_backend",
+        lambda site_id: FakeFilmpalast if site_id == "filmpalast" else None,
+    )
+
+    handle = await _resolve_episode_fallback(
+        {
+            "kind": "episode",
+            "series_title": "Arcane - League of Legends",
+            "season": 2,
+            "episode": 2,
+        },
+        site_id="filmpalast",
+    )
+
+    assert handle is not None
+    assert handle.url == "https://voe.sx/direct-arcane-s02e02"
+    assert handle.hint == "ytdlp"
+
+
+async def test_pipeline_prefers_exact_filmpalast_voe_for_burningseries_episode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    burningseries_wrapper = (
+        "https://burningseries.ac/serie/Arcane-League-of-Legends/2/2/de"
+    )
+    filmpalast_wrapper = "https://filmpalast.invalid/stream/arcane-s02e02"
+    voe_url = "https://voe.sx/direct-arcane-s02e02"
+
+    class FakeBurningSeries:
+        async def resolve_all_streams(self, url: str) -> list[StreamHandle]:
+            assert url == burningseries_wrapper
+            return [StreamHandle(site="burningseries", url=f"{url}/VOE", hint="playwright")]
+
+        async def aclose(self) -> None:
+            return None
+
+    class FakeFilmpalast:
+        async def list_season(self, show: str, season: int) -> list[EpisodeRef]:
+            assert show == "Arcane - League of Legends"
+            assert season == 2
+            return [
+                EpisodeRef(
+                    site="filmpalast",
+                    series_title=show,
+                    season=2,
+                    episode=2,
+                    title="Episode 2",
+                    url=filmpalast_wrapper,
+                )
+            ]
+
+        async def resolve_stream(self, url: str) -> StreamHandle:
+            assert url == filmpalast_wrapper
+            return StreamHandle(site="filmpalast", url=voe_url, hint="ytdlp")
+
+        async def aclose(self) -> None:
+            return None
+
+    backends = {
+        "burningseries": FakeBurningSeries,
+        "filmpalast": FakeFilmpalast,
+    }
+    monkeypatch.setattr("bankai.scraper.get_backend", lambda site_id: backends[site_id])
+
+    extract = _FakeWorker(JobKind.EXTRACT, {"path": "/tmp/audio.aac"})
+    torrent = _FakeWorker(JobKind.TORRENT, {"path": "/tmp/video.mkv"})
+    sync = _FakeWorker(JobKind.SYNC, {"path": "/tmp/synced.aac"})
+    remux = _FakeWorker(JobKind.REMUX, {"path": "/tmp/final.mkv"})
+    pipeline = PipelineWorker(extractor=extract, torrent=torrent, sync=sync, remux=remux)  # type: ignore[arg-type]
+
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+    job = repo.create_job(
+        Job(
+            kind=JobKind.PIPELINE,
+            status=JobStatus.RUNNING,
+            payload={
+                "query": "Arcane - League of Legends S02E02",
+                "series_title": "Arcane - League of Legends",
+                "season": 2,
+                "episode": 2,
+                "stream_url": burningseries_wrapper,
+                "stream_hint": "playwright",
+                "stream_site": "burningseries",
+                "kind": "episode",
+                "out": str(tmp_path / "out.mkv"),
+            },
+        )
+    )
+    ctx = WorkerContext(
+        job=job, repo=repo, work_dir=tmp_path / "work", cancel_token=asyncio.Event()
+    )
+
+    result = await pipeline.run(ctx)
+
+    assert result is not None
+    assert extract.calls[0]["url"] == voe_url
+    assert extract.calls[0]["hint"] == "ytdlp"

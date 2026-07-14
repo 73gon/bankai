@@ -211,16 +211,28 @@ const LogPanel = memo(function LogPanel({ text }: { text: string }) {
 // Fixed set of statuses a row can be in.
 type Status = 'queued' | 'downloading' | 'failed' | 'cancelled' | 'review' | 'approved' | 'transferring' | 'done' | 'deleted';
 
-const STATUS_VARIANT: Record<Status, 'muted' | 'accent' | 'destructive' | 'warning' | 'success'> = {
+const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning' | 'success' | 'transfer'> = {
   queued: 'muted',
-  downloading: 'accent',
+  downloading: 'info',
   failed: 'destructive',
   cancelled: 'warning',
   review: 'warning',
   approved: 'success',
-  transferring: 'accent',
+  transferring: 'transfer',
   done: 'success',
   deleted: 'muted',
+};
+
+const STATUS_ROW_TINT: Record<Status, string> = {
+  queued: 'bg-muted/15 hover:bg-muted/25',
+  downloading: 'bg-info/[0.055] hover:bg-info/[0.1]',
+  failed: 'bg-destructive/[0.07] hover:bg-destructive/[0.12]',
+  cancelled: 'bg-warning/[0.055] hover:bg-warning/[0.1]',
+  review: 'bg-warning/[0.045] hover:bg-warning/[0.085]',
+  approved: 'bg-success/[0.045] hover:bg-success/[0.085]',
+  transferring: 'bg-transfer/[0.06] hover:bg-transfer/[0.11]',
+  done: 'bg-success/[0.06] hover:bg-success/[0.1]',
+  deleted: 'bg-muted/10 hover:bg-muted/20',
 };
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -258,14 +270,14 @@ function StatusCell({ r }: { r: TitleRow }) {
     const pct = Math.round(r.overall_percent ?? 0);
     return (
       <div className='min-w-[10rem]'>
-        <Badge variant='accent' className='gap-1.5'>
+        <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
           <Loader2 className='h-3 w-3 animate-spin' />
           {r.step_label || 'Downloading'} {pct > 0 ? `${pct}%` : ''}
         </Badge>
         {pct > 0 && (
           <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
             <div
-              className='h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-violet-500'
+              className='h-full rounded-full bg-gradient-to-r from-info to-transfer'
               style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
             />
           </div>
@@ -276,7 +288,7 @@ function StatusCell({ r }: { r: TitleRow }) {
   if (s === 'transferring') {
     const pct = Math.round(r.transfer_percent || 0);
     return (
-      <Badge variant='accent' className='gap-1.5'>
+      <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
         <Loader2 className='h-3 w-3 animate-spin' /> Transferring {pct > 0 ? `${pct}%` : ''}
       </Badge>
     );
@@ -635,14 +647,14 @@ export default function Library() {
     const canCancel = isJob && (r.pending || r.job_status === 'running');
     const canDelete = isJob && (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled');
     const isOpen = expanded === r.id;
-    const isDone = rowStatus(r) === 'done';
+    const status = rowStatus(r);
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
         <tr
           className={cn(
             'cursor-pointer border-t border-border',
-            isDone ? 'bg-success/[0.06] hover:bg-success/[0.1]' : 'hover:bg-secondary/70',
+            STATUS_ROW_TINT[status],
           )}
           onClick={() => toggleExpand(r)}
         >

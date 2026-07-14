@@ -32,6 +32,7 @@ Job payload schema::
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ from bankai.queue.worker import (
     Worker,
     WorkerContext,
 )
+from bankai.scraper.base import StreamHandle
 from bankai.torrent.worker import TorrentWorker
 
 log = get_logger(__name__)
@@ -176,6 +178,25 @@ class PipelineWorker(Worker):
                 pass  # unknown backend id; fall through with original URL
             except Exception as exc:
                 log.warning("[pipeline] resolve_stream failed: %s", exc)
+
+        # Burning Series exposes German episode metadata reliably, but its
+        # player handoff is protected by an interactive invisible reCAPTCHA.
+        # Do not automate or bypass that challenge. When Filmpalast carries
+        # the exact same episode, prefer its directly exposed hoster URL
+        # (normally VOE) while retaining the Burning Series wrappers as later
+        # attempts for environments where the challenge completes normally.
+        if stream_site == "burningseries":
+            fallback = await _resolve_episode_fallback(payload, site_id="filmpalast")
+            if fallback is not None:
+                previous_urls = [stream_url, *mirror_urls]
+                stream_url = fallback.url
+                stream_hint = fallback.hint
+                mirror_urls = [url for url in previous_urls if url != stream_url]
+                log.info(
+                    "[pipeline] Burning Series player requires an interactive challenge; "
+                    "using exact Filmpalast episode mirror %s",
+                    fallback.url,
+                )
         extract_attempts = _extract_attempt_payloads(
             stream_url=stream_url,
             stream_hint=stream_hint,
@@ -571,6 +592,59 @@ def _default_output_path(
         folder_template=out_cfg.movie_folder_template,
         file_template=out_cfg.filename_template,
     )
+
+
+async def _resolve_episode_fallback(
+    payload: dict[str, Any],
+    *,
+    site_id: str,
+) -> StreamHandle | None:
+    """Resolve the exact episode through another registered series backend."""
+    if payload.get("kind") != "episode":
+        return None
+    try:
+        season = int(payload["season"])
+        episode = int(payload["episode"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    show = str(payload.get("series_title") or payload.get("query") or "").strip()
+    show = re.sub(r"\s+[Ss]\d{1,2}[Ee]\d{1,3}\s*$", "", show).strip()
+    if not show:
+        return None
+
+    try:
+        from bankai.scraper import get_backend
+
+        backend = get_backend(site_id)()
+    except Exception as exc:
+        log.debug("[pipeline] could not open episode fallback %s: %s", site_id, exc)
+        return None
+    try:
+        list_season = getattr(backend, "list_season", None)
+        if not callable(list_season):
+            return None
+        episodes = await list_season(show, season)
+        match = next((ref for ref in episodes if ref.episode == episode), None)
+        if match is None:
+            return None
+        handle = await backend.resolve_stream(match.url)
+        # A backend returning its own wrapper means no direct mirror was
+        # exposed. It is not a useful fallback for the guarded BS wrapper.
+        if not handle.url or handle.url == match.url:
+            return None
+        return handle
+    except Exception as exc:
+        log.warning(
+            "[pipeline] episode fallback %s failed for %s S%02dE%02d: %s",
+            site_id,
+            show,
+            season,
+            episode,
+            exc,
+        )
+        return None
+    finally:
+        await backend.aclose()
 
 
 def _extract_attempt_payloads(
