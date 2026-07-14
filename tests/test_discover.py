@@ -38,19 +38,25 @@ async def test_studio_search_uses_tvdb_company_filter(monkeypatch: pytest.Monkey
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v4/login":
             return httpx.Response(200, json={"data": {"token": "token"}})
-        assert request.url.path == "/v4/search"
-        assert request.url.params["type"] == "movie"
-        assert request.url.params["company"] == "Disney"
-        assert "query" not in request.url.params
+        if request.url.path == "/v4/search":
+            assert request.url.params["type"] == "company"
+            assert request.url.params["query"] == "Disney"
+            return httpx.Response(
+                200,
+                json={"data": [{"tvdb_id": "123", "name": "Walt Disney Studios"}]},
+            )
+        assert request.url.path == "/v4/movies/filter"
+        assert request.url.params["company"] == "123"
+        assert request.url.params["sort"] == "score"
         return httpx.Response(
             200,
             json={
                 "data": [
                     {
-                        "tvdb_id": "123",
+                        "id": 789,
                         "name": "Inside Out",
                         "year": "2015",
-                        "image_url": "https://artworks.thetvdb.com/posters/inside-out.jpg",
+                        "image": "https://artworks.thetvdb.com/posters/inside-out.jpg",
                     }
                 ]
             },
@@ -60,7 +66,7 @@ async def test_studio_search_uses_tvdb_company_filter(monkeypatch: pytest.Monkey
 
     items = await discover.search("Disney", kind="movie", search_by="studio")
 
-    assert [(item.name, item.tvdb_id, item.year) for item in items] == [("Inside Out", 123, 2015)]
+    assert [(item.name, item.tvdb_id, item.year) for item in items] == [("Inside Out", 789, 2015)]
 
 
 @pytest.mark.asyncio
@@ -68,9 +74,6 @@ async def test_person_search_combines_cast_and_director_movies(monkeypatch: pyte
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v4/login":
             return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/search" and request.url.params.get("director"):
-            assert request.url.params["director"] == "Anne Hathaway"
-            return httpx.Response(200, json={"data": []})
         if request.url.path == "/v4/search":
             assert request.url.params["type"] == "person"
             assert request.url.params["query"] == "Anne Hathaway"
@@ -110,15 +113,10 @@ async def test_person_search_combines_cast_and_director_movies(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_person_search_deduplicates_director_and_credit_results(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_person_search_deduplicates_multiple_credits_for_one_movie(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v4/login":
             return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/search" and request.url.params.get("director"):
-            return httpx.Response(
-                200,
-                json={"data": [{"tvdb_id": "100", "name": "Oppenheimer", "year": "2023"}]},
-            )
         if request.url.path == "/v4/search":
             return httpx.Response(
                 200,
@@ -130,6 +128,7 @@ async def test_person_search_deduplicates_director_and_credit_results(monkeypatc
                 json={
                     "data": {
                         "characters": [
+                            {"movieId": 100, "movie": {"name": "Oppenheimer", "year": "2023"}},
                             {"movieId": 100, "movie": {"name": "Oppenheimer", "year": "2023"}},
                             {"movieId": 101, "movie": {"name": "Tenet", "year": "2020"}},
                         ]

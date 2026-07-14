@@ -161,31 +161,12 @@ async def _person_movies(
     query: str,
     limit: int,
 ) -> list[DiscoverItem]:
-    """Return movies linked to matching TVDB people (cast or crew).
-
-    TVDB exposes an exact director filter, while all other cast/crew work is
-    represented by movie-linked character records on the extended person
-    response. Combining both paths covers directors as well as actors.
-    """
-    director_data, people_data = await asyncio.gather(
-        _request_data(
-            client,
-            "search",
-            headers=headers,
-            params={"type": "movie", "director": query, "limit": limit},
-        ),
-        _request_data(
-            client,
-            "search",
-            headers=headers,
-            params={"query": query, "type": "person", "limit": 5},
-        ),
-    )
-
-    direct = (
-        [_item_from_record(record, "movie") for record in director_data if isinstance(record, dict)]
-        if isinstance(director_data, list)
-        else []
+    """Return movies linked to matching TVDB people (cast or crew)."""
+    people_data = await _request_data(
+        client,
+        "search",
+        headers=headers,
+        params={"query": query, "type": "person", "limit": 5},
     )
     people = [record for record in people_data if isinstance(record, dict)] if isinstance(people_data, list) else []
 
@@ -230,7 +211,89 @@ async def _person_movies(
             credits.append(_item_from_record(record, "movie"))
 
     credits.sort(key=lambda item: (-(item.year or 0), item.name.casefold()))
-    return _dedupe_items([*direct, *credits], limit)
+    return _dedupe_items(credits, limit)
+
+
+_STUDIO_HINTS = ("studio", "studios", "picture", "pictures", "animation", "film", "films", "production", "company")
+_NON_STUDIO_HINTS = ("channel", "television", "network", "junior", "kids", "cinemagic", "xd")
+
+
+def _company_rank(record: dict, query: str, index: int) -> tuple[int, int, int, int]:
+    name = " ".join(str(record.get("name") or record.get("title") or "").casefold().split())
+    normalized_query = " ".join(query.casefold().split())
+    exact = int(name == normalized_query)
+    studio_hint = int(any(hint in name for hint in _STUDIO_HINTS))
+    penalty = int(any(hint in name for hint in _NON_STUDIO_HINTS) or "+" in name or "(" in name)
+    return (exact, studio_hint, -penalty, -index)
+
+
+async def _studio_movies(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    query: str,
+    limit: int,
+) -> list[DiscoverItem]:
+    """Resolve matching TVDB companies, then fetch their linked movies."""
+    company_data = await _request_data(
+        client,
+        "search",
+        headers=headers,
+        params={"query": query, "type": "company", "limit": 30},
+    )
+    companies = (
+        [record for record in company_data if isinstance(record, dict)]
+        if isinstance(company_data, list)
+        else []
+    )
+    normalized_query = " ".join(query.casefold().split())
+    exact = [
+        record
+        for record in companies
+        if " ".join(str(record.get("name") or record.get("title") or "").casefold().split())
+        == normalized_query
+    ]
+    if exact:
+        candidates = exact[:3]
+    else:
+        candidates = [
+            record
+            for index, record in sorted(
+                enumerate(companies),
+                key=lambda pair: _company_rank(pair[1], query, pair[0]),
+                reverse=True,
+            )[:3]
+        ]
+    company_ids = [
+        company_id
+        for record in candidates
+        if (company_id := _to_int(record.get("tvdb_id") or record.get("id"))) is not None
+    ]
+    movie_data = await asyncio.gather(
+        *(
+            _request_data(
+                client,
+                "movies/filter",
+                headers=headers,
+                params={"company": company_id, "sort": "score"},
+            )
+            for company_id in company_ids
+        )
+    )
+    buckets = [
+        [_item_from_record(record, "movie") for record in data if isinstance(record, dict)]
+        for data in movie_data
+        if isinstance(data, list)
+    ]
+    # Round-robin avoids one broad parent company crowding out more specific
+    # matching studios while preserving TVDB's score order within each list.
+    merged: list[DiscoverItem] = []
+    for position in range(max((len(bucket) for bucket in buckets), default=0)):
+        for bucket in buckets:
+            if position < len(bucket):
+                merged.append(bucket[position])
+        if len(merged) >= limit * 2:
+            break
+    return _dedupe_items(merged, limit)
 
 
 async def search(
@@ -259,12 +322,11 @@ async def search(
         headers = {"Authorization": f"Bearer {token}"}
         if mode == "person":
             items = await _person_movies(client, headers, query.strip(), limit)
+        elif mode == "studio":
+            items = await _studio_movies(client, headers, query.strip(), limit)
         else:
             params: dict[str, object] = {"type": tvdb_type, "limit": limit}
-            if mode == "studio":
-                params["company"] = query.strip()
-            else:
-                params["query"] = query.strip()
+            params["query"] = query.strip()
             data = await _request_data(
                 client,
                 "search",
