@@ -210,11 +210,10 @@ async def _person_movies(
             record = {**movie, "tvdb_id": movie_id}
             credits.append(_item_from_record(record, "movie"))
 
-    credits.sort(key=lambda item: (-(item.year or 0), item.name.casefold()))
     return _dedupe_items(credits, limit)
 
 
-_STUDIO_HINTS = ("studio", "studios", "picture", "pictures", "animation", "film", "films", "production", "company")
+_STUDIO_HINTS = ("studio", "picture", "animation", "film", "production")
 _NON_STUDIO_HINTS = ("channel", "television", "network", "junior", "kids", "cinemagic", "xd")
 
 
@@ -222,7 +221,7 @@ def _company_rank(record: dict, query: str, index: int) -> tuple[int, int, int, 
     name = " ".join(str(record.get("name") or record.get("title") or "").casefold().split())
     normalized_query = " ".join(query.casefold().split())
     exact = int(name == normalized_query)
-    studio_hint = int(any(hint in name for hint in _STUDIO_HINTS))
+    studio_hint = 2 if any(hint in name for hint in _STUDIO_HINTS) else int("company" in name)
     penalty = int(any(hint in name for hint in _NON_STUDIO_HINTS) or "+" in name or "(" in name)
     return (exact, studio_hint, -penalty, -index)
 

@@ -88,14 +88,14 @@ async def test_person_search_combines_cast_and_director_movies(monkeypatch: pyte
                     "data": {
                         "characters": [
                             {
-                                "movieId": 789,
-                                "peopleType": "Actor",
-                                "movie": {"name": "Interstellar", "year": "2014", "image": "/posters/interstellar.jpg"},
-                            },
-                            {
                                 "movieId": 790,
                                 "peopleType": "Actor",
                                 "movie": {"name": "The Dark Knight Rises", "year": "2012"},
+                            },
+                            {
+                                "movieId": 789,
+                                "peopleType": "Actor",
+                                "movie": {"name": "Interstellar", "year": "2014", "image": "/posters/interstellar.jpg"},
                             },
                         ]
                     }
@@ -107,9 +107,9 @@ async def test_person_search_combines_cast_and_director_movies(monkeypatch: pyte
 
     items = await discover.search("Anne Hathaway", kind="movie", search_by="person")
 
-    assert [item.name for item in items] == ["Interstellar", "The Dark Knight Rises"]
-    assert items[0].tvdb_id == 789
-    assert items[0].poster_url == "https://artworks.thetvdb.com/posters/interstellar.jpg"
+    assert [item.name for item in items] == ["The Dark Knight Rises", "Interstellar"]
+    assert items[1].tvdb_id == 789
+    assert items[1].poster_url == "https://artworks.thetvdb.com/posters/interstellar.jpg"
 
 
 @pytest.mark.asyncio
