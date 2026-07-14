@@ -250,19 +250,27 @@ class FilmpalastBackend:
         the one most likely to extract cleanly, since hosters like veev.to are
         not supported by yt-dlp and defeat the playwright fallback too.
         """
+        handles = await self.resolve_all_streams(url)
+        if not handles:
+            return StreamHandle(site=self.site_id, url=url, hint="playwright")
+        log.info(
+            "[filmpalast] resolved hoster: %s (from %d mirror(s))",
+            handles[0].url,
+            len(handles),
+        )
+        return handles[0]
+
+    async def resolve_all_streams(self, url: str) -> list[StreamHandle]:
+        """Return every direct hoster mirror, ordered by extractor reliability."""
         try:
             resp = await self._client.get(url)
         except Exception as exc:
             log.debug("filmpalast resolve_stream fetch failed: %s", exc)
-            return StreamHandle(site=self.site_id, url=url, hint="playwright")
+            return []
         if resp.status_code != 200:
-            return StreamHandle(site=self.site_id, url=url, hint="playwright")
-        hosters = self._extract_hosters(resp.text)
-        if not hosters:
-            return StreamHandle(site=self.site_id, url=url, hint="playwright")
-        hoster = min(hosters, key=_hoster_rank)
-        log.info("[filmpalast] resolved hoster: %s (from %d mirror(s))", hoster, len(hosters))
-        return StreamHandle(site=self.site_id, url=hoster, hint="ytdlp")
+            return []
+        hosters = sorted(self._extract_hosters(resp.text), key=_hoster_rank)
+        return [StreamHandle(site=self.site_id, url=hoster, hint="ytdlp") for hoster in hosters]
 
     def _extract_hosters(self, html: str) -> list[str]:
         seen: set[str] = set()

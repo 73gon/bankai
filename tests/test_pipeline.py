@@ -10,7 +10,7 @@ import pytest
 
 from bankai.config import get_settings, reset_settings_cache
 from bankai.db import StateRepository, initialize
-from bankai.processor.pipeline import PipelineWorker, _resolve_episode_fallback
+from bankai.processor.pipeline import PipelineWorker, _resolve_episode_fallbacks
 from bankai.processor.sync import PlaceholderAudioError
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import Worker, WorkerContext, WorkerError
@@ -236,7 +236,7 @@ async def test_burningseries_episode_fallback_resolves_exact_filmpalast_voe(
         lambda site_id: FakeFilmpalast if site_id == "filmpalast" else None,
     )
 
-    handle = await _resolve_episode_fallback(
+    handles = await _resolve_episode_fallbacks(
         {
             "kind": "episode",
             "series_title": "Arcane - League of Legends",
@@ -246,9 +246,9 @@ async def test_burningseries_episode_fallback_resolves_exact_filmpalast_voe(
         site_id="filmpalast",
     )
 
-    assert handle is not None
-    assert handle.url == "https://voe.sx/direct-arcane-s02e02"
-    assert handle.hint == "ytdlp"
+    assert len(handles) == 1
+    assert handles[0].url == "https://voe.sx/direct-arcane-s02e02"
+    assert handles[0].hint == "ytdlp"
 
 
 async def test_pipeline_prefers_exact_filmpalast_voe_for_burningseries_episode(
@@ -284,9 +284,16 @@ async def test_pipeline_prefers_exact_filmpalast_voe_for_burningseries_episode(
                 )
             ]
 
-        async def resolve_stream(self, url: str) -> StreamHandle:
+        async def resolve_all_streams(self, url: str) -> list[StreamHandle]:
             assert url == filmpalast_wrapper
-            return StreamHandle(site="filmpalast", url=voe_url, hint="ytdlp")
+            return [
+                StreamHandle(site="filmpalast", url=voe_url, hint="ytdlp"),
+                StreamHandle(
+                    site="filmpalast",
+                    url="https://streamtape.invalid/direct-arcane-s02e02",
+                    hint="ytdlp",
+                ),
+            ]
 
         async def aclose(self) -> None:
             return None

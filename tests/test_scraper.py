@@ -267,8 +267,35 @@ async def test_filmpalast_resolve_prefers_supported_hoster() -> None:
         handle = await backend.resolve_stream("http://example.invalid/stream/arcane-s02e01")
     finally:
         await backend.aclose()
+
     assert handle.url == "https://voe.sx/d6b91t8"
     assert handle.hint == "ytdlp"
+
+
+@pytest.mark.asyncio
+async def test_filmpalast_resolve_all_returns_ranked_hosters() -> None:
+    html = """
+    <a class="button iconPlay" href="https://veev.to/slow">Veev</a>
+    <a class="button iconPlay" href="https://streamtape.com/backup">Streamtape</a>
+    <a class="button iconPlay" href="https://voe.sx/primary">VOE</a>
+    """
+
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text=html)),
+    )
+    try:
+        handles = await backend.resolve_all_streams("http://example.invalid/stream/x")
+    finally:
+        await backend.aclose()
+
+    assert [handle.url for handle in handles] == [
+        "https://voe.sx/primary",
+        "https://streamtape.com/backup",
+        "https://veev.to/slow",
+    ]
 
 
 @pytest.mark.asyncio
