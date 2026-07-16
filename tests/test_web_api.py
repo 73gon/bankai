@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from bankai.config import get_settings, reset_settings_cache
 from bankai.web.app import _parse_range, _stream_site_from_url, _waveform_envelope, create_app
+from bankai.web.discover import DiscoverItem
 
 
 @pytest.fixture()
@@ -61,6 +62,42 @@ def test_discover_search_rejects_non_title_show_mode(client: TestClient) -> None
 
     assert response.status_code == 400
     assert response.json()["detail"] == "person and studio search are only available for movies"
+
+
+def test_discover_search_marks_titles_already_added(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_search(query: str, *, kind: str, search_by: str) -> list[DiscoverItem]:
+        return [
+            DiscoverItem(name="Queued Movie", kind="movie", year=2024),
+            DiscoverItem(name="Staged Movie", kind="movie", year=2023),
+            DiscoverItem(name="Server Movie", kind="movie", year=2022),
+            DiscoverItem(name="New Movie", kind="movie", year=2021),
+        ]
+
+    monkeypatch.setattr("bankai.web.discover.search", fake_search)
+    monkeypatch.setattr("bankai.web.discover.is_configured", lambda: True)
+    monkeypatch.setattr("bankai.web.jobs.snapshot", lambda: [{"title": "Queued Movie (2024)"}])
+    monkeypatch.setattr(
+        "bankai.web.media.scan_library",
+        lambda: [SimpleNamespace(kind="movie", name="Staged Movie (2023)", series=None)],
+    )
+    monkeypatch.setattr(
+        "bankai.web.media.scan_server",
+        lambda kind: [SimpleNamespace(name="Server Movie (2022)")],
+    )
+
+    response = client.get("/api/discover/search", params={"q": "Movie", "kind": "movie"})
+
+    assert response.status_code == 200
+    added_by_name = {item["name"]: item["added"] for item in response.json()["items"]}
+    assert added_by_name == {
+        "Queued Movie": True,
+        "Staged Movie": True,
+        "Server Movie": True,
+        "New Movie": False,
+    }
 
 
 def test_library_empty(client: TestClient) -> None:

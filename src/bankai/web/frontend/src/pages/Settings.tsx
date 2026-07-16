@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const SETTING_UI: Record<
   string,
@@ -267,8 +267,10 @@ export default function Settings() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value='1080p'>1080p</SelectItem>
-                              <SelectItem value='2160p'>2160p (4K)</SelectItem>
+                              <SelectGroup>
+                                <SelectItem value='1080p'>1080p</SelectItem>
+                                <SelectItem value='2160p'>2160p (4K)</SelectItem>
+                              </SelectGroup>
                             </SelectContent>
                           </Select>
                         ) : ui?.kind === 'number' ? (

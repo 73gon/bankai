@@ -44,6 +44,7 @@ export interface DiscoverItem {
   is_new?: boolean;
   available?: boolean;
   checked?: boolean;
+  added?: boolean;
   filmpalast_url?: string;
 }
 

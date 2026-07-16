@@ -385,6 +385,19 @@ def create_app() -> Any:
             pass
         return names
 
+    def _added_titles(kind: str) -> set[str]:
+        """Normalised titles already queued, staged, or on the media server."""
+        names = _server_have(kind) | _active_titles()
+        try:
+            for entry in media_mod.scan_library():
+                if kind == "movie" and entry.kind == "movie":
+                    names.add(_norm_title(entry.name))
+                elif kind == "show" and entry.kind == "episode":
+                    names.add(_norm_title(entry.series or entry.name))
+        except Exception:
+            pass
+        return names
+
     def _filter_discover(items: list, kind: str) -> list:
         """Hide upcoming (not-yet-released) titles, anything already on the
         server, and anything already in the queue, so Discover only shows
@@ -466,9 +479,15 @@ def create_app() -> Any:
         # hide clearly-unreleased titles; the discover mirror/on-server/queued
         # filters would otherwise hide exactly what the user searched for.
         items = [i for i in items if discover_mod.is_released(i)]
+        added = _added_titles(k)
+        results: list[dict] = []
+        for item in items:
+            result = discover_mod.to_dict(item)
+            result["added"] = _norm_title(item.name) in added
+            results.append(result)
         return {
             "configured": discover_mod.is_configured(),
-            "items": [discover_mod.to_dict(i) for i in items],
+            "items": results,
         }
 
     @app.get("/api/discover/poster")

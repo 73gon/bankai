@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2 } from 'lucide-react';
+import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type DiscoverItem, type DiscoverSearchBy, type SearchResult, type EpisodeItem } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -83,6 +83,16 @@ function Poster({ item, onClick, priority = false, eager = false }: { item: Disc
         <div className='flex h-full w-full items-center justify-center text-muted-foreground'>
           {item.kind === 'movie' ? <Film className='h-8 w-8' /> : <Tv className='h-8 w-8' />}
         </div>
+      )}
+      {item.added && (
+        <Badge
+          variant='success'
+          className='absolute right-2 top-2 gap-1 border-success/50 bg-card/95 shadow-lg backdrop-blur-sm'
+          title='Already added to the queue or library'
+        >
+          <Check className='h-3 w-3' strokeWidth={3} />
+          Added
+        </Badge>
       )}
       <div className='absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-2.5 pt-8'>
         <div className='line-clamp-2 text-xs font-medium'>{item.name}</div>

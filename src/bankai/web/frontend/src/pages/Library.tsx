@@ -35,7 +35,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
@@ -310,9 +310,11 @@ function statusRank(r: TitleRow): number {
 
 type SortCol = 'title' | 'type' | 'status' | 'created_at' | 'updated_at';
 type SortDir = 'asc' | 'desc';
+type PageSize = 10 | 25 | 50 | 100;
 
 const QUEUE_PREFERENCES_KEY = 'bankai:queue-table-preferences';
 const SORT_COLUMNS: SortCol[] = ['title', 'type', 'status', 'created_at', 'updated_at'];
+const PAGE_SIZES: PageSize[] = [10, 25, 50, 100];
 
 interface QueuePreferences {
   filter: string;
@@ -320,6 +322,7 @@ interface QueuePreferences {
   filtersOpen: boolean;
   sortCol: SortCol;
   sortDir: SortDir;
+  pageSize: PageSize;
 }
 
 function readQueuePreferences(): QueuePreferences {
@@ -329,6 +332,7 @@ function readQueuePreferences(): QueuePreferences {
     filtersOpen: false,
     sortCol: 'created_at',
     sortDir: 'desc',
+    pageSize: 50,
   };
   try {
     const raw = localStorage.getItem(QUEUE_PREFERENCES_KEY);
@@ -341,6 +345,7 @@ function readQueuePreferences(): QueuePreferences {
       filtersOpen: typeof saved.filtersOpen === 'boolean' ? saved.filtersOpen : fallback.filtersOpen,
       sortCol: SORT_COLUMNS.includes(saved.sortCol as SortCol) ? (saved.sortCol as SortCol) : fallback.sortCol,
       sortDir: saved.sortDir === 'asc' || saved.sortDir === 'desc' ? saved.sortDir : fallback.sortDir,
+      pageSize: PAGE_SIZES.includes(saved.pageSize as PageSize) ? (saved.pageSize as PageSize) : fallback.pageSize,
     };
   } catch {
     return fallback;
@@ -448,17 +453,13 @@ export default function Library() {
   const [sortCol, setSortCol] = useState<SortCol>(initialPreferences.sortCol);
   const [sortDir, setSortDir] = useState<SortDir>(initialPreferences.sortDir);
   const [page, setPage] = useState(0);
-  const [autoSize, setAutoSize] = useState(10);
-  const [pageChoice, setPageChoice] = useState<string>('auto');
-  const pageSize = pageChoice === 'auto' ? autoSize : parseInt(pageChoice, 10);
+  const [pageSize, setPageSize] = useState<PageSize>(initialPreferences.pageSize);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [redoing, setRedoing] = useState<Set<string>>(new Set());
 
   const [review, setReview] = useState<TitleRow | null>(null);
   const [del, setDel] = useState<TitleRow | null>(null);
-  const tableWrapRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     try {
       const preferences: QueuePreferences = {
@@ -467,12 +468,13 @@ export default function Library() {
         filtersOpen,
         sortCol,
         sortDir,
+        pageSize,
       };
       localStorage.setItem(QUEUE_PREFERENCES_KEY, JSON.stringify(preferences));
     } catch {
       /* localStorage may be unavailable in a locked-down browser. */
     }
-  }, [filter, statusFilters, filtersOpen, sortCol, sortDir]);
+  }, [filter, statusFilters, filtersOpen, sortCol, sortDir, pageSize]);
 
   async function load(silent = false) {
     if (!silent) setLoading(true);
@@ -515,22 +517,6 @@ export default function Library() {
       clearInterval(t);
     };
   }, [expanded]);
-
-  // Size the page to however many rows fit the viewport (no window scroll).
-  useEffect(() => {
-    const el = tableWrapRef.current;
-    if (!el) return;
-    const compute = () => {
-      const rowH = 60;
-      const headH = 42;
-      const h = el.clientHeight - headH;
-      setAutoSize(Math.max(4, Math.floor(h / rowH)));
-    };
-    compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [loading]);
 
   function typeLabel(r: TitleRow): string {
     if (r.kind === 'episode') {
@@ -744,8 +730,8 @@ export default function Library() {
           <td className='px-2 py-2 align-middle' onClick={stop}>
             <div className='flex items-center justify-end gap-1'>
               {isLib && (
-                <Button size='sm' variant='secondary' onClick={() => setReview(r)}>
-                  <Play className='h-4 w-4' /> Review
+                <Button size='sm' variant='default' onClick={() => setReview(r)}>
+                  <Play data-icon='inline-start' /> Review
                 </Button>
               )}
               <Button
@@ -768,8 +754,9 @@ export default function Library() {
                 </Button>
               )}
               {isLib && (r.stage === 'approved' || r.transfer_status === 'failed') && (
-                <Button size='icon' variant='ghost' onClick={() => transferOne(r.path!)} title='Send to media server'>
-                  <UploadCloud className='h-4 w-4' />
+                <Button size='sm' variant='default' onClick={() => transferOne(r.path!)} title='Send to media server'>
+                  <UploadCloud data-icon='inline-start' />
+                  {r.transfer_status === 'failed' ? 'Retry transfer' : 'Transfer'}
                 </Button>
               )}
               {isLib && (
@@ -875,7 +862,7 @@ export default function Library() {
       ) : filtered.length === 0 ? (
         <EmptyState icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
       ) : (
-        <div ref={tableWrapRef} className='min-h-0 flex-1 overflow-auto rounded-lg border'>
+        <div className='min-h-0 flex-1 overflow-auto rounded-lg border'>
           <table className='w-full text-sm'>
             <thead className='sticky top-0 z-10 bg-card text-left text-xs uppercase tracking-wide text-muted-foreground'>
               <tr>
@@ -909,16 +896,23 @@ export default function Library() {
             </span>
             <span>·</span>
             <span>Per page</span>
-            <Select value={pageChoice} onValueChange={(v) => setPageChoice(v)}>
+            <Select
+              value={String(pageSize)}
+              onValueChange={(value) => {
+                const next = Number(value) as PageSize;
+                if (PAGE_SIZES.includes(next)) setPageSize(next);
+              }}
+            >
               <SelectTrigger className='h-7 w-[86px]'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value='auto'>Auto</SelectItem>
-                <SelectItem value='10'>10</SelectItem>
-                <SelectItem value='25'>25</SelectItem>
-                <SelectItem value='50'>50</SelectItem>
-                <SelectItem value='100'>100</SelectItem>
+                <SelectGroup>
+                  <SelectItem value='10'>10</SelectItem>
+                  <SelectItem value='25'>25</SelectItem>
+                  <SelectItem value='50'>50</SelectItem>
+                  <SelectItem value='100'>100</SelectItem>
+                </SelectGroup>
               </SelectContent>
             </Select>
           </div>
