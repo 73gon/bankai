@@ -20,11 +20,13 @@ batching)::
 
 from __future__ import annotations
 
+import os
 import re
 import time as _time
 from pathlib import Path
 from typing import Any
 
+from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.queue.models import Artifact, JobKind
 from bankai.queue.worker import (
@@ -36,7 +38,7 @@ from bankai.queue.worker import (
 from bankai.torrent.matcher import EpisodeFile, find_video_files, match_episodes, pick_movie_file
 from bankai.torrent.prowlarr import ProwlarrClient
 from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError
-from bankai.torrent.selector import TorrentSelector
+from bankai.torrent.selector import ScoredCandidate, TorrentSelector
 
 log = get_logger(__name__)
 
@@ -93,7 +95,9 @@ class TorrentWorker(Worker):
     ) -> None:
         self._prowlarr = prowlarr or ProwlarrClient()
         self._qbit = qbit or QBittorrentClient()
-        self._selector = selector or TorrentSelector()
+        # Resolve settings at run time so a just-saved web preference (notably
+        # min_seeders) cannot be captured by a long-lived worker instance.
+        self._selector = selector
 
     async def run(self, ctx: WorkerContext) -> dict[str, Any] | None:
         query = ctx.job.payload.get("query")
@@ -101,6 +105,14 @@ class TorrentWorker(Worker):
             raise PermanentWorkerError("torrent job payload missing 'query'")
         media_kind = ctx.job.payload.get("kind", "movie")
         categories = _CAT_TV if media_kind == "episode" else _CAT_MOVIES
+        target_runtime = ctx.job.payload.get("target_runtime_seconds")
+        try:
+            target_runtime = float(target_runtime) if target_runtime is not None else None
+        except (TypeError, ValueError):
+            target_runtime = None
+        selector = self._selector or TorrentSelector()
+        manual_raw = ctx.job.payload.get("manual_candidate")
+        manual_override = isinstance(manual_raw, dict)
 
         # ---- search ------------------------------------------------------
         # Episodes prefer a season pack (single-episode releases usually
@@ -110,35 +122,85 @@ class TorrentWorker(Worker):
         else:
             search_queries = [query]
 
-        chosen = None
+        chosen: ScoredCandidate | None = None
         attempts: list[str] = []
-        for search_query in search_queries:
-            try:
-                candidates = await self._prowlarr.search(search_query, categories=categories)
-            except Exception as exc:
-                raise WorkerError(f"prowlarr search failed: {exc}") from exc
-            attempts.append(f"{search_query!r}={len(candidates)}")
-            if not candidates:
-                continue
-            pick = self._selector.select(candidates, query=search_query)
-            if pick is not None:
-                chosen = pick
-                if search_query != query:
-                    log.info("[torrent] using season pack search %r", search_query)
-                break
+        all_candidates = []
+        eligible_ids: set[str] = set()
+        if manual_override:
+            from bankai.torrent.actions import candidate_from_dict
+
+            chosen = ScoredCandidate(
+                candidate=candidate_from_dict(manual_raw),
+                score=0.0,
+                reasons=("manually selected",),
+            )
+        else:
+            from bankai.torrent.actions import candidate_id
+
+            for search_query in search_queries:
+                try:
+                    candidates = await self._prowlarr.search(search_query, categories=categories)
+                except Exception as exc:
+                    raise WorkerError(f"prowlarr search failed: {exc}") from exc
+                attempts.append(f"{search_query!r}={len(candidates)}")
+                if not candidates:
+                    continue
+                relevant = selector.relevant(candidates, query=search_query)
+                all_candidates.extend(relevant)
+                ranked = selector.rank(
+                    relevant,
+                    target_runtime_seconds=target_runtime,
+                )
+                eligible_ids.update(candidate_id(item.candidate) for item in ranked)
+                if ranked:
+                    chosen = ranked[0]
+                    if search_query != query:
+                        log.info("[torrent] using season pack search %r", search_query)
+                    break
 
         if chosen is None:
-            raise PermanentWorkerError(f"no candidate met selector criteria (tried {', '.join(attempts) or 'nothing'})")
+            background_id = os.environ.get("BANKAI_BG_JOB_ID")
+            if background_id and all_candidates and ctx.job.payload.get("wait_for_manual", True):
+                from bankai.torrent import actions as torrent_actions
+
+                torrent_actions.create_request(
+                    background_id,
+                    query=query,
+                    candidates=all_candidates,
+                    eligible_ids=eligible_ids,
+                    target_runtime_seconds=target_runtime,
+                )
+                log.info(
+                    'BANKAI_PROGRESS stage=torrent_action status=waiting pct=0 message="Waiting for torrent selection"'
+                )
+                log.warning(
+                    "[torrent] no release met the configured size/seeder/quality policy; waiting for a manual choice"
+                )
+                picked = await torrent_actions.wait_for_choice(background_id, cancel_token=ctx.cancel_token)
+                chosen = ScoredCandidate(picked, 0.0, ("manually selected after policy rejection",))
+                manual_override = True
+            else:
+                raise PermanentWorkerError(f"no candidate met selector criteria (tried {', '.join(attempts) or 'nothing'})")
+        policy = get_settings().selector
         log.info(
-            "[torrent] picked %s (score=%.1f, reasons=%s)",
+            "[torrent] picked %s (seeders=%d, configured minimum=%d, runtime=%s, score=%.1f, reasons=%s)",
             chosen.candidate.title,
+            chosen.candidate.seeders,
+            policy.min_seeders,
+            f"{chosen.candidate.runtime_seconds / 60:.1f} min" if chosen.candidate.runtime_seconds else "unknown",
             chosen.score,
             ", ".join(chosen.reasons),
         )
+        # Defensive final gate immediately before qBittorrent. This catches a
+        # stale selector/settings object even if a caller constructed one long
+        # before the web settings were updated. Explicit UI choices override
+        # policy by design.
+        if not manual_override and chosen.candidate.seeders < policy.min_seeders:
+            raise PermanentWorkerError(
+                f"selected release dropped below minimum seeders ({chosen.candidate.seeders} < {policy.min_seeders})"
+            )
 
         # ---- add to qBittorrent -----------------------------------------
-        from bankai.config import get_settings
-
         qbit_settings = get_settings().qbittorrent
         link = chosen.candidate.magnet_uri or chosen.candidate.download_url
         save_path_override = ctx.job.payload.get("save_path") or qbit_settings.save_path

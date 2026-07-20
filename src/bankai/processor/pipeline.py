@@ -219,6 +219,10 @@ class PipelineWorker(Worker):
             "kind": payload.get("kind", "movie"),
             "category": payload.get("category"),
         }
+        source_duration = await _probe_duration(Path(audio_path))
+        if source_duration is not None:
+            torrent_payload["target_runtime_seconds"] = source_duration
+            log.info("[torrent] German source runtime %.1f min", source_duration / 60.0)
         for k in ("season", "episode", "series_title"):
             if k in payload:
                 torrent_payload[k] = payload[k]
@@ -776,6 +780,35 @@ async def _probe_fps(path: Path) -> float | None:
             return float(num) / den_f if den_f else None
         return float(raw)
     except (ValueError, ZeroDivisionError):
+        return None
+
+
+async def _probe_duration(path: Path) -> float | None:
+    """Return media duration in seconds for torrent runtime matching."""
+    if not path.exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    try:
+        duration = float(stdout.decode(errors="ignore").strip())
+        return duration if duration > 0 else None
+    except ValueError:
         return None
 
 

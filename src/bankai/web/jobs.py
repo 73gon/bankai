@@ -24,6 +24,7 @@ from bankai.web import reasons
 
 log = get_logger(__name__)
 _LOCK = threading.RLock()
+_OPERATION_KINDS = {"transfer", "repack", "torrent_replace"}
 
 
 def _pending_path() -> Path:
@@ -62,7 +63,7 @@ def _running_count() -> int:
     return sum(
         1
         for job in bgjobs.list_jobs()
-        if job.status == "running" and job.kind != "transfer"
+        if job.status == "running" and job.kind not in _OPERATION_KINDS
     )
 
 
@@ -103,7 +104,7 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
         pending = _load_pending()
         if nt and (nt in _running_titles() or any(_norm_job_title(p.title) == nt for p in pending)):
             return {"status": "duplicate", "title": title}
-        if kind == "transfer":
+        if kind in _OPERATION_KINDS:
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
         if _running_count() < limit:
@@ -128,8 +129,8 @@ def reconcile() -> int:
 
         # Migrate transfers queued by older releases immediately, even when a
         # movie/show pipeline currently occupies every configured slot.
-        transfer_items = [item for item in pending if item.kind == "transfer"]
-        pending = [item for item in pending if item.kind != "transfer"]
+        transfer_items = [item for item in pending if item.kind in _OPERATION_KINDS]
+        pending = [item for item in pending if item.kind not in _OPERATION_KINDS]
         for item in transfer_items:
             nt = _norm_job_title(item.title)
             if nt and nt in running_titles:
@@ -192,11 +193,14 @@ def snapshot() -> list[dict]:
     reconcile()
     out: list[dict] = []
     for j in bgjobs.list_jobs():
-        if j.kind == "transfer":
+        if j.kind in _OPERATION_KINDS:
             continue
         snap = bgjobs.progress_snapshot(j)
         raw_reason = _job_reason(j)
         cls = reasons.classify_reason(raw_reason)
+        from bankai.torrent import actions as torrent_actions
+
+        action = torrent_actions.get_request(j.id) if j.status == "running" else None
         out.append(
             {
                 "id": j.id,
@@ -215,10 +219,11 @@ def snapshot() -> list[dict]:
                 "step_label": snap.step_label,
                 "overall_percent": snap.overall_percent,
                 "pending": False,
+                "action_required": bool(action and action.get("status") == "waiting"),
             }
         )
     for item in _load_pending():
-        if item.kind == "transfer":
+        if item.kind in _OPERATION_KINDS:
             continue
         out.append(
             {
@@ -235,6 +240,7 @@ def snapshot() -> list[dict]:
                 "step_label": "Waiting for a free slot",
                 "overall_percent": 0.0,
                 "pending": True,
+                "action_required": False,
             }
         )
     out.sort(key=lambda r: r["started_at"], reverse=True)
@@ -303,4 +309,47 @@ def transfer_states() -> dict[str, dict]:
         except OSError:
             key = target
         by_path.setdefault(key, {"status": "transferring", "percent": 0.0, "id": item.id, "exit_code": None})
+    return by_path
+
+
+def _operation_target(args: list[str], command: str) -> str | None:
+    """Return the first positional path after a hidden operation command."""
+    if not args or args[0] != command:
+        return None
+    for value in args[1:]:
+        if not value.startswith("-"):
+            return value
+    return None
+
+
+def repack_states() -> dict[str, dict]:
+    """Newest detached audio-repack/torrent-replacement state per path."""
+    reconcile()
+    by_path: dict[str, dict] = {}
+    for job in sorted(bgjobs.list_jobs(), key=lambda item: item.started_at or 0):
+        if job.kind not in {"repack", "torrent_replace"}:
+            continue
+        command = "review-repack" if job.kind == "repack" else "review-replace-torrent"
+        target = _operation_target(job.args, command)
+        if not target:
+            continue
+        try:
+            key = str(Path(target).resolve())
+        except OSError:
+            key = target
+        if job.status == "running":
+            status = "repacking"
+            percent = bgjobs.progress_snapshot(job).overall_percent or 0.0
+        elif job.status == "done" and job.exit_code in (0, None):
+            status, percent = "done", 100.0
+        else:
+            status, percent = "failed", 0.0
+        by_path[key] = {
+            "status": status,
+            "percent": percent,
+            "kind": "audio" if job.kind == "repack" else "torrent",
+            "label": "Repacking audio" if job.kind == "repack" else "Replacing torrent",
+            "id": job.id,
+            "reason": _job_reason(job),
+        }
     return by_path

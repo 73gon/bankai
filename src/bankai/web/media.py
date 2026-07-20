@@ -675,3 +675,86 @@ def repack_audio_drift(
         delay_ms=delay_ms,
         log=log_lines[-20:],
     )
+
+
+def replace_video_source(path: Path, new_video: Path, *, delay_ms: int = 0) -> RepackResult:
+    """Replace the HQ source while retaining only the reviewed German track.
+
+    Video, non-German audio and subtitles come from ``new_video``. The German
+    dub comes from the current library file, with the saved delay re-applied.
+    The destination is replaced atomically after mkvmerge succeeds.
+    """
+    original = Path(path)
+    replacement = Path(new_video)
+    if not original.is_file():
+        return RepackResult(False, f"file not found: {original}")
+    if not replacement.is_file():
+        return RepackResult(False, f"replacement video not found: {replacement}")
+    mkv = mkvmerge_bin()
+    if mkv is None:
+        return RepackResult(False, "mkvmerge not found")
+    old_info = probe(original, use_cache=False)
+    new_info = probe(replacement, use_cache=False)
+    if old_info is None or new_info is None:
+        return RepackResult(False, "could not probe source files")
+    german = next((track for track in old_info.audio_tracks if track.is_german), None)
+    if german is None:
+        return RepackResult(False, "no German audio track found in reviewed file")
+
+    tmp = original.with_suffix(original.suffix + ".replace.mkv")
+    cmd: list[str] = [mkv, "-o", str(tmp)]
+    # Avoid retaining a second German dub from the replacement torrent.
+    non_german_ids = [str(track.index) for track in new_info.audio_tracks if not track.is_german]
+    if len(non_german_ids) != len(new_info.audio_tracks):
+        if non_german_ids:
+            cmd.extend(["--audio-tracks", ",".join(non_german_ids)])
+        else:
+            cmd.append("--no-audio")
+    cmd.append(str(replacement))
+    cmd.extend(
+        [
+            "--no-video",
+            "--no-subtitles",
+            "--no-attachments",
+            "--no-chapters",
+            "--audio-tracks",
+            str(german.index),
+            "--sync",
+            f"{german.index}:{delay_ms}",
+            "--language",
+            f"{german.index}:ger",
+            "--track-name",
+            f"{german.index}:{german.title or 'German (Web-DL)'}",
+            "--default-track",
+            f"{german.index}:yes",
+            str(original),
+        ]
+    )
+    try:
+        out = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=7200,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        tmp.unlink(missing_ok=True)
+        return RepackResult(False, f"mkvmerge replacement failed: {exc}")
+    log_lines = (out.stdout or "").splitlines() + (out.stderr or "").splitlines()
+    if out.returncode >= 2 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        return RepackResult(False, f"mkvmerge replacement rc={out.returncode}", log=log_lines[-20:])
+    try:
+        tmp.replace(original)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        return RepackResult(False, f"could not overwrite original: {exc}")
+    _PROBE_CACHE.pop(str(original.resolve()), None)
+    return RepackResult(
+        True,
+        f"replaced HQ torrent and retained German audio with {delay_ms} ms delay",
+        delay_ms=delay_ms,
+        log=log_lines[-20:],
+    )

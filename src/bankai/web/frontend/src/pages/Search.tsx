@@ -9,6 +9,9 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Switch } from '@/components/ui/switch';
+
+const SEARCH_HIDE_LIBRARY_KEY = 'bankai:search-hide-library';
 
 // Parse "S02E01" / "Staffel 2" / "Season 2" out of a source title or URL.
 function parseSeason(s: string): number | null {
@@ -107,6 +110,16 @@ export default function Search() {
   const [searchBy, setSearchBy] = useState<DiscoverSearchBy>('title');
   const [q, setQ] = useState('');
   const [items, setItems] = useState<DiscoverItem[]>([]);
+  const [page, setPage] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
+  const [hasNext, setHasNext] = useState(false);
+  const [hideLibrary, setHideLibrary] = useState(() => {
+    try {
+      return localStorage.getItem(SEARCH_HIDE_LIBRARY_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [loading, setLoading] = useState(false);
   const [configured, setConfigured] = useState(true);
   const debounce = useRef<number | undefined>(undefined);
@@ -149,11 +162,13 @@ export default function Search() {
     setLoading(true);
     debounce.current = window.setTimeout(() => {
       api
-        .discoverSearch(titleQuery || raw, kind, searchBy)
+        .discoverSearch(titleQuery || raw, kind, searchBy, page)
         .then((r) => {
           if (cancelled) return;
           setConfigured(r.configured);
           setItems(year ? r.items.filter((i) => i.year === year) : r.items);
+          setTotal(r.total);
+          setHasNext(r.has_next);
         })
         .catch((e) => {
           if (!cancelled) toast.error(e.message);
@@ -166,7 +181,18 @@ export default function Search() {
       cancelled = true;
       window.clearTimeout(debounce.current);
     };
-  }, [q, kind, searchBy]);
+  }, [q, kind, searchBy, page]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SEARCH_HIDE_LIBRARY_KEY, String(hideLibrary));
+    } catch {
+      /* ignore */
+    }
+  }, [hideLibrary]);
+
+  const visibleItems = hideLibrary ? items.filter((item) => !item.in_library) : items;
+  const totalPages = total == null ? null : Math.max(1, Math.ceil(total / 50));
 
   async function openTitle(item: DiscoverItem) {
     setSelected(item);
@@ -394,6 +420,7 @@ export default function Search() {
             if (v === 'show') setSearchBy('title');
             setItems([]);
             setSelected(null);
+            setPage(0);
           }}
         >
           <TabsList>
@@ -408,6 +435,7 @@ export default function Search() {
               setSearchBy(value as DiscoverSearchBy);
               setItems([]);
               setSelected(null);
+              setPage(0);
             }}
             aria-label='Search movies by'
           >
@@ -422,7 +450,10 @@ export default function Search() {
           <SearchIcon className='absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' />
           <Input
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPage(0);
+            }}
             placeholder={
               kind === 'show'
                 ? 'Start typing a show…'
@@ -436,6 +467,10 @@ export default function Search() {
             autoFocus
           />
         </div>
+        <label className='flex items-center gap-2 whitespace-nowrap text-sm text-foreground'>
+          <Switch checked={hideLibrary} onCheckedChange={setHideLibrary} aria-label='Hide movies already in library' />
+          Hide library titles
+        </label>
       </div>
 
       {!configured ? (
@@ -448,7 +483,7 @@ export default function Search() {
         </div>
       ) : q.trim().length < 2 ? (
         <EmptyState icon={SearchIcon} title='Type to search' description='Results appear as you type.' />
-      ) : items.length === 0 ? (
+      ) : visibleItems.length === 0 ? (
         <EmptyState
           icon={SearchIcon}
           title='No results'
@@ -456,7 +491,7 @@ export default function Search() {
         />
       ) : (
         <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6'>
-          {items.map((it, index) => (
+          {visibleItems.map((it, index) => (
             <Poster
               key={`${it.kind}-${it.tvdb_id}-${it.name}`}
               item={it}
@@ -465,6 +500,20 @@ export default function Search() {
               eager={index < 6}
             />
           ))}
+        </div>
+      )}
+
+      {!loading && q.trim().length >= 2 && (page > 0 || hasNext) && (
+        <div className='flex items-center justify-center gap-3'>
+          <Button variant='secondary' disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
+            Previous
+          </Button>
+          <span className='text-sm text-foreground'>
+            Page {page + 1}{totalPages ? ` of ${totalPages}` : ''} · 50 per page
+          </span>
+          <Button variant='secondary' disabled={!hasNext} onClick={() => setPage((value) => value + 1)}>
+            Next
+          </Button>
         </div>
       )}
 

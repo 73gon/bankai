@@ -45,7 +45,34 @@ export interface DiscoverItem {
   available?: boolean;
   checked?: boolean;
   added?: boolean;
+  in_library?: boolean;
   filmpalast_url?: string;
+}
+
+export interface PagedDiscover {
+  configured: boolean;
+  items: DiscoverItem[];
+  page: number;
+  page_size: number;
+  total: number | null;
+  has_next: boolean;
+}
+
+export interface TorrentCandidate {
+  id: string;
+  title: string;
+  indexer: string;
+  indexer_id: number | null;
+  download_url: string;
+  info_url: string | null;
+  magnet_uri: string | null;
+  info_hash: string | null;
+  size_bytes: number;
+  seeders: number;
+  leechers: number;
+  publish_date: string | null;
+  runtime_seconds: number | null;
+  eligible: boolean;
 }
 
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
@@ -79,6 +106,7 @@ export interface Job {
   step_label: string;
   overall_percent: number | null;
   pending: boolean;
+  action_required: boolean;
 }
 
 export interface LibraryEntry {
@@ -97,6 +125,9 @@ export interface LibraryEntry {
   auto_delay_ms: number;
   transfer_status: string;
   transfer_percent: number;
+  repack_status: string;
+  repack_percent: number;
+  repack_kind: string | null;
 }
 
 /** Unified one-row-per-title view (library file OR in-flight/failed job). */
@@ -132,6 +163,11 @@ export interface TitleRow {
   overall_percent: number | null;
   total_steps: number | null;
   pending: boolean;
+  action_required: boolean;
+  repack_status: string;
+  repack_percent: number;
+  repack_kind: string | null;
+  repack_label: string | null;
 }
 
 export interface AudioTrack {
@@ -196,10 +232,10 @@ export interface SettingRow {
 export const api = {
   health: () => request<HealthResponse>('/api/health'),
 
-  discoverTrending: (kind: string) => request<{ configured: boolean; items: DiscoverItem[] }>(`/api/discover/trending?kind=${kind}`),
-  discoverSearch: (q: string, kind: string, by: DiscoverSearchBy = 'title') =>
-    request<{ configured: boolean; items: DiscoverItem[] }>(
-      `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}`,
+  discoverTrending: (kind: string, page = 0) => request<PagedDiscover>(`/api/discover/trending?kind=${kind}&page=${page}`),
+  discoverSearch: (q: string, kind: string, by: DiscoverSearchBy = 'title', page = 0) =>
+    request<PagedDiscover>(
+      `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}&page=${page}`,
     ),
   discoverGerman: (id: number, kind: string) =>
     request<{ tvdb_id: number; kind: string; german: string | null }>(`/api/discover/german?id=${id}&kind=${kind}`),
@@ -207,6 +243,16 @@ export const api = {
 
   search: (q: string, kind: string, site?: string) =>
     request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ''}`),
+  torrentSearch: (q: string, runtimeSeconds?: number | null) =>
+    request<{ query: string; target_runtime_seconds: number | null; candidates: TorrentCandidate[] }>(
+      `/api/torrents/search?q=${encodeURIComponent(q)}${runtimeSeconds ? `&runtime_seconds=${runtimeSeconds}` : ''}`,
+    ),
+  torrentAction: (jobId: string) =>
+    request<{ job_id: string; query: string; target_runtime_seconds: number | null; candidates: TorrentCandidate[] }>(
+      `/api/torrent-actions/${jobId}`,
+    ),
+  chooseTorrent: (jobId: string, candidateId: string) =>
+    request(`/api/torrent-actions/${jobId}`, { method: 'POST', body: JSON.stringify({ candidate_id: candidateId }) }),
   episodes: (show: string, season: number, site?: string) =>
     request<{ found: boolean; site: string | null; episodes: EpisodeItem[] }>(
       `/api/series/episodes?show=${encodeURIComponent(show)}&season=${season}${site ? `&site=${site}` : ''}`,
@@ -254,7 +300,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path, delay_ms, atempo: opts?.atempo ?? null, track_index: opts?.track_index ?? null }),
     }),
-  approve: (path: string) => request('/api/review/approve', { method: 'POST', body: JSON.stringify({ path }) }),
+  approve: (path: string, opts?: { delay_ms?: number; atempo?: number; track_index?: number | null }) =>
+    request<{ background: boolean }>('/api/review/approve', {
+      method: 'POST',
+      body: JSON.stringify({ path, ...opts }),
+    }),
+  replaceTorrent: (body: { path: string; query: string; target_runtime_seconds?: number | null; candidate?: TorrentCandidate }) =>
+    request<{ background: boolean }>('/api/review/replace-torrent', { method: 'POST', body: JSON.stringify(body) }),
   transfer: (path: string) => request('/api/review/transfer', { method: 'POST', body: JSON.stringify({ path }) }),
   approveBatch: (paths: string[]) =>
     request<{ approved: any[]; count: number; errors: any[] }>('/api/review/approve-batch', {

@@ -1275,9 +1275,21 @@ def _metadata_kind(kind: str) -> MediaKind:
 
 
 async def _movie_lookup_queries(query: str, german_title: str | None) -> list[str]:
-    if german_title:
-        return [german_title]
-    return await title_aliases(query, kind=MediaKind.MOVIE)
+    # Even when a caller supplied a title, include TVDB's aliases/translations.
+    # Web jobs historically always passed --de (falling back to the English
+    # title), which prevented titles such as "El Hoyo" from ever trying the
+    # Filmpalast name "Der Schacht".
+    values = [german_title] if german_title else []
+    values.extend(await title_aliases(query, kind=MediaKind.MOVIE))
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        clean = (value or "").strip()
+        key = clean.casefold()
+        if clean and key not in seen:
+            seen.add(key)
+            out.append(clean)
+    return out
 
 
 def _interactive_pick_movie(query: str) -> str | None:
@@ -1830,6 +1842,106 @@ def transfer_run(
     asyncio.run(notify_transfer_summary(summary=summary, ok=result.ok))
     if not result.ok:
         raise typer.Exit(code=1)
+
+
+@app.command("review-repack", hidden=True)
+def review_repack(
+    path: Path = typer.Argument(...),
+    delay_ms: int = typer.Option(..., "--delay-ms"),
+    atempo: float | None = typer.Option(None, "--atempo"),
+    track_index: int | None = typer.Option(None, "--track-index"),
+) -> None:
+    """Detached review repack used by the web UI."""
+    from bankai.web import media as media_mod
+    from bankai.web import review as review_mod
+
+    review_mod.set_repack(path, "repacking", percent=0.0, kind="audio")
+    log.info("BANKAI_PROGRESS stage=repack pct=1 status=running")
+    try:
+        if atempo is not None and abs(atempo - 1.0) > 1e-4:
+            result = media_mod.repack_audio_drift(
+                path,
+                delay_ms=delay_ms,
+                atempo=atempo,
+                track_index=track_index,
+            )
+        else:
+            result = media_mod.repack_audio_delay(path, delay_ms=delay_ms)
+        if not result.ok:
+            raise RuntimeError(result.message)
+        review_mod.set_delay(path, delay_ms)
+        review_mod.set_stage(path, "approved")
+        review_mod.set_repack(path, "done", percent=100.0, kind="audio")
+        log.info("BANKAI_PROGRESS stage=repack pct=100 status=done")
+        console.print_json(data={"final_path": str(path), "message": result.message})
+    except Exception as exc:
+        review_mod.set_repack(path, "failed", kind="audio", note=str(exc))
+        print(f"{type(exc).__name__}: {exc}", flush=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("review-replace-torrent", hidden=True)
+def review_replace_torrent(
+    path: Path = typer.Argument(...),
+    query: str = typer.Option(..., "--query"),
+    target_runtime_seconds: float | None = typer.Option(None, "--target-runtime-seconds"),
+    candidate_json: str | None = typer.Option(None, "--candidate-json"),
+) -> None:
+    """Download another HQ release and remux it with the reviewed German dub."""
+    from bankai.torrent.qbittorrent import QBittorrentClient
+    from bankai.torrent.worker import TorrentWorker
+    from bankai.web import media as media_mod
+    from bankai.web import review as review_mod
+
+    review_mod.set_repack(path, "repacking", percent=0.0, kind="torrent")
+    # The review dialog already provides an explicit Manual mode. Automatic
+    # replacement should fail visibly on the same row when policy rejects all
+    # releases, rather than entering the pipeline-only interactive wait state
+    # with no standalone job row to host its picker.
+    payload: dict[str, Any] = {"query": query, "kind": "movie", "wait_for_manual": False}
+    if target_runtime_seconds is not None:
+        payload["target_runtime_seconds"] = target_runtime_seconds
+    if candidate_json:
+        try:
+            payload["manual_candidate"] = json.loads(candidate_json)
+        except ValueError as exc:
+            review_mod.set_repack(path, "failed", kind="torrent", note="invalid torrent choice")
+            raise typer.BadParameter("invalid candidate JSON") from exc
+
+    async def go() -> dict[str, Any] | None:
+        log.info("BANKAI_PROGRESS stage=replace pct=2 status=searching")
+        result = await _run_worker_once(TorrentWorker(), get_settings().paths.work_dir, payload=payload)
+        if not result or not result.get("path"):
+            raise RuntimeError("replacement torrent produced no video file")
+        log.info("BANKAI_PROGRESS stage=replace pct=92 status=remuxing")
+        state = review_mod.get_state(path)
+        remuxed = await asyncio.to_thread(
+            media_mod.replace_video_source,
+            path,
+            Path(result["path"]),
+            delay_ms=state.delay_ms,
+        )
+        if not remuxed.ok:
+            raise RuntimeError(remuxed.message)
+        torrent_hash = result.get("torrent_hash")
+        if torrent_hash:
+            qbit = QBittorrentClient()
+            try:
+                await qbit.remove(str(torrent_hash), delete_files=True)
+            finally:
+                await qbit.aclose()
+        return result
+
+    try:
+        asyncio.run(go())
+        review_mod.set_stage(path, "review")
+        review_mod.set_repack(path, "done", percent=100.0, kind="torrent")
+        log.info("BANKAI_PROGRESS stage=replace pct=100 status=done")
+        console.print_json(data={"final_path": str(path), "message": "torrent replaced"})
+    except Exception as exc:
+        review_mod.set_repack(path, "failed", kind="torrent", note=str(exc))
+        print(f"{type(exc).__name__}: {exc}", flush=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _transfer_kind(kind: str) -> TransferKind:

@@ -60,6 +60,11 @@ class ReviewState:
     # instead of as a standalone queue job.
     transfer_status: str = "idle"  # idle | transferring | done | failed
     transfer_percent: float = 0.0
+    # Repack/replacement jobs are detached but rendered on this same library
+    # row, never as an extra queue entry.
+    repack_status: str = "idle"  # idle | repacking | done | failed
+    repack_percent: float = 0.0
+    repack_kind: str | None = None  # audio | torrent
 
 
 def _load() -> dict[str, dict]:
@@ -173,6 +178,37 @@ def set_transfer(path: str | Path, status: str, *, percent: float | None = None)
         raw["stage"] = "transferred"
         raw["transferred_at"] = time.time()
         raw["transfer_percent"] = 100.0
+    raw["updated_at"] = time.time()
+    data[key] = raw
+    _save(data)
+    return ReviewState(**raw)
+
+
+def set_repack(
+    path: str | Path,
+    status: str,
+    *,
+    percent: float | None = None,
+    kind: str | None = None,
+    note: str | None = None,
+) -> ReviewState:
+    """Update the detached repack/replacement status for a library entry."""
+    data = _load()
+    key = _key(path)
+    raw = data.get(key, {"path": str(path), "stage": "review"})
+    raw["path"] = str(path)
+    raw["repack_status"] = status
+    if percent is not None:
+        raw["repack_percent"] = float(percent)
+    if kind is not None:
+        raw["repack_kind"] = kind
+    if note is not None:
+        raw["note"] = note
+    if status == "repacking":
+        raw["stage"] = "repacking"
+        raw["repack_percent"] = float(percent or 0.0)
+    elif status == "failed":
+        raw["stage"] = "review"
     raw["updated_at"] = time.time()
     data[key] = raw
     _save(data)

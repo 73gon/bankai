@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+from bankai.config import reset_settings_cache
 from bankai.config import SelectorSettings
+from bankai.queue.worker import PermanentWorkerError
 from bankai.scraper.base import EpisodeRef
 from bankai.torrent.matcher import (
     find_video_files,
@@ -15,7 +21,7 @@ from bankai.torrent.matcher import (
 )
 from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.torrent.selector import TorrentSelector
-from bankai.torrent.worker import episode_search_queries
+from bankai.torrent.worker import TorrentWorker, episode_search_queries
 
 
 def _c(
@@ -47,6 +53,11 @@ def test_candidate_parses_release_attrs() -> None:
     assert c.codec == "x265"
     assert c.source == "BluRay"
     assert c.release_group == "FraMeSToR"
+
+
+def test_candidate_parses_runtime_from_indexer_metadata_and_title() -> None:
+    assert _c("Movie.2024.1080p", raw={"runtime": 129}).runtime_seconds == 129 * 60
+    assert _c("Movie.2024.02:09:00.1080p").runtime_seconds == 129 * 60
 
 
 def test_selector_filters_below_min_seeders() -> None:
@@ -93,6 +104,79 @@ def test_selector_release_group_breaks_tie() -> None:
     chosen = s.select([a, b])
     assert chosen is not None
     assert chosen.candidate is a
+
+
+def test_selector_prefers_release_near_source_runtime() -> None:
+    s = TorrentSelector(
+        SelectorSettings(
+            preferred_resolutions=["1080p"],
+            min_seeders=1,
+            max_size_gib=200,
+        )
+    )
+    close = _c("Movie.2024.1080p.130min-WEB", seeders=10)
+    busy_but_wrong_cut = _c("Movie.2024.1080p.95min-WEB", seeders=500)
+
+    chosen = s.select([busy_but_wrong_cut, close], target_runtime_seconds=129 * 60)
+
+    assert chosen is not None
+    assert chosen.candidate is close
+
+
+def test_selector_falls_back_to_most_seeders_when_no_runtime_is_close() -> None:
+    s = TorrentSelector(
+        SelectorSettings(
+            preferred_resolutions=["1080p"],
+            preferred_sources=["BluRay"],
+            min_seeders=1,
+            max_size_gib=200,
+        )
+    )
+    preferred_quality = _c("Movie.2024.1080p.BluRay.95min-GRP", seeders=20)
+    healthiest = _c("Movie.2024.1080p.WEB-DL.165min-GRP", seeders=200)
+
+    chosen = s.select([preferred_quality, healthiest], target_runtime_seconds=129 * 60)
+
+    assert chosen is not None
+    assert chosen.candidate is healthiest
+
+
+def test_worker_rechecks_current_min_seeders_before_qbit_add(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _c("Movie.2024.1080p.WEB-DL-GRP", seeders=10)
+
+    class FakeProwlarr:
+        async def search(self, *_args: object, **_kwargs: object) -> list[TorrentCandidate]:
+            return [candidate]
+
+    class NoQbitCalls:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"qBittorrent must not be called: {name}")
+
+    # Simulate a selector object created before the user raised the web setting
+    # from 1 to 20. The final gate must honor the current value.
+    stale_selector = TorrentSelector(
+        SelectorSettings(min_seeders=1, preferred_resolutions=["1080p"])
+    )
+    monkeypatch.setenv("BANKAI_SELECTOR__MIN_SEEDERS", "20")
+    monkeypatch.delenv("BANKAI_BG_JOB_ID", raising=False)
+    reset_settings_cache()
+    worker = TorrentWorker(
+        prowlarr=FakeProwlarr(),  # type: ignore[arg-type]
+        qbit=NoQbitCalls(),  # type: ignore[arg-type]
+        selector=stale_selector,
+    )
+    ctx = SimpleNamespace(
+        job=SimpleNamespace(payload={"query": "Movie 2024", "kind": "movie"}),
+        cancel_token=None,
+    )
+
+    try:
+        with pytest.raises(PermanentWorkerError, match="below minimum seeders"):
+            asyncio.run(worker.run(ctx))  # type: ignore[arg-type]
+    finally:
+        reset_settings_cache()
 
 
 def test_parse_se_variants() -> None:

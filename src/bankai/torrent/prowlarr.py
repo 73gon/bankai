@@ -23,6 +23,9 @@ _RES_RE = re.compile(r"\b(2160p|1440p|1080p|720p|480p)\b", re.IGNORECASE)
 _CODEC_RE = re.compile(r"\b(x265|h265|HEVC|x264|h264|AV1)\b", re.IGNORECASE)
 _SOURCE_RE = re.compile(r"\b(BluRay|BDRip|WEB-DL|WEBRip|HDTV|DVDRip|REMUX)\b", re.IGNORECASE)
 _GROUP_RE = re.compile(r"-([A-Za-z0-9]+)$")
+_MINUTES_RE = re.compile(r"\b(?P<minutes>\d{2,3})\s*(?:min|mins|minutes)\b", re.IGNORECASE)
+_HOURS_RE = re.compile(r"\b(?P<hours>\d{1,2})\s*h(?:ours?)?\s*(?P<minutes>\d{1,2})?\s*m?\b", re.IGNORECASE)
+_CLOCK_RE = re.compile(r"\b(?P<hours>\d{1,2}):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d)\b")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +66,100 @@ class TorrentCandidate:
         stem = re.sub(r"\.(mkv|mp4|avi|m4v|mov)$", "", self.title, flags=re.IGNORECASE)
         m = _GROUP_RE.search(stem)
         return m.group(1) if m else None
+
+    @property
+    def runtime_seconds(self) -> float | None:
+        """Best-effort runtime from Prowlarr/indexer metadata or release text.
+
+        Runtime is not part of BitTorrent's core metainfo. Some indexers do
+        expose it in custom fields, and some releases include it in the title;
+        callers must therefore treat a missing value as normal.
+        """
+        value = _runtime_from_mapping(self.raw)
+        return value if value is not None else _parse_runtime(self.title)
+
+
+def _parse_runtime(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number <= 0:
+            return None
+        # Generic runtime fields are commonly minutes; large values are much
+        # more likely seconds (or milliseconds for very large values).
+        if number >= 100_000:
+            return number / 1000.0
+        if number > 1000:
+            return number
+        return number * 60.0
+    text = str(value).strip()
+    if not text:
+        return None
+    iso = re.search(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", text, re.IGNORECASE)
+    if iso:
+        return int(iso.group(1) or 0) * 3600 + int(iso.group(2) or 0) * 60 + int(iso.group(3) or 0)
+    clock = _CLOCK_RE.search(text)
+    if clock:
+        return int(clock.group("hours")) * 3600 + int(clock.group("minutes")) * 60 + int(clock.group("seconds"))
+    hours = _HOURS_RE.search(text)
+    if hours:
+        return int(hours.group("hours")) * 3600 + int(hours.group("minutes") or 0) * 60
+    minutes = _MINUTES_RE.search(text)
+    if minutes:
+        return int(minutes.group("minutes")) * 60.0
+    return None
+
+
+def _runtime_from_mapping(raw: dict[str, Any]) -> float | None:
+    second_keys = {
+        "durationseconds",
+        "durationinseconds",
+        "runtimeseconds",
+        "runtimeinseconds",
+        "lengthseconds",
+    }
+    minute_keys = {
+        "duration",
+        "durationminutes",
+        "durationinminutes",
+        "runtime",
+        "runtimeminutes",
+        "runtimeinminutes",
+        "movielength",
+    }
+
+    def walk(value: object, depth: int = 0) -> float | None:
+        if depth > 3:
+            return None
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = re.sub(r"[^a-z]", "", str(key).casefold())
+                if normalized in second_keys:
+                    try:
+                        seconds = float(child)
+                        if seconds > 0:
+                            return seconds
+                    except (TypeError, ValueError):
+                        parsed = _parse_runtime(child)
+                        if parsed is not None:
+                            return parsed
+                if normalized in minute_keys:
+                    parsed = _parse_runtime(child)
+                    if parsed is not None:
+                        return parsed
+            for child in value.values():
+                found = walk(child, depth + 1)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = walk(child, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    return walk(raw)
 
 
 class ProwlarrClient:

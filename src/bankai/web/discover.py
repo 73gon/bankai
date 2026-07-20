@@ -23,6 +23,7 @@ log = get_logger(__name__)
 _BASE_URL = "https://api4.thetvdb.com/v4"
 _ARTWORK_BASE = "https://artworks.thetvdb.com"
 _CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
+_BROWSE_META: dict[str, dict] = {}
 # Keys currently being refreshed in the background (stale-while-revalidate),
 # so we never launch duplicate refreshes for the same key.
 _REFRESHING: set[str] = set()
@@ -41,6 +42,15 @@ class DiscoverItem:
     is_new: bool = False
     release_date: str | None = None  # ISO date (YYYY-MM-DD) when known
     status: str | None = None  # TVDB status name e.g. "Released", "Announced"
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverPage:
+    items: list[DiscoverItem]
+    page: int
+    page_size: int
+    total: int | None
+    has_next: bool
 
 
 def is_configured() -> bool:
@@ -299,7 +309,7 @@ async def search(
     query: str,
     *,
     kind: str,
-    limit: int = 24,
+    limit: int = 51,
     search_by: str = "title",
 ) -> list[DiscoverItem]:
     if not is_configured() or not query.strip():
@@ -339,6 +349,149 @@ async def search(
             )
     _cache_put(cache_key, items)
     return items
+
+
+async def search_page(
+    query: str,
+    *,
+    kind: str,
+    page: int,
+    page_size: int = 50,
+    search_by: str = "title",
+) -> DiscoverPage:
+    """Return one UI page without imposing an application-level page cap.
+
+    TVDB's title search supports ``offset`` + ``limit``. Person/studio searches
+    are assembled from related records, so those are sliced after resolution
+    instead. Bankai never imposes its own maximum page number.
+    """
+    page = max(0, int(page))
+    page_size = 50  # Product contract: both browse surfaces are fixed at 50.
+    mode = search_by.strip().casefold()
+    if not is_configured() or not query.strip() or mode not in {"title", "person", "studio"}:
+        return DiscoverPage([], page, page_size, 0, False)
+    if kind != "movie" and mode != "title":
+        return DiscoverPage([], page, page_size, 0, False)
+
+    if mode != "title":
+        # Credits/company filter responses are not offset-paginated by TVDB.
+        # Resolve enough rows for this UI page, then slice deterministically.
+        end = (page + 1) * page_size
+        if page == 0:
+            items = await search(query, kind=kind, search_by=mode)
+        else:
+            items = await search(query, kind=kind, limit=end + 1, search_by=mode)
+        return DiscoverPage(
+            items=items[page * page_size : end],
+            page=page,
+            page_size=page_size,
+            total=len(items) if len(items) <= end else None,
+            has_next=len(items) > end,
+        )
+
+    if page == 0:
+        # Reuse the regular search path for the first page (and its cache).
+        # Fetch one look-ahead row so has_next remains accurate without an
+        # arbitrary UI cap.
+        items = await search(query, kind=kind, search_by=mode)
+        return DiscoverPage(items[:page_size], page, page_size, None, len(items) > page_size)
+
+    cache_key = f"search-page:{kind}:{query.strip().casefold()}:{page}:{page_size}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        # A full page means there may be another page. The live response below
+        # carries an exact total when TVDB supplies links metadata.
+        return DiscoverPage(cached, page, page_size, None, len(cached) == page_size)
+
+    tvdb_type = "movie" if kind == "movie" else "series"
+    items: list[DiscoverItem] = []
+    total: int | None = None
+    has_next = False
+    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
+        token = await _login(client)
+        if not token:
+            return DiscoverPage([], page, page_size, 0, False)
+        try:
+            response = await client.get(
+                "search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "query": query.strip(),
+                    "type": tvdb_type,
+                    "offset": page * page_size,
+                    "limit": page_size,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") or []
+            links = payload.get("links") or {}
+            items = [_item_from_record(record, kind) for record in data if isinstance(record, dict)]
+            total = _to_int(links.get("total_items"))
+            if total is not None:
+                has_next = (page + 1) * page_size < total
+            else:
+                has_next = len(items) == page_size
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("TVDB paginated search failed: %s", exc)
+    _cache_put(cache_key, items)
+    return DiscoverPage(items, page, page_size, total, has_next)
+
+
+async def browse_page(kind: str, *, page: int, page_size: int = 50) -> DiscoverPage:
+    """Slice the complete TVDB movies/series catalogue into 50-row pages.
+
+    TVDB's catalogue endpoints use their own (larger) provider page size. We
+    translate the UI's stable 50-row page index to that provider page, using
+    the response ``links.page_size`` rather than assuming it is always 500.
+    """
+    page = max(0, int(page))
+    page_size = 50
+    if not is_configured():
+        return DiscoverPage([], page, page_size, 0, False)
+    endpoint = "movies" if kind == "movie" else "series"
+    start = page * page_size
+    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
+        token = await _login(client)
+        if not token:
+            return DiscoverPage([], page, page_size, 0, False)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async def provider_page(number: int) -> tuple[list[DiscoverItem], dict]:
+            key = f"browse-provider:{kind}:{number}"
+            cached_items = _cache_get(key)
+            meta_hit = _BROWSE_META.get(key)
+            if cached_items is not None and meta_hit is not None:
+                return cached_items, meta_hit
+            try:
+                response = await client.get(endpoint, headers=headers, params={"page": number})
+                response.raise_for_status()
+                payload = response.json()
+                data = payload.get("data") or []
+                links = payload.get("links") or {}
+                converted = [_item_from_record(record, kind) for record in data if isinstance(record, dict)]
+            except (httpx.HTTPError, ValueError) as exc:
+                log.warning("TVDB browse page %s failed: %s", number, exc)
+                return [], {}
+            _cache_put(key, converted)
+            _BROWSE_META[key] = dict(links) if isinstance(links, dict) else {}
+            return converted, _BROWSE_META[key]
+
+        first, first_links = await provider_page(0)
+        provider_size = _to_int(first_links.get("page_size")) or len(first) or page_size
+        total = _to_int(first_links.get("total_items"))
+        source_page = start // provider_size
+        source_offset = start % provider_size
+        source_items, source_links = (first, first_links) if source_page == 0 else await provider_page(source_page)
+        combined = list(source_items[source_offset:])
+        if len(combined) < page_size and source_items:
+            next_items, _ = await provider_page(source_page + 1)
+            combined.extend(next_items)
+        items = combined[:page_size]
+        if total is None:
+            total = _to_int(source_links.get("total_items"))
+        has_next = start + len(items) < total if total is not None else len(items) == page_size
+        return DiscoverPage(items, page, page_size, total, has_next)
 
 
 async def trending(kind: str, *, limit: int = 60) -> list[DiscoverItem]:

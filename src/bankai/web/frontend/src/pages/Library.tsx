@@ -14,7 +14,6 @@ import {
   Film,
   ChevronUp,
   ChevronDown,
-  ChevronRight,
   ChevronsUpDown,
   Filter,
   Check,
@@ -24,9 +23,11 @@ import {
   AudioLines,
   Minus,
   Plus,
+  ScrollText,
+  Download,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type MediaInfo, type TitleRow, type AudioTrack } from '@/lib/api';
+import { api, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -36,6 +37,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
@@ -163,7 +165,7 @@ function TruncCell({
   danger?: boolean;
   width?: string;
 }) {
-  if (!text) return <span className='text-muted-foreground/40'>-</span>;
+  if (!text) return <span className='text-foreground'>-</span>;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -209,14 +211,27 @@ const LogPanel = memo(function LogPanel({ text }: { text: string }) {
 });
 
 // Fixed set of statuses a row can be in.
-type Status = 'queued' | 'downloading' | 'failed' | 'cancelled' | 'review' | 'approved' | 'transferring' | 'done' | 'deleted';
+type Status =
+  | 'queued'
+  | 'downloading'
+  | 'waiting_action'
+  | 'failed'
+  | 'cancelled'
+  | 'review'
+  | 'repacking'
+  | 'approved'
+  | 'transferring'
+  | 'done'
+  | 'deleted';
 
-const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning' | 'success' | 'transfer'> = {
+const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning' | 'success' | 'transfer' | 'repack'> = {
   queued: 'muted',
   downloading: 'info',
+  waiting_action: 'warning',
   failed: 'destructive',
   cancelled: 'warning',
   review: 'warning',
+  repacking: 'repack',
   approved: 'success',
   transferring: 'transfer',
   done: 'success',
@@ -226,9 +241,11 @@ const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning
 const STATUS_ROW_TINT: Record<Status, string> = {
   queued: 'bg-muted/25 hover:bg-muted/35',
   downloading: 'bg-info/[0.12] hover:bg-info/[0.18]',
+  waiting_action: 'bg-warning/[0.16] hover:bg-warning/[0.22]',
   failed: 'bg-destructive/[0.14] hover:bg-destructive/[0.2]',
   cancelled: 'bg-warning/[0.12] hover:bg-warning/[0.18]',
   review: 'bg-warning/[0.1] hover:bg-warning/[0.16]',
+  repacking: 'bg-repack/[0.13] hover:bg-repack/[0.2]',
   approved: 'bg-success/[0.1] hover:bg-success/[0.16]',
   transferring: 'bg-transfer/[0.13] hover:bg-transfer/[0.19]',
   done: 'bg-success/[0.13] hover:bg-success/[0.19]',
@@ -238,9 +255,11 @@ const STATUS_ROW_TINT: Record<Status, string> = {
 const STATUS_LABEL: Record<Status, string> = {
   queued: 'Queued',
   downloading: 'Downloading',
+  waiting_action: 'Waiting for action',
   failed: 'Failed',
   cancelled: 'Cancelled',
   review: 'Review',
+  repacking: 'Repacking',
   approved: 'Approved',
   transferring: 'Transferring',
   done: 'Done',
@@ -249,6 +268,7 @@ const STATUS_LABEL: Record<Status, string> = {
 
 function rowStatus(r: TitleRow): Status {
   if (r.row_kind === 'job') {
+    if (r.action_required) return 'waiting_action';
     if (r.pending) return 'queued';
     if (r.job_status === 'running') return 'downloading';
     if (r.job_status === 'failed' || r.job_status === 'error') return 'failed';
@@ -257,6 +277,7 @@ function rowStatus(r: TitleRow): Status {
     return 'done';
   }
   if (r.stage === 'deleted') return 'deleted';
+  if (r.repack_status === 'repacking') return 'repacking';
   if (r.transfer_status === 'transferring') return 'transferring';
   if (r.transfer_status === 'failed') return 'failed';
   if (r.stage === 'transferred' || r.transfer_status === 'done') return 'done';
@@ -293,16 +314,27 @@ function StatusCell({ r }: { r: TitleRow }) {
       </Badge>
     );
   }
+  if (s === 'repacking') {
+    const pct = Math.round(r.repack_percent || 0);
+    return (
+      <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
+        <Loader2 className='h-3 w-3 animate-spin' /> {r.repack_label || (r.repack_kind === 'torrent' ? 'Replacing torrent' : 'Repacking')}{' '}
+        {pct > 0 ? `${pct}%` : ''}
+      </Badge>
+    );
+  }
   return <Badge variant={STATUS_VARIANT[s]}>{STATUS_LABEL[s]}</Badge>;
 }
 
 function statusRank(r: TitleRow): number {
   if (r.row_kind === 'job') {
+    if (r.action_required) return 0;
     if (r.job_status === 'running') return 0;
     if (r.pending) return 1;
     if (r.job_status === 'failed' || r.job_status === 'error') return 2;
     return 3;
   }
+  if (r.repack_status === 'repacking') return 4;
   if (r.stage === 'review') return 4;
   if (r.stage === 'approved') return 5;
   return 6; // transferred
@@ -460,6 +492,9 @@ export default function Library() {
 
   const [review, setReview] = useState<TitleRow | null>(null);
   const [del, setDel] = useState<TitleRow | null>(null);
+  const [torrentAction, setTorrentAction] = useState<TitleRow | null>(null);
+  const [torrentCandidates, setTorrentCandidates] = useState<TorrentCandidate[]>([]);
+  const [torrentLoading, setTorrentLoading] = useState(false);
   useEffect(() => {
     try {
       const preferences: QueuePreferences = {
@@ -640,8 +675,38 @@ export default function Library() {
     }
   }
 
+  async function openTorrentAction(r: TitleRow) {
+    if (!r.job_id) return;
+    setTorrentAction(r);
+    setTorrentCandidates([]);
+    setTorrentLoading(true);
+    try {
+      const result = await api.torrentAction(r.job_id);
+      setTorrentCandidates(result.candidates);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setTorrentLoading(false);
+    }
+  }
+
+  async function chooseTorrent(candidate: TorrentCandidate) {
+    if (!torrentAction?.job_id) return;
+    setTorrentLoading(true);
+    try {
+      await api.chooseTorrent(torrentAction.job_id, candidate.id);
+      toast.success('Torrent selected — pipeline resumed');
+      setTorrentAction(null);
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setTorrentLoading(false);
+    }
+  }
+
   function SyncCell({ r }: { r: TitleRow }) {
-    if (r.row_kind !== 'library') return <span className='text-muted-foreground'>—</span>;
+    if (r.row_kind !== 'library') return <span className='text-foreground'>—</span>;
     const c = r.sync_confidence;
     if (c == null) {
       if (r.needs_sync_review)
@@ -688,49 +753,44 @@ export default function Library() {
     const canDelete = isJob && (r.job_status === 'failed' || r.job_status === 'error' || r.job_status === 'cancelled');
     const isOpen = expanded === r.id;
     const status = rowStatus(r);
+    const isRepacking = r.repack_status === 'repacking';
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
-        <tr
-          className={cn(
-            'cursor-pointer border-t border-border',
-            STATUS_ROW_TINT[status],
-          )}
-          onClick={() => toggleExpand(r)}
-        >
+        <tr className={cn('border-t border-border text-foreground', STATUS_ROW_TINT[status])}>
           <td className='px-2 py-2 align-middle'>
             <Poster r={r} />
           </td>
           <td className='max-w-[24rem] px-2 py-2 align-middle'>
             <div className='flex items-center gap-1.5'>
-              {isOpen ? (
-                <ChevronDown className='h-3.5 w-3.5 shrink-0 text-muted-foreground' />
-              ) : (
-                <ChevronRight className='h-3.5 w-3.5 shrink-0 text-muted-foreground' />
-              )}
               <span className='truncate font-medium'>{titleWithYear(r)}</span>
             </div>
-            {isLib && r.size ? <div className='pl-5 text-xs text-muted-foreground'>{formatBytes(r.size)}</div> : null}
+            {isLib && r.size ? <div className='text-xs text-foreground'>{formatBytes(r.size)}</div> : null}
           </td>
-          <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>{typeLabel(r)}</td>
+          <td className='px-2 py-2 align-middle text-xs text-foreground'>{typeLabel(r)}</td>
           <td className='px-2 py-2 align-middle'>
             <StatusCell r={r} />
           </td>
-          <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>
+          <td className='px-2 py-2 align-middle text-xs text-foreground'>
             <TruncCell text={r.reason} tooltip={r.reason_detail || r.reason} danger width='18rem' />
           </td>
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
           </td>
-          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>{dateTimeLabel(r.created_at)}</td>
-          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-muted-foreground'>{dateTimeLabel(r.updated_at)}</td>
-          <td className='px-2 py-2 align-middle text-xs text-muted-foreground'>
+          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-foreground'>{dateTimeLabel(r.created_at)}</td>
+          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-foreground'>{dateTimeLabel(r.updated_at)}</td>
+          <td className='px-2 py-2 align-middle text-xs text-foreground'>
             <TruncCell text={r.path} mono width='20rem' />
           </td>
           <td className='px-2 py-2 align-middle' onClick={stop}>
             <div className='flex items-center justify-end gap-1'>
+              {r.action_required && (
+                <Button size='sm' variant='default' onClick={() => openTorrentAction(r)}>
+                  <Download data-icon='inline-start' /> Select torrent
+                </Button>
+              )}
               {isLib && (
-                <Button size='sm' variant='default' onClick={() => setReview(r)}>
+                <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={isRepacking}>
                   <Play data-icon='inline-start' /> Review
                 </Button>
               )}
@@ -738,11 +798,16 @@ export default function Library() {
                 size='icon'
                 variant='ghost'
                 onClick={() => redo(r)}
-                disabled={redoing.has(r.id)}
+                disabled={redoing.has(r.id) || isRepacking}
                 title='Redo — re-run the pipeline for this title'
               >
                 {redoing.has(r.id) ? <Loader2 className='h-4 w-4 animate-spin' /> : <RefreshCw className='h-4 w-4' />}
               </Button>
+              {r.job_id && (
+                <Button size='icon' variant='ghost' onClick={() => toggleExpand(r)} title={isOpen ? 'Hide logs' : 'Show logs'}>
+                  <ScrollText className='h-4 w-4' />
+                </Button>
+              )}
               {canCancel && (
                 <Button size='icon' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel'>
                   <X className='h-4 w-4' />
@@ -760,7 +825,7 @@ export default function Library() {
                 </Button>
               )}
               {isLib && (
-                <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete'>
+                <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete' disabled={isRepacking}>
                   <Trash2 className='h-4 w-4 text-red-400' />
                 </Button>
               )}
@@ -864,7 +929,7 @@ export default function Library() {
       ) : (
         <div className='min-h-0 flex-1 overflow-auto rounded-lg border'>
           <table className='w-full text-sm'>
-            <thead className='sticky top-0 z-10 bg-card text-left text-xs uppercase tracking-wide text-muted-foreground'>
+            <thead className='sticky top-0 z-10 bg-card text-left text-xs uppercase tracking-wide text-foreground'>
               <tr>
                 <th className='w-14 px-2 py-2' />
                 <SortHeader col='title' label='Title' className='text-left' />
@@ -947,6 +1012,44 @@ export default function Library() {
               <Trash2 className='h-4 w-4' /> Delete
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!torrentAction} onOpenChange={(open) => !open && setTorrentAction(null)}>
+        <DialogContent className='max-h-[85vh] max-w-3xl overflow-y-auto'>
+          <DialogHeader>
+            <DialogTitle>Select a torrent</DialogTitle>
+            <DialogDescription>
+              No release met your configured quality, size, and seeder rules. Pick a release explicitly to resume {torrentAction?.title}.
+            </DialogDescription>
+          </DialogHeader>
+          {torrentLoading && torrentCandidates.length === 0 ? (
+            <div className='flex items-center justify-center py-10'>
+              <Loader2 className='h-6 w-6 animate-spin' />
+            </div>
+          ) : torrentCandidates.length === 0 ? (
+            <EmptyState icon={Download} title='No torrent results' description='Try the job again later when indexers have more releases.' />
+          ) : (
+            <div className='flex flex-col gap-2'>
+              {torrentCandidates.map((candidate) => (
+                <div key={candidate.id} className='flex items-center justify-between gap-4 rounded-lg border border-border p-3 text-foreground'>
+                  <div className='min-w-0'>
+                    <div className='truncate font-medium'>{candidate.title}</div>
+                    <div className='mt-1 flex flex-wrap items-center gap-2 text-xs text-foreground'>
+                      <Badge variant={candidate.eligible ? 'success' : 'warning'}>{candidate.eligible ? 'Meets policy' : 'Manual override'}</Badge>
+                      <span>{candidate.seeders} seeders</span>
+                      <span>{formatBytes(candidate.size_bytes)}</span>
+                      {candidate.runtime_seconds && <span>{Math.round(candidate.runtime_seconds / 60)} min</span>}
+                      <span>{candidate.indexer}</span>
+                    </div>
+                  </div>
+                  <Button size='sm' disabled={torrentLoading} onClick={() => chooseTorrent(candidate)}>
+                    Select
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
@@ -1053,6 +1156,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [, setSeeking] = useState(false);
   const [videoLoading, setVideoLoading] = useState(true);
   const [gerLoading, setGerLoading] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceMode, setReplaceMode] = useState<'auto' | 'manual'>('auto');
+  const [replaceCandidates, setReplaceCandidates] = useState<TorrentCandidate[]>([]);
+  const [replaceLoading, setReplaceLoading] = useState(false);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const engCanvas = useRef<HTMLCanvasElement>(null);
@@ -1065,6 +1172,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const rafRef = useRef<number | null>(null);
   const livePosRef = useRef(0);
   const wasPlayingRef = useRef(false);
+  const resumeModeRef = useRef<'both' | 'eng' | 'ger'>('both');
   const seekFracRef = useRef(0);
 
   const duration = info?.duration ?? 0;
@@ -1247,8 +1355,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // drift correction: the window's left edge stays anchored (aligned by the
   // delay) and time advances by `stretch` across it, so the user can line up
   // the left edge with the delay then stretch to match the right edge. The
-  // visible slice is re-normalised to its own peak so both lanes fill the lane
-  // height evenly regardless of how loud the rest of the buffer is.
+  // backend's fixed dBFS scale is retained so quiet and loud scenes remain
+  // visually comparable.
   function drawLane(
     canvas: HTMLCanvasElement | null,
     buf: { peaks: Uint8Array; start: number; dur: number } | null,
@@ -1273,17 +1381,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         const v = bi >= 0 && bi < bn ? buf.peaks[bi] : 0;
         vals[x] = v;
       }
-      // Use a robust visible-window ceiling: a single click/pop should clip,
-      // not flatten every sustained sound into a tiny line. The square-root
-      // display curve better reflects how quiet-but-audible content is heard.
-      const audible = Array.from(vals)
-        .filter((value) => value > 0)
-        .sort((a, b) => a - b);
-      const robustMax = audible.length ? audible[Math.round((audible.length - 1) * 0.95)] : 0;
-      const scale = Math.max(robustMax, 12);
+      // Backend values already use a fixed dBFS loudness scale. Do not
+      // normalise each viewport: doing so made a quiet scene look as loud as
+      // an explosion and was the main source of misleading visual spikes.
       ctx.fillStyle = color;
       for (let x = 0; x < W; x++) {
-        const h = Math.sqrt(Math.min(1, vals[x] / scale)) * (H / 2 - 2);
+        const h = Math.min(1, vals[x] / 127) * (H / 2 - 2);
         ctx.fillRect(x, H / 2 - h, 1, h * 2);
       }
     }
@@ -1343,6 +1446,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   function playSection(which: 'both' | 'eng' | 'ger') {
+    resumeModeRef.current = which;
     stopAll();
     const startFrac = seekFracRef.current;
     const startOffset = startFrac * windowSec; // seconds into the window
@@ -1405,6 +1509,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     e.stopPropagation();
     wasPlayingRef.current = playing !== 'none';
     if (playing !== 'none') {
+      resumeModeRef.current = playing;
       haltAudioVideo();
       setPlaying('none');
     }
@@ -1417,7 +1522,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       window.removeEventListener('mouseup', onUp);
       if (wasPlayingRef.current) {
         wasPlayingRef.current = false;
-        playSection('both');
+        playSection(resumeModeRef.current);
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -1432,6 +1537,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     let moved = false;
     wasPlayingRef.current = playing !== 'none';
     if (playing !== 'none') {
+      resumeModeRef.current = playing;
       haltAudioVideo();
       setPlaying('none');
     }
@@ -1452,7 +1558,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       if (!moved) seekFromClientX(ev.clientX);
       if (wasPlayingRef.current) {
         wasPlayingRef.current = false;
-        playSection('both');
+        playSection(resumeModeRef.current);
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -1502,17 +1608,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   async function approve() {
     setBusy('approve');
     try {
-      if (delayMs !== savedDelay || stretch !== 1) {
-        const r = await api.repack(path, delayMs, {
-          atempo: stretch !== 1 ? stretch : undefined,
-          track_index: gerStream,
-        });
-        if (!r.ok) throw new Error(r.message);
-        setSavedDelay(delayMs);
-        setStretch(1); // stretch is now baked into the file
-      }
-      await api.approve(path);
-      toast.success('Approved — ready to send to server');
+      const result = await api.approve(path, {
+        delay_ms: delayMs,
+        atempo: stretch !== 1 ? stretch : undefined,
+        track_index: gerStream,
+      });
+      toast.success(result.background ? 'Repacking in the background' : 'Approved — ready to send to server');
       onClose();
     } catch (e: any) {
       toast.error(e.message);
@@ -1537,6 +1638,40 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // 23.976 is 25 / 23.976 = 1.0427 (speed the German track up by that factor).
   const fpsStretch = sourceFps && referenceFps ? sourceFps / referenceFps : null;
   const durationStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
+
+  async function openReplacement() {
+    setReplaceOpen(true);
+    setReplaceMode('auto');
+    setReplaceCandidates([]);
+    setReplaceLoading(true);
+    try {
+      const result = await api.torrentSearch(titleWithYear(entry), gerTrack?.duration ?? duration ?? null);
+      setReplaceCandidates(result.candidates);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setReplaceLoading(false);
+    }
+  }
+
+  async function startReplacement(candidate?: TorrentCandidate) {
+    setBusy('replace');
+    try {
+      await api.replaceTorrent({
+        path,
+        query: titleWithYear(entry),
+        target_runtime_seconds: gerTrack?.duration ?? duration ?? null,
+        candidate,
+      });
+      toast.success(candidate ? 'Selected torrent is downloading in the background' : 'Automatic torrent replacement started');
+      setReplaceOpen(false);
+      onClose();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setBusy(null);
+    }
+  }
   const suggestedStretch =
     measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0005
       ? measuredDrift
@@ -1572,6 +1707,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           </h2>
         </div>
         <div className='flex items-center gap-3'>
+          {entry.kind === 'movie' && (
+            <Button variant='secondary' onClick={openReplacement} disabled={busy != null}>
+              <Download data-icon='inline-start' /> New torrent
+            </Button>
+          )}
           <div className='rounded-md border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm'>
             Delay{' '}
             <span className='font-mono font-semibold'>
@@ -1591,6 +1731,61 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           </Button>
         </div>
       </div>
+
+      <Dialog open={replaceOpen} onOpenChange={setReplaceOpen}>
+        <DialogContent className='max-h-[85vh] max-w-3xl overflow-y-auto'>
+          <DialogHeader>
+            <DialogTitle>Repack with a new torrent</DialogTitle>
+            <DialogDescription>
+              The existing HQ video is replaced. The reviewed German audio is retained and the downloaded torrent files are removed after remuxing.
+            </DialogDescription>
+          </DialogHeader>
+          <Tabs value={replaceMode} onValueChange={(value) => setReplaceMode(value as 'auto' | 'manual')}>
+            <TabsList>
+              <TabsTrigger value='auto'>Automatic</TabsTrigger>
+              <TabsTrigger value='manual'>Manual</TabsTrigger>
+            </TabsList>
+            <TabsContent value='auto'>
+              <div className='flex flex-col gap-4 py-3'>
+                <p className='text-sm text-foreground'>Bankai will prefer an eligible release close to the German runtime, then fall back to the release with the most seeders.</p>
+                <Button onClick={() => startReplacement()} disabled={busy === 'replace'}>
+                  {busy === 'replace' ? <Loader2 className='h-4 w-4 animate-spin' /> : <Download data-icon='inline-start' />}
+                  Pick automatically
+                </Button>
+              </div>
+            </TabsContent>
+            <TabsContent value='manual'>
+              {replaceLoading ? (
+                <div className='flex items-center justify-center py-10'>
+                  <Loader2 className='h-6 w-6 animate-spin' />
+                </div>
+              ) : replaceCandidates.length === 0 ? (
+                <EmptyState icon={Download} title='No matching torrents' description='Try the automatic option later when indexers have more releases.' />
+              ) : (
+                <div className='flex flex-col gap-2 py-3'>
+                  {replaceCandidates.map((candidate) => (
+                    <div key={candidate.id} className='flex items-center justify-between gap-4 rounded-lg border border-border p-3 text-foreground'>
+                      <div className='min-w-0'>
+                        <div className='truncate font-medium'>{candidate.title}</div>
+                        <div className='mt-1 flex flex-wrap items-center gap-2 text-xs'>
+                          <Badge variant={candidate.eligible ? 'success' : 'warning'}>{candidate.eligible ? 'Meets policy' : 'Manual override'}</Badge>
+                          <span>{candidate.seeders} seeders</span>
+                          <span>{formatBytes(candidate.size_bytes)}</span>
+                          {candidate.runtime_seconds && <span>{Math.round(candidate.runtime_seconds / 60)} min</span>}
+                          <span>{candidate.indexer}</span>
+                        </div>
+                      </div>
+                      <Button size='sm' onClick={() => startReplacement(candidate)} disabled={busy === 'replace'}>
+                        Select
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
 
       <div className='flex flex-1 flex-col overflow-hidden'>
         {loading ? (
@@ -1772,6 +1967,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 onPointerDown={() => {
                   wasPlayingRef.current = playing !== 'none';
                   if (playing !== 'none') {
+                    resumeModeRef.current = playing;
                     haltAudioVideo();
                     setPlaying('none');
                   }
@@ -1779,7 +1975,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 onValueCommit={() => {
                   if (wasPlayingRef.current) {
                     wasPlayingRef.current = false;
-                    playSection('both');
+                    playSection(resumeModeRef.current);
                   }
                 }}
                 className='flex-1'

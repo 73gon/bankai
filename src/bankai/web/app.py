@@ -70,36 +70,47 @@ def _stream_site_from_url(url: str) -> str:
 
 
 def _waveform_envelope(samples: Any, bins: int) -> bytearray:
-    """Build a robust, perceived-loudness envelope from signed PCM samples.
+    """Build a stable dBFS loudness envelope from full-band PCM samples.
 
-    RMS follows sustained audible energy better than a raw maximum. A capped
-    peak contribution keeps transients visible, while percentile scaling stops
-    one click/pop from flattening the rest of the waveform.
+    Each bin uses winsorised RMS: the loudest two percent of samples are capped
+    before energy is calculated, so a click or decode glitch cannot create a
+    large bar for an otherwise quiet moment. Values are mapped against a fixed
+    -72 dBFS noise floor. Crucially, there is no per-window normalisation, so a
+    quiet scene remains visually quiet and comparable with a loud scene.
     """
     n = len(samples)
     if n == 0 or bins <= 0:
         return bytearray()
-    binsz = max(1, n // bins)
-    magnitudes: list[int] = []
-    for i in range(0, n, binsz):
-        chunk = samples[i : i + binsz]
+    count = min(bins, n)
+    powers: list[float] = []
+    for index in range(count):
+        lo = index * n // count
+        hi = max(lo + 1, (index + 1) * n // count)
+        chunk = samples[lo:hi]
         if not chunk:
             continue
-        peak = max(abs(int(sample)) for sample in chunk)
-        rms = int(math.sqrt(sum(int(sample) ** 2 for sample in chunk) / len(chunk)))
-        # Prevent a single-sample impulse from dominating an otherwise quiet
-        # bin, but retain enough peak information for consonants and impacts.
-        capped_peak = min(peak, rms * 4) if rms else 0
-        magnitudes.append(round(rms * 0.8 + capped_peak * 0.2))
-        if len(magnitudes) == bins:
-            break
+        absolute = sorted(abs(int(sample)) for sample in chunk)
+        cap = absolute[min(len(absolute) - 1, int((len(absolute) - 1) * 0.98))]
+        powers.append(sum(min(abs(int(sample)), cap) ** 2 for sample in chunk) / len(chunk))
 
-    nonzero = sorted(m for m in magnitudes if m > 0)
-    if not nonzero:
-        return bytearray(len(magnitudes))
-    p95 = nonzero[round((len(nonzero) - 1) * 0.95)]
-    scale = max(p95, 320)
-    return bytearray(min(127, round(magnitude * 127 / scale)) for magnitude in magnitudes)
+    if not any(power > 0 for power in powers):
+        return bytearray(len(powers))
+    # A short ~3-bin integration window follows perceived energy and prevents
+    # one narrow sample bin from looking more important than it sounds.
+    smoothed: list[float] = []
+    for index in range(len(powers)):
+        nearby = powers[max(0, index - 1) : min(len(powers), index + 2)]
+        smoothed.append(sum(nearby) / len(nearby))
+    floor_db = -72.0
+    values = bytearray()
+    for power in smoothed:
+        if power <= 0:
+            values.append(0)
+            continue
+        rms = math.sqrt(power) / 32768.0
+        dbfs = 20.0 * math.log10(max(rms, 1e-9))
+        values.append(max(0, min(127, round((dbfs - floor_db) * 127 / -floor_db))))
+    return values
 
 
 @contextmanager
@@ -214,12 +225,47 @@ class DelayRequest(BaseModel):
     track_index: int | None = None
 
 
+class ApproveRequest(BaseModel):
+    path: str
+    delay_ms: int | None = None
+    atempo: float | None = None
+    track_index: int | None = None
+
+
+class TorrentCandidateRequest(BaseModel):
+    id: str | None = None
+    title: str
+    indexer: str = ""
+    indexer_id: int | None = None
+    download_url: str
+    info_url: str | None = None
+    magnet_uri: str | None = None
+    info_hash: str | None = None
+    size_bytes: int = 0
+    seeders: int = 0
+    leechers: int = 0
+    publish_date: str | None = None
+    runtime_seconds: float | None = None
+    eligible: bool = False
+
+
+class ReplaceTorrentRequest(BaseModel):
+    path: str
+    query: str
+    target_runtime_seconds: float | None = None
+    candidate: TorrentCandidateRequest | None = None
+
+
 class PathRequest(BaseModel):
     path: str
 
 
 class PathsRequest(BaseModel):
     paths: list[str]
+
+
+class TorrentChoiceRequest(BaseModel):
+    candidate_id: str
 
 
 class ServerDirRequest(BaseModel):
@@ -398,6 +444,19 @@ def create_app() -> Any:
             pass
         return names
 
+    def _library_titles(kind: str) -> set[str]:
+        """Normalised titles staged in bankai's local review library."""
+        names: set[str] = _server_have(kind)
+        try:
+            for entry in media_mod.scan_library():
+                if kind == "movie" and entry.kind == "movie":
+                    names.add(_norm_title(entry.name))
+                elif kind == "show" and entry.kind == "episode":
+                    names.add(_norm_title(entry.series or entry.name))
+        except Exception:
+            pass
+        return names
+
     def _filter_discover(items: list, kind: str) -> list:
         """Hide upcoming (not-yet-released) titles, anything already on the
         server, and anything already in the queue, so Discover only shows
@@ -414,12 +473,12 @@ def create_app() -> Any:
             out.append(it)
         return out
 
-    def _apply_availability(items: list, kind: str, cap: int = 100) -> list[dict]:
+    def _apply_availability(items: list, kind: str) -> list[dict]:
         """Drop titles confirmed to have no working filmpalast mirror, backfill
         from deeper in the pool, schedule background checks for every unchecked
         pool item, and mark survivors with availability for the UI checkmark."""
         if kind != "movie":
-            return [discover_mod.to_dict(i) for i in items[:cap]]
+            return [discover_mod.to_dict(i) for i in items]
         from bankai.web import availability as avail
 
         out: list[dict] = []
@@ -431,8 +490,6 @@ def create_app() -> Any:
                 avail.schedule(it.name)
             if st and st["status"] == "unavailable":
                 continue  # hide it; a later pool item takes the slot
-            if len(out) >= cap:
-                continue
             d = discover_mod.to_dict(it)
             d["available"] = bool(st and st["status"] == "available")
             d["checked"] = bool(st and st["status"] in ("available", "unavailable"))
@@ -442,24 +499,20 @@ def create_app() -> Any:
         return out
 
     @app.get("/api/discover/trending")
-    async def discover_trending(kind: str = Query("movie")) -> dict:
+    async def discover_trending(
+        kind: str = Query("movie"),
+        page: int = Query(0, ge=0),
+    ) -> dict:
         k = "movie" if kind == "movie" else "show"
-        # Over-fetch a large pool so ~100 survive the released / not-on-server /
-        # working-mirror filters (many trending titles have no filmpalast dub).
-        new = await discover_mod.new_releases(k, limit=80)
-        browse = await discover_mod.trending(k, limit=300)
-        merged: list = []
-        seen: set = set()
-        for it in [*new, *browse]:
-            key = (it.tvdb_id, it.name.casefold())
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(it)
-        merged = _filter_discover(merged, k)
+        result = await discover_mod.browse_page(k, page=page, page_size=50)
+        items = _filter_discover(result.items, k)
         return {
             "configured": discover_mod.is_configured(),
-            "items": _apply_availability(merged, k, cap=100),
+            "items": _apply_availability(items, k),
+            "page": result.page,
+            "page_size": result.page_size,
+            "total": result.total,
+            "has_next": result.has_next,
         }
 
     @app.get("/api/discover/search")
@@ -467,6 +520,7 @@ def create_app() -> Any:
         q: str = Query(...),
         kind: str = Query("movie"),
         search_by: str = Query("title", alias="by"),
+        page: int = Query(0, ge=0),
     ) -> dict:
         k = "movie" if kind == "movie" else "show"
         mode = search_by.strip().casefold()
@@ -474,20 +528,26 @@ def create_app() -> Any:
             raise HTTPException(status_code=400, detail="by must be title, person, or studio")
         if k != "movie" and mode != "title":
             raise HTTPException(status_code=400, detail="person and studio search are only available for movies")
-        items = await discover_mod.search(q, kind=k, search_by=mode)
+        paged = await discover_mod.search_page(q, kind=k, page=page, page_size=50, search_by=mode)
         # An explicit search should surface everything that matches. We only
         # hide clearly-unreleased titles; the discover mirror/on-server/queued
         # filters would otherwise hide exactly what the user searched for.
-        items = [i for i in items if discover_mod.is_released(i)]
+        items = [i for i in paged.items if discover_mod.is_released(i)]
         added = _added_titles(k)
+        in_library = _library_titles(k)
         results: list[dict] = []
         for item in items:
             result = discover_mod.to_dict(item)
             result["added"] = _norm_title(item.name) in added
+            result["in_library"] = _norm_title(item.name) in in_library
             results.append(result)
         return {
             "configured": discover_mod.is_configured(),
             "items": results,
+            "page": paged.page,
+            "page_size": paged.page_size,
+            "total": paged.total,
+            "has_next": paged.has_next,
         }
 
     @app.get("/api/discover/poster")
@@ -540,6 +600,62 @@ def create_app() -> Any:
                 for r in results
             ]
         }
+
+    @app.get("/api/torrents/search")
+    async def torrent_search(
+        q: str = Query(...),
+        runtime_seconds: float | None = Query(None, gt=0),
+    ) -> dict:
+        """Candidates for the review replacement picker."""
+        from bankai.torrent.actions import candidate_id, candidate_to_dict
+        from bankai.torrent.prowlarr import ProwlarrClient
+        from bankai.torrent.selector import TorrentSelector
+
+        client = ProwlarrClient()
+        try:
+            candidates = await client.search(q, categories=[2000, 2010, 2020, 2030, 2040, 2045, 2050])
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Prowlarr search failed: {exc}") from exc
+        finally:
+            await client.aclose()
+        selector = TorrentSelector()
+        relevant = selector.relevant(candidates, query=q)
+        ranked = selector.rank(relevant, query=None, target_runtime_seconds=runtime_seconds)
+        eligible = {candidate_id(item.candidate) for item in ranked}
+        order = {candidate_id(item.candidate): index for index, item in enumerate(ranked)}
+        relevant.sort(
+            key=lambda item: (
+                candidate_id(item) not in eligible,
+                order.get(candidate_id(item), 10_000),
+                -item.seeders,
+            )
+        )
+        return {
+            "query": q,
+            "target_runtime_seconds": runtime_seconds,
+            "candidates": [
+                candidate_to_dict(item, eligible=candidate_id(item) in eligible)
+                for item in relevant
+            ],
+        }
+
+    @app.get("/api/torrent-actions/{job_id}")
+    def torrent_action_get(job_id: str) -> dict:
+        from bankai.torrent import actions as torrent_actions
+
+        request = torrent_actions.get_request(job_id)
+        if request is None:
+            raise HTTPException(status_code=404, detail="torrent action not found")
+        return request
+
+    @app.post("/api/torrent-actions/{job_id}")
+    def torrent_action_choose(job_id: str, req: TorrentChoiceRequest) -> dict:
+        from bankai.torrent import actions as torrent_actions
+
+        selected = torrent_actions.choose(job_id, req.candidate_id)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="torrent candidate not found")
+        return {"selected": selected, "status": "resuming"}
 
     @app.get("/api/series/episodes")
     async def series_episodes(
@@ -712,6 +828,7 @@ def create_app() -> Any:
     def library_list() -> dict:
         entries = media_mod.scan_library()
         transfers = webjobs.transfer_states()
+        repacks = webjobs.repack_states()
         out = []
         for e in entries:
             state = review_mod.get_state(e.path)
@@ -724,6 +841,15 @@ def create_app() -> Any:
             tinfo = transfers.get(tkey)
             if tinfo and tinfo["status"] != state.transfer_status:
                 state = review_mod.set_transfer(e.path, tinfo["status"], percent=tinfo.get("percent"))
+            rinfo = repacks.get(tkey)
+            if rinfo and rinfo["status"] != state.repack_status:
+                state = review_mod.set_repack(
+                    e.path,
+                    rinfo["status"],
+                    percent=rinfo.get("percent"),
+                    kind=rinfo.get("kind"),
+                    note=rinfo.get("reason"),
+                )
             out.append(
                 {
                     "kind": e.kind,
@@ -741,6 +867,9 @@ def create_app() -> Any:
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
                     "transfer_percent": (tinfo.get("percent", state.transfer_percent) if tinfo else state.transfer_percent),
+                    "repack_status": state.repack_status,
+                    "repack_percent": (rinfo.get("percent", state.repack_percent) if rinfo else state.repack_percent),
+                    "repack_kind": state.repack_kind,
                 }
             )
         return {"entries": out, "library": str(get_settings().output.directory)}
@@ -756,6 +885,7 @@ def create_app() -> Any:
         """
         entries = media_mod.scan_library()
         transfers = webjobs.transfer_states()
+        repacks = webjobs.repack_states()
         jobs = webjobs.snapshot()  # already excludes transfer jobs
         # Tombstones for files the user explicitly deleted (stage="deleted"),
         # keyed by resolved path — used to relabel their finished job row.
@@ -784,6 +914,15 @@ def create_app() -> Any:
             tinfo = transfers.get(rp)
             if tinfo and tinfo["status"] != state.transfer_status:
                 state = review_mod.set_transfer(e.path, tinfo["status"], percent=tinfo.get("percent"))
+            rinfo = repacks.get(rp)
+            if rinfo and rinfo["status"] != state.repack_status:
+                state = review_mod.set_repack(
+                    e.path,
+                    rinfo["status"],
+                    percent=rinfo.get("percent"),
+                    kind=rinfo.get("kind"),
+                    note=rinfo.get("reason"),
+                )
             lib_paths.add(rp)
             norm = _norm_title(e.name)
             lib_norms.add(norm)
@@ -816,18 +955,25 @@ def create_app() -> Any:
                     "series": e.series,
                     "season": e.season,
                     "stage": "review" if state.stage == "deleted" else state.stage,
+                    "reason": rinfo.get("reason") if rinfo and rinfo.get("status") == "failed" else None,
+                    "reason_detail": rinfo.get("reason") if rinfo and rinfo.get("status") == "failed" else None,
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
                     "transfer_percent": (tinfo.get("percent", state.transfer_percent) if tinfo else state.transfer_percent),
+                    "repack_status": state.repack_status,
+                    "repack_percent": (rinfo.get("percent", state.repack_percent) if rinfo else state.repack_percent),
+                    "repack_kind": state.repack_kind,
+                    "repack_label": rinfo.get("label") if rinfo else None,
                     "job_id": related["id"] if related else None,
                     "job_status": None,
                     "step_label": None,
                     "overall_percent": None,
                     "total_steps": None,
                     "pending": False,
+                    "action_required": False,
                 }
             )
         # Collapse queue jobs that have no finished library file yet into one
@@ -885,12 +1031,17 @@ def create_app() -> Any:
                     "auto_delay_ms": 0,
                     "transfer_status": "idle",
                     "transfer_percent": 0.0,
+                    "repack_status": "idle",
+                    "repack_percent": 0.0,
+                    "repack_kind": None,
+                    "repack_label": None,
                     "job_id": j["id"],
                     "job_status": "deleted" if is_deleted else j.get("status"),
                     "step_label": j.get("step_label"),
                     "overall_percent": j.get("overall_percent"),
                     "total_steps": j.get("total_steps"),
                     "pending": j.get("pending", False),
+                    "action_required": j.get("action_required", False),
                 }
             )
         return {"rows": rows, "library": str(get_settings().output.directory)}
@@ -1108,8 +1259,10 @@ def create_app() -> Any:
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
-        # Decode at a rate that yields a few samples per output bin.
-        ar = max(200, min(8000, int(bins * 4 / dur)))
+        # Always decode the audible band. The old adaptive rate could fall to
+        # ~100 Hz for a 90-second window, discarding speech/music frequencies
+        # and producing bars from resampling artefacts instead of what is heard.
+        ar = 8000
         cmd = [
             ffmpeg,
             "-v",
@@ -1298,10 +1451,43 @@ def create_app() -> Any:
         return {"ok": True, "message": result.message, "delay_ms": result.delay_ms}
 
     @app.post("/api/review/approve")
-    def review_approve(req: PathRequest) -> dict:
+    def review_approve(req: ApproveRequest) -> dict:
         p = _safe_path(req.path)
+        current = review_mod.get_state(str(p))
+        delay_ms = current.delay_ms if req.delay_ms is None else req.delay_ms
+        needs_repack = delay_ms != current.delay_ms or (
+            req.atempo is not None and abs(req.atempo - 1.0) > 1e-4
+        )
+        if needs_repack:
+            args = ["review-repack", str(p), "--delay-ms", str(delay_ms)]
+            if req.atempo is not None:
+                args.extend(["--atempo", str(req.atempo)])
+            if req.track_index is not None:
+                args.extend(["--track-index", str(req.track_index)])
+            job = webjobs.enqueue(kind="repack", title=f"Repack {p.name}", args=args)
+            state = review_mod.set_repack(str(p), "repacking", percent=0.0, kind="audio")
+            return {**review_mod.to_dict(state), "background": True, "job": job}
         state = review_mod.set_stage(str(p), "approved")
-        return review_mod.to_dict(state)
+        return {**review_mod.to_dict(state), "background": False}
+
+    @app.post("/api/review/replace-torrent")
+    def review_replace_torrent(req: ReplaceTorrentRequest) -> dict:
+        p = _safe_path(req.path)
+        query = req.query.strip()
+        if not query:
+            raise HTTPException(status_code=422, detail="torrent query required")
+        args = ["review-replace-torrent", str(p), "--query", query]
+        if req.target_runtime_seconds is not None:
+            args.extend(["--target-runtime-seconds", str(req.target_runtime_seconds)])
+        if req.candidate is not None:
+            args.extend(["--candidate-json", req.candidate.model_dump_json()])
+        job = webjobs.enqueue(
+            kind="torrent_replace",
+            title=f"Replace torrent {p.name}",
+            args=args,
+        )
+        state = review_mod.set_repack(str(p), "repacking", percent=0.0, kind="torrent")
+        return {**review_mod.to_dict(state), "background": True, "job": job}
 
     @app.post("/api/review/approve-batch")
     def review_approve_batch(req: PathsRequest) -> dict:

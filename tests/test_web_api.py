@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +18,7 @@ from bankai.web.discover import DiscoverItem
 
 
 @pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     library = tmp_path / "library"
     (library / "Movies").mkdir(parents=True)
     (library / "Shows").mkdir(parents=True)
@@ -27,7 +28,8 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     reset_settings_cache()
     get_settings()
     app = create_app()
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 def test_health(client: TestClient) -> None:
@@ -189,6 +191,37 @@ def test_titles_library_uses_file_creation_and_modification_times(
     assert row["updated_at"] == pytest.approx(stat.st_mtime)
 
 
+def test_approve_with_changed_delay_starts_background_repack_on_same_entry(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "Repack Movie (2024).mkv"
+    movie.write_bytes(b"movie")
+    queued: list[dict[str, object]] = []
+
+    def fake_enqueue(*, kind: str, title: str, args: list[str]) -> dict:
+        queued.append({"kind": kind, "title": title, "args": args})
+        return {"status": "running", "id": "repack1", "title": title}
+
+    monkeypatch.setattr("bankai.web.jobs.enqueue", fake_enqueue)
+
+    response = client.post(
+        "/api/review/approve",
+        json={"path": str(movie), "delay_ms": 275, "track_index": 2},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["background"] is True
+    assert response.json()["stage"] == "repacking"
+    assert queued == [
+        {
+            "kind": "repack",
+            "title": "Repack Repack Movie (2024).mkv",
+            "args": ["review-repack", str(movie), "--delay-ms", "275", "--track-index", "2"],
+        }
+    ]
+
+
 def test_queue_show_accepts_custom_episode_mirror_links(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -267,7 +300,12 @@ def test_waveform_envelope_is_not_flattened_by_one_outlier() -> None:
     peaks = _waveform_envelope(samples, 20)
 
     assert len(peaks) == 20
-    assert min(peaks[:19]) >= 100
+    # 1,000 / 32,768 is roughly -30 dBFS, which maps to the middle of the
+    # fixed display range.  A single full-scale impulse must not flatten the
+    # other bins or make the whole response look loud.
+    assert min(peaks[:18]) >= 68
+    assert max(peaks[:18]) <= 80
+    assert peaks[-1] <= peaks[0]
     assert max(_waveform_envelope([0] * 200, 20)) == 0
 
 

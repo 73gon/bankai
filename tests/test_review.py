@@ -41,3 +41,18 @@ def test_sync_review_survives_stage_change(tmp_path: Path) -> None:
     st = review_mod.get_state(path)
     assert st.stage == "approved"
     assert st.needs_sync_review is True
+
+
+def test_repack_state_stays_on_the_library_entry(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+
+    running = review_mod.set_repack(path, "repacking", percent=37.5, kind="audio")
+    assert running.stage == "repacking"
+    assert running.repack_status == "repacking"
+    assert running.repack_percent == 37.5
+    assert running.repack_kind == "audio"
+
+    failed = review_mod.set_repack(path, "failed", note="mkvmerge failed")
+    assert failed.stage == "review"
+    assert failed.repack_status == "failed"
+    assert failed.note == "mkvmerge failed"

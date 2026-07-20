@@ -49,6 +49,8 @@ _RULES: list[tuple[str, str, tuple[str, ...]]] = [
             "ytdlperror",
             "voe",
             "no video url",
+            "no media url captured",
+            "playwright fallback failed",
             "no stream",
             "stream url",
             "extract",

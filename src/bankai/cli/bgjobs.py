@@ -254,6 +254,16 @@ def progress_snapshot(job: BgJob) -> ProgressSnapshot:
                 total = 1
                 step_key = "transfer"
                 step_label = "Transfer files"
+            elif stage == "repack" and job.kind == "repack":
+                step = 1
+                total = 1
+                step_key = "repack"
+                step_label = "Repacking audio"
+            elif stage in {"replace", "torrent"} and job.kind == "torrent_replace":
+                step = 1
+                total = 1
+                step_key = stage
+                step_label = "Replacing torrent"
             continue
 
         fallback_stage = _fallback_stage(line)
@@ -307,6 +317,10 @@ def _default_step_label(job: BgJob) -> str:
         return "Failed"
     if job.kind == "transfer":
         return "Waiting to transfer"
+    if job.kind == "repack":
+        return "Waiting to repack"
+    if job.kind == "torrent_replace":
+        return "Waiting to replace torrent"
     return "Starting"
 
 
@@ -347,6 +361,8 @@ def _part_label(stage: str) -> str:
         "stream": "Filmpalast audio",
         "torrent": "HQ video",
         "transfer": "Transfer",
+        "repack": "Repack",
+        "replace": "Replace torrent",
     }.get(stage, stage.replace("_", " ").title())
 
 

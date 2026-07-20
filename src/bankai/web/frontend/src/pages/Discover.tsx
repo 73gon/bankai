@@ -60,6 +60,9 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
 export default function Discover() {
   const [kind, setKind] = useState('movie');
   const [items, setItems] = useState<DiscoverItem[]>([]);
+  const [page, setPage] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
+  const [hasNext, setHasNext] = useState(false);
   const [loading, setLoading] = useState(true);
   const [configured, setConfigured] = useState(true);
   const [selected, setSelected] = useState<DiscoverItem | null>(null);
@@ -78,14 +81,16 @@ export default function Discover() {
   useEffect(() => {
     setLoading(true);
     api
-      .discoverTrending(kind)
+      .discoverTrending(kind, page)
       .then((r) => {
         setConfigured(r.configured);
         setItems(r.items);
+        setTotal(r.total);
+        setHasNext(r.has_next);
       })
       .catch((e) => toast.error(e.message))
       .finally(() => setLoading(false));
-  }, [kind]);
+  }, [kind, page]);
 
   // Availability (working filmpalast mirror) is checked in the background, so
   // re-fetch a handful of times: verified titles gain a checkmark and ones
@@ -97,7 +102,7 @@ export default function Discover() {
     const t = setInterval(async () => {
       n += 1;
       try {
-        const r = await api.discoverTrending(kind);
+        const r = await api.discoverTrending(kind, page);
         if (stop) return;
         setItems(r.items);
         const pending = r.items.filter((it) => !it.checked).length;
@@ -110,7 +115,7 @@ export default function Discover() {
       stop = true;
       clearInterval(t);
     };
-  }, [kind]);
+  }, [kind, page]);
 
   // Names already present on the media server, to hide from discovery.
   useEffect(() => {
@@ -124,6 +129,7 @@ export default function Discover() {
   }, [kind]);
 
   const visibleItems = useMemo(() => items.filter((it) => !serverNames.has(normalizeTitle(it.name))), [items, serverNames]);
+  const totalPages = total == null ? null : Math.max(1, Math.ceil(total / 50));
 
   async function openItem(item: DiscoverItem) {
     setSelected(item);
@@ -258,7 +264,13 @@ export default function Discover() {
         </div>
       </header>
 
-      <Tabs value={kind} onValueChange={setKind}>
+      <Tabs
+        value={kind}
+        onValueChange={(value) => {
+          setKind(value);
+          setPage(0);
+        }}
+      >
         <TabsList>
           <TabsTrigger value='movie'>Movies</TabsTrigger>
           <TabsTrigger value='show'>Shows</TabsTrigger>
@@ -288,6 +300,20 @@ export default function Discover() {
           )}
         </TabsContent>
       </Tabs>
+
+      {!loading && (page > 0 || hasNext) && (
+        <div className='flex items-center justify-center gap-3'>
+          <Button variant='secondary' disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
+            Previous
+          </Button>
+          <span className='text-sm text-foreground'>
+            Page {page + 1}{totalPages ? ` of ${totalPages}` : ''} · 50 per page
+          </span>
+          <Button variant='secondary' disabled={!hasNext} onClick={() => setPage((value) => value + 1)}>
+            Next
+          </Button>
+        </div>
+      )}
 
       <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
         <DialogContent className={selected?.kind === 'movie' ? 'max-w-2xl' : undefined}>

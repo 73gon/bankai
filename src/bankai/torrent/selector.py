@@ -69,15 +69,54 @@ class TorrentSelector:
 
     # ---- public API --------------------------------------------------------
 
-    def select(self, candidates: list[TorrentCandidate], *, query: str | None = None) -> ScoredCandidate | None:
-        scored = self.rank(candidates, query=query)
+    def select(
+        self,
+        candidates: list[TorrentCandidate],
+        *,
+        query: str | None = None,
+        target_runtime_seconds: float | None = None,
+    ) -> ScoredCandidate | None:
+        scored = self.rank(candidates, query=query, target_runtime_seconds=target_runtime_seconds)
         return scored[0] if scored else None
 
-    def rank(self, candidates: list[TorrentCandidate], *, query: str | None = None) -> list[ScoredCandidate]:
+    def rank(
+        self,
+        candidates: list[TorrentCandidate],
+        *,
+        query: str | None = None,
+        target_runtime_seconds: float | None = None,
+    ) -> list[ScoredCandidate]:
         filtered = self._filter_by_query(candidates, query) if query else candidates
         scored = [s for s in (self._score(c) for c in filtered) if s is not None]
-        scored.sort(key=lambda s: s.score, reverse=True)
+        target = float(target_runtime_seconds or 0)
+        tolerance = max(600.0, target * 0.08) if target > 0 else 0.0
+        close = [
+            item
+            for item in scored
+            if item.candidate.runtime_seconds is not None
+            and abs(item.candidate.runtime_seconds - target) <= tolerance
+        ]
+        if close:
+            close.sort(
+                key=lambda item: (
+                    abs((item.candidate.runtime_seconds or target) - target),
+                    -item.score,
+                )
+            )
+            other = [item for item in scored if item not in close]
+            other.sort(key=lambda item: (item.candidate.seeders, item.score), reverse=True)
+            scored = close + other
+        elif target > 0:
+            # When no release publishes a reasonably close runtime, use the
+            # healthiest eligible swarm as the deterministic fallback.
+            scored.sort(key=lambda item: (item.candidate.seeders, item.score), reverse=True)
+        else:
+            scored.sort(key=lambda item: item.score, reverse=True)
         return scored
+
+    def relevant(self, candidates: list[TorrentCandidate], *, query: str) -> list[TorrentCandidate]:
+        """Title/year-matching candidates before hard policy filters."""
+        return self._filter_by_query(candidates, query)
 
     # ---- title relevance --------------------------------------------------
 

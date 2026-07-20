@@ -30,11 +30,29 @@ def test_running_count_excludes_transfers(monkeypatch: pytest.MonkeyPatch) -> No
         lambda: [
             SimpleNamespace(status="running", kind="movie"),
             SimpleNamespace(status="running", kind="transfer"),
+            SimpleNamespace(status="running", kind="repack"),
+            SimpleNamespace(status="running", kind="torrent_replace"),
             SimpleNamespace(status="done", kind="show"),
         ],
     )
 
     assert webjobs._running_count() == 1
+
+
+def test_snapshot_hides_detached_operations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(webjobs, "reconcile", lambda: 0)
+    monkeypatch.setattr(webjobs, "_load_pending", lambda: [])
+    monkeypatch.setattr(
+        webjobs.bgjobs,
+        "list_jobs",
+        lambda: [
+            SimpleNamespace(kind="repack"),
+            SimpleNamespace(kind="torrent_replace"),
+            SimpleNamespace(kind="transfer"),
+        ],
+    )
+
+    assert webjobs.snapshot() == []
 
 
 def test_transfer_starts_immediately_when_pipeline_limit_is_full(

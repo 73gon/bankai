@@ -15,8 +15,10 @@ def _configured_tvdb(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BANKAI_METADATA__TVDB_API_KEY", "test-key")
     reset_settings_cache()
     discover._CACHE.clear()
+    discover._BROWSE_META.clear()
     yield
     discover._CACHE.clear()
+    discover._BROWSE_META.clear()
     reset_settings_cache()
 
 
@@ -142,3 +144,58 @@ async def test_person_search_deduplicates_multiple_credits_for_one_movie(monkeyp
     items = await discover.search("Christopher Nolan", kind="movie", search_by="person")
 
     assert [(item.tvdb_id, item.name) for item in items] == [(100, "Oppenheimer"), (101, "Tenet")]
+
+
+@pytest.mark.asyncio
+async def test_title_search_page_uses_fixed_50_row_offset(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token"}})
+        assert request.url.path == "/v4/search"
+        assert request.url.params["offset"] == "100"
+        assert request.url.params["limit"] == "50"
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"id": 101, "name": "Result 101", "year": "2024"}],
+                "links": {"total_items": 10_000},
+            },
+        )
+
+    _mock_tvdb(monkeypatch, handler)
+
+    result = await discover.search_page("Result", kind="movie", page=2)
+
+    assert result.page_size == 50
+    assert [item.name for item in result.items] == ["Result 101"]
+    assert result.total == 10_000
+    assert result.has_next is True
+
+
+@pytest.mark.asyncio
+async def test_browse_page_translates_fixed_ui_page_to_provider_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    def records(start: int, count: int) -> list[dict[str, object]]:
+        return [{"id": i, "name": f"Movie {i}", "year": "2024"} for i in range(start, start + count)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token"}})
+        assert request.url.path == "/v4/movies"
+        provider_page = int(request.url.params["page"])
+        start = provider_page * 500
+        return httpx.Response(
+            200,
+            json={
+                "data": records(start, 500),
+                "links": {"page_size": 500, "total_items": 12_345},
+            },
+        )
+
+    _mock_tvdb(monkeypatch, handler)
+
+    result = await discover.browse_page("movie", page=11)
+
+    assert result.page_size == 50
+    assert result.total == 12_345
+    assert result.has_next is True
+    assert [item.tvdb_id for item in result.items] == list(range(550, 600))

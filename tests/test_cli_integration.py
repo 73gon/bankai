@@ -9,6 +9,7 @@ the unit tests for each worker.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -162,3 +163,18 @@ def test_internal_search_can_skip_rendering(
 
     assert len(results) == 1
     assert capsys.readouterr().out == ""
+
+
+def test_movie_lookup_keeps_supplied_title_and_adds_tvdb_german_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_aliases(query: str, *, kind: MediaKind) -> list[str]:
+        assert query == "El Hoyo 2019"
+        assert kind is MediaKind.MOVIE
+        return ["El Hoyo 2019", "The Platform", "Der Schacht"]
+
+    monkeypatch.setattr(main, "title_aliases", fake_aliases)
+
+    queries = asyncio.run(main._movie_lookup_queries("El Hoyo 2019", "El Hoyo"))
+
+    assert queries == ["El Hoyo", "El Hoyo 2019", "The Platform", "Der Schacht"]
