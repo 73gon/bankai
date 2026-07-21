@@ -199,3 +199,24 @@ async def test_browse_page_translates_fixed_ui_page_to_provider_page(monkeypatch
     assert result.total == 12_345
     assert result.has_next is True
     assert [item.tvdb_id for item in result.items] == list(range(550, 600))
+
+
+@pytest.mark.asyncio
+async def test_browse_page_honors_adjustable_page_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token"}})
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"id": i, "name": f"Movie {i}", "year": "2024"} for i in range(500)],
+                "links": {"page_size": 500, "total_items": 10_000},
+            },
+        )
+
+    _mock_tvdb(monkeypatch, handler)
+
+    result = await discover.browse_page("movie", page=2, page_size=100)
+
+    assert result.page_size == 100
+    assert [item.tvdb_id for item in result.items] == list(range(200, 300))

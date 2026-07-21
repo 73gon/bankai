@@ -27,6 +27,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 
 def jobs_root() -> Path:
@@ -61,7 +62,7 @@ class BgJob:
     started_at: float
     pid: int | None = None
     child_pid: int | None = None
-    status: str = "running"  # running | done | failed | cancelled
+    status: str = "running"  # running | stopped | done | failed | cancelled
     finished_at: float | None = None
     exit_code: int | None = None
     final_path: str | None = None
@@ -113,23 +114,48 @@ class BgJob:
         return self
 
     def cancel(self) -> bool:
-        if self.pid is None or not _pid_alive(self.pid):
+        if not self._terminate():
             return False
+        self.status = "cancelled"
+        self.finished_at = time.time()
+        self.save()
+        return True
+
+    def stop(self) -> bool:
+        """Pause a job so this same ledger entry can be continued later."""
+        if self.status == "running" and not self._terminate():
+            return False
+        if self.status not in {"running", "cancelled", "stopped"}:
+            return False
+        self.status = "stopped"
+        self.finished_at = time.time()
+        self.save()
+        return True
+
+    def _terminate(self) -> bool:
+        if self.pid is None or not _pid_alive(self.pid):
+            return self.status == "cancelled"
         try:
-            killpg = getattr(os, "killpg", None)
-            getpgid = getattr(os, "getpgid", None)
-            if callable(killpg) and callable(getpgid):
-                killpg(getpgid(self.pid), signal.SIGTERM)
+            if sys.platform == "win32":
+                proc = subprocess.run(
+                    ["taskkill", "/PID", str(self.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=15,
+                )
+                if proc.returncode != 0 and _pid_alive(self.pid):
+                    return False
             else:
-                os.kill(self.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
+                killpg = getattr(os, "killpg", None)
+                getpgid = getattr(os, "getpgid", None)
+                if callable(killpg) and callable(getpgid):
+                    killpg(getpgid(self.pid), signal.SIGTERM)
+                else:
+                    os.kill(self.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
             try:
                 os.kill(self.pid, signal.SIGTERM)
             except Exception:
                 return False
-        self.status = "cancelled"
-        self.finished_at = time.time()
-        self.save()
         return True
 
     def delete(self) -> bool:
@@ -438,18 +464,10 @@ def get_job(job_id: str) -> BgJob | None:
     return None
 
 
-def spawn(*, kind: str, title: str, args: list[str]) -> BgJob:
-    """Spawn ``bankai <args>`` detached. Returns the BgJob."""
-    job = BgJob(
-        id=uuid.uuid4().hex[:8],
-        kind=kind,
-        title=title,
-        args=args,
-        started_at=time.time(),
-    )
+def _launch(job: BgJob) -> BgJob:
     job.dir.mkdir(parents=True, exist_ok=True)
     job.save()
-    cmd = [sys.executable, "-m", "bankai.cli.bgjobs", "--supervise", job.id, *args]
+    cmd = [sys.executable, "-m", "bankai.cli.bgjobs", "--supervise", job.id, *job.args]
     env = os.environ.copy()
     # Persist ANSI colour codes into the on-disk log so the viewer can
     # replay them with Rich; older releases set NO_COLOR=1 here, which is
@@ -482,6 +500,33 @@ def spawn(*, kind: str, title: str, args: list[str]) -> BgJob:
     job.pid = proc.pid
     job.save()
     return job
+
+
+def spawn(*, kind: str, title: str, args: list[str]) -> BgJob:
+    """Spawn ``bankai <args>`` detached. Returns the BgJob."""
+    return _launch(
+        BgJob(
+            id=uuid.uuid4().hex[:8],
+            kind=kind,
+            title=title,
+            args=args,
+            started_at=time.time(),
+        )
+    )
+
+
+def resume(job: BgJob) -> BgJob:
+    """Continue a stopped job using its original id and arguments."""
+    if job.status != "stopped":
+        raise ValueError("only stopped jobs can be continued")
+    job.started_at = time.time()
+    job.pid = None
+    job.child_pid = None
+    job.status = "running"
+    job.finished_at = None
+    job.exit_code = None
+    job.final_path = None
+    return _launch(job)
 
 
 def _bankai_cmd() -> str:
@@ -517,7 +562,8 @@ def _supervise(job_id: str, args: list[str]) -> int:
     env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("BANKAI_BG_JOB_ID", job.id)
     job.log_path.parent.mkdir(parents=True, exist_ok=True)
-    with job.log_path.open("wb") as log_fh:
+    # Preserve output across stop/continue cycles.
+    with job.log_path.open("ab") as log_fh:
         proc = subprocess.Popen(
             cmd,
             stdout=log_fh,
@@ -530,7 +576,7 @@ def _supervise(job_id: str, args: list[str]) -> int:
         exit_code = proc.wait()
 
     latest = _load_job(job_id) or job
-    if latest.status == "cancelled":
+    if latest.status in {"cancelled", "stopped"}:
         return exit_code
     latest.exit_code = exit_code
     latest.finished_at = time.time()
@@ -617,6 +663,7 @@ __all__ = [
     "list_jobs",
     "progress_snapshot",
     "render_tail",
+    "resume",
     "spawn",
     "tail",
     "watch",

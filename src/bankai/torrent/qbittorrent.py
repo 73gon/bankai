@@ -142,6 +142,20 @@ class QBittorrentClient:
             data={"hashes": torrent_hash, "deleteFiles": str(delete_files).lower()},
         )
 
+    async def pause(self, torrent_hash: str) -> None:
+        await self._ensure_login()
+        response = await self._client.post("/api/v2/torrents/stop", data={"hashes": torrent_hash})
+        if response.status_code == 404:  # qBittorrent < 5 uses the old verb.
+            response = await self._client.post("/api/v2/torrents/pause", data={"hashes": torrent_hash})
+        response.raise_for_status()
+
+    async def resume(self, torrent_hash: str) -> None:
+        await self._ensure_login()
+        response = await self._client.post("/api/v2/torrents/start", data={"hashes": torrent_hash})
+        if response.status_code == 404:  # qBittorrent < 5 uses the old verb.
+            response = await self._client.post("/api/v2/torrents/resume", data={"hashes": torrent_hash})
+        response.raise_for_status()
+
     # ---- helpers -----------------------------------------------------------
 
     async def wait_until_complete(

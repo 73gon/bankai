@@ -29,6 +29,7 @@ def test_running_count_excludes_transfers(monkeypatch: pytest.MonkeyPatch) -> No
         "list_jobs",
         lambda: [
             SimpleNamespace(status="running", kind="movie"),
+            SimpleNamespace(status="stopped", kind="show"),
             SimpleNamespace(status="running", kind="transfer"),
             SimpleNamespace(status="running", kind="repack"),
             SimpleNamespace(status="running", kind="torrent_replace"),
@@ -36,7 +37,7 @@ def test_running_count_excludes_transfers(monkeypatch: pytest.MonkeyPatch) -> No
         ],
     )
 
-    assert webjobs._running_count() == 1
+    assert webjobs._running_count() == 2
 
 
 def test_snapshot_hides_detached_operations(monkeypatch: pytest.MonkeyPatch) -> None:

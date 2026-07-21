@@ -113,6 +113,33 @@ def _waveform_envelope(samples: Any, bins: int) -> bytearray:
     return values
 
 
+_R128_VALUE_RE = re.compile(r"lavfi\.r128\.M=(-?\d+(?:\.\d+)?)")
+
+
+def _ebur128_envelope(output: str, bins: int) -> bytearray:
+    """Map FFmpeg's EBU R128 momentary-loudness frames to display bars.
+
+    R128's 400 ms integration window models perceived loudness much better
+    than raw PCM peaks.  We keep a fixed LUFS scale so quiet passages remain
+    visibly quiet instead of being normalised to fill the canvas.
+    """
+    loudness = [float(match.group(1)) for match in _R128_VALUE_RE.finditer(output)]
+    if not loudness or bins <= 0:
+        return bytearray()
+    count = min(bins, len(loudness))
+    values = bytearray()
+    floor_lufs, ceiling_lufs = -70.0, -5.0
+    for index in range(count):
+        lo = index * len(loudness) // count
+        hi = max(lo + 1, (index + 1) * len(loudness) // count)
+        # Average in the energy domain, not directly in decibels.
+        energy = sum(10.0 ** (value / 10.0) for value in loudness[lo:hi]) / (hi - lo)
+        lufs = 10.0 * math.log10(max(energy, 1e-12))
+        scaled = (lufs - floor_lufs) / (ceiling_lufs - floor_lufs)
+        values.append(max(0, min(127, round(scaled * 127))))
+    return values
+
+
 @contextmanager
 def _ffmpeg_slot():
     if not _FFMPEG_SLOTS.acquire(timeout=1.0):
@@ -502,9 +529,10 @@ def create_app() -> Any:
     async def discover_trending(
         kind: str = Query("movie"),
         page: int = Query(0, ge=0),
+        page_size: int = Query(50, ge=10, le=100),
     ) -> dict:
         k = "movie" if kind == "movie" else "show"
-        result = await discover_mod.browse_page(k, page=page, page_size=50)
+        result = await discover_mod.browse_page(k, page=page, page_size=page_size)
         items = _filter_discover(result.items, k)
         return {
             "configured": discover_mod.is_configured(),
@@ -521,6 +549,7 @@ def create_app() -> Any:
         kind: str = Query("movie"),
         search_by: str = Query("title", alias="by"),
         page: int = Query(0, ge=0),
+        page_size: int = Query(50, ge=10, le=100),
     ) -> dict:
         k = "movie" if kind == "movie" else "show"
         mode = search_by.strip().casefold()
@@ -528,7 +557,7 @@ def create_app() -> Any:
             raise HTTPException(status_code=400, detail="by must be title, person, or studio")
         if k != "movie" and mode != "title":
             raise HTTPException(status_code=400, detail="person and studio search are only available for movies")
-        paged = await discover_mod.search_page(q, kind=k, page=page, page_size=50, search_by=mode)
+        paged = await discover_mod.search_page(q, kind=k, page=page, page_size=page_size, search_by=mode)
         # An explicit search should surface everything that matches. We only
         # hide clearly-unreleased titles; the discover mirror/on-server/queued
         # filters would otherwise hide exactly what the user searched for.
@@ -788,6 +817,23 @@ def create_app() -> Any:
             raise HTTPException(status_code=404, detail="job not found")
         ok = job.cancel()
         return {"cancelled": ok, "pending": False}
+
+    @app.post("/api/queue/{job_id}/stop")
+    def queue_stop(job_id: str) -> dict:
+        job = webjobs.stop_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=409, detail="only running jobs can be stopped")
+        return {"stopped": True, "id": job.id}
+
+    @app.post("/api/queue/{job_id}/continue")
+    def queue_continue(job_id: str) -> dict:
+        try:
+            job = webjobs.continue_job(job_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if job is None:
+            raise HTTPException(status_code=409, detail="job is not stopped")
+        return {"continued": True, "id": job.id, "status": job.status}
 
     @app.post("/api/queue/{job_id}/retry")
     def queue_retry(job_id: str) -> dict:
@@ -1236,14 +1282,13 @@ def create_app() -> Any:
         dur: float = Query(30.0, gt=0.0, le=1800.0),
         bins: int = Query(1000, ge=50, le=4000),
     ) -> dict:
-        """Downsampled peak envelope for a *window* of one audio track.
+        """EBU R128 perceived-loudness envelope for one audio-track window.
 
         Only the requested ``[start, start+dur]`` slice is decoded, so this
         stays fast even on weak hardware (a full-movie decode would take
         minutes). Returns base64 uint8 peaks; the client maps pixels to peaks
         using ``start``/``dur``.
         """
-        import array
         import base64
         import subprocess
 
@@ -1259,41 +1304,47 @@ def create_app() -> Any:
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
-        # Always decode the audible band. The old adaptive rate could fall to
-        # ~100 Hz for a 90-second window, discarding speech/music frequencies
-        # and producing bars from resampling artefacts instead of what is heard.
-        ar = 8000
+        # R128 momentary loudness uses a standardised 400 ms perceptual window.
+        # Decode a small lead-in so seeking into the movie does not leave the
+        # first bars waiting for the filter window to warm up.
+        pre_roll = min(start, 0.4)
         cmd = [
             ffmpeg,
             "-v",
             "error",
+            "-nostats",
             "-ss",
-            str(start),
+            str(start - pre_roll),
             "-t",
-            str(dur),
+            str(dur + pre_roll),
             "-i",
             str(p),
             "-map",
             f"0:{stream}",
-            "-ac",
-            "1",
-            "-ar",
-            str(ar),
+            "-af",
+            "ebur128=metadata=1:framelog=quiet,ametadata=mode=print:key=lavfi.r128.M:file=-:direct=1",
             "-f",
-            "s16le",
-            "pipe:1",
+            "null",
+            "-",
         ]
         try:
             with _ffmpeg_slot():
-                proc = subprocess.run(cmd, capture_output=True, timeout=60)
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                )
         except subprocess.TimeoutExpired as exc:
             raise HTTPException(status_code=504, detail="waveform decode timed out") from exc
         if proc.returncode != 0:
             raise HTTPException(status_code=422, detail="could not decode audio track")
-        raw = proc.stdout
-        pcm = array.array("h")
-        pcm.frombytes(raw[: len(raw) - (len(raw) % 2)])
-        peaks = _waveform_envelope(pcm, bins)
+        measurements = _R128_VALUE_RE.findall(proc.stdout)
+        skip = round(pre_roll * 10)
+        usable = "\n".join(f"lavfi.r128.M={value}" for value in measurements[skip:])
+        peaks = _ebur128_envelope(usable, bins)
         out = {
             "start": start,
             "dur": dur,

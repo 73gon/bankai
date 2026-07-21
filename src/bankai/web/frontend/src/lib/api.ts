@@ -232,10 +232,10 @@ export interface SettingRow {
 export const api = {
   health: () => request<HealthResponse>('/api/health'),
 
-  discoverTrending: (kind: string, page = 0) => request<PagedDiscover>(`/api/discover/trending?kind=${kind}&page=${page}`),
-  discoverSearch: (q: string, kind: string, by: DiscoverSearchBy = 'title', page = 0) =>
+  discoverTrending: (kind: string, page = 0, pageSize = 50) => request<PagedDiscover>(`/api/discover/trending?kind=${kind}&page=${page}&page_size=${pageSize}`),
+  discoverSearch: (q: string, kind: string, by: DiscoverSearchBy = 'title', page = 0, pageSize = 50) =>
     request<PagedDiscover>(
-      `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}&page=${page}`,
+      `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}&page=${page}&page_size=${pageSize}`,
     ),
   discoverGerman: (id: number, kind: string) =>
     request<{ tvdb_id: number; kind: string; german: string | null }>(`/api/discover/german?id=${id}&kind=${kind}`),
@@ -270,6 +270,8 @@ export const api = {
   }) =>
     request('/api/queue/show', { method: 'POST', body: JSON.stringify(body) }),
   cancelJob: (id: string) => request(`/api/queue/${id}/cancel`, { method: 'POST' }),
+  stopJob: (id: string) => request(`/api/queue/${id}/stop`, { method: 'POST' }),
+  continueJob: (id: string) => request(`/api/queue/${id}/continue`, { method: 'POST' }),
   retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: 'POST' }),
   deleteJob: (id: string) => request(`/api/queue/${id}`, { method: 'DELETE' }),
   jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),

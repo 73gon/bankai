@@ -8,6 +8,7 @@ import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 const SETTING_UI: Record<
   string,
@@ -200,9 +201,9 @@ export default function Settings() {
   return (
     <div className='mx-auto max-w-3xl space-y-8 pb-24'>
       <header className='flex flex-wrap items-end justify-between gap-4'>
-        <div>
+        <div className='flex items-baseline gap-2'>
           <h1 className='text-2xl font-semibold'>Settings</h1>
-          <p className='mt-1 text-sm text-muted-foreground'>Edit safe configuration keys, then save all at once.</p>
+          <span className='text-sm text-muted-foreground'>— Edit safe configuration keys, then save all at once.</span>
         </div>
         <div className='flex items-center gap-2'>
           {dirtyCount > 0 && (
@@ -249,7 +250,12 @@ export default function Settings() {
                       <div className='min-w-0 space-y-1'>
                         <div className='flex items-center gap-2'>
                           <span className='text-foreground'>{fieldLabel(row.key)}</span>
-                          {dirty && <span className='h-1.5 w-1.5 rounded-full bg-primary' title='Unsaved change' />}
+                          {dirty && (
+                            <Tooltip>
+                              <TooltipTrigger asChild><span className='h-1.5 w-1.5 rounded-full bg-primary' /></TooltipTrigger>
+                              <TooltipContent>Unsaved change</TooltipContent>
+                            </Tooltip>
+                          )}
                           {row.secret && (row.is_set ? <Badge variant='success'>Set</Badge> : <Badge variant='muted'>Unset</Badge>)}
                         </div>
                         {ui?.description && <p className='max-w-md text-xs text-muted-foreground'>{ui.description}</p>}

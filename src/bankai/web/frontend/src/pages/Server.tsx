@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Server as ServerIcon, RefreshCw, Film, Tv, Loader2, Plus, Trash2, FolderPlus, ChevronDown, ChevronRight } from 'lucide-react';
+import { Server as ServerIcon, RefreshCw, Film, Tv, Loader2, Plus, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type ServerTitle, type ServerSeason } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,16 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+
+function PathText({ text, tooltip, className }: { text: string; tooltip: string; className?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild><span className={className}>{text}</span></TooltipTrigger>
+      <TooltipContent className='font-mono'>{tooltip}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 function fmtSize(bytes: number): string {
   if (!bytes) return '';
@@ -58,9 +68,7 @@ function ShowRow({ it }: { it: ServerTitle }) {
           ) : (
             <span className='w-4 shrink-0' />
           )}
-          <span className='truncate text-sm' title={it.location || undefined}>
-            {it.name}
-          </span>
+          {it.location ? <PathText text={it.name} tooltip={it.location} className='truncate text-sm' /> : <span className='truncate text-sm'>{it.name}</span>}
         </span>
         {it.present ? <Badge variant='success'>On server</Badge> : <Badge variant='muted'>Missing</Badge>}
       </button>
@@ -89,9 +97,10 @@ function ShowRow({ it }: { it: ServerTitle }) {
                     ) : (
                       se.episodes.map((ep) => (
                         <div key={ep.path} className='flex items-center justify-between gap-3 rounded px-2 py-1 pl-6 hover:bg-secondary/30'>
-                          <span className='truncate text-xs' title={ep.path}>
-                            {ep.name}
-                          </span>
+                          <Tooltip>
+                            <TooltipTrigger asChild><span className='truncate text-xs'>{ep.name}</span></TooltipTrigger>
+                            <TooltipContent className='font-mono'>{ep.path}</TooltipContent>
+                          </Tooltip>
                           <span className='shrink-0 text-[11px] text-muted-foreground'>{fmtSize(ep.size)}</span>
                         </div>
                       ))
@@ -122,7 +131,7 @@ function Column({
   const filtered = items.filter((i) => i.name.toLowerCase().includes(filter.toLowerCase()));
   const present = items.filter((i) => i.present).length;
   return (
-    <Card>
+    <Card className='flex h-full min-h-0 flex-col'>
       <CardHeader className='flex flex-row items-center justify-between'>
         <CardTitle className='flex items-center gap-2'>
           <Icon className='h-4 w-4' /> {title}
@@ -131,7 +140,7 @@ function Column({
           {present}/{items.length} on server
         </Badge>
       </CardHeader>
-      <CardContent className='max-h-[60vh] space-y-1.5 overflow-auto'>
+      <CardContent className='min-h-0 flex-1 space-y-1.5 overflow-auto'>
         {filtered.length === 0 ? (
           <p className='py-6 text-center text-sm text-muted-foreground'>No titles.</p>
         ) : expandable ? (
@@ -139,9 +148,10 @@ function Column({
         ) : (
           filtered.map((it) => (
             <div key={it.name} className='flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-secondary/40'>
-              <span className='truncate text-sm' title={it.location || undefined}>
-                {it.name}
-              </span>
+              <Tooltip>
+                <TooltipTrigger asChild><span className='truncate text-sm'>{it.name}</span></TooltipTrigger>
+                <TooltipContent className='font-mono'>{it.location || it.name}</TooltipContent>
+              </Tooltip>
               {it.present ? <Badge variant='success'>On server</Badge> : <Badge variant='muted'>Missing</Badge>}
             </div>
           ))
@@ -226,11 +236,11 @@ export default function Server() {
   }
 
   return (
-    <div className='space-y-6'>
+    <div className='flex h-full min-h-0 flex-col gap-6 md:overflow-hidden'>
       <header className='flex flex-wrap items-center justify-between gap-3'>
-        <div>
-          <h1 className='text-2xl font-semibold'>Server</h1>
-          <p className='text-sm text-muted-foreground'>What already lives on the media server.</p>
+        <div className='flex items-baseline gap-2'>
+          <h1 className='text-2xl font-semibold'>Library</h1>
+          <span className='text-sm text-muted-foreground'>— What already lives on the media server.</span>
         </div>
         <div className='flex gap-2'>
           <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Search titles…' className='w-64' />
@@ -242,12 +252,7 @@ export default function Server() {
       </header>
 
       <Card>
-        <CardHeader>
-          <CardTitle className='flex items-center gap-2'>
-            <FolderPlus className='h-4 w-4' /> Scan directories
-          </CardTitle>
-        </CardHeader>
-        <CardContent className='grid gap-4 md:grid-cols-2'>
+        <CardContent className='grid gap-4 pt-6 md:grid-cols-2'>
           <DirManager
             title='Movie directories'
             icon={Film}
@@ -274,12 +279,12 @@ export default function Server() {
       {error ? (
         <EmptyState icon={ServerIcon} title='Could not read server' description={error} />
       ) : loading ? (
-        <div className='grid gap-4 md:grid-cols-2'>
+        <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2'>
           <Skeleton className='h-96' />
           <Skeleton className='h-96' />
         </div>
       ) : (
-        <div className='grid gap-4 md:grid-cols-2'>
+        <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2'>
           <Column title='Movies' icon={Film} items={movies} filter={filter} />
           <Column title='Shows' icon={Tv} items={shows} filter={filter} expandable />
         </div>

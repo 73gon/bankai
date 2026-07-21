@@ -73,9 +73,9 @@ export default function Queue() {
   return (
     <div className='space-y-6'>
       <header className='flex items-center justify-between'>
-        <div>
+        <div className='flex items-baseline gap-2'>
           <h1 className='text-2xl font-semibold'>Queue</h1>
-          <p className='text-sm text-muted-foreground'>Live download &amp; dubbing jobs.</p>
+          <span className='text-sm text-muted-foreground'>— Live download and dubbing jobs.</span>
         </div>
         <Badge variant={connected ? 'success' : 'muted'} className='gap-1.5'>
           {connected ? <Wifi className='h-3 w-3' /> : <WifiOff className='h-3 w-3' />}

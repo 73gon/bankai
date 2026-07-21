@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2, Check } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type DiscoverItem, type DiscoverSearchBy, type SearchResult, type EpisodeItem } from '@/lib/api';
+import { api, type DiscoverItem, type DiscoverSearchBy, type PagedDiscover, type SearchResult, type EpisodeItem } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,8 +10,17 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Separator } from '@/components/ui/separator';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
 
 const SEARCH_HIDE_LIBRARY_KEY = 'bankai:search-hide-library';
+const searchPageCache = new Map<string, PagedDiscover>();
+
+function searchCacheKey(query: string, kind: string, by: string, page: number, pageSize: number) {
+  return `${kind}:${by}:${query.toLocaleLowerCase()}:${page}:${pageSize}`;
+}
 
 // Parse "S02E01" / "Staffel 2" / "Season 2" out of a source title or URL.
 function parseSeason(s: string): number | null {
@@ -88,14 +97,14 @@ function Poster({ item, onClick, priority = false, eager = false }: { item: Disc
         </div>
       )}
       {item.added && (
-        <Badge
-          variant='success'
-          className='absolute right-2 top-2 gap-1 border-success/50 bg-card/95 shadow-lg backdrop-blur-sm'
-          title='Already added to the queue or library'
-        >
-          <Check className='h-3 w-3' strokeWidth={3} />
-          Added
-        </Badge>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant='success' className='absolute right-2 top-2 gap-1 border-success/50 bg-card/95 shadow-lg backdrop-blur-sm'>
+              <Check className='h-3 w-3' strokeWidth={3} /> Added
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>Already added to the queue or library.</TooltipContent>
+        </Tooltip>
       )}
       <div className='absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-2.5 pt-8'>
         <div className='line-clamp-2 text-xs font-medium'>{item.name}</div>
@@ -113,6 +122,7 @@ export default function Search() {
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
   const [hasNext, setHasNext] = useState(false);
+  const [pageSize, setPageSize] = useState<CatalogPageSize>(loadCatalogPageSize);
   const [hideLibrary, setHideLibrary] = useState(() => {
     try {
       return localStorage.getItem(SEARCH_HIDE_LIBRARY_KEY) === 'true';
@@ -159,16 +169,36 @@ export default function Search() {
     const ym = searchBy === 'title' ? raw.match(/(?<!\d)(\d{4})(?!\d)/) : null;
     const year = ym ? parseInt(ym[1], 10) : null;
     const titleQuery = year ? raw.replace(ym![0], '').replace(/\s+/g, ' ').trim() : raw;
-    setLoading(true);
+    const key = searchCacheKey(titleQuery || raw, kind, searchBy, page, pageSize);
+    const cached = searchPageCache.get(key);
+    if (cached) {
+      setConfigured(cached.configured);
+      setItems(year ? cached.items.filter((item) => item.year === year) : cached.items);
+      setTotal(cached.total);
+      setHasNext(cached.has_next);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     debounce.current = window.setTimeout(() => {
       api
-        .discoverSearch(titleQuery || raw, kind, searchBy, page)
+        .discoverSearch(titleQuery || raw, kind, searchBy, page, pageSize)
         .then((r) => {
           if (cancelled) return;
+          searchPageCache.set(key, r);
           setConfigured(r.configured);
           setItems(year ? r.items.filter((i) => i.year === year) : r.items);
           setTotal(r.total);
           setHasNext(r.has_next);
+          const neighbours = [page - 1, page + 1].filter((value) => value >= 0 && (value < page || r.has_next));
+          void Promise.all(
+            neighbours.map(async (neighbour) => {
+              const neighbourKey = searchCacheKey(titleQuery || raw, kind, searchBy, neighbour, pageSize);
+              if (!searchPageCache.has(neighbourKey)) {
+                searchPageCache.set(neighbourKey, await api.discoverSearch(titleQuery || raw, kind, searchBy, neighbour, pageSize));
+              }
+            }),
+          ).catch(() => undefined);
         })
         .catch((e) => {
           if (!cancelled) toast.error(e.message);
@@ -181,7 +211,7 @@ export default function Search() {
       cancelled = true;
       window.clearTimeout(debounce.current);
     };
-  }, [q, kind, searchBy, page]);
+  }, [q, kind, searchBy, page, pageSize]);
 
   useEffect(() => {
     try {
@@ -192,7 +222,7 @@ export default function Search() {
   }, [hideLibrary]);
 
   const visibleItems = hideLibrary ? items.filter((item) => !item.in_library) : items;
-  const totalPages = total == null ? null : Math.max(1, Math.ceil(total / 50));
+  const totalPages = total == null ? null : Math.max(1, Math.ceil(total / pageSize));
 
   async function openTitle(item: DiscoverItem) {
     setSelected(item);
@@ -399,9 +429,9 @@ export default function Search() {
 
   return (
     <div className='space-y-6'>
-      <header>
-        <h1 className='text-2xl font-semibold'>Search</h1>
-        <p className='text-sm text-muted-foreground'>
+      <header className='flex items-baseline gap-2'>
+        <h1 className='shrink-0 text-2xl font-semibold'>Search</h1>
+        <span className='text-sm text-muted-foreground'>—{' '}
           {kind === 'show'
             ? 'Find a show on TheTVDB, then match it to a German stream source.'
             : searchBy === 'person'
@@ -409,7 +439,7 @@ export default function Search() {
               : searchBy === 'studio'
                 ? 'Find movies from a studio or production company on TheTVDB.'
                 : 'Find a movie on TheTVDB, then match it to a German stream source.'}
-        </p>
+        </span>
       </header>
 
       <div className='flex flex-wrap items-center gap-3'>
@@ -423,28 +453,31 @@ export default function Search() {
             setPage(0);
           }}
         >
-          <TabsList>
+          <TabsList className='border-0 bg-transparent shadow-none'>
             <TabsTrigger value='movie'>Movie</TabsTrigger>
             <TabsTrigger value='show'>Show</TabsTrigger>
           </TabsList>
         </Tabs>
         {kind === 'movie' && (
-          <Tabs
-            value={searchBy}
-            onValueChange={(value) => {
-              setSearchBy(value as DiscoverSearchBy);
-              setItems([]);
-              setSelected(null);
-              setPage(0);
-            }}
-            aria-label='Search movies by'
-          >
-            <TabsList>
-              <TabsTrigger value='title'>Title</TabsTrigger>
-              <TabsTrigger value='person'>Person</TabsTrigger>
-              <TabsTrigger value='studio'>Studio</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <>
+            <Separator orientation='vertical' className='h-7' />
+            <Tabs
+              value={searchBy}
+              onValueChange={(value) => {
+                setSearchBy(value as DiscoverSearchBy);
+                setItems([]);
+                setSelected(null);
+                setPage(0);
+              }}
+              aria-label='Search movies by'
+            >
+              <TabsList className='border-0 bg-transparent shadow-none'>
+                <TabsTrigger value='title'>Title</TabsTrigger>
+                <TabsTrigger value='person'>Person</TabsTrigger>
+                <TabsTrigger value='studio'>Studio</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </>
         )}
         <div className='relative flex-1'>
           <SearchIcon className='absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' />
@@ -503,14 +536,32 @@ export default function Search() {
         </div>
       )}
 
-      {!loading && q.trim().length >= 2 && (page > 0 || hasNext) && (
+      {!loading && q.trim().length >= 2 && (
         <div className='flex items-center justify-center gap-3'>
           <Button variant='secondary' disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
             Previous
           </Button>
           <span className='text-sm text-foreground'>
-            Page {page + 1}{totalPages ? ` of ${totalPages}` : ''} · 50 per page
+            Page {page + 1}{totalPages ? ` of ${totalPages}` : ''}
           </span>
+          <Select
+            value={String(pageSize)}
+            onValueChange={(value) => {
+              const next = Number(value) as CatalogPageSize;
+              setPageSize(next);
+              saveCatalogPageSize(next);
+              setPage(0);
+            }}
+          >
+            <SelectTrigger className='w-32' aria-label='Entries per page'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CATALOG_PAGE_SIZES.map((size) => (
+                <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button variant='secondary' disabled={!hasNext} onClick={() => setPage((value) => value + 1)}>
             Next
           </Button>
@@ -585,26 +636,24 @@ export default function Search() {
                   {uniqueShowSources(filmResults).map((r) => {
                     const active = !customMode && picked?.site === r.site && picked?.url === r.url;
                     return (
-                      <button
-                        key={`${r.site}-${r.url}`}
-                        type='button'
-                        onClick={() => {
-                          setCustomMode(false);
-                          const cleaned = cleanSeriesTitle(r.title) || searchTerm || r.title;
-                          setSeriesTitle(cleaned);
-                          loadEpisodes(r, season, cleaned, true);
-                        }}
-                        className={
-                          'min-w-0 rounded-md px-3 py-2 text-left text-xs ring-1 transition-colors ' +
-                          (active
-                            ? 'bg-primary/20 text-foreground ring-primary/50'
-                            : 'bg-secondary/40 text-muted-foreground ring-border/50 hover:text-foreground')
-                        }
-                        title={r.title}
-                      >
-                        <span className='block font-medium'>{siteLabel(r.site)}</span>
-                        <span className='block truncate opacity-75'>{r.title}</span>
-                      </button>
+                      <Tooltip key={`${r.site}-${r.url}`}>
+                        <TooltipTrigger asChild>
+                          <button
+                            type='button'
+                            onClick={() => {
+                              setCustomMode(false);
+                              const cleaned = cleanSeriesTitle(r.title) || searchTerm || r.title;
+                              setSeriesTitle(cleaned);
+                              loadEpisodes(r, season, cleaned, true);
+                            }}
+                            className={'min-w-0 cursor-pointer rounded-md px-3 py-2 text-left text-xs ring-1 transition-colors ' + (active ? 'bg-primary/20 text-foreground ring-primary/50' : 'bg-secondary/40 text-muted-foreground ring-border/50 hover:text-foreground')}
+                          >
+                            <span className='block font-medium'>{siteLabel(r.site)}</span>
+                            <span className='block truncate opacity-75'>{r.title}</span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{r.title}</TooltipContent>
+                      </Tooltip>
                     );
                   })}
                   <button

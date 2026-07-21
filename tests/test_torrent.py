@@ -9,10 +9,10 @@ from typing import Any
 
 import pytest
 
-from bankai.config import reset_settings_cache
-from bankai.config import SelectorSettings
+from bankai.config import SelectorSettings, reset_settings_cache
 from bankai.queue.worker import PermanentWorkerError
 from bankai.scraper.base import EpisodeRef
+from bankai.torrent import actions as torrent_actions
 from bankai.torrent.matcher import (
     find_video_files,
     match_episodes,
@@ -70,6 +70,24 @@ def test_selector_filters_outside_size_bounds() -> None:
     s = TorrentSelector(SelectorSettings(max_size_gib=2.0, preferred_resolutions=["1080p"]))
     chosen = s.select([_c("Movie.1080p.x264-X", size_gib=5.0)])
     assert chosen is None
+
+
+def test_selector_accepts_i_robot_release_with_short_title_word() -> None:
+    selector = TorrentSelector(SelectorSettings(min_seeders=1, preferred_resolutions=["1080p"]))
+
+    chosen = selector.select([_c("I.Robot.2004.1080p.BluRay.x264-GROUP")], query="I, Robot 2004")
+
+    assert chosen is not None
+
+
+def test_active_torrent_state_survives_a_stopped_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    torrent_actions.set_active_torrent("job123", "abc123")
+
+    assert torrent_actions.get_active_torrent("job123") == "abc123"
+    torrent_actions.clear_active_torrent("job123")
+    assert torrent_actions.get_active_torrent("job123") is None
 
 
 def test_selector_prefers_higher_resolution() -> None:

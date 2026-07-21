@@ -46,7 +46,7 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className='flex min-h-screen flex-col md:flex-row'>
+      <div className='flex min-h-screen flex-col md:h-screen md:min-h-0 md:flex-row md:overflow-hidden'>
         {/* Sidebar (desktop) / top bar (mobile) */}
         <aside
           className={cn(
@@ -120,8 +120,8 @@ export default function App() {
           </nav>
         </aside>
 
-        <main className='flex-1 px-4 py-6 md:px-8 md:py-8'>
-          <div className='w-full animate-fade-in'>
+        <main className='min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8'>
+          <div className='h-full w-full animate-fade-in'>
             <Routes>
               <Route path='/' element={<Navigate to='/discover' replace />} />
               <Route path='/discover' element={<Discover />} />

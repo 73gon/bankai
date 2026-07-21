@@ -59,11 +59,15 @@ def _save_pending(items: list[PendingJob]) -> None:
 
 
 def _running_count() -> int:
-    """Count pipeline jobs against the configured concurrency limit."""
+    """Count active or stopped pipelines against the worker-slot limit.
+
+    A stopped job reserves its slot; otherwise stopping every active job would
+    immediately promote queued work and defeat the user's request to halt it.
+    """
     return sum(
         1
         for job in bgjobs.list_jobs()
-        if job.status == "running" and job.kind not in _OPERATION_KINDS
+        if job.status in {"running", "stopped"} and job.kind not in _OPERATION_KINDS
     )
 
 
@@ -86,7 +90,7 @@ def _running_titles() -> set[str]:
     return {
         _norm_job_title(job.title)
         for job in bgjobs.list_jobs()
-        if job.status == "running"
+        if job.status in {"running", "stopped"}
     }
 
 
@@ -169,6 +173,51 @@ def cancel_pending(job_id: str) -> bool:
             return False
         _save_pending(kept)
         return True
+
+
+def continue_job(job_id: str) -> bgjobs.BgJob | None:
+    """Resume a stopped background job in place when a slot is available."""
+    with _LOCK:
+        job = bgjobs.get_job(job_id)
+        if job is None or job.status != "stopped":
+            return None
+        # The stopped job already reserves a scheduler slot, so continuing it
+        # replaces that reservation without increasing occupancy.
+        _set_torrent_paused(job.id, paused=False)
+        return bgjobs.resume(job)
+
+
+def stop_job(job_id: str) -> bgjobs.BgJob | None:
+    """Stop the process tree and pause its active qBittorrent download."""
+    with _LOCK:
+        job = bgjobs.get_job(job_id)
+        if job is None or not job.stop():
+            return None
+        _set_torrent_paused(job.id, paused=True)
+        return job
+
+
+def _set_torrent_paused(job_id: str, *, paused: bool) -> None:
+    from bankai.torrent import actions as torrent_actions
+
+    torrent_hash = torrent_actions.get_active_torrent(job_id)
+    if not torrent_hash:
+        return
+    try:
+        import asyncio
+
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        async def apply() -> None:
+            async with QBittorrentClient() as client:
+                if paused:
+                    await client.pause(torrent_hash)
+                else:
+                    await client.resume(torrent_hash)
+
+        asyncio.run(apply())
+    except Exception as exc:  # stopping the local worker still matters
+        log.warning("failed to %s torrent for %s: %s", "pause" if paused else "resume", job_id, exc)
 
 
 def _job_reason(j: bgjobs.BgJob) -> str | None:

@@ -366,7 +366,7 @@ async def search_page(
     instead. Bankai never imposes its own maximum page number.
     """
     page = max(0, int(page))
-    page_size = 50  # Product contract: both browse surfaces are fixed at 50.
+    page_size = max(10, min(100, int(page_size)))
     mode = search_by.strip().casefold()
     if not is_configured() or not query.strip() or mode not in {"title", "person", "studio"}:
         return DiscoverPage([], page, page_size, 0, False)
@@ -378,7 +378,7 @@ async def search_page(
         # Resolve enough rows for this UI page, then slice deterministically.
         end = (page + 1) * page_size
         if page == 0:
-            items = await search(query, kind=kind, search_by=mode)
+            items = await search(query, kind=kind, limit=page_size + 1, search_by=mode)
         else:
             items = await search(query, kind=kind, limit=end + 1, search_by=mode)
         return DiscoverPage(
@@ -393,7 +393,7 @@ async def search_page(
         # Reuse the regular search path for the first page (and its cache).
         # Fetch one look-ahead row so has_next remains accurate without an
         # arbitrary UI cap.
-        items = await search(query, kind=kind, search_by=mode)
+        items = await search(query, kind=kind, limit=page_size + 1, search_by=mode)
         return DiscoverPage(items[:page_size], page, page_size, None, len(items) > page_size)
 
     cache_key = f"search-page:{kind}:{query.strip().casefold()}:{page}:{page_size}"
@@ -439,14 +439,14 @@ async def search_page(
 
 
 async def browse_page(kind: str, *, page: int, page_size: int = 50) -> DiscoverPage:
-    """Slice the complete TVDB movies/series catalogue into 50-row pages.
+    """Slice the complete TVDB movies/series catalogue into UI-sized pages.
 
     TVDB's catalogue endpoints use their own (larger) provider page size. We
-    translate the UI's stable 50-row page index to that provider page, using
+    translate the UI page index to that provider page, using
     the response ``links.page_size`` rather than assuming it is always 500.
     """
     page = max(0, int(page))
-    page_size = 50
+    page_size = max(10, min(100, int(page_size)))
     if not is_configured():
         return DiscoverPage([], page, page_size, 0, False)
     endpoint = "movies" if kind == "movie" else "series"
@@ -484,9 +484,13 @@ async def browse_page(kind: str, *, page: int, page_size: int = 50) -> DiscoverP
         source_offset = start % provider_size
         source_items, source_links = (first, first_links) if source_page == 0 else await provider_page(source_page)
         combined = list(source_items[source_offset:])
-        if len(combined) < page_size and source_items:
-            next_items, _ = await provider_page(source_page + 1)
-            combined.extend(next_items)
+        next_page = source_page + 1
+        while len(combined) < page_size and source_items:
+            source_items, _ = await provider_page(next_page)
+            if not source_items:
+                break
+            combined.extend(source_items)
+            next_page += 1
         items = combined[:page_size]
         if total is None:
             total = _to_int(source_links.get("total_items"))

@@ -79,6 +79,30 @@ def _path(job_id: str) -> Path:
     return _root() / f"{safe}.json"
 
 
+def _active_path(job_id: str) -> Path:
+    safe = "".join(ch for ch in job_id if ch.isalnum() or ch in "-_")
+    return _root() / f"{safe}.active.json"
+
+
+def set_active_torrent(job_id: str, torrent_hash: str) -> None:
+    path = _active_path(job_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"hash": torrent_hash}), encoding="utf-8")
+    tmp.replace(path)
+
+
+def get_active_torrent(job_id: str) -> str | None:
+    try:
+        value = json.loads(_active_path(job_id).read_text(encoding="utf-8")).get("hash")
+        return str(value) if value else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def clear_active_torrent(job_id: str) -> None:
+    _active_path(job_id).unlink(missing_ok=True)
+
+
 def get_request(job_id: str) -> dict[str, Any] | None:
     try:
         return json.loads(_path(job_id).read_text(encoding="utf-8"))
@@ -144,4 +168,4 @@ async def wait_for_choice(job_id: str, *, cancel_token: asyncio.Event) -> Torren
 
 def clear(job_id: str) -> None:
     _path(job_id).unlink(missing_ok=True)
-
+    clear_active_torrent(job_id)

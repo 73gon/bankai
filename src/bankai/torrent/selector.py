@@ -145,7 +145,11 @@ class TorrentSelector:
             # Obsession", or "Smile" vs "Smile 2". That's a different movie, not
             # just a release tag. Common leading articles are ignored.
             if q_year and not query_is_episodic:
-                extra_words = (cand_set - set(q_main)) - {"the", "a", "an"}
+                # Include short query words in the subtraction even though
+                # they are intentionally omitted from the required-token
+                # check. Otherwise every correct "I, Robot" release is
+                # rejected because its leading ``i`` looks like extra text.
+                extra_words = (cand_set - set(q_tokens)) - {"the", "a", "an"}
                 if extra_words:
                     continue
             # If the query carries a year, the candidate must mention the

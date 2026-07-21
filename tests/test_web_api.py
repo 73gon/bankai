@@ -13,7 +13,13 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bankai.config import get_settings, reset_settings_cache
-from bankai.web.app import _parse_range, _stream_site_from_url, _waveform_envelope, create_app
+from bankai.web.app import (
+    _ebur128_envelope,
+    _parse_range,
+    _stream_site_from_url,
+    _waveform_envelope,
+    create_app,
+)
 from bankai.web.discover import DiscoverItem
 
 
@@ -46,7 +52,7 @@ def test_discover_search_forwards_movie_search_mode(
 ) -> None:
     calls: list[tuple[str, str, str]] = []
 
-    async def fake_search(query: str, *, kind: str, search_by: str) -> list[object]:
+    async def fake_search(query: str, *, kind: str, search_by: str, limit: int = 51) -> list[object]:
         calls.append((query, kind, search_by))
         return []
 
@@ -70,7 +76,7 @@ def test_discover_search_marks_titles_already_added(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_search(query: str, *, kind: str, search_by: str) -> list[DiscoverItem]:
+    async def fake_search(query: str, *, kind: str, search_by: str, limit: int = 51) -> list[DiscoverItem]:
         return [
             DiscoverItem(name="Queued Movie", kind="movie", year=2024),
             DiscoverItem(name="Staged Movie", kind="movie", year=2023),
@@ -307,6 +313,17 @@ def test_waveform_envelope_is_not_flattened_by_one_outlier() -> None:
     assert max(peaks[:18]) <= 80
     assert peaks[-1] <= peaks[0]
     assert max(_waveform_envelope([0] * 200, 20)) == 0
+
+
+def test_ebur128_envelope_uses_fixed_perceived_loudness_scale() -> None:
+    output = "\n".join(
+        ["lavfi.r128.M=-120.691", "lavfi.r128.M=-55.0", "lavfi.r128.M=-23.0", "lavfi.r128.M=-8.0"]
+    )
+
+    bars = _ebur128_envelope(output, 4)
+
+    assert bars[0] == 0
+    assert 20 < bars[1] < bars[2] < bars[3] <= 127
 
 
 def test_settings_get_masks_secrets(client: TestClient) -> None:

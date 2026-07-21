@@ -252,6 +252,18 @@ class TorrentWorker(Worker):
         if torrent_hash is None:
             raise WorkerError("could not locate just-added torrent in qBittorrent")
 
+        background_id = os.environ.get("BANKAI_BG_JOB_ID")
+        if background_id:
+            from bankai.torrent import actions as torrent_actions
+
+            torrent_actions.set_active_torrent(background_id, torrent_hash)
+        # A continued job may be reattaching to the exact torrent that its
+        # Stop action paused. Starting an already-active torrent is harmless.
+        try:
+            await self._qbit.resume(torrent_hash)
+        except QBittorrentError as exc:
+            log.warning("could not explicitly resume torrent %s: %s", torrent_hash[:8], exc)
+
         # ---- wait for completion ----------------------------------------
         try:
             status = await self._qbit.wait_until_complete(
@@ -261,6 +273,8 @@ class TorrentWorker(Worker):
             )
         except QBittorrentError as exc:
             raise WorkerError(f"download failed: {exc}") from exc
+        if background_id:
+            torrent_actions.clear_active_torrent(background_id)
 
         # ---- pick local file(s) -----------------------------------------
         # Translate container paths to host paths via configured map.

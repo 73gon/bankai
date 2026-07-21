@@ -93,6 +93,30 @@ def test_clear_jobs_removes_finished_background_jobs(
     assert running.dir.exists()
 
 
+def test_stopped_job_can_resume_in_same_ledger_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    job = bgjobs.BgJob(
+        id="resume12",
+        kind="movie",
+        title="Movie",
+        args=["run", "Movie 2024"],
+        started_at=1.0,
+        status="stopped",
+        finished_at=2.0,
+    )
+    monkeypatch.setattr(bgjobs, "_launch", lambda value: value)
+
+    resumed = bgjobs.resume(job)
+
+    assert resumed.id == "resume12"
+    assert resumed.status == "running"
+    assert resumed.finished_at is None
+    assert resumed.args == ["run", "Movie 2024"]
+
+
 def test_progress_snapshot_parses_pipeline_download_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

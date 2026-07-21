@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon, Check } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type DiscoverItem, type SearchResult } from '@/lib/api';
+import { api, type DiscoverItem, type PagedDiscover, type SearchResult } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -9,6 +9,17 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
+
+const discoverCache = new Map<string, PagedDiscover>();
+let discoverView = { kind: 'movie', page: 0 };
+let serverNamesCache: Record<string, Set<string>> = {};
+
+function discoverKey(kind: string, page: number, pageSize: number) {
+  return `${kind}:${page}:${pageSize}`;
+}
 
 // Normalize a title for matching against media-server folder names:
 // lowercase, drop a trailing year, strip everything but alphanumerics.
@@ -43,12 +54,14 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
         </span>
       )}
       {item.available && (
-        <span
-          className='absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-white shadow ring-2 ring-black/20'
-          title='Verified: a German dub is available on filmpalast'
-        >
-          <Check className='h-3.5 w-3.5' strokeWidth={3} />
-        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className='absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-white shadow ring-2 ring-black/20'>
+              <Check className='h-3.5 w-3.5' strokeWidth={3} />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>Verified: a German dub is available on Filmpalast.</TooltipContent>
+        </Tooltip>
       )}
       <div className='absolute inset-0 flex items-center justify-center bg-primary/20 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100'>
         <Plus className='h-7 w-7' />
@@ -58,18 +71,20 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
 }
 
 export default function Discover() {
-  const [kind, setKind] = useState('movie');
-  const [items, setItems] = useState<DiscoverItem[]>([]);
-  const [page, setPage] = useState(0);
-  const [total, setTotal] = useState<number | null>(null);
-  const [hasNext, setHasNext] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [kind, setKind] = useState(discoverView.kind);
+  const [page, setPage] = useState(discoverView.page);
+  const [pageSize, setPageSize] = useState<CatalogPageSize>(loadCatalogPageSize);
+  const initial = discoverCache.get(discoverKey(discoverView.kind, discoverView.page, pageSize));
+  const [items, setItems] = useState<DiscoverItem[]>(initial?.items ?? []);
+  const [total, setTotal] = useState<number | null>(initial?.total ?? null);
+  const [hasNext, setHasNext] = useState(initial?.has_next ?? false);
+  const [loading, setLoading] = useState(!initial);
   const [configured, setConfigured] = useState(true);
   const [selected, setSelected] = useState<DiscoverItem | null>(null);
   const [season, setSeason] = useState('1');
   const [episodes, setEpisodes] = useState('');
   const [busy, setBusy] = useState(false);
-  const [serverNames, setServerNames] = useState<Set<string>>(new Set());
+  const [serverNames, setServerNames] = useState<Set<string>>(serverNamesCache[kind] ?? new Set());
 
   // Movie -> resolve German title -> filmpalast picker
   const [german, setGerman] = useState<string | null>(null);
@@ -79,18 +94,44 @@ export default function Discover() {
   const [busyUrl, setBusyUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    setLoading(true);
+    discoverView = { kind, page };
+    const key = discoverKey(kind, page, pageSize);
+    const cached = discoverCache.get(key);
+    if (cached) {
+      setConfigured(cached.configured);
+      setItems(cached.items);
+      setTotal(cached.total);
+      setHasNext(cached.has_next);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+    let cancelled = false;
     api
-      .discoverTrending(kind, page)
+      .discoverTrending(kind, page, pageSize)
       .then((r) => {
+        if (cancelled) return;
+        discoverCache.set(key, r);
         setConfigured(r.configured);
         setItems(r.items);
         setTotal(r.total);
         setHasNext(r.has_next);
+        const neighbours = [page - 1, page + 1].filter((value) => value >= 0 && (value < page || r.has_next));
+        void Promise.all(
+          neighbours.map(async (neighbour) => {
+            const neighbourKey = discoverKey(kind, neighbour, pageSize);
+            if (!discoverCache.has(neighbourKey)) {
+              discoverCache.set(neighbourKey, await api.discoverTrending(kind, neighbour, pageSize));
+            }
+          }),
+        ).catch(() => undefined);
       })
       .catch((e) => toast.error(e.message))
-      .finally(() => setLoading(false));
-  }, [kind, page]);
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, page, pageSize]);
 
   // Availability (working filmpalast mirror) is checked in the background, so
   // re-fetch a handful of times: verified titles gain a checkmark and ones
@@ -102,8 +143,9 @@ export default function Discover() {
     const t = setInterval(async () => {
       n += 1;
       try {
-        const r = await api.discoverTrending(kind, page);
+        const r = await api.discoverTrending(kind, page, pageSize);
         if (stop) return;
+        discoverCache.set(discoverKey(kind, page, pageSize), r);
         setItems(r.items);
         const pending = r.items.filter((it) => !it.checked).length;
         if (pending === 0 || n >= 10) clearInterval(t);
@@ -115,7 +157,7 @@ export default function Discover() {
       stop = true;
       clearInterval(t);
     };
-  }, [kind, page]);
+  }, [kind, page, pageSize]);
 
   // Names already present on the media server, to hide from discovery.
   useEffect(() => {
@@ -123,13 +165,15 @@ export default function Discover() {
       .serverContents()
       .then((r) => {
         const present = (kind === 'movie' ? r.movies : r.shows).filter((t) => t.present);
-        setServerNames(new Set(present.map((t) => normalizeTitle(t.name))));
+        const names = new Set(present.map((t) => normalizeTitle(t.name)));
+        serverNamesCache[kind] = names;
+        setServerNames(names);
       })
       .catch(() => setServerNames(new Set()));
   }, [kind]);
 
   const visibleItems = useMemo(() => items.filter((it) => !serverNames.has(normalizeTitle(it.name))), [items, serverNames]);
-  const totalPages = total == null ? null : Math.max(1, Math.ceil(total / 50));
+  const totalPages = total == null ? null : Math.max(1, Math.ceil(total / pageSize));
 
   async function openItem(item: DiscoverItem) {
     setSelected(item);
@@ -257,11 +301,9 @@ export default function Discover() {
 
   return (
     <div className='space-y-6'>
-      <header className='flex items-center justify-between'>
-        <div>
-          <h1 className='text-2xl font-semibold'>Discover</h1>
-          <p className='text-sm text-muted-foreground'>Trending titles from TheTVDB.</p>
-        </div>
+      <header className='flex items-baseline gap-2'>
+        <h1 className='text-2xl font-semibold'>Discover</h1>
+        <span className='text-sm text-muted-foreground'>— Trending titles from TheTVDB.</span>
       </header>
 
       <Tabs
@@ -271,7 +313,7 @@ export default function Discover() {
           setPage(0);
         }}
       >
-        <TabsList>
+        <TabsList className='border-0 bg-transparent shadow-none'>
           <TabsTrigger value='movie'>Movies</TabsTrigger>
           <TabsTrigger value='show'>Shows</TabsTrigger>
         </TabsList>
@@ -285,7 +327,7 @@ export default function Discover() {
             />
           ) : loading ? (
             <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8'>
-              {Array.from({ length: 16 }).map((_, i) => (
+              {Array.from({ length: Math.min(pageSize, 24) }).map((_, i) => (
                 <Skeleton key={i} className='aspect-[2/3] rounded-lg' />
               ))}
             </div>
@@ -301,14 +343,32 @@ export default function Discover() {
         </TabsContent>
       </Tabs>
 
-      {!loading && (page > 0 || hasNext) && (
+      {!loading && configured && (
         <div className='flex items-center justify-center gap-3'>
           <Button variant='secondary' disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
             Previous
           </Button>
           <span className='text-sm text-foreground'>
-            Page {page + 1}{totalPages ? ` of ${totalPages}` : ''} · 50 per page
+            Page {page + 1}{totalPages ? ` of ${totalPages}` : ''}
           </span>
+          <Select
+            value={String(pageSize)}
+            onValueChange={(value) => {
+              const next = Number(value) as CatalogPageSize;
+              setPageSize(next);
+              saveCatalogPageSize(next);
+              setPage(0);
+            }}
+          >
+            <SelectTrigger className='w-32' aria-label='Entries per page'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CATALOG_PAGE_SIZES.map((size) => (
+                <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button variant='secondary' disabled={!hasNext} onClick={() => setPage((value) => value + 1)}>
             Next
           </Button>
