@@ -274,14 +274,14 @@ type Status =
   | 'done'
   | 'deleted';
 
-const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning' | 'success' | 'transfer' | 'repack'> = {
+const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning' | 'success' | 'review' | 'transfer' | 'repack'> = {
   queued: 'muted',
   downloading: 'info',
   waiting_action: 'warning',
   failed: 'destructive',
   stopped: 'warning',
   cancelled: 'warning',
-  review: 'warning',
+  review: 'review',
   repacking: 'repack',
   approved: 'success',
   transferring: 'transfer',
@@ -296,7 +296,7 @@ const STATUS_ROW_TINT: Record<Status, string> = {
   failed: 'bg-destructive/[0.14] hover:bg-destructive/[0.2]',
   stopped: 'bg-amber-500/[0.12] hover:bg-amber-500/[0.18]',
   cancelled: 'bg-warning/[0.12] hover:bg-warning/[0.18]',
-  review: 'bg-warning/[0.1] hover:bg-warning/[0.16]',
+  review: 'bg-foreground/[0.08] hover:bg-foreground/[0.13]',
   repacking: 'bg-repack/[0.13] hover:bg-repack/[0.2]',
   approved: 'bg-success/[0.1] hover:bg-success/[0.16]',
   transferring: 'bg-transfer/[0.13] hover:bg-transfer/[0.19]',
@@ -331,7 +331,7 @@ function rowStatus(r: TitleRow): Status {
     return 'done';
   }
   if (r.stage === 'deleted') return 'deleted';
-  if (r.repack_status === 'repacking') return 'repacking';
+  if (r.stage === 'repacking' || r.repack_status === 'repacking') return 'repacking';
   if (r.transfer_status === 'transferring') return 'transferring';
   if (r.transfer_status === 'failed') return 'failed';
   if (r.stage === 'transferred' || r.transfer_status === 'done') return 'done';
@@ -388,7 +388,7 @@ function statusRank(r: TitleRow): number {
     if (r.job_status === 'failed' || r.job_status === 'error') return 2;
     return 3;
   }
-  if (r.repack_status === 'repacking') return 4;
+  if (r.stage === 'repacking' || r.repack_status === 'repacking') return 4;
   if (r.stage === 'review') return 4;
   if (r.stage === 'approved') return 5;
   return 6; // transferred
@@ -549,6 +549,12 @@ export default function Library() {
   const [torrentAction, setTorrentAction] = useState<TitleRow | null>(null);
   const [torrentCandidates, setTorrentCandidates] = useState<TorrentCandidate[]>([]);
   const [torrentLoading, setTorrentLoading] = useState(false);
+  const [torrentReplacement, setTorrentReplacement] = useState<TitleRow | null>(null);
+  const [replacementMode, setReplacementMode] = useState<'auto' | 'manual'>('manual');
+  const [replacementCandidates, setReplacementCandidates] = useState<TorrentCandidate[]>([]);
+  const [replacementRuntime, setReplacementRuntime] = useState<number | null>(null);
+  const [replacementLoading, setReplacementLoading] = useState(false);
+  const [replacementBusy, setReplacementBusy] = useState(false);
   const tableScrollRef = useRef<HTMLDivElement>(null);
   const restoreScrollRef = useRef<number | null>(null);
   useEffect(() => {
@@ -789,6 +795,52 @@ export default function Library() {
     }
   }
 
+  async function openTorrentReplacement(r: TitleRow) {
+    if (!r.path) return;
+    setTorrentReplacement(r);
+    setReplacementMode('manual');
+    setReplacementCandidates([]);
+    setReplacementRuntime(null);
+    setReplacementLoading(true);
+    let runtime: number | null = null;
+    try {
+      const media = await api.mediaInfo(r.path);
+      runtime = media.audio_tracks.find((track) => track.is_german)?.duration ?? media.duration ?? null;
+      setReplacementRuntime(runtime);
+    } catch {
+      // Runtime ranking is an enhancement; torrent selection still works
+      // without it when probing a partially written file fails.
+    }
+    try {
+      const result = await api.torrentSearch(titleWithYear(r), runtime);
+      setReplacementCandidates(result.candidates);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setReplacementLoading(false);
+    }
+  }
+
+  async function startTorrentReplacement(candidate?: TorrentCandidate) {
+    if (!torrentReplacement?.path) return;
+    setReplacementBusy(true);
+    try {
+      await api.replaceTorrent({
+        path: torrentReplacement.path,
+        query: titleWithYear(torrentReplacement),
+        target_runtime_seconds: replacementRuntime,
+        candidate,
+      });
+      toast.success(candidate ? 'Selected torrent is downloading in the background' : 'Automatic torrent replacement started');
+      setTorrentReplacement(null);
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setReplacementBusy(false);
+    }
+  }
+
   function SyncCell({ r }: { r: TitleRow }) {
     if (r.row_kind !== 'library') return <span className='text-foreground'>—</span>;
     const c = r.sync_confidence;
@@ -839,7 +891,7 @@ export default function Library() {
     const canDelete = isJob && ['failed', 'error', 'cancelled', 'stopped'].includes(r.job_status || '');
     const isOpen = expanded === r.id;
     const status = rowStatus(r);
-    const isRepacking = r.repack_status === 'repacking';
+    const isRepacking = r.stage === 'repacking' || r.repack_status === 'repacking';
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
@@ -878,6 +930,17 @@ export default function Library() {
               {isLib && (
                 <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={isRepacking}>
                   <Play data-icon='inline-start' /> Review
+                </Button>
+              )}
+              {isLib && r.kind === 'movie' && (
+                <Button
+                  size='icon'
+                  variant='ghost'
+                  onClick={() => openTorrentReplacement(r)}
+                  disabled={isRepacking}
+                  title='Select a new torrent'
+                >
+                  <Download className='h-4 w-4' />
                 </Button>
               )}
               <Button
@@ -1131,6 +1194,54 @@ export default function Library() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={!!torrentReplacement}
+        onOpenChange={(open) => {
+          if (!open && !replacementBusy) setTorrentReplacement(null);
+        }}
+      >
+        <DialogContent className='flex max-h-[88vh] w-[96vw] max-w-7xl flex-col overflow-hidden'>
+          <DialogHeader>
+            <DialogTitle>Repack with a new torrent</DialogTitle>
+            <DialogDescription>
+              Replace the HQ video for {torrentReplacement?.title}. The existing German audio is retained and remuxed with the new release.
+            </DialogDescription>
+          </DialogHeader>
+          <Tabs
+            className='flex min-h-0 flex-1 flex-col'
+            value={replacementMode}
+            onValueChange={(value) => setReplacementMode(value as 'auto' | 'manual')}
+          >
+            <TabsList>
+              <TabsTrigger value='auto'>Automatic</TabsTrigger>
+              <TabsTrigger value='manual'>Manual</TabsTrigger>
+            </TabsList>
+            <TabsContent value='auto'>
+              <div className='flex flex-col gap-4 py-3'>
+                <p className='text-sm text-foreground'>
+                  Bankai will prefer an eligible release close to the German runtime, then fall back to the release with the most seeders.
+                </p>
+                <Button onClick={() => startTorrentReplacement()} disabled={replacementBusy}>
+                  {replacementBusy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Download data-icon='inline-start' />}
+                  Pick automatically
+                </Button>
+              </div>
+            </TabsContent>
+            <TabsContent value='manual' className='min-h-0 flex-1 overflow-hidden'>
+              {replacementLoading ? (
+                <div className='flex items-center justify-center py-10'>
+                  <Loader2 className='h-6 w-6 animate-spin' />
+                </div>
+              ) : replacementCandidates.length === 0 ? (
+                <EmptyState icon={Download} title='No matching torrents' description='Try the automatic option later when indexers have more releases.' />
+              ) : (
+                <TorrentCandidateTable candidates={replacementCandidates} busy={replacementBusy} onSelect={startTorrentReplacement} />
+              )}
+            </TabsContent>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
+
       {/* Review studio */}
       {review && review.path && (
         <WaveformReview
@@ -1234,7 +1345,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [videoLoading, setVideoLoading] = useState(true);
   const [gerLoading, setGerLoading] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
-  const [replaceMode, setReplaceMode] = useState<'auto' | 'manual'>('auto');
+  const [replaceMode, setReplaceMode] = useState<'auto' | 'manual'>('manual');
   const [replaceCandidates, setReplaceCandidates] = useState<TorrentCandidate[]>([]);
   const [replaceLoading, setReplaceLoading] = useState(false);
 
@@ -1742,7 +1853,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   async function openReplacement() {
     setReplaceOpen(true);
-    setReplaceMode('auto');
+    setReplaceMode('manual');
     setReplaceCandidates([]);
     setReplaceLoading(true);
     try {
@@ -1806,6 +1917,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             {entry.title}
             {entry.year ? <span className='ml-1 text-muted-foreground'>({entry.year})</span> : null}
           </h2>
+          <div className='shrink-0 rounded-md border border-white/10 bg-white/[0.03] px-3 py-1.5 font-mono text-sm text-foreground'>
+            {formatBytes(entry.size ?? info?.size ?? 0)}
+          </div>
           <div className='shrink-0 rounded-md border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm text-foreground'>
             Delay <span className='font-mono font-semibold'>{delayMs > 0 ? '+' : ''}{delayMs} ms</span>
             {drift !== 0 && <span className='ml-1 text-xs text-amber-400'>(unsaved {drift > 0 ? '+' : ''}{drift})</span>}

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from dataclasses import dataclass
 from typing import Any
 
@@ -94,17 +95,45 @@ class TVDBClient:
             tvdb_id = _record_id(item)
             base = _alias_from_record(item, kind=kind)
             translations = await self._fetch_translations(record_type, tvdb_id, token)
+            worldwide_date = await self._fetch_worldwide_release(record_type, tvdb_id, token)
             alias = TitleAlias(
                 name=base.name,
                 english_title=translations.get("eng") or base.english_title,
                 german_title=translations.get("deu") or base.german_title,
-                year=base.year,
+                year=int(worldwide_date[:4]) if worldwide_date else base.year,
                 tvdb_id=tvdb_id,
                 kind=base.kind,
             )
             if alias.name or alias.english_title or alias.german_title:
                 aliases.append(alias)
         return aliases
+
+    async def _fetch_worldwide_release(
+        self,
+        record_type: str | None,
+        tvdb_id: int | None,
+        token: str,
+    ) -> str | None:
+        """Return TVDB's explicit worldwide movie release date.
+
+        Search records expose a generic ``year`` that can represent an early
+        country or festival release. The extended movie record carries the
+        country-specific release list, including TVDB's ``Worldwide`` entry.
+        """
+        if record_type != "movie" or tvdb_id is None:
+            return None
+        try:
+            response = await self._client.get(
+                f"movies/{tvdb_id}/extended",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.debug("TVDB worldwide release lookup failed for %s: %s", tvdb_id, exc)
+            return None
+        return worldwide_release_date(_as_dict(_as_dict(response.json()).get("data")))
 
     async def _ensure_token(self) -> str:
         if self._token:
@@ -234,6 +263,33 @@ def _year(record: dict[str, Any]) -> int | None:
             if match:
                 return int(match.group(0))
     return None
+
+
+def worldwide_release_date(record: dict[str, Any]) -> str | None:
+    """Pick the explicit Worldwide date from a TVDB extended movie record.
+
+    TVDB release rows contain ``country``, ``date`` and ``detail``. We do not
+    substitute the earliest national release because that is precisely what
+    makes titles such as *300* appear as 2006 instead of their 2007 worldwide
+    release. If multiple Worldwide rows exist, the earliest valid Worldwide
+    date is deterministic and still stays within that release scope.
+    """
+    candidates: list[str] = []
+    for raw in _as_list(record.get("releases")):
+        release = _as_dict(raw)
+        scope = " ".join(
+            str(release.get(key) or "") for key in ("country", "detail")
+        ).casefold()
+        normalized_scope = re.sub(r"[^a-z]+", "", scope)
+        if "worldwide" not in normalized_scope and "global" not in normalized_scope:
+            continue
+        raw_date = str(release.get("date") or "")[:10]
+        try:
+            parsed = date.fromisoformat(raw_date)
+        except ValueError:
+            continue
+        candidates.append(parsed.isoformat())
+    return min(candidates) if candidates else None
 
 
 def _translated_title(record: dict[str, Any], lang: str) -> str | None:

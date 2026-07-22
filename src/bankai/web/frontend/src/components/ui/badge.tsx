@@ -10,7 +10,7 @@ const badgeVariants = cva('inline-flex items-center rounded-full border px-2.5 p
       secondary: 'border-white/10 bg-white/[0.05] text-secondary-foreground',
       success: 'border-success/30 bg-success/15 text-success',
       info: 'border-info/30 bg-info/15 text-info',
-      review: 'border-transfer/30 bg-transfer/15 text-transfer',
+      review: 'border-foreground/45 bg-foreground/15 text-foreground',
       transfer: 'border-transfer/30 bg-transfer/15 text-transfer',
       repack: 'border-repack/30 bg-repack/15 text-repack',
       muted: 'border-white/10 bg-white/[0.03] text-muted-foreground',

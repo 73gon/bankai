@@ -60,6 +60,41 @@ async def test_tvdb_client_expands_series_aliases() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tvdb_movie_alias_uses_worldwide_release_instead_of_earliest_year() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token-123"}})
+        if request.url.path == "/v4/search":
+            return httpx.Response(
+                200,
+                json={"data": [{"type": "movie", "tvdb_id": 807, "name": "300", "year": 2006}]},
+            )
+        if request.url.path.endswith("/translations/deu") or request.url.path.endswith("/translations/eng"):
+            return httpx.Response(200, json={"data": {"name": "300"}})
+        if request.url.path == "/v4/movies/807/extended":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "releases": [
+                            {"country": "usa", "date": "2006-12-09", "detail": "Festival"},
+                            {"country": "Worldwide", "date": "2007-03-09", "detail": "Theatrical"},
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    client = TVDBClient(api_key="api-key", transport=httpx.MockTransport(handler))
+    try:
+        aliases = await client.search_aliases("300", kind=MediaKind.MOVIE)
+    finally:
+        await client.aclose()
+
+    assert aliases[0].year == 2007
+
+
+@pytest.mark.asyncio
 async def test_get_title_aliases_is_empty_without_api_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

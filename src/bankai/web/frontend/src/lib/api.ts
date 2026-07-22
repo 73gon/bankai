@@ -39,6 +39,7 @@ export interface DiscoverItem {
   kind: string;
   tvdb_id: number | null;
   year: number | null;
+  release_date?: string | null;
   poster_url: string | null;
   overview: string | null;
   is_new?: boolean;
@@ -238,7 +239,9 @@ export const api = {
       `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}&page=${page}&page_size=${pageSize}`,
     ),
   discoverGerman: (id: number, kind: string) =>
-    request<{ tvdb_id: number; kind: string; german: string | null }>(`/api/discover/german?id=${id}&kind=${kind}`),
+    request<{ tvdb_id: number; kind: string; german: string | null; year: number | null; release_date: string | null }>(
+      `/api/discover/german?id=${id}&kind=${kind}`,
+    ),
   posterUrl: (url: string) => `/api/discover/poster?url=${encodeURIComponent(url)}`,
 
   search: (q: string, kind: string, site?: string) =>

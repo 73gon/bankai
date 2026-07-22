@@ -17,12 +17,14 @@ import httpx
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
+from bankai.metadata.tvdb import worldwide_release_date
 
 log = get_logger(__name__)
 
 _BASE_URL = "https://api4.thetvdb.com/v4"
 _ARTWORK_BASE = "https://artworks.thetvdb.com"
 _CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
+_DETAIL_CACHE: dict[str, tuple[float, TitleDetails]] = {}
 _BROWSE_META: dict[str, dict] = {}
 # Keys currently being refreshed in the background (stale-while-revalidate),
 # so we never launch duplicate refreshes for the same key.
@@ -51,6 +53,16 @@ class DiscoverPage:
     page_size: int
     total: int | None
     has_next: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TitleDetails:
+    german: str | None = None
+    worldwide_release_date: str | None = None
+
+    @property
+    def worldwide_year(self) -> int | None:
+        return _to_int((self.worldwide_release_date or "")[:4])
 
 
 def is_configured() -> bool:
@@ -107,9 +119,10 @@ def _abs_image(url: object) -> str | None:
 
 def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
     name = rec.get("name") or rec.get("title") or rec.get("slug") or "Untitled"
-    date = rec.get("first_air_time") or rec.get("release_date") or rec.get("firstAired") or rec.get("date")
+    worldwide_date = worldwide_release_date(rec) if kind == "movie" else None
+    date = worldwide_date or rec.get("first_air_time") or rec.get("release_date") or rec.get("firstAired") or rec.get("date")
     date_s = str(date)[:10] if date else None
-    year = _to_int(rec.get("year")) or _to_int((date_s or "")[:4])
+    year = _to_int((worldwide_date or "")[:4]) or _to_int(rec.get("year")) or _to_int((date_s or "")[:4])
     poster = rec.get("image_url") or rec.get("image") or rec.get("thumbnail")
     status_raw = rec.get("status")
     if isinstance(status_raw, dict):
@@ -596,39 +609,55 @@ async def new_releases(kind: str, *, limit: int = 24) -> list[DiscoverItem]:
     return items
 
 
-async def german_title(tvdb_id: int, *, kind: str) -> str | None:
-    """Look up the German title (translation) for a TVDB record.
+async def title_details(tvdb_id: int, *, kind: str) -> TitleDetails:
+    """Resolve localized title details with TVDB's worldwide movie date.
 
-    Falls back to ``None`` when no German translation exists or TVDB is
-    unreachable, so the caller can fall back to the original name.
+    The regular search result's generic year may be an earlier country or
+    festival release. Only the extended movie record exposes an explicit
+    Worldwide release row, so it is resolved when the user opens a title and
+    cached with its German translation.
     """
     if not is_configured() or not tvdb_id:
-        return None
-    cache_key = f"de:{kind}:{tvdb_id}"
-    hit = _CACHE.get(cache_key)
+        return TitleDetails()
+    cache_key = f"details:{kind}:{tvdb_id}"
+    hit = _DETAIL_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < get_settings().web.cache_ttl_seconds:
-        return hit[1][0].name if hit[1] else None
+        return hit[1]
     entity = "movies" if kind == "movie" else "series"
     async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
         token = await _login(client)
         if not token:
-            return None
+            return TitleDetails()
         headers = {"Authorization": f"Bearer {token}"}
-        for lang in ("deu", "ger"):
-            try:
-                r = await client.get(f"{entity}/{tvdb_id}/translations/{lang}", headers=headers)
-                if r.status_code != 200:
+
+        async def german_translation() -> str | None:
+            for lang in ("deu", "ger"):
+                try:
+                    response = await client.get(f"{entity}/{tvdb_id}/translations/{lang}", headers=headers)
+                    if response.status_code != 200:
+                        continue
+                    name = (response.json().get("data") or {}).get("name")
+                except (httpx.HTTPError, ValueError):
                     continue
-                name = (r.json().get("data") or {}).get("name")
-            except (httpx.HTTPError, ValueError):
-                continue
-            if name:
-                _CACHE[cache_key] = (
-                    time.time(),
-                    [DiscoverItem(name=str(name), kind=kind, tvdb_id=tvdb_id)],
-                )
-                return str(name)
-    return None
+                if name:
+                    return str(name)
+            return None
+
+        async def worldwide_date() -> str | None:
+            if kind != "movie":
+                return None
+            data = await _request_data(client, f"movies/{tvdb_id}/extended", headers=headers)
+            return worldwide_release_date(data) if isinstance(data, dict) else None
+
+        german, release_date = await asyncio.gather(german_translation(), worldwide_date())
+    details = TitleDetails(german=german, worldwide_release_date=release_date)
+    _DETAIL_CACHE[cache_key] = (time.time(), details)
+    return details
+
+
+async def german_title(tvdb_id: int, *, kind: str) -> str | None:
+    """Backward-compatible German-title-only lookup."""
+    return (await title_details(tvdb_id, kind=kind)).german
 
 
 def to_dict(item: DiscoverItem) -> dict:

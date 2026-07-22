@@ -189,6 +189,9 @@ export default function Discover() {
       let name = item.name;
       if (item.tvdb_id) {
         const g = await api.discoverGerman(item.tvdb_id, item.kind);
+        if (g.year) {
+          setSelected((current) => (current ? { ...current, year: g.year, release_date: g.release_date } : current));
+        }
         if (g.german) {
           name = g.german;
           setGerman(g.german);

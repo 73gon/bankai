@@ -600,8 +600,14 @@ def create_app() -> Any:
     @app.get("/api/discover/german")
     async def discover_german(id: int = Query(...), kind: str = Query("movie")) -> dict:
         k = "movie" if kind == "movie" else "show"
-        name = await discover_mod.german_title(id, kind=k)
-        return {"tvdb_id": id, "kind": k, "german": name}
+        details = await discover_mod.title_details(id, kind=k)
+        return {
+            "tvdb_id": id,
+            "kind": k,
+            "german": details.german,
+            "year": details.worldwide_year,
+            "release_date": details.worldwide_release_date,
+        }
 
     # ------------------------------------------------------------------
     # Search (stream sources)

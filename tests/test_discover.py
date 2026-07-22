@@ -15,9 +15,11 @@ def _configured_tvdb(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BANKAI_METADATA__TVDB_API_KEY", "test-key")
     reset_settings_cache()
     discover._CACHE.clear()
+    discover._DETAIL_CACHE.clear()
     discover._BROWSE_META.clear()
     yield
     discover._CACHE.clear()
+    discover._DETAIL_CACHE.clear()
     discover._BROWSE_META.clear()
     reset_settings_cache()
 
@@ -33,6 +35,39 @@ def _mock_tvdb(
         "AsyncClient",
         lambda **kwargs: async_client(transport=transport, **kwargs),
     )
+
+
+@pytest.mark.asyncio
+async def test_title_details_prefers_explicit_worldwide_release_year(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token"}})
+        if request.url.path == "/v4/movies/123/translations/deu":
+            return httpx.Response(200, json={"data": {"name": "300"}})
+        if request.url.path == "/v4/movies/123/extended":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "year": "2006",
+                        "releases": [
+                            {"country": "United States of America", "date": "2006-12-09", "detail": "Festival"},
+                            {"country": "Worldwide", "date": "2007-03-09", "detail": "Theatrical"},
+                        ],
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    _mock_tvdb(monkeypatch, handler)
+
+    details = await discover.title_details(123, kind="movie")
+
+    assert details.german == "300"
+    assert details.worldwide_release_date == "2007-03-09"
+    assert details.worldwide_year == 2007
 
 
 @pytest.mark.asyncio
