@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -56,3 +57,45 @@ def test_repack_state_stays_on_the_library_entry(tmp_path: Path) -> None:
     assert failed.stage == "review"
     assert failed.repack_status == "failed"
     assert failed.note == "mkvmerge failed"
+
+
+def test_completed_repack_restores_the_correct_stage(tmp_path: Path) -> None:
+    audio = tmp_path / "audio.mkv"
+    review_mod.set_repack(audio, "repacking", kind="audio")
+    assert review_mod.set_repack(audio, "done", percent=100).stage == "approved"
+
+    torrent = tmp_path / "torrent.mkv"
+    review_mod.set_repack(torrent, "repacking", kind="torrent")
+    assert review_mod.set_repack(torrent, "done", percent=100).stage == "review"
+
+
+def test_created_at_is_written_once(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+
+    first = review_mod.ensure_created_at(path, 100.0)
+    second = review_mod.ensure_created_at(path, 900.0)
+
+    assert first.created_at == 100.0
+    assert second.created_at == 100.0
+
+
+def test_save_retries_a_transient_windows_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_replace = os.replace
+    attempts = 0
+
+    def flaky_replace(source: str | Path, target: str | Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, "temporarily denied")
+        real_replace(source, target)
+
+    monkeypatch.setattr(review_mod.os, "replace", flaky_replace)
+
+    state = review_mod.set_stage(tmp_path / "movie.mkv", "approved")
+
+    assert state.stage == "approved"
+    assert attempts == 3

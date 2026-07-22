@@ -113,6 +113,8 @@ def test_stopped_job_can_resume_in_same_ledger_entry(
 
     assert resumed.id == "resume12"
     assert resumed.status == "running"
+    assert resumed.started_at == 1.0
+    assert resumed.updated_at is not None and resumed.updated_at > resumed.started_at
     assert resumed.finished_at is None
     assert resumed.args == ["run", "Movie 2024"]
 

@@ -60,6 +60,7 @@ class BgJob:
     title: str  # display name
     args: list[str]  # full argv (after "bankai")
     started_at: float
+    updated_at: float | None = None
     pid: int | None = None
     child_pid: int | None = None
     status: str = "running"  # running | stopped | done | failed | cancelled
@@ -80,6 +81,7 @@ class BgJob:
         return self.dir / "meta.json"
 
     def save(self) -> None:
+        self.updated_at = time.time()
         self.dir.mkdir(parents=True, exist_ok=True)
         self.meta_path.write_text(json.dumps(asdict(self), indent=2))
 
@@ -502,7 +504,9 @@ def _launch(job: BgJob) -> BgJob:
     return job
 
 
-def spawn(*, kind: str, title: str, args: list[str]) -> BgJob:
+def spawn(
+    *, kind: str, title: str, args: list[str], created_at: float | None = None
+) -> BgJob:
     """Spawn ``bankai <args>`` detached. Returns the BgJob."""
     return _launch(
         BgJob(
@@ -510,7 +514,7 @@ def spawn(*, kind: str, title: str, args: list[str]) -> BgJob:
             kind=kind,
             title=title,
             args=args,
-            started_at=time.time(),
+            started_at=created_at or time.time(),
         )
     )
 
@@ -519,7 +523,7 @@ def resume(job: BgJob) -> BgJob:
     """Continue a stopped job using its original id and arguments."""
     if job.status != "stopped":
         raise ValueError("only stopped jobs can be continued")
-    job.started_at = time.time()
+    job.updated_at = time.time()
     job.pid = None
     job.child_pid = None
     job.status = "running"

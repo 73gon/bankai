@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from array import array
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,21 +54,27 @@ def test_discover_search_forwards_movie_search_mode(
 ) -> None:
     calls: list[tuple[str, str, str]] = []
 
-    async def fake_search(query: str, *, kind: str, search_by: str, limit: int = 51) -> list[object]:
+    async def fake_search(
+        query: str, *, kind: str, search_by: str, limit: int = 51
+    ) -> list[object]:
         calls.append((query, kind, search_by))
         return []
 
     monkeypatch.setattr("bankai.web.discover.search", fake_search)
     monkeypatch.setattr("bankai.web.discover.is_configured", lambda: True)
 
-    response = client.get("/api/discover/search", params={"q": "Anne Hathaway", "kind": "movie", "by": "person"})
+    response = client.get(
+        "/api/discover/search", params={"q": "Anne Hathaway", "kind": "movie", "by": "person"}
+    )
 
     assert response.status_code == 200
     assert calls == [("Anne Hathaway", "movie", "person")]
 
 
 def test_discover_search_rejects_non_title_show_mode(client: TestClient) -> None:
-    response = client.get("/api/discover/search", params={"q": "Disney", "kind": "show", "by": "studio"})
+    response = client.get(
+        "/api/discover/search", params={"q": "Disney", "kind": "show", "by": "studio"}
+    )
 
     assert response.status_code == 400
     assert response.json()["detail"] == "person and studio search are only available for movies"
@@ -76,7 +84,9 @@ def test_discover_search_marks_titles_already_added(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_search(query: str, *, kind: str, search_by: str, limit: int = 51) -> list[DiscoverItem]:
+    async def fake_search(
+        query: str, *, kind: str, search_by: str, limit: int = 51
+    ) -> list[DiscoverItem]:
         return [
             DiscoverItem(name="Queued Movie", kind="movie", year=2024),
             DiscoverItem(name="Staged Movie", kind="movie", year=2023),
@@ -196,6 +206,67 @@ def test_titles_library_uses_file_creation_and_modification_times(
     assert row["created_at"] == pytest.approx(float(getattr(stat, "st_birthtime", stat.st_ctime)))
     assert row["updated_at"] == pytest.approx(stat.st_mtime)
 
+    # A repack atomically replaces the file and therefore changes st_ctime on
+    # Windows. The UI's Created value must remain the first value we recorded.
+    replacement = movie.with_suffix(".replacement")
+    replacement.write_bytes(b"repacked movie")
+    replacement.replace(movie)
+    os.utime(movie, (stat.st_mtime + 60, stat.st_mtime + 60))
+    second = client.get("/api/titles")
+    second_row = second.json()["rows"][0]
+    assert second_row["created_at"] == pytest.approx(row["created_at"])
+    assert second_row["updated_at"] > row["updated_at"]
+
+
+def test_titles_never_surfaces_a_repack_as_a_job_row(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "Hidden Repack (2024).mkv"
+    from bankai.web import review as review_mod
+
+    review_mod.set_repack(movie, "repacking", kind="audio")
+    monkeypatch.setattr("bankai.web.media.scan_library", lambda: [])
+    monkeypatch.setattr("bankai.web.jobs.transfer_states", lambda: {})
+    monkeypatch.setattr("bankai.web.jobs.repack_states", lambda: {})
+    monkeypatch.setattr(
+        "bankai.web.jobs.snapshot",
+        lambda: [
+            {
+                "id": "old-pipeline",
+                "kind": "movie",
+                "title": "Hidden Repack (2024)",
+                "status": "done",
+                "started_at": 100.0,
+                "finished_at": 200.0,
+                "final_path": str(movie),
+                "pending": False,
+            }
+        ],
+    )
+
+    response = client.get("/api/titles")
+
+    assert response.status_code == 200
+    assert response.json()["rows"] == []
+
+
+def test_queue_force_and_priority_endpoints(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "bankai.web.jobs.force_start_pending",
+        lambda job_id: SimpleNamespace(id=f"started-{job_id}", status="running"),
+    )
+    monkeypatch.setattr("bankai.web.jobs.reorder_pending", lambda job_id, position: position)
+
+    forced = client.post("/api/queue/queued1/force")
+    moved = client.post("/api/queue/queued1/priority", json={"position": 2})
+
+    assert forced.json() == {"started": True, "id": "started-queued1", "status": "running"}
+    assert moved.json() == {"id": "queued1", "position": 2}
+
 
 def test_approve_with_changed_delay_starts_background_repack_on_same_entry(
     client: TestClient,
@@ -271,7 +342,11 @@ def test_queue_show_rejects_invalid_or_duplicate_custom_episode_links(
     monkeypatch.setattr("bankai.web.jobs.enqueue", lambda **_kwargs: {})
     invalid = client.post(
         "/api/queue/show",
-        json={"show": "Arcane", "season": 2, "custom_episodes": [{"episode": 1, "url": "voe.sx/no-scheme"}]},
+        json={
+            "show": "Arcane",
+            "season": 2,
+            "custom_episodes": [{"episode": 1, "url": "voe.sx/no-scheme"}],
+        },
     )
     duplicate = client.post(
         "/api/queue/show",
@@ -291,7 +366,10 @@ def test_queue_show_rejects_invalid_or_duplicate_custom_episode_links(
 
 def test_stream_site_detection_keeps_direct_hosters_direct() -> None:
     assert _stream_site_from_url("https://voe.sx/e/abc") == "unknown"
-    assert _stream_site_from_url("https://burningseries.ac/serie/Arcane/2/1-title/de") == "burningseries"
+    assert (
+        _stream_site_from_url("https://burningseries.ac/serie/Arcane/2/1-title/de")
+        == "burningseries"
+    )
     assert _stream_site_from_url("https://filmpalast.to/stream/title") == "filmpalast"
     with pytest.raises(ValueError):
         _stream_site_from_url("javascript:alert(1)")
@@ -324,6 +402,33 @@ def test_ebur128_envelope_uses_fixed_perceived_loudness_scale() -> None:
 
     assert bars[0] == 0
     assert 20 < bars[1] < bars[2] < bars[3] <= 127
+
+
+def test_close_zoom_waveform_uses_detailed_pcm(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "waveform.mkv"
+    movie.write_bytes(b"source")
+    calls: list[list[str]] = []
+    pcm = array("h", [1000, -1000] * 1200).tobytes()
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=pcm, stderr=b"")
+
+    monkeypatch.setattr("bankai.web.media.ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    response = client.get(
+        "/api/media/waveform",
+        params={"path": str(movie), "stream": 1, "start": 30, "dur": 9, "bins": 600},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["detail"] == "pcm"
+    assert response.json()["bins"] == 600
+    assert calls[0][calls[0].index("-f") + 1] == "s16le"
 
 
 def test_settings_get_masks_secrets(client: TestClient) -> None:

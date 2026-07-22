@@ -341,6 +341,13 @@ function rowStatus(r: TitleRow): Status {
 
 function StatusCell({ r }: { r: TitleRow }) {
   const s = rowStatus(r);
+  if (s === 'queued') {
+    return (
+      <Badge variant={STATUS_VARIANT[s]}>
+        Queued{r.queue_position != null ? ` #${r.queue_position}` : ''}
+      </Badge>
+    );
+  }
   if (s === 'downloading') {
     const pct = Math.round(r.overall_percent ?? 0);
     return (
@@ -543,6 +550,7 @@ export default function Library() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [redoing, setRedoing] = useState<Set<string>>(new Set());
+  const [queueBusy, setQueueBusy] = useState<Set<string>>(new Set());
 
   const [review, setReview] = useState<TitleRow | null>(null);
   const [del, setDel] = useState<TitleRow | null>(null);
@@ -573,11 +581,12 @@ export default function Library() {
     }
   }, [filter, statusFilters, filtersOpen, sortCol, sortDir, pageSize]);
 
-  async function load(silent = false) {
+  async function load(silent = false, preserveScroll = false) {
     if (!silent) setLoading(true);
     try {
       const r = await api.titles();
       queueRowsCache = r.rows;
+      if (preserveScroll) restoreScrollRef.current = tableScrollRef.current?.scrollTop ?? null;
       setRows(r.rows);
     } catch (e: any) {
       if (!silent) toast.error(e.message);
@@ -695,13 +704,13 @@ export default function Library() {
     if (restoreScrollRef.current == null || !tableScrollRef.current) return;
     tableScrollRef.current.scrollTop = restoreScrollRef.current;
     restoreScrollRef.current = null;
-  }, [expanded]);
+  }, [expanded, rows]);
 
   async function transferOne(path: string) {
     try {
       await api.transfer(path);
       toast.success('Sending to server');
-      load(true);
+      await load(true, true);
     } catch (e: any) {
       toast.error(e.message);
     }
@@ -777,6 +786,40 @@ export default function Library() {
       load(true);
     } catch (e: any) {
       toast.error(e.message);
+    }
+  }
+
+  async function forceJob(id: string) {
+    setQueueBusy((current) => new Set(current).add(id));
+    try {
+      await api.forceJob(id);
+      toast.success('Queued job started immediately');
+      await load(true, true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setQueueBusy((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
+  async function moveQueuedJob(r: TitleRow, delta: number) {
+    if (!r.job_id || r.queue_position == null) return;
+    setQueueBusy((current) => new Set(current).add(r.id));
+    try {
+      await api.setJobPriority(r.job_id, r.queue_position + delta);
+      await load(true, true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setQueueBusy((current) => {
+        const next = new Set(current);
+        next.delete(r.id);
+        return next;
+      });
     }
   }
 
@@ -886,6 +929,7 @@ export default function Library() {
     const isLib = r.row_kind === 'library';
     const isJob = r.row_kind === 'job';
     const canCancel = isJob && r.pending;
+    const canForce = isJob && r.pending;
     const canStop = isJob && r.job_status === 'running';
     const canContinue = isJob && r.job_status === 'stopped';
     const canDelete = isJob && ['failed', 'error', 'cancelled', 'stopped'].includes(r.job_status || '');
@@ -926,6 +970,52 @@ export default function Library() {
                 <Button size='sm' variant='default' onClick={() => openTorrentAction(r)}>
                   <Download data-icon='inline-start' /> Select torrent
                 </Button>
+              )}
+              {canForce && (
+                <>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size='icon'
+                        variant='ghost'
+                        disabled={queueBusy.has(r.id) || (r.queue_position ?? 1) <= 1}
+                        onClick={() => moveQueuedJob(r, -1)}
+                        aria-label='Move queued job earlier'
+                      >
+                        <ChevronUp data-icon='inline-start' />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Move earlier in the queue</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size='icon'
+                        variant='ghost'
+                        disabled={queueBusy.has(r.id) || (r.queue_position ?? 0) >= (r.queue_total ?? 0)}
+                        onClick={() => moveQueuedJob(r, 1)}
+                        aria-label='Move queued job later'
+                      >
+                        <ChevronDown data-icon='inline-start' />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Move later in the queue</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size='icon'
+                        variant='ghost'
+                        disabled={queueBusy.has(r.id)}
+                        onClick={() => forceJob(r.job_id!)}
+                        aria-label='Force queued job to start'
+                      >
+                        {queueBusy.has(r.id) ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <CirclePlay data-icon='inline-start' />}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Start now, bypassing the concurrent-job limit</TooltipContent>
+                  </Tooltip>
+                </>
               )}
               {isLib && (
                 <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={isRepacking}>
@@ -1546,8 +1636,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // drift correction: the window's left edge stays anchored (aligned by the
   // delay) and time advances by `stretch` across it, so the user can line up
   // the left edge with the delay then stretch to match the right edge. The
-  // backend's fixed EBU R128 LUFS scale is retained so quiet and loud scenes remain
-  // visually comparable.
+  // backend's fixed loudness scale is retained so quiet and loud scenes remain
+  // visually comparable. At close zoom levels the buffer contains detailed
+  // PCM RMS samples; interpolation avoids throwing away sub-pixel transitions.
   function drawLane(
     canvas: HTMLCanvasElement | null,
     buf: { peaks: Uint8Array; start: number; dur: number } | null,
@@ -1568,9 +1659,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       for (let x = 0; x < W; x++) {
         const viewTime = viewStart + (x / W) * windowSec;
         const trackTime = anchor + (viewTime - viewStart) * stretch;
-        const bi = Math.floor(((trackTime - buf.start) / buf.dur) * bn);
-        const v = bi >= 0 && bi < bn ? buf.peaks[bi] : 0;
-        vals[x] = v;
+        const position = ((trackTime - buf.start) / buf.dur) * (bn - 1);
+        const left = Math.floor(position);
+        const mix = position - left;
+        const a = left >= 0 && left < bn ? buf.peaks[left] : 0;
+        const b = left + 1 >= 0 && left + 1 < bn ? buf.peaks[left + 1] : a;
+        vals[x] = a + (b - a) * mix;
       }
       // Backend values already use a fixed perceived-loudness scale. Do not
       // normalise each viewport: doing so made a quiet scene look as loud as
@@ -1633,6 +1727,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   function zoom(factor: number) {
+    resetSeekToStart();
     setWindowSec((w) => Math.min(600, Math.max(1, Math.round(w * factor))));
   }
 
@@ -1758,19 +1853,35 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const activeMode = playing;
     seekFracRef.current = frac;
+    livePosRef.current = frac;
     setSeekFrac(frac);
+    parkHeads(frac);
+    if (activeMode !== 'none') {
+      resumeModeRef.current = activeMode;
+      void playSection(activeMode);
+    }
+  }
+
+  function resetSeekToStart() {
+    if (playing !== 'none') {
+      resumeModeRef.current = playing;
+      haltAudioVideo();
+      setPlaying('none');
+    }
+    seekFracRef.current = 0;
+    livePosRef.current = 0;
+    playbackStartOffsetRef.current = 0;
+    setSeekFrac(0);
+    parkHeads(0);
   }
 
   // The English/reference lane scrolls through the movie. Zooming is reserved
   // for the German lane so the two wheel gestures cannot be confused.
   function onWheelPan(e: React.WheelEvent) {
     e.preventDefault();
-    if (playing !== 'none') {
-      resumeModeRef.current = playing;
-      haltAudioVideo();
-      setPlaying('none');
-    }
+    resetSeekToStart();
     const delta = Math.sign(e.deltaY || e.deltaX) * Math.max(1, windowSec * 0.15);
     const maxCenter = Math.max(windowSec / 2, duration - windowSec / 2);
     setCenter((value) => Math.max(windowSec / 2, Math.min(maxCenter, value + delta)));
@@ -1806,9 +1917,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         zoom(1.25);
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
+        resetSeekToStart();
         setCenter((c) => Math.max(windowSec / 2, c - windowSec * 0.2));
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
+        resetSeekToStart();
         setCenter((c) => Math.min(duration || c + windowSec, c + windowSec * 0.2));
       }
     };
@@ -2161,7 +2274,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 min={0}
                 max={duration || 1}
                 step={0.5}
-                onValueChange={(v) => setCenter(v[0])}
+                onValueChange={(v) => {
+                  resetSeekToStart();
+                  setCenter(v[0]);
+                }}
                 onPointerDown={() => {
                   wasPlayingRef.current = playing !== 'none';
                   if (playing !== 'none') {

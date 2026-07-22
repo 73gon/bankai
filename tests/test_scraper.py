@@ -269,7 +269,7 @@ async def test_filmpalast_resolve_prefers_supported_hoster() -> None:
         await backend.aclose()
 
     assert handle.url == "https://voe.sx/d6b91t8"
-    assert handle.hint == "ytdlp"
+    assert handle.hint == "playwright"
 
 
 @pytest.mark.asyncio
@@ -296,6 +296,33 @@ async def test_filmpalast_resolve_all_returns_ranked_hosters() -> None:
         "https://streamtape.com/backup",
         "https://veev.to/slow",
     ]
+
+
+@pytest.mark.asyncio
+async def test_filmpalast_resolve_reads_data_player_url_and_prefers_vidsonic() -> None:
+    html = """
+    <a class="button iconPlay" href="https://voe.sx/backup">VOE</a>
+    <a class="button iconPlay" href="#"
+       data-player-url="https://st-us-01.vidsonic.net/e/current">VidSonic</a>
+    <a class="button iconPlay" data-player-url="https://firestream.to/e/third">Fire</a>
+    """
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text=html)),
+    )
+    try:
+        handles = await backend.resolve_all_streams("http://example.invalid/stream/x")
+    finally:
+        await backend.aclose()
+
+    assert [handle.url for handle in handles] == [
+        "https://st-us-01.vidsonic.net/e/current",
+        "https://firestream.to/e/third",
+        "https://voe.sx/backup",
+    ]
+    assert [handle.hint for handle in handles] == ["playwright"] * 3
 
 
 @pytest.mark.asyncio

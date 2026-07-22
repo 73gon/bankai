@@ -10,7 +10,11 @@ import pytest
 
 from bankai.config import get_settings, reset_settings_cache
 from bankai.db import StateRepository, initialize
-from bankai.processor.pipeline import PipelineWorker, _resolve_episode_fallbacks
+from bankai.processor.pipeline import (
+    PipelineWorker,
+    _extract_attempt_payloads,
+    _resolve_episode_fallbacks,
+)
 from bankai.processor.sync import PlaceholderAudioError
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import Worker, WorkerContext, WorkerError
@@ -339,3 +343,16 @@ async def test_pipeline_prefers_exact_filmpalast_voe_for_burningseries_episode(
     assert result is not None
     assert extract.calls[0]["url"] == voe_url
     assert extract.calls[0]["hint"] == "ytdlp"
+
+
+def test_filmpalast_extract_attempts_do_not_repeat_wrapper() -> None:
+    attempts = _extract_attempt_payloads(
+        stream_url="https://st-us-01.vidsonic.net/e/current",
+        stream_hint="playwright",
+        stream_site="filmpalast",
+        wrapper_url="https://filmpalast.to/stream/example",
+        mirror_urls=["https://voe.sx/backup"],
+    )
+
+    assert all(attempt["url"] != "https://filmpalast.to/stream/example" for attempt in attempts)
+    assert attempts[0]["url"] == "https://st-us-01.vidsonic.net/e/current"

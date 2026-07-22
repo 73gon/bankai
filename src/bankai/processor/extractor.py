@@ -34,9 +34,11 @@ import asyncio
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
@@ -505,6 +507,55 @@ class _VirtualDisplay:
             os.environ.pop("DISPLAY", None)
 
 
+def _acquire_capture_lease() -> Any:
+    """Take the machine-wide Playwright capture lock.
+
+    The lock is owned by the file descriptor, so the operating system also
+    releases it if an extraction process is interrupted.
+    """
+    path = Path(tempfile.gettempdir()) / "bankai-playwright-capture.lock"
+    handle = path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+    handle.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        handle.close()
+        raise
+    log.info("[playwright] acquired the shared browser-capture slot")
+    return handle
+
+
+def _release_capture_lease(handle: Any) -> None:
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 class PlaywrightRunner:
     """Headless Chromium fallback that intercepts media URLs.
 
@@ -535,7 +586,16 @@ class PlaywrightRunner:
         want_video: bool = False,
         max_height: int | None = None,
     ) -> ExtractResult:
-        captured, final_url = await self._capture(url)
+        # Multiple pipeline processes may run at once, but launching several
+        # automated player sessions from the same IP causes hosters to throttle
+        # or withhold every manifest. Serialise only this short capture phase;
+        # the actual media downloads still run concurrently afterwards.
+        log.info("[playwright] waiting for the shared browser-capture slot")
+        lease = await asyncio.to_thread(_acquire_capture_lease)
+        try:
+            captured, final_url = await self._capture(url)
+        finally:
+            await asyncio.to_thread(_release_capture_lease, lease)
         if not captured:
             raise PlaywrightError(f"no media URL captured at {url}")
         runner = ytdlp or YtDlpRunner()
@@ -604,11 +664,17 @@ class PlaywrightRunner:
 
         def _consider(href: str, ct: str = "") -> None:
             lower = href.lower()
+            path = urlsplit(href).path.lower()
             if any(bad in lower for bad in ("blank.mp4", "/dummy", "preview", "trailer", "intro")):
                 return
-            if ".m3u8" in lower or ".mp4" in lower or "video/" in ct or "application/vnd.apple.mpegurl" in ct:
+            if (
+                path.endswith(".m3u8")
+                or path.endswith(".mp4")
+                or "video/" in ct
+                or "application/vnd.apple.mpegurl" in ct
+            ):
                 captured.append(href)
-                if ".m3u8" in lower or "mpegurl" in ct:
+                if path.endswith(".m3u8") or "mpegurl" in ct:
                     got_manifest.set()
 
         # Start the virtual display BEFORE the Playwright driver launches so
@@ -675,13 +741,16 @@ class PlaywrightRunner:
                     # Detect a dead hoster link (e.g. voe 404 "file not
                     # found") and bail fast so the pipeline tries the next
                     # mirror.
-                    if resp is not None and resp.status == 404 and page.url == url:
+                    if resp is not None and resp.status in {404, 410} and page.url == url:
                         try:
                             body = (await page.content()).lower()
                         except Exception:
                             body = ""
-                        if any(m in body for m in _DEAD_PAGE_MARKERS):
-                            raise PlaywrightError(f"hoster link is dead (404 not-found page): {url}")
+                        marker = next((m for m in _DEAD_PAGE_MARKERS if m in body), None)
+                        detail = f" ({marker})" if marker else ""
+                        raise PlaywrightError(
+                            f"hoster link is dead (HTTP {resp.status}{detail}): {url}"
+                        )
                     # Give a JS redirect a chance to fire and the player load.
                     final_url = page.url
                     if final_url != url:
@@ -720,7 +789,7 @@ class PlaywrightRunner:
             seen.add(href)
             unique.append(href)
         # Prefer HLS manifests over .mp4 fragments.
-        manifests = [h for h in unique if h.endswith(".m3u8") or "m3u8" in h]
+        manifests = [h for h in unique if urlsplit(h).path.lower().endswith(".m3u8")]
         return (manifests if manifests else unique), final_url
 
     @staticmethod

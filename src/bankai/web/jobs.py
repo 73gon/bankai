@@ -25,6 +25,15 @@ from bankai.web import reasons
 log = get_logger(__name__)
 _LOCK = threading.RLock()
 _OPERATION_KINDS = {"transfer", "repack", "torrent_replace"}
+_OPERATION_COMMANDS = {"transfer-run", "review-repack", "review-replace-torrent"}
+_STREAM_FAILURE_THRESHOLD = 2
+_STREAM_FAILURE_WINDOW_SECONDS = 10 * 60
+_STREAM_FAILURE_COOLDOWN_SECONDS = 15 * 60
+
+
+def _is_operation(kind: str | None, args: list[str] | None = None) -> bool:
+    """Recognise hidden row-level work, including jobs made by older builds."""
+    return bool(kind in _OPERATION_KINDS or (args and args[0] in _OPERATION_COMMANDS))
 
 
 def _pending_path() -> Path:
@@ -67,7 +76,8 @@ def _running_count() -> int:
     return sum(
         1
         for job in bgjobs.list_jobs()
-        if job.status in {"running", "stopped"} and job.kind not in _OPERATION_KINDS
+        if job.status in {"running", "stopped"}
+        and not _is_operation(job.kind, getattr(job, "args", None))
     )
 
 
@@ -140,11 +150,30 @@ def reconcile() -> int:
             if nt and nt in running_titles:
                 continue
             try:
-                bgjobs.spawn(kind=item.kind, title=item.title, args=item.args)
+                bgjobs.spawn(
+                    kind=item.kind,
+                    title=item.title,
+                    args=item.args,
+                    created_at=item.created_at,
+                )
                 running_titles.add(nt)
                 started += 1
             except Exception as exc:  # pragma: no cover - spawn failure
                 log.warning("failed to start pending job %s: %s", item.id, exc)
+
+        # A cluster of stream-extraction failures generally means the shared
+        # hoster/browser path is unhealthy, not that every queued title is
+        # invalid. Keep the remaining queue intact until the source has had a
+        # chance to recover. Explicit Force start remains available as a
+        # deliberate canary and operations above are never held back.
+        cooldown_until = _stream_failure_cooldown_until()
+        if pending and cooldown_until is not None:
+            log.warning(
+                "stream extraction circuit open; pending pipelines paused for %.0f seconds",
+                max(0.0, cooldown_until - time.time()),
+            )
+            _save_pending(pending)
+            return started
 
         while pending and _running_count() < limit:
             item = pending.pop(0)
@@ -152,7 +181,12 @@ def reconcile() -> int:
             if nt and nt in running_titles:
                 continue  # already running -> drop the duplicate instead of colliding
             try:
-                bgjobs.spawn(kind=item.kind, title=item.title, args=item.args)
+                bgjobs.spawn(
+                    kind=item.kind,
+                    title=item.title,
+                    args=item.args,
+                    created_at=item.created_at,
+                )
                 running_titles.add(nt)
                 started += 1
             except Exception as exc:  # pragma: no cover - spawn failure
@@ -173,6 +207,60 @@ def cancel_pending(job_id: str) -> bool:
             return False
         _save_pending(kept)
         return True
+
+
+def force_start_pending(job_id: str) -> bgjobs.BgJob | None:
+    """Start a queued pipeline immediately, deliberately bypassing the limit."""
+    with _LOCK:
+        pending = _load_pending()
+        index = next(
+            (
+                i
+                for i, item in enumerate(pending)
+                if item.id == job_id or item.id.startswith(job_id)
+            ),
+            None,
+        )
+        if index is None:
+            return None
+        item = pending[index]
+        nt = _norm_job_title(item.title)
+        if nt and nt in _running_titles():
+            raise RuntimeError("a job for this title is already running")
+        pending.pop(index)
+        _save_pending(pending)
+        try:
+            return bgjobs.spawn(
+                kind=item.kind,
+                title=item.title,
+                args=item.args,
+                created_at=item.created_at,
+            )
+        except Exception:
+            pending.insert(index, item)
+            _save_pending(pending)
+            raise
+
+
+def reorder_pending(job_id: str, position: int) -> int | None:
+    """Move a queued job to a one-based priority position."""
+    with _LOCK:
+        pending = _load_pending()
+        index = next(
+            (
+                i
+                for i, item in enumerate(pending)
+                if item.id == job_id or item.id.startswith(job_id)
+            ),
+            None,
+        )
+        if index is None:
+            return None
+        item = pending.pop(index)
+        new_index = max(0, min(len(pending), int(position) - 1))
+        pending.insert(new_index, item)
+        _save_pending(pending)
+        return new_index + 1
 
 
 def continue_job(job_id: str) -> bgjobs.BgJob | None:
@@ -229,7 +317,32 @@ def _job_reason(j: bgjobs.BgJob) -> str | None:
     """
     if j.status != "failed":
         return None
-    return bgjobs.failure_reason(j) or ("Stopped before completing \u2014 no error was logged (the job was likely interrupted or timed out)")
+    return bgjobs.failure_reason(j) or (
+        "Stopped before completing \u2014 no error was logged (the job was likely interrupted or timed out)"
+    )
+
+
+def _stream_failure_cooldown_until(now: float | None = None) -> float | None:
+    """Return the extraction circuit's recovery time after clustered failures."""
+    current = time.time() if now is None else now
+    failures: list[float] = []
+    for job in bgjobs.list_jobs():
+        if _is_operation(job.kind, getattr(job, "args", None)):
+            continue
+        finished_at = getattr(job, "finished_at", None)
+        if (
+            job.status != "failed"
+            or finished_at is None
+            or finished_at < current - _STREAM_FAILURE_WINDOW_SECONDS
+        ):
+            continue
+        classified = reasons.classify_reason(_job_reason(job))
+        if classified and classified[0] == "extract":
+            failures.append(finished_at)
+    if len(failures) < _STREAM_FAILURE_THRESHOLD:
+        return None
+    until = max(failures) + _STREAM_FAILURE_COOLDOWN_SECONDS
+    return until if until > current else None
 
 
 def snapshot() -> list[dict]:
@@ -242,7 +355,7 @@ def snapshot() -> list[dict]:
     reconcile()
     out: list[dict] = []
     for j in bgjobs.list_jobs():
-        if j.kind in _OPERATION_KINDS:
+        if _is_operation(j.kind, getattr(j, "args", None)):
             continue
         snap = bgjobs.progress_snapshot(j)
         raw_reason = _job_reason(j)
@@ -258,6 +371,7 @@ def snapshot() -> list[dict]:
                 "status": j.status,
                 "started_at": j.started_at,
                 "finished_at": j.finished_at,
+                "updated_at": j.updated_at or j.finished_at or j.started_at,
                 "exit_code": j.exit_code,
                 "final_path": j.final_path,
                 "reason": cls[1] if cls else None,
@@ -269,10 +383,15 @@ def snapshot() -> list[dict]:
                 "overall_percent": snap.overall_percent,
                 "pending": False,
                 "action_required": bool(action and action.get("status") == "waiting"),
+                "queue_position": None,
+                "queue_total": None,
             }
         )
-    for item in _load_pending():
-        if item.kind in _OPERATION_KINDS:
+    visible_pending = [item for item in _load_pending() if not _is_operation(item.kind, item.args)]
+    queue_total = len(visible_pending)
+    stream_cooldown = _stream_failure_cooldown_until()
+    for queue_position, item in enumerate(visible_pending, start=1):
+        if _is_operation(item.kind, item.args):
             continue
         out.append(
             {
@@ -282,14 +401,21 @@ def snapshot() -> list[dict]:
                 "status": "queued",
                 "started_at": item.created_at,
                 "finished_at": None,
+                "updated_at": item.created_at,
                 "exit_code": None,
                 "final_path": None,
                 "step": None,
                 "total_steps": None,
-                "step_label": "Waiting for a free slot",
+                "step_label": (
+                    "Waiting for stream source recovery"
+                    if stream_cooldown is not None
+                    else "Waiting for a free slot"
+                ),
                 "overall_percent": 0.0,
                 "pending": True,
                 "action_required": False,
+                "queue_position": queue_position,
+                "queue_total": queue_total,
             }
         )
     out.sort(key=lambda r: r["started_at"], reverse=True)
@@ -357,7 +483,9 @@ def transfer_states() -> dict[str, dict]:
             key = str(Path(target).resolve())
         except OSError:
             key = target
-        by_path.setdefault(key, {"status": "transferring", "percent": 0.0, "id": item.id, "exit_code": None})
+        by_path.setdefault(
+            key, {"status": "transferring", "percent": 0.0, "id": item.id, "exit_code": None}
+        )
     return by_path
 
 

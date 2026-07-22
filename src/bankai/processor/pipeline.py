@@ -682,12 +682,14 @@ def _extract_attempt_payloads(
         add(mirror, "ytdlp")
     for mirror in mirror_urls or []:
         add(mirror, "playwright")
-    # If a scraper resolved the original wrapper to a hoster page, direct
-    # Playwright on that hoster may stall. The wrapper page often contains
-    # the click flow that exposes the real media URL, so try it next.
-    add(wrapper_url, "playwright")
+    # Filmpalast wrappers only link back to the same direct mirrors. Retrying
+    # the wrapper after those mirrors fail repeats the same browser work and
+    # used to keep a bad source busy for several additional minutes.
+    if stream_site != "filmpalast":
+        add(wrapper_url, "playwright")
     add(stream_url, "playwright")
-    add(wrapper_url, "ytdlp")
+    if stream_site != "filmpalast":
+        add(wrapper_url, "ytdlp")
     add(stream_url, "ytdlp")
     return [
         {

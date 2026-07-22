@@ -11,7 +11,9 @@ import asyncio
 import math
 import mimetypes
 import re
+import sys
 import threading
+from array import array
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -240,6 +242,10 @@ class ShowQueueRequest(BaseModel):
     episodes: list[int] | None = None
     site: str | None = None
     custom_episodes: list[CustomEpisodeRequest] | None = None
+
+
+class QueuePriorityRequest(BaseModel):
+    position: int
 
 
 class DelayRequest(BaseModel):
@@ -556,8 +562,12 @@ def create_app() -> Any:
         if mode not in {"title", "person", "studio"}:
             raise HTTPException(status_code=400, detail="by must be title, person, or studio")
         if k != "movie" and mode != "title":
-            raise HTTPException(status_code=400, detail="person and studio search are only available for movies")
-        paged = await discover_mod.search_page(q, kind=k, page=page, page_size=page_size, search_by=mode)
+            raise HTTPException(
+                status_code=400, detail="person and studio search are only available for movies"
+            )
+        paged = await discover_mod.search_page(
+            q, kind=k, page=page, page_size=page_size, search_by=mode
+        )
         # An explicit search should surface everything that matches. We only
         # hide clearly-unreleased titles; the discover mirror/on-server/queued
         # filters would otherwise hide exactly what the user searched for.
@@ -648,7 +658,9 @@ def create_app() -> Any:
 
         client = ProwlarrClient()
         try:
-            candidates = await client.search(q, categories=[2000, 2010, 2020, 2030, 2040, 2045, 2050])
+            candidates = await client.search(
+                q, categories=[2000, 2010, 2020, 2030, 2040, 2045, 2050]
+            )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Prowlarr search failed: {exc}") from exc
         finally:
@@ -707,7 +719,10 @@ def create_app() -> Any:
             "found": True,
             "site": result.site,
             "query": result.query,
-            "episodes": [{"season": e.season, "episode": e.episode, "title": e.title, "url": e.url} for e in sorted(result.episodes, key=lambda e: e.episode)],
+            "episodes": [
+                {"season": e.season, "episode": e.episode, "title": e.title, "url": e.url}
+                for e in sorted(result.episodes, key=lambda e: e.episode)
+            ],
         }
 
     # ------------------------------------------------------------------
@@ -841,6 +856,25 @@ def create_app() -> Any:
             raise HTTPException(status_code=409, detail="job is not stopped")
         return {"continued": True, "id": job.id, "status": job.status}
 
+    @app.post("/api/queue/{job_id}/force")
+    def queue_force(job_id: str) -> dict:
+        try:
+            job = webjobs.force_start_pending(job_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if job is None:
+            raise HTTPException(status_code=409, detail="job is no longer queued")
+        return {"started": True, "id": job.id, "status": job.status}
+
+    @app.post("/api/queue/{job_id}/priority")
+    def queue_priority(job_id: str, req: QueuePriorityRequest) -> dict:
+        if req.position < 1:
+            raise HTTPException(status_code=422, detail="position must be at least 1")
+        position = webjobs.reorder_pending(job_id, req.position)
+        if position is None:
+            raise HTTPException(status_code=409, detail="job is no longer queued")
+        return {"id": job_id, "position": position}
+
     @app.post("/api/queue/{job_id}/retry")
     def queue_retry(job_id: str) -> dict:
         from bankai.cli import bgjobs
@@ -884,6 +918,14 @@ def create_app() -> Any:
         out = []
         for e in entries:
             state = review_mod.get_state(e.path)
+            if state.stage == "repacking" and state.repack_status in {"done", "failed"}:
+                state = review_mod.set_repack(
+                    e.path,
+                    state.repack_status,
+                    percent=state.repack_percent,
+                    kind=state.repack_kind,
+                    note=state.note,
+                )
             # Reconcile the detached transfer job into the per-entry status so
             # the library shows transfer progress as a column (not a queue job).
             try:
@@ -892,7 +934,9 @@ def create_app() -> Any:
                 tkey = e.path
             tinfo = transfers.get(tkey)
             if tinfo and tinfo["status"] != state.transfer_status:
-                state = review_mod.set_transfer(e.path, tinfo["status"], percent=tinfo.get("percent"))
+                state = review_mod.set_transfer(
+                    e.path, tinfo["status"], percent=tinfo.get("percent")
+                )
             rinfo = repacks.get(tkey)
             if rinfo and rinfo["status"] != state.repack_status:
                 state = review_mod.set_repack(
@@ -918,9 +962,17 @@ def create_app() -> Any:
                     "sync_confidence": state.sync_confidence,
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
-                    "transfer_percent": (tinfo.get("percent", state.transfer_percent) if tinfo else state.transfer_percent),
+                    "transfer_percent": (
+                        tinfo.get("percent", state.transfer_percent)
+                        if tinfo
+                        else state.transfer_percent
+                    ),
                     "repack_status": state.repack_status,
-                    "repack_percent": (rinfo.get("percent", state.repack_percent) if rinfo else state.repack_percent),
+                    "repack_percent": (
+                        rinfo.get("percent", state.repack_percent)
+                        if rinfo
+                        else state.repack_percent
+                    ),
                     "repack_kind": state.repack_kind,
                 }
             )
@@ -939,9 +991,19 @@ def create_app() -> Any:
         transfers = webjobs.transfer_states()
         repacks = webjobs.repack_states()
         jobs = webjobs.snapshot()  # already excludes transfer jobs
+        review_states = review_mod.all_states()
         # Tombstones for files the user explicitly deleted (stage="deleted"),
         # keyed by resolved path — used to relabel their finished job row.
-        deleted_paths = {k for k, st in review_mod.all_states().items() if st.stage == "deleted"}
+        deleted_paths = {k for k, st in review_states.items() if st.stage == "deleted"}
+        # During the tiny atomic-replacement window a repacked file may be
+        # absent from a directory scan. Reserve its path/title so the original
+        # pipeline job never flashes up as a separate temporary row.
+        repacking_paths = {
+            k
+            for k, st in review_states.items()
+            if st.stage == "repacking" or st.repack_status == "repacking"
+        }
+        repacking_norms = {_norm_title(_clean_title(Path(k).name)) for k in repacking_paths}
         # Map normalised title -> newest job, so a finished library row can
         # still surface its download log (expandable row) and be re-run.
         job_by_norm: dict[str, dict] = {}
@@ -959,13 +1021,23 @@ def create_app() -> Any:
         lib_norms: set[str] = set()
         for e in entries:
             state = review_mod.get_state(e.path)
+            if state.stage == "repacking" and state.repack_status in {"done", "failed"}:
+                state = review_mod.set_repack(
+                    e.path,
+                    state.repack_status,
+                    percent=state.repack_percent,
+                    kind=state.repack_kind,
+                    note=state.note,
+                )
             try:
                 rp = str(Path(e.path).resolve())
             except OSError:
                 rp = e.path
             tinfo = transfers.get(rp)
             if tinfo and tinfo["status"] != state.transfer_status:
-                state = review_mod.set_transfer(e.path, tinfo["status"], percent=tinfo.get("percent"))
+                state = review_mod.set_transfer(
+                    e.path, tinfo["status"], percent=tinfo.get("percent")
+                )
             rinfo = repacks.get(rp)
             if rinfo and rinfo["status"] != state.repack_status:
                 state = review_mod.set_repack(
@@ -979,10 +1051,17 @@ def create_app() -> Any:
             norm = _norm_title(e.name)
             lib_norms.add(norm)
             clean = _clean_title(e.name)
-            poster_key = ("show:" if e.kind == "episode" else "movie:") + (_norm_title(e.series or clean) if e.kind == "episode" else norm)
-            posters_mod.ensure(poster_key, e.series or clean, "series" if e.kind == "episode" else "movie")
+            poster_key = ("show:" if e.kind == "episode" else "movie:") + (
+                _norm_title(e.series or clean) if e.kind == "episode" else norm
+            )
+            posters_mod.ensure(
+                poster_key, e.series or clean, "series" if e.kind == "episode" else "movie"
+            )
             related = job_by_norm.get(norm)
-            created_at = min(e.created_at, created_by_norm.get(norm, e.created_at))
+            observed_created_at = min(e.created_at, created_by_norm.get(norm, e.created_at))
+            if state.created_at is None:
+                state = review_mod.ensure_created_at(e.path, observed_created_at)
+            created_at = state.created_at or observed_created_at
             updated_at = max(
                 e.mtime,
                 state.updated_at or 0,
@@ -1007,16 +1086,28 @@ def create_app() -> Any:
                     "series": e.series,
                     "season": e.season,
                     "stage": "review" if state.stage == "deleted" else state.stage,
-                    "reason": rinfo.get("reason") if rinfo and rinfo.get("status") == "failed" else None,
-                    "reason_detail": rinfo.get("reason") if rinfo and rinfo.get("status") == "failed" else None,
+                    "reason": rinfo.get("reason")
+                    if rinfo and rinfo.get("status") == "failed"
+                    else None,
+                    "reason_detail": rinfo.get("reason")
+                    if rinfo and rinfo.get("status") == "failed"
+                    else None,
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
-                    "transfer_percent": (tinfo.get("percent", state.transfer_percent) if tinfo else state.transfer_percent),
+                    "transfer_percent": (
+                        tinfo.get("percent", state.transfer_percent)
+                        if tinfo
+                        else state.transfer_percent
+                    ),
                     "repack_status": state.repack_status,
-                    "repack_percent": (rinfo.get("percent", state.repack_percent) if rinfo else state.repack_percent),
+                    "repack_percent": (
+                        rinfo.get("percent", state.repack_percent)
+                        if rinfo
+                        else state.repack_percent
+                    ),
                     "repack_kind": state.repack_kind,
                     "repack_label": rinfo.get("label") if rinfo else None,
                     "job_id": related["id"] if related else None,
@@ -1026,6 +1117,8 @@ def create_app() -> Any:
                     "total_steps": None,
                     "pending": False,
                     "action_required": False,
+                    "queue_position": None,
+                    "queue_total": None,
                 }
             )
         # Collapse queue jobs that have no finished library file yet into one
@@ -1038,10 +1131,10 @@ def create_app() -> Any:
                     rfp = str(Path(fp).resolve())
                 except OSError:
                     rfp = fp
-                if rfp in lib_paths:
+                if rfp in lib_paths or rfp in repacking_paths:
                     continue  # already represented by its library row
             nt = _norm_title(j.get("title", ""))
-            if nt in lib_norms:
+            if nt in lib_norms or nt in repacking_norms:
                 continue  # a library file already covers this title
             cur = best_by_norm.get(nt)
             if cur is None or _job_priority(j) >= _job_priority(cur):
@@ -1062,10 +1155,13 @@ def create_app() -> Any:
                     "id": j["id"],
                     "title": clean,
                     "kind": "episode" if is_ep else "movie",
-                    "year": _extract_year(j.get("title", "")) or posters_mod.cached_year(poster_key),
+                    "year": _extract_year(j.get("title", ""))
+                    or posters_mod.cached_year(poster_key),
                     "poster": posters_mod.cached(poster_key),
                     "created_at": j.get("started_at"),
-                    "updated_at": j.get("finished_at") or j.get("started_at"),
+                    "updated_at": j.get("updated_at")
+                    or j.get("finished_at")
+                    or j.get("started_at"),
                     "done_at": j.get("finished_at") or j.get("started_at"),
                     "path": j.get("final_path"),
                     "rel_path": None,
@@ -1094,6 +1190,8 @@ def create_app() -> Any:
                     "total_steps": j.get("total_steps"),
                     "pending": j.get("pending", False),
                     "action_required": j.get("action_required", False),
+                    "queue_position": j.get("queue_position"),
+                    "queue_total": j.get("queue_total"),
                 }
             )
         return {"rows": rows, "library": str(get_settings().output.directory)}
@@ -1217,7 +1315,9 @@ def create_app() -> Any:
             "Accept-Ranges": "bytes",
             "Content-Length": str(length),
         }
-        return StreamingResponse(iter_file(), status_code=206, headers=headers, media_type=content_type)
+        return StreamingResponse(
+            iter_file(), status_code=206, headers=headers, media_type=content_type
+        )
 
     @app.get("/api/media/transcode")
     def media_transcode(
@@ -1288,12 +1388,13 @@ def create_app() -> Any:
         dur: float = Query(30.0, gt=0.0, le=1800.0),
         bins: int = Query(1000, ge=50, le=4000),
     ) -> dict:
-        """EBU R128 perceived-loudness envelope for one audio-track window.
+        """Adaptive loudness envelope for one audio-track window.
 
         Only the requested ``[start, start+dur]`` slice is decoded, so this
         stays fast even on weak hardware (a full-movie decode would take
-        minutes). Returns base64 uint8 peaks; the client maps pixels to peaks
-        using ``start``/``dur``.
+        minutes). Close zoom levels use full-band PCM RMS for millisecond-scale
+        detail; wide views use EBU R128 perceived loudness. Returns base64
+        uint8 peaks; the client maps pixels to peaks using ``start``/``dur``.
         """
         import base64
         import subprocess
@@ -1303,59 +1404,90 @@ def create_app() -> Any:
             st = p.stat()
         except OSError as exc:
             raise HTTPException(status_code=404, detail="not found") from exc
-        key = (str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
+        detailed = dur <= 180.0
+        key = ("adaptive-v2", str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
         hit = _WAVEFORM_CACHE.get(key)
         if hit is not None:
             return hit
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
-        # R128 momentary loudness uses a standardised 400 ms perceptual window.
-        # Decode a small lead-in so seeking into the movie does not leave the
-        # first bars waiting for the filter window to warm up.
-        pre_roll = min(start, 0.4)
-        cmd = [
-            ffmpeg,
-            "-v",
-            "error",
-            "-nostats",
-            "-ss",
-            str(start - pre_roll),
-            "-t",
-            str(dur + pre_roll),
-            "-i",
-            str(p),
-            "-map",
-            f"0:{stream}",
-            "-af",
-            "ebur128=metadata=1:framelog=quiet,ametadata=mode=print:key=lavfi.r128.M:file=-:direct=1",
-            "-f",
-            "null",
-            "-",
-        ]
+        if detailed:
+            cmd = [
+                ffmpeg,
+                "-v",
+                "error",
+                "-nostats",
+                "-ss",
+                str(start),
+                "-t",
+                str(dur),
+                "-i",
+                str(p),
+                "-map",
+                f"0:{stream}",
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "12000",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ]
+            pre_roll = 0.0
+        else:
+            # R128 momentary loudness uses a standardised 400 ms perceptual
+            # window. Decode a lead-in so the first bars are already warm.
+            pre_roll = min(start, 0.4)
+            cmd = [
+                ffmpeg,
+                "-v",
+                "error",
+                "-nostats",
+                "-ss",
+                str(start - pre_roll),
+                "-t",
+                str(dur + pre_roll),
+                "-i",
+                str(p),
+                "-map",
+                f"0:{stream}",
+                "-af",
+                "ebur128=metadata=1:framelog=quiet,ametadata=mode=print:key=lavfi.r128.M:file=-:direct=1",
+                "-f",
+                "null",
+                "-",
+            ]
         try:
             with _ffmpeg_slot():
                 proc = subprocess.run(
                     cmd,
                     capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     timeout=60,
                 )
         except subprocess.TimeoutExpired as exc:
             raise HTTPException(status_code=504, detail="waveform decode timed out") from exc
         if proc.returncode != 0:
             raise HTTPException(status_code=422, detail="could not decode audio track")
-        measurements = _R128_VALUE_RE.findall(proc.stdout)
-        skip = round(pre_roll * 10)
-        usable = "\n".join(f"lavfi.r128.M={value}" for value in measurements[skip:])
-        peaks = _ebur128_envelope(usable, bins)
+        if detailed:
+            samples = array("h")
+            samples.frombytes(proc.stdout[: len(proc.stdout) - (len(proc.stdout) % 2)])
+            if sys.byteorder != "little":  # ffmpeg's s16le output is fixed
+                samples.byteswap()
+            peaks = _waveform_envelope(samples, bins)
+        else:
+            output = proc.stdout.decode("utf-8", errors="replace")
+            measurements = _R128_VALUE_RE.findall(output)
+            skip = round(pre_roll * 10)
+            usable = "\n".join(f"lavfi.r128.M={value}" for value in measurements[skip:])
+            peaks = _ebur128_envelope(usable, bins)
         out = {
             "start": start,
             "dur": dur,
             "bins": len(peaks),
             "peaks": base64.b64encode(bytes(peaks)).decode("ascii"),
+            "detail": "pcm" if detailed else "r128",
         }
         _WAVEFORM_CACHE[key] = out
         return out
@@ -1613,8 +1745,12 @@ def create_app() -> Any:
         movies = media_mod.scan_server("movie", use_cache=not rescan)
         shows = media_mod.scan_server("show", use_cache=not rescan)
         return {
-            "movies": [{"name": t.name, "present": t.present, "location": t.location} for t in movies],
-            "shows": [{"name": t.name, "present": t.present, "location": t.location} for t in shows],
+            "movies": [
+                {"name": t.name, "present": t.present, "location": t.location} for t in movies
+            ],
+            "shows": [
+                {"name": t.name, "present": t.present, "location": t.location} for t in shows
+            ],
         }
 
     @app.get("/api/server/show")
@@ -1633,7 +1769,9 @@ def create_app() -> Any:
                 {
                     "name": se.name,
                     "season": se.season,
-                    "episodes": [{"name": e.name, "path": e.path, "size": e.size} for e in se.episodes],
+                    "episodes": [
+                        {"name": e.name, "path": e.path, "size": e.size} for e in se.episodes
+                    ],
                 }
                 for se in seasons
             ],
@@ -1656,7 +1794,10 @@ def create_app() -> Any:
             raise HTTPException(status_code=400, detail="path required")
         key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
         s = get_settings()
-        current = [str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)]
+        current = [
+            str(p)
+            for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
+        ]
         if path not in current:
             current.append(path)
         from bankai.cli.main import _set_config_value
@@ -1672,7 +1813,10 @@ def create_app() -> Any:
             raise HTTPException(status_code=400, detail="kind must be movie or show")
         key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
         s = get_settings()
-        current = [str(p) for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)]
+        current = [
+            str(p)
+            for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
+        ]
         current = [p for p in current if p != req.path.strip()]
         from bankai.cli.main import _set_config_value
 
@@ -1774,7 +1918,9 @@ def create_app() -> Any:
 
         @app.get("/")
         def placeholder() -> Any:
-            return HTMLResponse(f"<h1>bankai web</h1><p>Frontend assets not built yet. Run the Vite build and place output in <code>{STATIC_DIR}</code>.</p>")
+            return HTMLResponse(
+                f"<h1>bankai web</h1><p>Frontend assets not built yet. Run the Vite build and place output in <code>{STATIC_DIR}</code>.</p>"
+            )
 
     return app
 

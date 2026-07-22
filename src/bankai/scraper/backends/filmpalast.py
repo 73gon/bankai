@@ -233,13 +233,12 @@ class FilmpalastBackend:
 
     # ---- stream resolve ----------------------------------------------------
 
-    _HOSTER_RE = re.compile(
-        r"""<a[^>]+class=["'][^"']*iconPlay[^"']*["'][^>]+href=["']([^"']+)["']""",
-        re.I,
-    )
     # Any <a ...> tag that carries the iconPlay class, in either attribute order.
     _HOSTER_ANCHOR_RE = re.compile(r"<a\b[^>]*iconPlay[^>]*>", re.I)
-    _HREF_RE = re.compile(r"""href=["']([^"']+)["']""", re.I)
+    _URL_ATTR_RE = re.compile(
+        r"""(?:data-player-url|data-url|data-src|href)=["']([^"']+)["']""",
+        re.I,
+    )
 
     async def resolve_stream(self, url: str) -> StreamHandle:
         """Scrape the detail page for the hoster URL (Voe / Streamtape / \u2026).
@@ -270,19 +269,36 @@ class FilmpalastBackend:
         if resp.status_code != 200:
             return []
         hosters = sorted(self._extract_hosters(resp.text), key=_hoster_rank)
-        return [StreamHandle(site=self.site_id, url=hoster, hint="ytdlp") for hoster in hosters]
+        return [
+            StreamHandle(site=self.site_id, url=hoster, hint=_hoster_hint(hoster))
+            for hoster in hosters
+        ]
 
     def _extract_hosters(self, html: str) -> list[str]:
         seen: set[str] = set()
         out: list[str] = []
+
+        def add(href: str | None) -> None:
+            value = (href or "").strip()
+            if value.startswith("http") and value not in seen:
+                seen.add(value)
+                out.append(value)
+
+        # Newer Filmpalast pages put FireStream and similar mirrors in a
+        # data-player-url attribute while leaving href empty or javascript-y.
+        # Parse the tag properly first, then retain the regex fallback for
+        # malformed fragments returned by the site from time to time.
+        for node in HTMLParser(html).css("a.iconPlay"):
+            attrs = node.attributes
+            for name in ("data-player-url", "data-url", "data-src", "href"):
+                value = attrs.get(name)
+                if value:
+                    add(value)
+                    break
         for tag in self._HOSTER_ANCHOR_RE.findall(html):
-            m = self._HREF_RE.search(tag)
-            if not m:
-                continue
-            href = m.group(1).strip()
-            if href.startswith("http") and href not in seen:
-                seen.add(href)
-                out.append(href)
+            match = self._URL_ATTR_RE.search(tag)
+            if match:
+                add(match.group(1))
         return out
 
 
@@ -291,6 +307,10 @@ class FilmpalastBackend:
 # the middle; known-bad hosts (veev.to defeats both yt-dlp and playwright)
 # are pushed to the back.
 _HOSTER_PREFERRED = (
+    "vidsonic.net",
+    "firestream.to",
+    "vidmatrixa.com",
+    "flyfile.app",
     "voe.sx",
     "voe",
     "streamtape",
@@ -313,6 +333,22 @@ def _hoster_rank(url: str) -> int:
     if any(bad in host for bad in _HOSTER_AVOID):
         return 900
     return 500
+
+
+def _hoster_hint(url: str) -> str:
+    """Use the browser directly for hosts that expose HLS at runtime."""
+    host = urlparse(url).netloc.lower()
+    browser_hosts = (
+        "vidsonic.net",
+        "firestream.to",
+        "vidmatrixa.com",
+        "flyfile.app",
+        "voe.sx",
+        "voe",
+        "vinovo",
+        "filemoon",
+    )
+    return "playwright" if any(name in host for name in browser_hosts) else "ytdlp"
 
 
 def _query_variants(query: str) -> list[str]:

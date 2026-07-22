@@ -99,6 +99,7 @@ export interface Job {
   title: string;
   status: string;
   started_at: number;
+  updated_at: number | null;
   finished_at: number | null;
   exit_code: number | null;
   final_path: string | null;
@@ -108,6 +109,8 @@ export interface Job {
   overall_percent: number | null;
   pending: boolean;
   action_required: boolean;
+  queue_position: number | null;
+  queue_total: number | null;
 }
 
 export interface LibraryEntry {
@@ -169,6 +172,8 @@ export interface TitleRow {
   repack_percent: number;
   repack_kind: string | null;
   repack_label: string | null;
+  queue_position: number | null;
+  queue_total: number | null;
 }
 
 export interface AudioTrack {
@@ -275,6 +280,12 @@ export const api = {
   cancelJob: (id: string) => request(`/api/queue/${id}/cancel`, { method: 'POST' }),
   stopJob: (id: string) => request(`/api/queue/${id}/stop`, { method: 'POST' }),
   continueJob: (id: string) => request(`/api/queue/${id}/continue`, { method: 'POST' }),
+  forceJob: (id: string) => request(`/api/queue/${id}/force`, { method: 'POST' }),
+  setJobPriority: (id: string, position: number) =>
+    request<{ id: string; position: number }>(`/api/queue/${id}/priority`, {
+      method: 'POST',
+      body: JSON.stringify({ position }),
+    }),
   retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: 'POST' }),
   deleteJob: (id: string) => request(`/api/queue/${id}`, { method: 'DELETE' }),
   jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
