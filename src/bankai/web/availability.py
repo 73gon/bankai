@@ -55,9 +55,21 @@ def _matches(name: str, candidate_title: str) -> bool:
     if want == candidate:
         return True
     # A one-word title such as "Up" must not certify "Step Up". Longer
-    # titles may carry a short subtitle, but only within a narrow margin.
+    # Filmpalast titles may append a translated subtitle after a separator
+    # ("Maleficent - Die dunkle Fee"), which is still the same release.
     if min(len(want), len(candidate)) == 1:
-        return False
+        if len(want) != 1:
+            return False
+        only = next(iter(want))
+        return bool(
+            re.match(
+                rf"^\s*{re.escape(only)}\s*[-:|/\u2013\u2014]",
+                candidate_title,
+                flags=re.IGNORECASE,
+            )
+        )
+    # Longer titles may carry a short subtitle, but only within a narrow
+    # margin so similarly named sequels do not certify one another.
     smaller, larger = sorted((want, candidate), key=len)
     return smaller.issubset(larger) and len(larger) - len(smaller) <= 2
 

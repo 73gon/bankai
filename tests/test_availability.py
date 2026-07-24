@@ -50,6 +50,12 @@ def _mirror(url: str = "https://voe.sx/working") -> StreamHandle:
     return StreamHandle(site="filmpalast", url=url, hint="playwright")
 
 
+def test_availability_title_match_accepts_subtitle_but_not_leading_extra_word() -> None:
+    assert availability._matches("Maleficent", "Maleficent - Die dunkle Fee")
+    assert not availability._matches("Up", "Step Up")
+    assert not availability._matches("Up", "Up in the Air")
+
+
 def test_availability_requires_supported_mirror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
