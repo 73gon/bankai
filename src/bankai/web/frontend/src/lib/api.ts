@@ -76,6 +76,24 @@ export interface TorrentCandidate {
   eligible: boolean;
 }
 
+export interface TorrentSearchOptions {
+  kind?: 'movie' | 'episode';
+  seriesTitle?: string | null;
+  season?: number | null;
+  episode?: number | null;
+  minSeeders?: number | null;
+  maxSeeders?: number | null;
+  minSizeGib?: number | null;
+  maxSizeGib?: number | null;
+}
+
+export interface TorrentPolicy {
+  min_seeders: number;
+  max_seeders: number | null;
+  min_size_gib: number;
+  max_size_gib: number;
+}
+
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
 
 export interface SearchResult {
@@ -251,16 +269,35 @@ export const api = {
 
   search: (q: string, kind: string, site?: string) =>
     request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ''}`),
-  torrentSearch: (q: string, runtimeSeconds?: number | null) =>
-    request<{ query: string; target_runtime_seconds: number | null; candidates: TorrentCandidate[] }>(
-      `/api/torrents/search?q=${encodeURIComponent(q)}${runtimeSeconds ? `&runtime_seconds=${runtimeSeconds}` : ''}`,
-    ),
+  torrentSearch: (q: string, runtimeSeconds?: number | null, options: TorrentSearchOptions = {}) => {
+    const params = new URLSearchParams({ q });
+    if (runtimeSeconds) params.set('runtime_seconds', String(runtimeSeconds));
+    if (options.kind) params.set('kind', options.kind);
+    if (options.seriesTitle) params.set('series_title', options.seriesTitle);
+    if (options.season != null) params.set('season', String(options.season));
+    if (options.episode != null) params.set('episode', String(options.episode));
+    if (options.minSeeders != null) params.set('min_seeders', String(options.minSeeders));
+    if (options.maxSeeders != null) params.set('max_seeders', String(options.maxSeeders));
+    if (options.minSizeGib != null) params.set('min_size_gib', String(options.minSizeGib));
+    if (options.maxSizeGib != null) params.set('max_size_gib', String(options.maxSizeGib));
+    return request<{
+      query: string;
+      target_runtime_seconds: number | null;
+      policy: TorrentPolicy;
+      candidates: TorrentCandidate[];
+    }>(`/api/torrents/search?${params.toString()}`);
+  },
   torrentAction: (jobId: string) =>
     request<{ job_id: string; query: string; target_runtime_seconds: number | null; candidates: TorrentCandidate[] }>(
       `/api/torrent-actions/${jobId}`,
     ),
-  chooseTorrent: (jobId: string, candidateId: string) =>
-    request(`/api/torrent-actions/${jobId}`, { method: 'POST', body: JSON.stringify({ candidate_id: candidateId }) }),
+  chooseTorrent: (jobId: string, candidate: TorrentCandidate) =>
+    request(`/api/torrent-actions/${jobId}`, { method: 'POST', body: JSON.stringify({ candidate }) }),
+  chooseTorrentMagnet: (jobId: string, magnetUri: string, title?: string) =>
+    request(`/api/torrent-actions/${jobId}`, {
+      method: 'POST',
+      body: JSON.stringify({ magnet_uri: magnetUri, title }),
+    }),
   episodes: (show: string, season: number, site?: string) =>
     request<{ found: boolean; site: string | null; episodes: EpisodeItem[] }>(
       `/api/series/episodes?show=${encodeURIComponent(show)}&season=${season}${site ? `&site=${site}` : ''}`,
@@ -287,7 +324,8 @@ export const api = {
       body: JSON.stringify({ position }),
     }),
   retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: 'POST' }),
-  deleteJob: (id: string) => request(`/api/queue/${id}`, { method: 'DELETE' }),
+  deleteJob: (id: string) =>
+    request<{ deleted: boolean; pending: boolean }>(`/api/queue/${id}`, { method: 'DELETE' }),
   jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
 
   library: () => request<{ entries: LibraryEntry[]; library: string }>('/api/library'),
@@ -305,8 +343,8 @@ export const api = {
     request<{ start: number; dur: number; bins: number; peaks: string }>(
       `/api/media/waveform?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}&bins=${bins}`,
     ),
-  audioClipUrl: (path: string, stream: number, start: number, dur: number) =>
-    `/api/media/audioclip?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}`,
+  audioClipUrl: (path: string, stream: number, start: number, dur: number, lead = 0, rate = 1) =>
+    `/api/media/audioclip?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}&lead=${lead}&rate=${rate}`,
   videoClipUrl: (path: string, start: number, dur: number, height = 480, audio?: number | null) =>
     `/api/media/videoclip?path=${encodeURIComponent(path)}&start=${start}&dur=${dur}&height=${height}${audio == null ? '' : `&audio=${audio}`}`,
 
@@ -321,7 +359,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path, ...opts }),
     }),
-  replaceTorrent: (body: { path: string; query: string; target_runtime_seconds?: number | null; candidate?: TorrentCandidate }) =>
+  replaceTorrent: (body: {
+    path: string;
+    query: string;
+    target_runtime_seconds?: number | null;
+    candidate?: TorrentCandidate;
+    magnet_uri?: string;
+    kind?: 'movie' | 'episode';
+    series_title?: string | null;
+    season?: number | null;
+    episode?: number | null;
+  }) =>
     request<{ background: boolean }>('/api/review/replace-torrent', { method: 'POST', body: JSON.stringify(body) }),
   transfer: (path: string) => request('/api/review/transfer', { method: 'POST', body: JSON.stringify({ path }) }),
   approveBatch: (paths: string[]) =>

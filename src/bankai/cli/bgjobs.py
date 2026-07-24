@@ -167,8 +167,29 @@ class BgJob:
             target.relative_to(root)
         except ValueError:
             return False
-        shutil.rmtree(target, ignore_errors=True)
-        return True
+        if not target.exists():
+            return True
+        # Move the ledger out of the scanner immediately. Windows can retain
+        # short-lived handles to meta/log files even after the worker exits;
+        # the old ignore_errors=True path reported success while the visible
+        # queue row remained in place.
+        tombstone = root / f".deleted-{self.id}-{uuid.uuid4().hex[:8]}"
+        try:
+            target.replace(tombstone)
+            target = tombstone
+        except OSError:
+            pass
+        for attempt in range(5):
+            try:
+                shutil.rmtree(target)
+            except OSError:
+                if attempt < 4:
+                    time.sleep(0.1 * (attempt + 1))
+            if not target.exists():
+                return True
+        # A successfully renamed tombstone is already absent from list_jobs;
+        # a later scan will retry its cleanup.
+        return target.name.startswith(".deleted-")
 
 
 _FAILURE_REASON_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning))\b:?\s*(.*)$")
@@ -451,6 +472,9 @@ def _log_looks_failed(path: Path) -> bool:
 def list_jobs() -> list[BgJob]:
     jobs: list[BgJob] = []
     for meta in sorted(jobs_root().glob("*/meta.json"), reverse=True):
+        if meta.parent.name.startswith(".deleted-"):
+            shutil.rmtree(meta.parent, ignore_errors=True)
+            continue
         try:
             data = json.loads(meta.read_text())
             jobs.append(BgJob(**data).refresh())

@@ -21,12 +21,11 @@ import {
   ZoomOut,
   Languages,
   AudioLines,
-  Minus,
-  Plus,
   ScrollText,
   Download,
   CirclePause,
   CirclePlay,
+  ExternalLink,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
@@ -202,7 +201,7 @@ function TorrentCandidateTable({
             <th className='w-24 px-3 py-2 text-right'>Size</th>
             <th className='w-24 px-3 py-2 text-right'>Length</th>
             <th className='w-36 px-3 py-2'>Source</th>
-            <th className='w-24 px-3 py-2 text-right'>Action</th>
+            <th className='w-32 px-3 py-2 text-right'>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -217,12 +216,105 @@ function TorrentCandidateTable({
               <td className='px-3 py-2.5 text-right font-mono'>{candidate.runtime_seconds ? `${Math.round(candidate.runtime_seconds / 60)} min` : '—'}</td>
               <td className='px-3 py-2.5'><TruncCell text={candidate.indexer} width='8rem' /></td>
               <td className='px-3 py-2.5 text-right'>
-                <Button size='sm' disabled={busy} onClick={() => onSelect(candidate)}>Select</Button>
+                <div className='flex items-center justify-end gap-1'>
+                  {candidate.info_url && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button size='icon' variant='ghost' asChild>
+                          <a href={candidate.info_url} target='_blank' rel='noreferrer' aria-label={`Open ${candidate.title} details`}>
+                            <ExternalLink data-icon='inline-start' />
+                          </a>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Open the indexer description</TooltipContent>
+                    </Tooltip>
+                  )}
+                  <Button size='sm' disabled={busy} onClick={() => onSelect(candidate)}>Select</Button>
+                </div>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+interface TorrentFilters {
+  minSeeders: string;
+  maxSeeders: string;
+  minSizeGib: string;
+  maxSizeGib: string;
+  magnet: string;
+}
+
+const EMPTY_TORRENT_FILTERS: TorrentFilters = {
+  minSeeders: '',
+  maxSeeders: '',
+  minSizeGib: '',
+  maxSizeGib: '',
+  magnet: '',
+};
+
+function nullableNumber(value: string): number | null {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function TorrentPickerTools({
+  filters,
+  onChange,
+  onSearch,
+  onMagnet,
+  busy,
+}: {
+  filters: TorrentFilters;
+  onChange: (next: TorrentFilters) => void;
+  onSearch: () => void | Promise<void>;
+  onMagnet: (magnet: string) => void | Promise<void>;
+  busy: boolean;
+}) {
+  const field = (key: keyof Omit<TorrentFilters, 'magnet'>, label: string, placeholder: string) => (
+    <label className='flex min-w-0 flex-col gap-1 text-xs text-foreground'>
+      {label}
+      <Input
+        type='number'
+        min='0'
+        step={key.includes('Size') ? '0.1' : '1'}
+        value={filters[key]}
+        onChange={(event) => onChange({ ...filters, [key]: event.target.value })}
+        placeholder={placeholder}
+        className='h-8'
+      />
+    </label>
+  );
+  return (
+    <div className='flex flex-col gap-3 rounded-lg border border-border bg-secondary/20 p-3'>
+      <div className='grid gap-2 sm:grid-cols-2 lg:grid-cols-[repeat(4,minmax(7rem,1fr))_auto] lg:items-end'>
+        {field('minSeeders', 'Min seeders', 'Default')}
+        {field('maxSeeders', 'Max seeders', 'Unlimited')}
+        {field('minSizeGib', 'Min size (GB)', 'Default')}
+        {field('maxSizeGib', 'Max size (GB)', 'Default')}
+        <Button variant='secondary' onClick={onSearch} disabled={busy}>
+          {busy ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <RefreshCw data-icon='inline-start' />}
+          Apply
+        </Button>
+      </div>
+      <div className='flex flex-col gap-2 sm:flex-row'>
+        <Input
+          value={filters.magnet}
+          onChange={(event) => onChange({ ...filters, magnet: event.target.value })}
+          placeholder='Paste a magnet link'
+          className='min-w-0 flex-1 font-mono text-xs'
+        />
+        <Button
+          onClick={() => onMagnet(filters.magnet)}
+          disabled={busy || !filters.magnet.trim()}
+        >
+          <Download data-icon='inline-start' /> Use magnet
+        </Button>
+      </div>
     </div>
   );
 }
@@ -463,6 +555,29 @@ function titleWithYear(r: TitleRow): string {
   return r.year ? `${r.title} (${r.year})` : r.title;
 }
 
+function torrentContext(r: TitleRow) {
+  const match = /S(\d{1,2})E(\d{1,3})/i.exec(r.name || r.title);
+  const season = r.season ?? (match ? Number(match[1]) : null);
+  const episode = match ? Number(match[2]) : null;
+  const seriesTitle = r.series || r.title.replace(/\s*[-–—]?\s*S\d{1,2}E\d{1,3}.*$/i, '').trim();
+  if (r.kind === 'episode') {
+    return {
+      query: `${seriesTitle} S${String(season ?? 1).padStart(2, '0')}E${String(episode ?? 1).padStart(2, '0')}`,
+      kind: 'episode' as const,
+      seriesTitle,
+      season,
+      episode,
+    };
+  }
+  return {
+    query: titleWithYear(r),
+    kind: 'movie' as const,
+    seriesTitle: null,
+    season: null,
+    episode: null,
+  };
+}
+
 // Multi-select dropdown of every row status (a lightweight popover — no
 // external dependency). Selecting none means "all".
 function StatusMultiSelect({
@@ -557,12 +672,15 @@ export default function Library() {
   const [torrentAction, setTorrentAction] = useState<TitleRow | null>(null);
   const [torrentCandidates, setTorrentCandidates] = useState<TorrentCandidate[]>([]);
   const [torrentLoading, setTorrentLoading] = useState(false);
+  const [torrentFilters, setTorrentFilters] = useState<TorrentFilters>(EMPTY_TORRENT_FILTERS);
+  const [torrentActionRuntime, setTorrentActionRuntime] = useState<number | null>(null);
   const [torrentReplacement, setTorrentReplacement] = useState<TitleRow | null>(null);
   const [replacementMode, setReplacementMode] = useState<'auto' | 'manual'>('manual');
   const [replacementCandidates, setReplacementCandidates] = useState<TorrentCandidate[]>([]);
   const [replacementRuntime, setReplacementRuntime] = useState<number | null>(null);
   const [replacementLoading, setReplacementLoading] = useState(false);
   const [replacementBusy, setReplacementBusy] = useState(false);
+  const [replacementFilters, setReplacementFilters] = useState<TorrentFilters>(EMPTY_TORRENT_FILTERS);
   const tableScrollRef = useRef<HTMLDivElement>(null);
   const restoreScrollRef = useRef<number | null>(null);
   useEffect(() => {
@@ -626,12 +744,7 @@ export default function Library() {
   }, [expanded]);
 
   function typeLabel(r: TitleRow): string {
-    if (r.kind === 'episode') {
-      const parts: string[] = [];
-      if (r.series) parts.push(r.series);
-      if (r.season != null) parts.push(`S${String(r.season).padStart(2, '0')}`);
-      return parts.length ? parts.join(' · ') : 'Episode';
-    }
+    if (r.kind === 'episode') return 'Show';
     return 'Movie';
   }
 
@@ -727,10 +840,18 @@ export default function Library() {
   }
 
   async function deleteJob(id: string) {
+    const savedScroll = tableScrollRef.current?.scrollTop ?? null;
     try {
-      await api.deleteJob(id);
+      const result = await api.deleteJob(id);
+      if (!result.deleted) throw new Error('The job could not be removed');
+      setRows((current) => {
+        const next = current.filter((row) => row.job_id !== id && row.id !== id);
+        queueRowsCache = next;
+        return next;
+      });
+      restoreScrollRef.current = savedScroll;
       toast.success('Removed');
-      load(true);
+      await load(true, true);
     } catch (e: any) {
       toast.error(e.message);
     }
@@ -758,10 +879,12 @@ export default function Library() {
     if (!r.job_id) return;
     setTorrentAction(r);
     setTorrentCandidates([]);
+    setTorrentFilters(EMPTY_TORRENT_FILTERS);
     setTorrentLoading(true);
     try {
       const result = await api.torrentAction(r.job_id);
       setTorrentCandidates(result.candidates);
+      setTorrentActionRuntime(result.target_runtime_seconds);
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -827,10 +950,54 @@ export default function Library() {
     if (!torrentAction?.job_id) return;
     setTorrentLoading(true);
     try {
-      await api.chooseTorrent(torrentAction.job_id, candidate.id);
+      await api.chooseTorrent(torrentAction.job_id, candidate);
       toast.success('Torrent selected — pipeline resumed');
       setTorrentAction(null);
       load(true);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setTorrentLoading(false);
+    }
+  }
+
+  async function searchTorrentAction() {
+    if (!torrentAction) return;
+    setTorrentLoading(true);
+    try {
+      const context = torrentContext(torrentAction);
+      const result = await api.torrentSearch(context.query, torrentActionRuntime, {
+        kind: context.kind,
+        seriesTitle: context.seriesTitle,
+        season: context.season,
+        episode: context.episode,
+        minSeeders: nullableNumber(torrentFilters.minSeeders),
+        maxSeeders: nullableNumber(torrentFilters.maxSeeders),
+        minSizeGib: nullableNumber(torrentFilters.minSizeGib),
+        maxSizeGib: nullableNumber(torrentFilters.maxSizeGib),
+      });
+      setTorrentCandidates(result.candidates);
+      setTorrentFilters((current) => ({
+        ...current,
+        minSeeders: current.minSeeders || String(result.policy.min_seeders),
+        minSizeGib: current.minSizeGib || String(result.policy.min_size_gib),
+        maxSizeGib: current.maxSizeGib || String(result.policy.max_size_gib),
+      }));
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setTorrentLoading(false);
+    }
+  }
+
+  async function chooseTorrentMagnet(magnet: string) {
+    if (!torrentAction?.job_id) return;
+    setTorrentLoading(true);
+    try {
+      await api.chooseTorrentMagnet(torrentAction.job_id, magnet, torrentAction.title);
+      toast.success('Magnet added — pipeline resumed');
+      setTorrentAction(null);
+      await load(true, true);
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -843,6 +1010,7 @@ export default function Library() {
     setTorrentReplacement(r);
     setReplacementMode('manual');
     setReplacementCandidates([]);
+    setReplacementFilters(EMPTY_TORRENT_FILTERS);
     setReplacementRuntime(null);
     setReplacementLoading(true);
     let runtime: number | null = null;
@@ -855,7 +1023,42 @@ export default function Library() {
       // without it when probing a partially written file fails.
     }
     try {
-      const result = await api.torrentSearch(titleWithYear(r), runtime);
+      const context = torrentContext(r);
+      const result = await api.torrentSearch(context.query, runtime, {
+        kind: context.kind,
+        seriesTitle: context.seriesTitle,
+        season: context.season,
+        episode: context.episode,
+      });
+      setReplacementCandidates(result.candidates);
+      setReplacementFilters((current) => ({
+        ...current,
+        minSeeders: String(result.policy.min_seeders),
+        minSizeGib: String(result.policy.min_size_gib),
+        maxSizeGib: String(result.policy.max_size_gib),
+      }));
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setReplacementLoading(false);
+    }
+  }
+
+  async function searchReplacementTorrents() {
+    if (!torrentReplacement) return;
+    setReplacementLoading(true);
+    try {
+      const context = torrentContext(torrentReplacement);
+      const result = await api.torrentSearch(context.query, replacementRuntime, {
+        kind: context.kind,
+        seriesTitle: context.seriesTitle,
+        season: context.season,
+        episode: context.episode,
+        minSeeders: nullableNumber(replacementFilters.minSeeders),
+        maxSeeders: nullableNumber(replacementFilters.maxSeeders),
+        minSizeGib: nullableNumber(replacementFilters.minSizeGib),
+        maxSizeGib: nullableNumber(replacementFilters.maxSizeGib),
+      });
       setReplacementCandidates(result.candidates);
     } catch (e: any) {
       toast.error(e.message);
@@ -864,19 +1067,25 @@ export default function Library() {
     }
   }
 
-  async function startTorrentReplacement(candidate?: TorrentCandidate) {
+  async function startTorrentReplacement(candidate?: TorrentCandidate, magnet?: string) {
     if (!torrentReplacement?.path) return;
     setReplacementBusy(true);
     try {
+      const context = torrentContext(torrentReplacement);
       await api.replaceTorrent({
         path: torrentReplacement.path,
-        query: titleWithYear(torrentReplacement),
+        query: context.query,
         target_runtime_seconds: replacementRuntime,
         candidate,
+        magnet_uri: magnet || undefined,
+        kind: context.kind,
+        series_title: context.seriesTitle,
+        season: context.season,
+        episode: context.episode,
       });
-      toast.success(candidate ? 'Selected torrent is downloading in the background' : 'Automatic torrent replacement started');
+      toast.success(candidate || magnet ? 'Selected torrent is downloading in the background' : 'Automatic torrent replacement started');
       setTorrentReplacement(null);
-      load(true);
+      await load(true, true);
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -1022,7 +1231,7 @@ export default function Library() {
                   <Play data-icon='inline-start' /> Review
                 </Button>
               )}
-              {isLib && r.kind === 'movie' && (
+              {isLib && (
                 <Button
                   size='icon'
                   variant='ghost'
@@ -1122,7 +1331,7 @@ export default function Library() {
       await api.deleteFile(del.path);
       toast.success('Deleted');
       setDel(null);
-      load();
+      await load(true, true);
     } catch (e: any) {
       toast.error(e.message);
     }
@@ -1272,6 +1481,13 @@ export default function Library() {
               No release met your configured quality, size, and seeder rules. Pick a release explicitly to resume {torrentAction?.title}.
             </DialogDescription>
           </DialogHeader>
+          <TorrentPickerTools
+            filters={torrentFilters}
+            onChange={setTorrentFilters}
+            onSearch={searchTorrentAction}
+            onMagnet={chooseTorrentMagnet}
+            busy={torrentLoading}
+          />
           {torrentLoading && torrentCandidates.length === 0 ? (
             <div className='flex items-center justify-center py-10'>
               <Loader2 className='h-6 w-6 animate-spin' />
@@ -1318,15 +1534,24 @@ export default function Library() {
               </div>
             </TabsContent>
             <TabsContent value='manual' className='min-h-0 flex-1 overflow-hidden'>
-              {replacementLoading ? (
-                <div className='flex items-center justify-center py-10'>
-                  <Loader2 className='h-6 w-6 animate-spin' />
-                </div>
-              ) : replacementCandidates.length === 0 ? (
-                <EmptyState icon={Download} title='No matching torrents' description='Try the automatic option later when indexers have more releases.' />
-              ) : (
-                <TorrentCandidateTable candidates={replacementCandidates} busy={replacementBusy} onSelect={startTorrentReplacement} />
-              )}
+              <div className='flex min-h-0 flex-1 flex-col gap-3 py-3'>
+                <TorrentPickerTools
+                  filters={replacementFilters}
+                  onChange={setReplacementFilters}
+                  onSearch={searchReplacementTorrents}
+                  onMagnet={(magnet) => startTorrentReplacement(undefined, magnet)}
+                  busy={replacementLoading || replacementBusy}
+                />
+                {replacementLoading ? (
+                  <div className='flex items-center justify-center py-10'>
+                    <Loader2 className='h-6 w-6 animate-spin' />
+                  </div>
+                ) : replacementCandidates.length === 0 ? (
+                  <EmptyState icon={Download} title='No matching torrents' description='Change the filters or paste a magnet link.' />
+                ) : (
+                  <TorrentCandidateTable candidates={replacementCandidates} busy={replacementBusy} onSelect={startTorrentReplacement} />
+                )}
+              </div>
             </TabsContent>
           </Tabs>
         </DialogContent>
@@ -1391,6 +1616,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // on top of the constant delay so a dub that slowly slides out of sync
   // (e.g. PAL 25fps vs 23.976) can be corrected.
   const [stretch, setStretch] = useState(1);
+  const [stretchInput, setStretchInput] = useState('1.000000');
   const [windowSec, setWindowSec] = useState(30);
   const [center, setCenter] = useState(60);
   const [playing, setPlaying] = useState<'none' | 'both' | 'eng' | 'ger'>('none');
@@ -1438,6 +1664,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [replaceMode, setReplaceMode] = useState<'auto' | 'manual'>('manual');
   const [replaceCandidates, setReplaceCandidates] = useState<TorrentCandidate[]>([]);
   const [replaceLoading, setReplaceLoading] = useState(false);
+  const [replaceFilters, setReplaceFilters] = useState<TorrentFilters>(EMPTY_TORRENT_FILTERS);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const engCanvas = useRef<HTMLCanvasElement>(null);
@@ -1458,8 +1685,15 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const duration = info?.duration ?? 0;
   const viewStart = Math.max(0, center - windowSec / 2);
   const pxPerSec = canvasW / windowSec;
-  // Clip covering the visible window (capped) so we can seek within it.
-  const clipLen = Math.min(windowSec, 90);
+  // Reusable preview segments make nearby seeks hit the same cached file.
+  // Each segment also contains the next segment, so normal forward panning is
+  // already available while the user is inspecting the current section.
+  const videoSegmentSec = Math.min(60, Math.max(10, windowSec));
+  const videoClipStart = Math.floor(viewStart / videoSegmentSec) * videoSegmentSec;
+  const videoClipLen = Math.max(
+    1,
+    Math.min(120, duration > 0 ? duration - videoClipStart : videoSegmentSec * 2, videoSegmentSec * 2),
+  );
 
   // Move both lane playheads to a fraction (0..1) of the window.
   function parkHeads(frac: number) {
@@ -1518,6 +1752,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         setDelayMs(m.delay_ms);
         setSavedDelay(m.delay_ms);
         setStretch(1);
+        setStretchInput('1.000000');
         const g = m.audio_tracks.find((t) => t.is_german);
         const e = m.audio_tracks.find((t) => t.language === 'eng' && !t.is_german) ?? m.audio_tracks.find((t) => !t.is_german) ?? m.audio_tracks[0];
         const gi = g ? g.index : null;
@@ -1571,17 +1806,25 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const fetchAll = async (attempt: number): Promise<void> => {
       try {
+        const tasks: Promise<void>[] = [];
         if (engStream != null) {
           const start = Math.max(0, viewStart - windowSec);
-          const w = await api.waveform(path, engStream, start, bufDur, bins);
-          if (!cancelled) setEngBuf({ peaks: decodePeaks(w.peaks), start, dur: bufDur });
+          tasks.push(
+            api.waveform(path, engStream, start, bufDur, bins).then((w) => {
+              if (!cancelled) setEngBuf({ peaks: decodePeaks(w.peaks), start, dur: bufDur });
+            }),
+          );
         }
         if (gerStream != null) {
           if (!cancelled) setGerLoading(true);
           const start = Math.max(0, viewStart - windowSec - delayMs / 1000);
-          const w = await api.waveform(path, gerStream, start, bufDur, bins);
-          if (!cancelled) setGerBuf({ peaks: decodePeaks(w.peaks), start, dur: bufDur });
+          tasks.push(
+            api.waveform(path, gerStream, start, bufDur, bins).then((w) => {
+              if (!cancelled) setGerBuf({ peaks: decodePeaks(w.peaks), start, dur: bufDur });
+            }),
+          );
         }
+        await Promise.all(tasks);
         if (!cancelled) setGerLoading(false);
       } catch {
         // Likely 503 (transcoder busy) — retry a few times before giving up.
@@ -1601,8 +1844,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging]);
 
-  // Prefetch the video clip when the view/quality settles (debounced so
-  // dragging the timeline doesn't spawn a transcode per pixel).
+  // Load a cache-aligned video segment with only a tiny debounce.
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -1611,12 +1853,45 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       // Keep the HQ reference picture and English track in one clip. A single
       // browser media clock guarantees that they cannot appear offset simply
       // because two independently fetched elements started at different times.
-      v.src = api.videoClipUrl(path, viewStart, clipLen, quality, engStream);
+      v.src = api.videoClipUrl(path, videoClipStart, videoClipLen, quality, engStream);
+      v.dataset.clipStart = String(videoClipStart);
       v.load();
-    }, 350);
+    }, 75);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, viewStart, windowSec, quality, engStream]);
+  }, [path, videoClipStart, videoClipLen, quality, engStream]);
+
+  // Warm the previous/next segment in the server cache after the current one
+  // settles. Fetches are sequential to avoid starving waveform/audio work.
+  useEffect(() => {
+    const controller = new AbortController();
+    const starts = [
+      Math.max(0, videoClipStart - videoSegmentSec),
+      videoClipStart + videoSegmentSec,
+    ].filter((start) => start !== videoClipStart && (duration <= 0 || start < duration));
+    const timer = setTimeout(async () => {
+      for (const start of starts) {
+        if (controller.signal.aborted) break;
+        try {
+          const span = Math.max(
+            1,
+            Math.min(120, duration > 0 ? duration - start : videoSegmentSec * 2, videoSegmentSec * 2),
+          );
+          const response = await fetch(api.videoClipUrl(path, start, span, quality, engStream), {
+            signal: controller.signal,
+            cache: 'force-cache',
+          });
+          await response.body?.cancel();
+        } catch {
+          if (controller.signal.aborted) break;
+        }
+      }
+    }, 750);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [path, videoClipStart, videoSegmentSec, duration, quality, engStream]);
 
   function drawGrid(ctx: CanvasRenderingContext2D, W: number, H: number) {
     ctx.clearRect(0, 0, W, H);
@@ -1763,13 +2038,35 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const token = ++playTokenRef.current;
     const startFrac = seekFracRef.current;
     const startOffset = startFrac * windowSec; // seconds into the window
-    playbackStartOffsetRef.current = startOffset;
-    const startT = viewStart + startOffset; // absolute reference time
-    const dur = Math.max(1, Math.min(clipLen - startOffset, windowSec - startOffset));
+    const desiredRefTime = viewStart + startOffset;
+    let activeClipStart = videoClipStart;
+    if (
+      desiredRefTime < videoClipStart
+      || desiredRefTime >= videoClipStart + videoClipLen - 1
+    ) {
+      activeClipStart = Math.floor(desiredRefTime / videoSegmentSec) * videoSegmentSec;
+    }
+    const activeClipLen = Math.max(
+      1,
+      Math.min(
+        120,
+        duration > 0 ? duration - activeClipStart : videoSegmentSec * 2,
+        videoSegmentSec * 2,
+      ),
+    );
+    const videoStartAt = desiredRefTime - activeClipStart;
+    playbackStartOffsetRef.current = videoStartAt;
+    const dur = Math.max(
+      1,
+      Math.min(activeClipLen - videoStartAt, windowSec - startOffset),
+    );
     let german: HTMLAudioElement | null = null;
     if (which !== 'eng' && gerStream != null) {
-      const gs = Math.max(0, startT - delayMs / 1000);
-      const a = new Audio(api.audioClipUrl(path, gerStream, gs, dur));
+      const sourceStart = viewStart - delayMs / 1000 + startOffset * stretch;
+      const lead = sourceStart < 0 ? Math.min(dur, -sourceStart / stretch) : 0;
+      const a = new Audio(
+        api.audioClipUrl(path, gerStream, Math.max(0, sourceStart), dur, lead, stretch),
+      );
       a.preload = 'auto';
       a.onended = () => stopAll();
       gerAudio.current = a;
@@ -1781,9 +2078,16 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       // English is embedded in the preview MP4 and always shares the picture's
       // timeline. German-only mode deliberately mutes that reference track.
       v.muted = which === 'ger' || engStream == null;
-      if (!v.currentSrc && !v.src) {
+      const loadedClipStart = Number(v.dataset.clipStart);
+      if (
+        !v.currentSrc
+        || !v.src
+        || !Number.isFinite(loadedClipStart)
+        || Math.abs(loadedClipStart - activeClipStart) > 0.01
+      ) {
         setVideoLoading(true);
-        v.src = api.videoClipUrl(path, viewStart, clipLen, quality, engStream);
+        v.src = api.videoClipUrl(path, activeClipStart, activeClipLen, quality, engStream);
+        v.dataset.clipStart = String(activeClipStart);
         v.load();
       }
       if (v.readyState < HTMLMediaElement.HAVE_METADATA) {
@@ -1798,7 +2102,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         }
       }
       try {
-        v.currentTime = startOffset;
+        v.currentTime = videoStartAt;
       } catch {
         /* not seekable yet */
       }
@@ -1807,8 +2111,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         // allowed to start until the picture can render from the seek point.
         await Promise.all([waitUntilReady(v, token), german ? waitUntilReady(german, token) : Promise.resolve()]);
         if (token !== playTokenRef.current) return;
-        await v.play();
-        if (german) await german.play();
+        await Promise.all([v.play(), german ? german.play() : Promise.resolve()]);
       } catch {
         if (token === playTokenRef.current) stopAll();
         return;
@@ -1820,7 +2123,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const tick = () => {
       let posSec = startOffset;
       const vv = videoRef.current;
-      if (vv && !vv.paused && vv.currentTime > 0) posSec = vv.currentTime;
+      if (vv && !vv.paused) {
+        posSec = startOffset + Math.max(0, vv.currentTime - playbackStartOffsetRef.current);
+      }
       else if (gerAudio.current) posSec = startOffset + gerAudio.current.currentTime;
       const frac = Math.min(1, posSec / windowSec);
       livePosRef.current = frac;
@@ -1858,6 +2163,18 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     livePosRef.current = frac;
     setSeekFrac(frac);
     parkHeads(frac);
+    const video = videoRef.current;
+    if (video && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      const loadedStart = Number(video.dataset.clipStart);
+      const desired = viewStart + frac * windowSec;
+      if (
+        Number.isFinite(loadedStart)
+        && desired >= loadedStart
+        && desired < loadedStart + video.duration
+      ) {
+        video.currentTime = desired - loadedStart;
+      }
+    }
     if (activeMode !== 'none') {
       resumeModeRef.current = activeMode;
       void playSection(activeMode);
@@ -1968,9 +2285,44 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     setReplaceOpen(true);
     setReplaceMode('manual');
     setReplaceCandidates([]);
+    setReplaceFilters(EMPTY_TORRENT_FILTERS);
     setReplaceLoading(true);
     try {
-      const result = await api.torrentSearch(titleWithYear(entry), gerTrack?.duration ?? duration ?? null);
+      const context = torrentContext(entry);
+      const result = await api.torrentSearch(context.query, gerTrack?.duration ?? duration ?? null, {
+        kind: context.kind,
+        seriesTitle: context.seriesTitle,
+        season: context.season,
+        episode: context.episode,
+      });
+      setReplaceCandidates(result.candidates);
+      setReplaceFilters((current) => ({
+        ...current,
+        minSeeders: String(result.policy.min_seeders),
+        minSizeGib: String(result.policy.min_size_gib),
+        maxSizeGib: String(result.policy.max_size_gib),
+      }));
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setReplaceLoading(false);
+    }
+  }
+
+  async function searchReviewTorrents() {
+    setReplaceLoading(true);
+    try {
+      const context = torrentContext(entry);
+      const result = await api.torrentSearch(context.query, gerTrack?.duration ?? duration ?? null, {
+        kind: context.kind,
+        seriesTitle: context.seriesTitle,
+        season: context.season,
+        episode: context.episode,
+        minSeeders: nullableNumber(replaceFilters.minSeeders),
+        maxSeeders: nullableNumber(replaceFilters.maxSeeders),
+        minSizeGib: nullableNumber(replaceFilters.minSizeGib),
+        maxSizeGib: nullableNumber(replaceFilters.maxSizeGib),
+      });
       setReplaceCandidates(result.candidates);
     } catch (e: any) {
       toast.error(e.message);
@@ -1979,16 +2331,22 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     }
   }
 
-  async function startReplacement(candidate?: TorrentCandidate) {
+  async function startReplacement(candidate?: TorrentCandidate, magnet?: string) {
     setBusy('replace');
     try {
+      const context = torrentContext(entry);
       await api.replaceTorrent({
         path,
-        query: titleWithYear(entry),
+        query: context.query,
         target_runtime_seconds: gerTrack?.duration ?? duration ?? null,
         candidate,
+        magnet_uri: magnet || undefined,
+        kind: context.kind,
+        series_title: context.seriesTitle,
+        season: context.season,
+        episode: context.episode,
       });
-      toast.success(candidate ? 'Selected torrent is downloading in the background' : 'Automatic torrent replacement started');
+      toast.success(candidate || magnet ? 'Selected torrent is downloading in the background' : 'Automatic torrent replacement started');
       setReplaceOpen(false);
       onClose();
     } catch (e: any) {
@@ -2009,6 +2367,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     (fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0015) ||
     (durationStretch != null && lenDrift != null && Math.abs(lenDrift) > 2 && Math.abs(durationStretch - 1) > 0.001);
   const stretchPct = ((stretch - 1) * 100).toFixed(2);
+  function applyStretchInput(value = stretchInput) {
+    const parsed = Number(value.replace(',', '.'));
+    if (!Number.isFinite(parsed) || parsed < 0.5 || parsed > 2) {
+      toast.error('Drift factor must be between 0.5 and 2.0');
+      setStretchInput(stretch.toFixed(6));
+      return;
+    }
+    const next = +parsed.toFixed(6);
+    setStretch(next);
+    setStretchInput(next.toFixed(6));
+  }
   const trackMeta = (t: AudioTrack | null, videoFps: number | null | undefined) => {
     const bits: string[] = [];
     if (t?.codec) bits.push(t.codec.toUpperCase());
@@ -2039,11 +2408,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           </div>
         </div>
         <div className='flex items-center gap-3'>
-          {entry.kind === 'movie' && (
-            <Button variant='secondary' onClick={openReplacement} disabled={busy != null}>
-              <Download data-icon='inline-start' /> New torrent
-            </Button>
-          )}
+          <Button variant='secondary' onClick={openReplacement} disabled={busy != null}>
+            <Download data-icon='inline-start' /> New torrent
+          </Button>
           <Button onClick={approve} disabled={busy === 'approve'}>
             {busy === 'approve' ? <Loader2 className='h-4 w-4 animate-spin' /> : <CheckCircle2 className='h-4 w-4' />}
             Approve
@@ -2074,15 +2441,24 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               </div>
             </TabsContent>
             <TabsContent value='manual' className='min-h-0 flex-1 overflow-hidden'>
-              {replaceLoading ? (
-                <div className='flex items-center justify-center py-10'>
-                  <Loader2 className='h-6 w-6 animate-spin' />
-                </div>
-              ) : replaceCandidates.length === 0 ? (
-                <EmptyState icon={Download} title='No matching torrents' description='Try the automatic option later when indexers have more releases.' />
-              ) : (
-                <TorrentCandidateTable candidates={replaceCandidates} busy={busy === 'replace'} onSelect={startReplacement} />
-              )}
+              <div className='flex min-h-0 flex-1 flex-col gap-3 py-3'>
+                <TorrentPickerTools
+                  filters={replaceFilters}
+                  onChange={setReplaceFilters}
+                  onSearch={searchReviewTorrents}
+                  onMagnet={(magnet) => startReplacement(undefined, magnet)}
+                  busy={replaceLoading || busy === 'replace'}
+                />
+                {replaceLoading ? (
+                  <div className='flex items-center justify-center py-10'>
+                    <Loader2 className='h-6 w-6 animate-spin' />
+                  </div>
+                ) : replaceCandidates.length === 0 ? (
+                  <EmptyState icon={Download} title='No matching torrents' description='Change the filters or paste a magnet link.' />
+                ) : (
+                  <TorrentCandidateTable candidates={replaceCandidates} busy={busy === 'replace'} onSelect={startReplacement} />
+                )}
+              </div>
             </TabsContent>
           </Tabs>
         </DialogContent>
@@ -2107,6 +2483,13 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   muted={playing === 'ger' || engStream == null}
                   playsInline
                   preload='auto'
+                  onLoadedMetadata={(event) => {
+                    const media = event.currentTarget;
+                    const loadedStart = Number(media.dataset.clipStart);
+                    if (Number.isFinite(loadedStart)) {
+                      media.currentTime = Math.max(0, viewStart - loadedStart);
+                    }
+                  }}
                   onLoadedData={() => setVideoLoading(false)}
                   onCanPlay={() => setVideoLoading(false)}
                   onWaiting={pauseGermanForVideo}
@@ -2179,64 +2562,58 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               </div>
               {/* Drift correction (time-stretch) — auto-suggested, manual override */}
               <div className='flex flex-wrap items-center gap-2 rounded-md border border-border/50 bg-secondary/20 px-2.5 py-1.5 text-xs'>
-                <span className='text-white'>Drift</span>
-                <div className='flex items-center gap-1'>
-                  <Button
-                    size='icon'
-                    variant='outline'
-                    className='h-6 w-6'
-                    title='Slow German down (−0.05%)'
-                    onClick={() => setStretch((s) => Math.max(0.5, +(s - 0.0005).toFixed(6)))}
-                  >
-                    <Minus className='h-3 w-3' />
-                  </Button>
-                  <span className='w-[8.5rem] text-center font-mono text-white'>
-                    ×{stretch.toFixed(4)} ({stretch >= 1 ? '+' : ''}
-                    {stretchPct}%)
-                  </span>
-                  <Button
-                    size='icon'
-                    variant='outline'
-                    className='h-6 w-6'
-                    title='Speed German up (+0.05%)'
-                    onClick={() => setStretch((s) => Math.min(2, +(s + 0.0005).toFixed(6)))}
-                  >
-                    <Plus className='h-3 w-3' />
-                  </Button>
-                </div>
-                {sourceFps && referenceFps && fpsStretch != null && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className='rounded-md bg-background/50 px-2 py-1 font-mono text-foreground'>
-                        FPS ×{fpsStretch.toFixed(4)} = {sourceFps.toFixed(3)} / {referenceFps.toFixed(3)}
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>German source FPS divided by HQ reference FPS. This remains a preview until you select Use.</TooltipContent>
-                  </Tooltip>
-                )}
+                <label className='flex items-center gap-2 text-white'>
+                  Drift factor
+                  <Input
+                    value={stretchInput}
+                    onChange={(event) => setStretchInput(event.target.value)}
+                    onBlur={() => applyStretchInput()}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') applyStretchInput();
+                    }}
+                    inputMode='decimal'
+                    className='h-7 w-28 font-mono'
+                    aria-label='German audio drift factor'
+                  />
+                </label>
+                <Button size='sm' variant='secondary' className='h-7' onClick={() => applyStretchInput()}>
+                  Apply
+                </Button>
+                <span className='font-mono text-white'>{stretch >= 1 ? '+' : ''}{stretchPct}%</span>
                 {suggestedStretch != null && Math.abs(suggestedStretch - 1) > 0.0005 && (
                   <Button
                     size='sm'
                     variant='secondary'
-                    className='h-6'
-                    onClick={() => setStretch(+suggestedStretch.toFixed(6))}
-                    title='Load the suggested factor into the preview; approving applies it to the file'
+                    className='h-7'
+                    onClick={() => {
+                      const next = +suggestedStretch.toFixed(6);
+                      setStretch(next);
+                      setStretchInput(next.toFixed(6));
+                    }}
                   >
-                    Use ×{suggestedStretch.toFixed(4)}
+                    Suggested ×{suggestedStretch.toFixed(4)}
                   </Button>
                 )}
                 {stretch !== 1 && (
-                  <Button size='sm' variant='ghost' className='h-6' onClick={() => setStretch(1)}>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    className='h-7'
+                    onClick={() => {
+                      setStretch(1);
+                      setStretchInput('1.000000');
+                    }}
+                  >
                     Reset
                   </Button>
                 )}
                 {driftSuspected && (
                   <span className='text-warning'>
                     {measuredDrift != null && sourceFps && referenceFps
-                      ? `visual drift ×${measuredDrift.toFixed(4)} — German ${sourceFps.toFixed(3)} vs ${referenceFps.toFixed(3)} fps`
+                      ? `Measured ×${measuredDrift.toFixed(4)}`
                       : fpsStretch != null && sourceFps && referenceFps
-                        ? `FPS mismatch — German ${sourceFps.toFixed(3)} vs ${referenceFps.toFixed(3)}`
-                        : 'drift likely — dub length differs'}
+                        ? `FPS ×${fpsStretch.toFixed(4)}`
+                        : 'Track lengths differ'}
                   </span>
                 )}
               </div>

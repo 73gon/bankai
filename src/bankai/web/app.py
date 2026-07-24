@@ -287,6 +287,11 @@ class ReplaceTorrentRequest(BaseModel):
     query: str
     target_runtime_seconds: float | None = None
     candidate: TorrentCandidateRequest | None = None
+    magnet_uri: str | None = None
+    kind: str = "movie"
+    series_title: str | None = None
+    season: int | None = None
+    episode: int | None = None
 
 
 class PathRequest(BaseModel):
@@ -298,7 +303,10 @@ class PathsRequest(BaseModel):
 
 
 class TorrentChoiceRequest(BaseModel):
-    candidate_id: str
+    candidate_id: str | None = None
+    candidate: TorrentCandidateRequest | None = None
+    magnet_uri: str | None = None
+    title: str | None = None
 
 
 class ServerDirRequest(BaseModel):
@@ -650,24 +658,74 @@ def create_app() -> Any:
     async def torrent_search(
         q: str = Query(...),
         runtime_seconds: float | None = Query(None, gt=0),
+        kind: str = Query("movie"),
+        series_title: str | None = Query(None),
+        season: int | None = Query(None, ge=1),
+        episode: int | None = Query(None, ge=1),
+        min_seeders: int | None = Query(None, ge=0),
+        max_seeders: int | None = Query(None, ge=0),
+        min_size_gib: float | None = Query(None, ge=0),
+        max_size_gib: float | None = Query(None, gt=0),
     ) -> dict:
         """Candidates for the review replacement picker."""
         from bankai.torrent.actions import candidate_id, candidate_to_dict
         from bankai.torrent.prowlarr import ProwlarrClient
         from bankai.torrent.selector import TorrentSelector
+        from bankai.torrent.worker import _CAT_MOVIES, _CAT_TV, episode_search_queries
+
+        if kind not in {"movie", "episode"}:
+            raise HTTPException(status_code=422, detail="kind must be movie or episode")
+        if max_seeders is not None and min_seeders is not None and max_seeders < min_seeders:
+            raise HTTPException(status_code=422, detail="maximum seeders cannot be below minimum")
+        base_policy = get_settings().selector
+        policy_data = base_policy.model_dump()
+        if min_seeders is not None:
+            policy_data["min_seeders"] = min_seeders
+        if min_size_gib is not None:
+            policy_data["min_size_gib"] = min_size_gib
+        if max_size_gib is not None:
+            policy_data["max_size_gib"] = max_size_gib
+        try:
+            policy = SelectorSettings.model_validate(policy_data)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc.errors()[0]["msg"])) from exc
+
+        payload = {
+            "query": q,
+            "kind": kind,
+            "series_title": series_title,
+            "season": season,
+            "episode": episode,
+        }
+        queries = episode_search_queries(payload) if kind == "episode" else [q]
+        categories = _CAT_TV if kind == "episode" else _CAT_MOVIES
 
         client = ProwlarrClient()
         try:
-            candidates = await client.search(
-                q, categories=[2000, 2010, 2020, 2030, 2040, 2045, 2050]
-            )
+            by_id = {}
+            relevant = []
+            for search_query in queries:
+                candidates = await client.search(search_query, categories=categories)
+                for candidate in TorrentSelector(policy).relevant(candidates, query=search_query):
+                    ident = candidate_id(candidate)
+                    if ident not in by_id:
+                        by_id[ident] = candidate
+                        relevant.append(candidate)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Prowlarr search failed: {exc}") from exc
         finally:
             await client.aclose()
-        selector = TorrentSelector()
-        relevant = selector.relevant(candidates, query=q)
-        ranked = selector.rank(relevant, query=None, target_runtime_seconds=runtime_seconds)
+        selector = TorrentSelector(policy)
+        policy_candidates = [
+            candidate
+            for candidate in relevant
+            if max_seeders is None or candidate.seeders <= max_seeders
+        ]
+        ranked = selector.rank(
+            policy_candidates,
+            query=None,
+            target_runtime_seconds=runtime_seconds,
+        )
         eligible = {candidate_id(item.candidate) for item in ranked}
         order = {candidate_id(item.candidate): index for index, item in enumerate(ranked)}
         relevant.sort(
@@ -680,6 +738,12 @@ def create_app() -> Any:
         return {
             "query": q,
             "target_runtime_seconds": runtime_seconds,
+            "policy": {
+                "min_seeders": policy.min_seeders,
+                "max_seeders": max_seeders,
+                "min_size_gib": policy.min_size_gib,
+                "max_size_gib": policy.max_size_gib,
+            },
             "candidates": [
                 candidate_to_dict(item, eligible=candidate_id(item) in eligible)
                 for item in relevant
@@ -699,7 +763,20 @@ def create_app() -> Any:
     def torrent_action_choose(job_id: str, req: TorrentChoiceRequest) -> dict:
         from bankai.torrent import actions as torrent_actions
 
-        selected = torrent_actions.choose(job_id, req.candidate_id)
+        if req.candidate is not None:
+            selected = torrent_actions.choose_candidate(
+                job_id,
+                req.candidate.model_dump(),
+            )
+        elif req.magnet_uri:
+            magnet = req.magnet_uri.strip()
+            if not magnet.casefold().startswith("magnet:?xt=urn:btih:"):
+                raise HTTPException(status_code=422, detail="a valid BitTorrent magnet link is required")
+            selected = torrent_actions.choose_magnet(job_id, magnet_uri=magnet, title=req.title)
+        elif req.candidate_id:
+            selected = torrent_actions.choose(job_id, req.candidate_id)
+        else:
+            raise HTTPException(status_code=422, detail="candidate_id or magnet_uri is required")
         if selected is None:
             raise HTTPException(status_code=404, detail="torrent candidate not found")
         return {"selected": selected, "status": "resuming"}
@@ -896,6 +973,8 @@ def create_app() -> Any:
         if job.status == "running":
             job.cancel()
         ok = job.delete()
+        if not ok:
+            raise HTTPException(status_code=500, detail="job could not be removed from disk")
         return {"deleted": ok, "pending": False}
 
     @app.get("/api/jobs/{job_id}/log")
@@ -1498,8 +1577,10 @@ def create_app() -> Any:
         stream: int = Query(..., ge=0),
         start: float = Query(0.0, ge=0.0),
         dur: float = Query(10.0, gt=0.0, le=120.0),
+        lead: float = Query(0.0, ge=0.0, le=120.0),
+        rate: float = Query(1.0, ge=0.5, le=2.0),
     ) -> Response:
-        """Return a short, disk-cached MP3 clip of one audio track (A/B play)."""
+        """Return a drift-aware, disk-cached MP3 clip for exact A/B playback."""
         import subprocess
 
         p = _safe_path(path)
@@ -1509,6 +1590,14 @@ def create_app() -> Any:
         st = p.stat()
 
         def build(out: Path) -> None:
+            audible = max(0.05, dur - lead)
+            source_dur = audible * rate + 0.25
+            filters: list[str] = []
+            if abs(rate - 1.0) > 1e-5:
+                filters.append(f"atempo={rate:.8f}")
+            if lead > 1e-4:
+                filters.append(f"adelay={round(lead * 1000)}:all=1")
+            filters.append(f"apad=whole_dur={dur:.6f}")
             with _ffmpeg_slot():
                 subprocess.run(
                     [
@@ -1519,13 +1608,17 @@ def create_app() -> Any:
                         "-ss",
                         str(start),
                         "-t",
-                        str(dur),
+                        str(source_dur),
                         "-i",
                         str(p),
                         "-map",
                         f"0:{stream}",
                         "-ac",
                         "2",
+                        "-af",
+                        ",".join(filters),
+                        "-t",
+                        str(dur),
                         "-c:a",
                         "libmp3lame",
                         "-b:a",
@@ -1539,7 +1632,10 @@ def create_app() -> Any:
                     check=False,
                 )
 
-        key = f"{p}|{st.st_mtime_ns}|aud|{stream}|{round(start, 2)}|{round(dur, 2)}"
+        key = (
+            f"{p}|{st.st_mtime_ns}|aud3|{stream}|{round(start, 3)}|{round(dur, 3)}"
+            f"|{round(lead, 3)}|{round(rate, 6)}"
+        )
         clip = _cached_clip(key, "mp3", build)
         return FileResponse(clip, media_type="audio/mpeg")
 
@@ -1593,9 +1689,11 @@ def create_app() -> Any:
                         "-c:v",
                         "libx264",
                         "-preset",
-                        "veryfast",
+                        "ultrafast",
+                        "-tune",
+                        "zerolatency",
                         "-crf",
-                        "28",
+                        "30",
                         "-pix_fmt",
                         "yuv420p",
                         "-movflags",
@@ -1609,7 +1707,7 @@ def create_app() -> Any:
                     check=False,
                 )
 
-        key = f"{p}|{st.st_mtime_ns}|vid2|{round(start, 2)}|{round(dur, 2)}|{height}|{audio}"
+        key = f"{p}|{st.st_mtime_ns}|vid3|{round(start, 2)}|{round(dur, 2)}|{height}|{audio}"
         clip = _cached_clip(key, "mp4", build)
         return FileResponse(clip, media_type="video/mp4")
 
@@ -1665,11 +1763,31 @@ def create_app() -> Any:
         query = req.query.strip()
         if not query:
             raise HTTPException(status_code=422, detail="torrent query required")
+        if req.kind not in {"movie", "episode"}:
+            raise HTTPException(status_code=422, detail="kind must be movie or episode")
         args = ["review-replace-torrent", str(p), "--query", query]
+        args.extend(["--kind", req.kind])
+        if req.series_title:
+            args.extend(["--series-title", req.series_title.strip()])
+        if req.season is not None:
+            args.extend(["--season", str(req.season)])
+        if req.episode is not None:
+            args.extend(["--episode", str(req.episode)])
         if req.target_runtime_seconds is not None:
             args.extend(["--target-runtime-seconds", str(req.target_runtime_seconds)])
-        if req.candidate is not None:
-            args.extend(["--candidate-json", req.candidate.model_dump_json()])
+        candidate = req.candidate
+        if req.magnet_uri:
+            magnet = req.magnet_uri.strip()
+            if not magnet.casefold().startswith("magnet:?xt=urn:btih:"):
+                raise HTTPException(status_code=422, detail="a valid BitTorrent magnet link is required")
+            candidate = TorrentCandidateRequest(
+                title=query,
+                indexer="Manual magnet",
+                download_url=magnet,
+                magnet_uri=magnet,
+            )
+        if candidate is not None:
+            args.extend(["--candidate-json", candidate.model_dump_json()])
         job = webjobs.enqueue(
             kind="torrent_replace",
             title=f"Replace torrent {p.name}",

@@ -23,6 +23,7 @@ log = get_logger(__name__)
 
 _VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts"}
 _GERMAN_TAGS = {"ger", "deu", "de", "german", "deutsch"}
+_WORKING_MEDIA_MARKERS = (".replace.", ".repack.", ".partial.", ".tmp.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,13 +295,23 @@ def scan_library(library: Path | None = None) -> list[LibraryEntry]:
     shows_dir = root / "Shows"
     if movies_dir.is_dir():
         for f in sorted(movies_dir.rglob("*")):
-            if f.is_file() and f.suffix.lower() in _VIDEO_EXTS:
+            if _is_library_media(f):
                 entries.append(_movie_entry(root, f))
     if shows_dir.is_dir():
         for f in sorted(shows_dir.rglob("*")):
-            if f.is_file() and f.suffix.lower() in _VIDEO_EXTS:
+            if _is_library_media(f):
                 entries.append(_episode_entry(root, shows_dir, f))
     return entries
+
+
+def _is_library_media(path: Path) -> bool:
+    """Exclude atomic repack/replacement work files from the visible library."""
+    name = path.name.casefold()
+    return (
+        path.is_file()
+        and path.suffix.casefold() in _VIDEO_EXTS
+        and not any(marker in name for marker in _WORKING_MEDIA_MARKERS)
+    )
 
 
 def _movie_entry(root: Path, f: Path) -> LibraryEntry:

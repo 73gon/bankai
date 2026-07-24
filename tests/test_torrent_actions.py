@@ -46,3 +46,36 @@ def test_torrent_action_persists_candidates_and_explicit_choice(
     assert selected is not None
     assert selected["title"] == second.title
     assert actions.get_request("job1")["status"] == "selected"  # type: ignore[index]
+
+
+def test_torrent_action_accepts_fresh_candidate_and_manual_magnet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(actions, "_root", lambda: tmp_path)
+    actions.create_request(
+        "job1",
+        query="Arcane S02E01",
+        candidates=[_candidate("Arcane.S02.1080p", 20)],
+        eligible_ids=set(),
+        target_runtime_seconds=2400,
+    )
+    fresh = actions.candidate_to_dict(_candidate("Arcane.S02E01.1080p", 30))
+
+    assert actions.choose_candidate("job1", fresh)["title"] == "Arcane.S02E01.1080p"  # type: ignore[index]
+
+    actions.create_request(
+        "job2",
+        query="Arcane S02E02",
+        candidates=[],
+        eligible_ids=set(),
+        target_runtime_seconds=2400,
+    )
+    selected = actions.choose_magnet(
+        "job2",
+        magnet_uri="magnet:?xt=urn:btih:" + "a" * 40,
+    )
+
+    assert selected is not None
+    assert selected["indexer"] == "Manual magnet"
+    assert selected["magnet_uri"].startswith("magnet:?")

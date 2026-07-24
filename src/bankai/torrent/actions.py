@@ -155,6 +155,50 @@ def choose(job_id: str, selected_id: str) -> dict[str, Any] | None:
     return selected
 
 
+def choose_magnet(job_id: str, *, magnet_uri: str, title: str | None = None) -> dict[str, Any] | None:
+    """Resume a waiting job with a user-supplied magnet outside Prowlarr."""
+    request = get_request(job_id)
+    if request is None:
+        return None
+    candidate = TorrentCandidate(
+        title=(title or request.get("query") or "Manual magnet").strip(),
+        indexer="Manual magnet",
+        indexer_id=None,
+        download_url=magnet_uri,
+        info_url=None,
+        magnet_uri=magnet_uri,
+        info_hash=None,
+        size_bytes=0,
+        seeders=0,
+        leechers=0,
+        publish_date=None,
+    )
+    selected = candidate_to_dict(candidate, eligible=True)
+    request["selected"] = selected
+    request["status"] = "selected"
+    path = _path(job_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(request, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return selected
+
+
+def choose_candidate(job_id: str, candidate: dict[str, Any]) -> dict[str, Any] | None:
+    """Resume a waiting job with a freshly filtered Prowlarr candidate."""
+    request = get_request(job_id)
+    if request is None:
+        return None
+    selected = dict(candidate)
+    selected.setdefault("id", candidate_id(selected))
+    request["selected"] = selected
+    request["status"] = "selected"
+    path = _path(job_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(request, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return selected
+
+
 async def wait_for_choice(job_id: str, *, cancel_token: asyncio.Event) -> TorrentCandidate:
     while not cancel_token.is_set():
         request = get_request(job_id)

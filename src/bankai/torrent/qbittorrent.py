@@ -167,8 +167,28 @@ class QBittorrentClient:
     ) -> TorrentStatus:
         """Poll until the torrent is in a "complete" state."""
         interval = self._settings.poll_interval_seconds
+        transport_failures = 0
         while True:
-            status = await self.get(torrent_hash)
+            try:
+                status = await self.get(torrent_hash)
+                transport_failures = 0
+            except httpx.TransportError as exc:
+                transport_failures += 1
+                if transport_failures >= 10:
+                    raise QBittorrentError(
+                        f"qBittorrent status unavailable after {transport_failures} retries: {exc}"
+                    ) from exc
+                # A single dropped HTTP response must not throw away a
+                # multi-hour download. Re-authenticate and keep polling the
+                # same hash; this is what caused Fight Club to fail at 5.6%.
+                self._logged_in = False
+                log.warning(
+                    "temporary qBittorrent status error (%d/10): %s",
+                    transport_failures,
+                    exc,
+                )
+                await asyncio.sleep(min(15.0, max(interval, transport_failures * 2.0)))
+                continue
             if status is None:
                 raise QBittorrentError(f"torrent {torrent_hash} disappeared")
             if progress_cb is not None:

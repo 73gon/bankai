@@ -7,9 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
-from bankai.config import SelectorSettings, reset_settings_cache
+from bankai.config import QBittorrentSettings, SelectorSettings, reset_settings_cache
 from bankai.queue.worker import PermanentWorkerError
 from bankai.scraper.base import EpisodeRef
 from bankai.torrent import actions as torrent_actions
@@ -20,6 +21,7 @@ from bankai.torrent.matcher import (
     pick_movie_file,
 )
 from bankai.torrent.prowlarr import TorrentCandidate
+from bankai.torrent.qbittorrent import QBittorrentClient, TorrentStatus
 from bankai.torrent.selector import TorrentSelector
 from bankai.torrent.worker import TorrentWorker, episode_search_queries
 
@@ -248,3 +250,42 @@ def test_episode_search_queries_derives_series_from_query() -> None:
 def test_episode_search_queries_without_season_is_query_only() -> None:
     qs = episode_search_queries({"query": "Some Show S02E05"})
     assert qs == ["Some Show S02E05"]
+
+
+def test_qbittorrent_poll_retries_transient_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = QBittorrentClient(QBittorrentSettings(poll_interval_seconds=0))
+    complete = TorrentStatus(
+        hash="abc",
+        name="Fight Club",
+        state="uploading",
+        progress=1.0,
+        save_path="/downloads",
+        content_path="/downloads/fight.mkv",
+        size_bytes=1,
+        dlspeed=0,
+        eta=0,
+    )
+    calls = 0
+
+    async def fake_get(_torrent_hash: str) -> TorrentStatus:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadError("connection dropped")
+        return complete
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(client, "get", fake_get)
+    monkeypatch.setattr("bankai.torrent.qbittorrent.asyncio.sleep", no_sleep)
+
+    try:
+        result = asyncio.run(client.wait_until_complete("abc"))
+    finally:
+        asyncio.run(client.aclose())
+
+    assert result is complete
+    assert calls == 2

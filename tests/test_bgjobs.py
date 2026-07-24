@@ -93,6 +93,33 @@ def test_clear_jobs_removes_finished_background_jobs(
     assert running.dir.exists()
 
 
+def test_delete_hides_job_even_when_windows_cleanup_is_temporarily_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    job = bgjobs.BgJob(
+        id="locked12",
+        kind="movie",
+        title="Locked",
+        args=["run", "Locked"],
+        started_at=time.time(),
+        status="failed",
+    )
+    job.save()
+    real_rmtree = bgjobs.shutil.rmtree
+
+    def blocked(_path: Path, *args: object, **kwargs: object) -> None:
+        raise PermissionError("temporarily locked")
+
+    monkeypatch.setattr(bgjobs.shutil, "rmtree", blocked)
+    assert job.delete() is True
+    assert not job.dir.exists()
+
+    monkeypatch.setattr(bgjobs.shutil, "rmtree", real_rmtree)
+    assert bgjobs.list_jobs() == []
+
+
 def test_stopped_job_can_resume_in_same_ledger_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -15,6 +15,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bankai.config import get_settings, reset_settings_cache
+from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.web.app import (
     _ebur128_envelope,
     _parse_range,
@@ -251,6 +252,19 @@ def test_titles_never_surfaces_a_repack_as_a_job_row(
     assert response.json()["rows"] == []
 
 
+def test_titles_hides_atomic_repack_and_replacement_files(client: TestClient) -> None:
+    movies = Path(get_settings().output.directory) / "Movies" / "The Irishman (2019)"
+    movies.mkdir(parents=True)
+    (movies / "The Irishman (2019).mkv").write_bytes(b"original")
+    (movies / "The Irishman (2019).mkv.replace.mkv").write_bytes(b"working")
+    (movies / "The Irishman (2019).mkv.repack.mkv").write_bytes(b"working")
+
+    rows = client.get("/api/titles").json()["rows"]
+
+    library_rows = [row for row in rows if row["row_kind"] == "library"]
+    assert [row["name"] for row in library_rows] == ["The Irishman (2019)"]
+
+
 def test_queue_force_and_priority_endpoints(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -333,6 +347,112 @@ def test_queue_show_accepts_custom_episode_mirror_links(
     assert first_args[first_args.index("--url") + 1] == "https://voe.sx/e/abc123"
     assert first_args[first_args.index("--episode-title") + 1] == "Heavy Is the Crown"
     assert second_args[second_args.index("--site") + 1] == "filmpalast"
+
+
+def test_episode_torrent_replacement_passes_show_identity(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episode = (
+        Path(get_settings().output.directory)
+        / "Shows"
+        / "Arcane"
+        / "Season 02"
+        / "Arcane - S02E01.mkv"
+    )
+    episode.parent.mkdir(parents=True)
+    episode.write_bytes(b"episode")
+    queued: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "running", "id": "replace1"},
+    )
+
+    response = client.post(
+        "/api/review/replace-torrent",
+        json={
+            "path": str(episode),
+            "query": "Arcane S02E01",
+            "kind": "episode",
+            "series_title": "Arcane",
+            "season": 2,
+            "episode": 1,
+            "magnet_uri": "magnet:?xt=urn:btih:" + "a" * 40,
+        },
+    )
+
+    assert response.status_code == 200
+    args = queued[0]["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--kind") + 1] == "episode"
+    assert args[args.index("--series-title") + 1] == "Arcane"
+    assert args[args.index("--season") + 1] == "2"
+    assert args[args.index("--episode") + 1] == "1"
+    assert "--candidate-json" in args
+
+
+def test_torrent_picker_searches_tv_categories_and_applies_temporary_filters(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, list[int] | None]] = []
+
+    def candidate(title: str, seeders: int, marker: str) -> TorrentCandidate:
+        return TorrentCandidate(
+            title=title,
+            indexer="Test",
+            indexer_id=1,
+            download_url=f"https://example.test/{marker}.torrent",
+            info_url=f"https://example.test/{marker}",
+            magnet_uri=None,
+            info_hash=marker * 40,
+            size_bytes=5 * 1024**3,
+            seeders=seeders,
+            leechers=0,
+            publish_date=None,
+        )
+
+    class FakeProwlarr:
+        async def search(
+            self,
+            query: str,
+            *,
+            categories: list[int] | None = None,
+        ) -> list[TorrentCandidate]:
+            calls.append((query, categories))
+            if query == "Arcane S02":
+                return [
+                    candidate("Arcane.S02.1080p.WEB-DL.x265-GRP", 40, "a"),
+                    candidate("Arcane.S02.1080p.WEB-DL.x265-BUSY", 200, "b"),
+                ]
+            return []
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("bankai.torrent.prowlarr.ProwlarrClient", FakeProwlarr)
+    response = client.get(
+        "/api/torrents/search",
+        params={
+            "q": "Arcane S02E01",
+            "kind": "episode",
+            "series_title": "Arcane",
+            "season": 2,
+            "episode": 1,
+            "min_seeders": 10,
+            "max_seeders": 100,
+            "min_size_gib": 1,
+            "max_size_gib": 20,
+        },
+    )
+
+    assert response.status_code == 200
+    assert [call[0] for call in calls] == ["Arcane S02", "Arcane S02E01"]
+    assert all(call[1] and call[1][0] == 5000 for call in calls)
+    by_seeders = {row["seeders"]: row for row in response.json()["candidates"]}
+    assert by_seeders[40]["eligible"] is True
+    assert by_seeders[200]["eligible"] is False
 
 
 def test_queue_show_rejects_invalid_or_duplicate_custom_episode_links(
@@ -495,6 +615,40 @@ def test_video_clip_muxes_reference_audio(
     assert cmd[cmd.index("-c:a") + 1] == "aac"
     assert "0:2" in cmd
     assert "-an" not in cmd
+
+
+def test_audio_clip_applies_leading_silence_and_drift_rate(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "audio-preview.mkv"
+    movie.write_bytes(b"source")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"clip")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("bankai.web.media.ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    response = client.get(
+        "/api/media/audioclip",
+        params={
+            "path": str(movie),
+            "stream": 2,
+            "start": 0,
+            "dur": 10,
+            "lead": 2.5,
+            "rate": 1.0427,
+        },
+    )
+
+    assert response.status_code == 200
+    audio_filter = calls[0][calls[0].index("-af") + 1]
+    assert "atempo=1.04270000" in audio_filter
+    assert "adelay=2500:all=1" in audio_filter
 
 
 def test_settings_rejects_unknown_key(client: TestClient) -> None:

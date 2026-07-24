@@ -1886,6 +1886,10 @@ def review_replace_torrent(
     query: str = typer.Option(..., "--query"),
     target_runtime_seconds: float | None = typer.Option(None, "--target-runtime-seconds"),
     candidate_json: str | None = typer.Option(None, "--candidate-json"),
+    kind: str = typer.Option("movie", "--kind"),
+    series_title: str | None = typer.Option(None, "--series-title"),
+    season: int | None = typer.Option(None, "--season"),
+    episode: int | None = typer.Option(None, "--episode"),
 ) -> None:
     """Download another HQ release and remux it with the reviewed German dub."""
     from bankai.torrent.qbittorrent import QBittorrentClient
@@ -1898,7 +1902,15 @@ def review_replace_torrent(
     # replacement should fail visibly on the same row when policy rejects all
     # releases, rather than entering the pipeline-only interactive wait state
     # with no standalone job row to host its picker.
-    payload: dict[str, Any] = {"query": query, "kind": "movie", "wait_for_manual": False}
+    if kind not in {"movie", "episode"}:
+        raise typer.BadParameter("kind must be movie or episode")
+    payload: dict[str, Any] = {"query": query, "kind": kind, "wait_for_manual": False}
+    if series_title:
+        payload["series_title"] = series_title
+    if season is not None:
+        payload["season"] = season
+    if episode is not None:
+        payload["episode"] = episode
     if target_runtime_seconds is not None:
         payload["target_runtime_seconds"] = target_runtime_seconds
     if candidate_json:
