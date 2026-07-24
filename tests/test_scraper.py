@@ -299,6 +299,58 @@ async def test_filmpalast_resolve_all_returns_ranked_hosters() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filmpalast_supported_streams_excludes_unreliable_hosters() -> None:
+    html = """
+    <a class="button iconPlay" href="https://unknown.invalid/file">Unknown</a>
+    <a class="button iconPlay" href="https://veev.to/dead">Veev</a>
+    <a class="button iconPlay" href="https://voe.sx/working">VOE</a>
+    """
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text=html)),
+    )
+    try:
+        handles = await backend.resolve_supported_streams("http://example.invalid/stream/x")
+    finally:
+        await backend.aclose()
+
+    assert [handle.url for handle in handles] == ["https://voe.sx/working"]
+
+
+@pytest.mark.asyncio
+async def test_filmpalast_live_streams_rejects_dead_voe_and_vinovo() -> None:
+    html = """
+    <a class="button iconPlay" href="https://voe.sx/dead">VOE</a>
+    <a class="button iconPlay" href="https://vinovo.to/d/placeholder">Vinovo</a>
+    <a class="button iconPlay" href="https://streamtape.com/live">Streamtape</a>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.invalid":
+            return httpx.Response(200, text=html)
+        if request.url.host == "voe.sx":
+            return httpx.Response(404, text="File not found")
+        if request.url.host == "streamtape.com":
+            return httpx.Response(200, text="<html>player</html>")
+        raise AssertionError(f"unexpected probe: {request.url}")
+
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        handles = await backend.resolve_live_streams("http://example.invalid/stream/x")
+    finally:
+        await backend.aclose()
+
+    assert [handle.url for handle in handles] == ["https://streamtape.com/live"]
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_resolve_reads_data_player_url_and_prefers_vidsonic() -> None:
     html = """
     <a class="button iconPlay" href="https://voe.sx/backup">VOE</a>

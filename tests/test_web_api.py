@@ -131,6 +131,66 @@ def test_queue_snapshot(client: TestClient) -> None:
     assert "jobs" in r.json()
 
 
+def test_queue_movie_revalidates_filmpalast_source(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[dict[str, object]] = []
+
+    async def no_mirrors(_url: str) -> int:
+        return 0
+
+    monkeypatch.setattr("bankai.web.app._verify_filmpalast_source", no_mirrors)
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "queued"},
+    )
+
+    response = client.post(
+        "/api/queue/movie",
+        json={
+            "title": "A Star Is Born",
+            "german": "A Star Is Born",
+            "year": 2018,
+            "site": "filmpalast",
+            "url": "https://filmpalast.to/stream/a-star-is-born",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "no longer has a supported German stream mirror" in response.json()["detail"]
+    assert queued == []
+
+
+def test_queue_movie_accepts_revalidated_filmpalast_source(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[dict[str, object]] = []
+
+    async def working_mirror(_url: str) -> int:
+        return 2
+
+    monkeypatch.setattr("bankai.web.app._verify_filmpalast_source", working_mirror)
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "queued"},
+    )
+
+    response = client.post(
+        "/api/queue/movie",
+        json={
+            "title": "A Star Is Born",
+            "year": 2018,
+            "site": "filmpalast",
+            "url": "https://filmpalast.to/stream/a-star-is-born",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(queued) == 1
+
+
 def test_titles_exposes_stable_created_and_updated_timestamps(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

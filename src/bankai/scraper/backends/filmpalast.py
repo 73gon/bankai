@@ -11,6 +11,7 @@ breaks, update the selectors at the marked points and add a fixture in
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import ClassVar
 from urllib.parse import quote, urljoin, urlparse
@@ -259,20 +260,78 @@ class FilmpalastBackend:
         )
         return handles[0]
 
-    async def resolve_all_streams(self, url: str) -> list[StreamHandle]:
+    async def resolve_all_streams(
+        self,
+        url: str,
+        *,
+        strict: bool = False,
+    ) -> list[StreamHandle]:
         """Return every direct hoster mirror, ordered by extractor reliability."""
         try:
             resp = await self._client.get(url)
         except Exception as exc:
             log.debug("filmpalast resolve_stream fetch failed: %s", exc)
+            if strict:
+                raise ScraperError(f"filmpalast detail fetch failed: {exc}") from exc
             return []
         if resp.status_code != 200:
+            if strict:
+                raise ScraperError(f"filmpalast detail fetch failed: HTTP {resp.status_code}")
             return []
         hosters = sorted(self._extract_hosters(resp.text), key=_hoster_rank)
         return [
             StreamHandle(site=self.site_id, url=hoster, hint=_hoster_hint(hoster))
             for hoster in hosters
         ]
+
+    async def resolve_supported_streams(
+        self,
+        url: str,
+        *,
+        strict: bool = False,
+    ) -> list[StreamHandle]:
+        """Return mirrors backed by hosters the extractor is known to handle.
+
+        ``resolve_all_streams`` intentionally retains unknown and known-bad
+        mirrors as last-ditch pipeline fallbacks. Availability checks need a
+        stricter answer: a Filmpalast detail page alone is not evidence that a
+        downloadable German stream currently exists.
+        """
+        return [
+            handle
+            for handle in await self.resolve_all_streams(url, strict=strict)
+            if is_supported_hoster(handle.url)
+        ]
+
+    async def resolve_live_streams(self, url: str) -> list[StreamHandle]:
+        """Return supported mirrors whose player page is currently reachable.
+
+        This is still a lightweight metadata probe, not a media download. It
+        catches expired VOE links (normally 404/410) and dead-page bodies. A
+        host such as Vinovo that frequently exposes only an advert placeholder
+        is intentionally not eligible for availability certification.
+        """
+        supported = await self.resolve_supported_streams(url, strict=True)
+
+        async def probe(handle: StreamHandle) -> tuple[StreamHandle, bool | None]:
+            try:
+                resp = await self._client.get(handle.url)
+            except Exception as exc:
+                log.debug("filmpalast hoster probe failed for %s: %s", handle.url, exc)
+                return handle, None
+            if resp.status_code >= 400:
+                return handle, False
+            content_type = resp.headers.get("content-type", "").casefold()
+            body = resp.text[:100_000].casefold() if "text" in content_type or not content_type else ""
+            if any(marker in body for marker in _DEAD_HOSTER_MARKERS):
+                return handle, False
+            return handle, True
+
+        probes = await asyncio.gather(*(probe(handle) for handle in supported))
+        completed_probes = sum(result is not None for _, result in probes)
+        if supported and completed_probes == 0:
+            raise ScraperError("all Filmpalast hoster probes failed")
+        return [handle for handle, is_live in probes if is_live]
 
     def _extract_hosters(self, html: str) -> list[str]:
         seen: set[str] = set()
@@ -323,6 +382,22 @@ _HOSTER_PREFERRED = (
     "vinovo",
 )
 _HOSTER_AVOID = ("veev.to", "veev")
+_AVAILABILITY_AVOID = (*_HOSTER_AVOID, "vinovo")
+_DEAD_HOSTER_MARKERS = (
+    "not recognized",
+    "404 - not found",
+    "file not found",
+    "video has been deleted",
+    "video was deleted",
+)
+
+
+def is_supported_hoster(url: str) -> bool:
+    """Whether ``url`` belongs to a hoster with a working extraction path."""
+    host = urlparse(url).netloc.casefold()
+    if any(bad in host for bad in _AVAILABILITY_AVOID):
+        return False
+    return any(name in host for name in _HOSTER_PREFERRED)
 
 
 def _hoster_rank(url: str) -> int:

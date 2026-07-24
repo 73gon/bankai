@@ -60,7 +60,7 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
               <Check className='h-3.5 w-3.5' strokeWidth={3} />
             </span>
           </TooltipTrigger>
-          <TooltipContent>Verified: a German dub is available on Filmpalast.</TooltipContent>
+          <TooltipContent>Verified: the matching Filmpalast release currently has a reachable, supported German stream mirror.</TooltipContent>
         </Tooltip>
       )}
       <div className='absolute inset-0 flex items-center justify-center bg-primary/20 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100'>
@@ -178,7 +178,17 @@ export default function Discover() {
   async function openItem(item: DiscoverItem) {
     setSelected(item);
     setGerman(null);
-    setFilmResults([]);
+    const verifiedResult: SearchResult | null =
+      item.available && item.filmpalast_url
+        ? {
+            site: 'filmpalast',
+            title: item.name,
+            year: item.year,
+            kind: 'movie',
+            url: item.filmpalast_url,
+          }
+        : null;
+    setFilmResults(verifiedResult ? [verifiedResult] : []);
     setSeason('1');
     setEpisodes('');
     if (item.kind !== 'movie') return;
@@ -199,7 +209,11 @@ export default function Discover() {
       }
       setSearchTerm(name);
       const r = await api.search(name, 'movie');
-      setFilmResults(r.results);
+      const first = verifiedResult ? [{ ...verifiedResult, title: name }] : [];
+      setFilmResults([
+        ...first,
+        ...r.results.filter((result) => !first.some((verified) => verified.url === result.url)),
+      ]);
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -452,6 +466,11 @@ export default function Discover() {
                         <Badge variant='muted' className='mt-1'>
                           {r.site}
                         </Badge>
+                        {selected?.filmpalast_url === r.url && (
+                          <Badge variant='success' className='ml-2 mt-1'>
+                            Verified German source
+                          </Badge>
+                        )}
                       </div>
                       <Button size='sm' onClick={() => queueMovie(r)} disabled={busyUrl === r.url}>
                         {busyUrl === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}

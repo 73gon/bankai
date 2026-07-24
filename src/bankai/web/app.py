@@ -71,6 +71,21 @@ def _stream_site_from_url(url: str) -> str:
     return "unknown"
 
 
+async def _verify_filmpalast_source(url: str) -> int:
+    """Return the supported mirror count for a Filmpalast wrapper URL."""
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if not (host == "filmpalast.to" or host.endswith(".filmpalast.to")):
+        return 0
+    from bankai.scraper.backends.filmpalast import FilmpalastBackend
+
+    backend = FilmpalastBackend()
+    try:
+        return len(await backend.resolve_live_streams(url))
+    finally:
+        await backend.aclose()
+
+
 def _waveform_envelope(samples: Any, bins: int) -> bytearray:
     """Build a stable dBFS loudness envelope from full-band PCM samples.
 
@@ -396,7 +411,12 @@ def create_app() -> Any:
             anyio.to_thread.current_default_thread_limiter().total_tokens = 96
         except Exception:
             pass
-        yield
+        try:
+            yield
+        finally:
+            from bankai.web import availability as availability_mod
+
+            await availability_mod.shutdown()
 
     app = FastAPI(
         title="bankai",
@@ -524,11 +544,11 @@ def create_app() -> Any:
 
         out: list[dict] = []
         for it in items:
-            st = avail.get_status(it.name)
+            st = avail.get_status(it.name, year=it.year)
             # Schedule a check for anything unresolved -- including items beyond
             # the first `cap` so they're ready to backfill on the next refresh.
             if st is None or st["status"] == "unknown":
-                avail.schedule(it.name)
+                avail.schedule(it.name, year=it.year)
             if st and st["status"] == "unavailable":
                 continue  # hide it; a later pool item takes the slot
             d = discover_mod.to_dict(it)
@@ -810,7 +830,7 @@ def create_app() -> Any:
         return {"jobs": webjobs.snapshot()}
 
     @app.post("/api/queue/movie")
-    def queue_movie(req: MovieQueueRequest) -> dict:
+    async def queue_movie(req: MovieQueueRequest) -> dict:
         from bankai.backend import BatchMovie, build_movie_args
 
         # The year MUST come from the exact title the user selected (its TVDB
@@ -820,6 +840,22 @@ def create_app() -> Any:
         year = req.year
         if year is None:
             raise HTTPException(status_code=422, detail="year_required")
+        if req.url and _stream_site_from_url(req.url) == "filmpalast":
+            try:
+                mirror_count = await _verify_filmpalast_source(req.url)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The German source could not be checked. Please try again.",
+                ) from exc
+            if mirror_count == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This Filmpalast page no longer has a supported German stream mirror. "
+                        "Choose another result."
+                    ),
+                )
         movie = BatchMovie(title=req.title, german_title=req.german, url=req.url, year=year)
         args = build_movie_args(movie, site=req.site)
         return webjobs.enqueue(kind="movie", title=f"{req.title} ({year})", args=args)
