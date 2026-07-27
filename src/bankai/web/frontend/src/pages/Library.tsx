@@ -1870,7 +1870,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const videoRef = useRef<HTMLVideoElement>(null);
   const dragRef = useRef<{ x: number; delay: number } | null>(null);
   const overviewDragRef = useRef<{
-    lane: 'eng' | 'ger';
     pointerId: number;
     grabOffset: number;
   } | null>(null);
@@ -1899,6 +1898,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     1,
     Math.min(120, duration > 0 ? duration - videoClipStart : videoSegmentSec * 2, videoSegmentSec * 2),
   );
+  const videoPreviewKey = [path, quality, engStream ?? 'none'].join('|');
   const readyCachedRanges = useMemo(
     () =>
       readinessMode === 'eng'
@@ -1942,13 +1942,26 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     }
   }
 
-  function haltAudioVideo() {
-    playTokenRef.current += 1;
-    if (gerAudio.current) {
-      gerAudio.current.pause();
-      gerAudio.current.src = '';
+  function discardGermanAudio() {
+    const audio = gerAudio.current;
+    if (audio) {
+      audio.pause();
+      audio.onloadedmetadata = null;
+      audio.onloadeddata = null;
+      audio.oncanplay = null;
+      audio.onprogress = null;
+      audio.onended = null;
+      audio.removeAttribute('src');
+      audio.load();
       gerAudio.current = null;
     }
+    setBufferedGermanRanges([]);
+  }
+
+  function haltAudioVideo(discardGerman = false) {
+    playTokenRef.current += 1;
+    gerAudio.current?.pause();
+    if (discardGerman) discardGermanAudio();
     if (videoRef.current) videoRef.current.pause();
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
@@ -1957,8 +1970,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   // Hard stop — reset the playheads to the parked seek position.
-  function stopAll() {
-    haltAudioVideo();
+  function stopAll(discardGerman = false) {
+    haltAudioVideo(discardGerman);
     parkHeads(seekFracRef.current);
     setPlaying('none');
   }
@@ -2006,7 +2019,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     })();
     return () => {
       cancelled = true;
-      stopAll();
+      stopAll(true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
@@ -2194,6 +2207,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }
 
   function captureVideoBuffered(media: HTMLVideoElement) {
+    if (media !== videoRef.current) return;
     const clipStart = Number(media.dataset.clipStart);
     if (!Number.isFinite(clipStart)) return;
     const ranges: TimelineRange[] = [];
@@ -2203,14 +2217,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         end: clipStart + media.buffered.end(index),
       });
     }
-    if (ranges.length > 0) {
-      setBufferedVideoRanges((current) =>
-        mergeTimelineRanges([...current, ...ranges]),
-      );
-    }
+    setBufferedVideoRanges(mergeTimelineRanges(ranges));
   }
 
   function captureGermanBuffered(media: HTMLAudioElement) {
+    if (media !== gerAudio.current) return;
     const clipStart = Number(media.dataset.clipStart);
     if (!Number.isFinite(clipStart)) return;
     const ranges: TimelineRange[] = [];
@@ -2220,11 +2231,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         end: clipStart + media.buffered.end(index),
       });
     }
-    if (ranges.length > 0) {
-      setBufferedGermanRanges((current) =>
-        mergeTimelineRanges([...current, ...ranges]),
-      );
-    }
+    setBufferedGermanRanges(mergeTimelineRanges(ranges));
   }
 
   // Cached previews depend on the segment grid, quality, and embedded English
@@ -2260,6 +2267,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     let cancelled = false;
     setCachedGermanRanges([]);
     setBufferedGermanRanges([]);
+    if (gerAudio.current) stopAll(true);
     if (duration > 0 && gerStream != null) {
       void api
         .audioClipCache(path, gerStream, videoSegmentSec, delayMs, stretch)
@@ -2283,7 +2291,28 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    const loadedStart = Number(v.dataset.clipStart);
+    const loadedLen = Number(v.dataset.clipLen);
+    const canReuseCurrentClip =
+      Boolean(v.currentSrc)
+      && v.dataset.previewKey === videoPreviewKey
+      && Number.isFinite(loadedStart)
+      && Number.isFinite(loadedLen)
+      && viewStart >= loadedStart
+      && viewStart + windowSec <= loadedStart + loadedLen + 0.01;
+    if (canReuseCurrentClip) {
+      try {
+        v.currentTime = Math.max(0, viewStart - loadedStart);
+      } catch {
+        /* metadata may still be settling; playback will seek after it loads */
+      }
+      setVideoLoading(false);
+      captureVideoBuffered(v);
+      return;
+    }
     setVideoLoading(true);
+    setBufferedVideoRanges([]);
+    if (gerAudio.current) discardGermanAudio();
     const t = setTimeout(() => {
       // Keep the HQ reference picture and English track in one clip. A single
       // browser media clock guarantees that they cannot appear offset simply
@@ -2291,11 +2320,21 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       v.src = api.videoClipUrl(path, videoClipStart, videoClipLen, quality, engStream);
       v.dataset.clipStart = String(videoClipStart);
       v.dataset.clipLen = String(videoClipLen);
+      v.dataset.previewKey = videoPreviewKey;
       v.load();
     }, 75);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, videoClipStart, videoClipLen, quality, engStream]);
+  }, [
+    path,
+    videoClipStart,
+    videoClipLen,
+    videoPreviewKey,
+    quality,
+    engStream,
+    viewStart,
+    windowSec,
+  ]);
 
   // Warm the nearby reusable video and German-audio segments after the current
   // preview settles. Fetches remain sequential so review preparation consumes
@@ -2471,29 +2510,28 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   function drawOverviewLane(
     canvas: HTMLCanvasElement | null,
     buf: WaveBuffer | null,
-    totalDuration: number,
+    trackDuration: number,
+    referenceDuration: number,
     color: string,
     lane: 'eng' | 'ger',
   ) {
-    if (!canvas || totalDuration <= 0) return;
+    if (!canvas || trackDuration <= 0 || referenceDuration <= 0) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const W = canvas.width;
     const H = canvas.height;
-    const mapReferenceTime = (referenceTime: number) =>
+    const trackTimeForReference = (referenceTime: number) =>
       lane === 'ger'
         ? (referenceTime - delayMs / 1000) * stretch
         : referenceTime;
-    const xForTrackTime = (trackTime: number) =>
-      (Math.min(totalDuration, Math.max(0, trackTime)) / totalDuration) * W;
-    const fillMappedRanges = (ranges: TimelineRange[], fill: string) => {
+    const xForReferenceTime = (referenceTime: number) =>
+      (Math.min(referenceDuration, Math.max(0, referenceTime)) / referenceDuration) * W;
+    const fillReadyRanges = (ranges: TimelineRange[], fill: string) => {
       ctx.fillStyle = fill;
       for (const range of ranges) {
-        const mappedStart = mapReferenceTime(range.start);
-        const mappedEnd = mapReferenceTime(range.end);
-        if (mappedEnd <= 0 || mappedStart >= totalDuration) continue;
-        const left = xForTrackTime(mappedStart);
-        const right = xForTrackTime(mappedEnd);
+        if (range.end <= 0 || range.start >= referenceDuration) continue;
+        const left = xForReferenceTime(range.start);
+        const right = xForReferenceTime(range.end);
         ctx.fillRect(left, 0, Math.max(1, right - left), H);
       }
     };
@@ -2501,8 +2539,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fillRect(0, 0, W, H);
-    fillMappedRanges(readyCachedRanges, 'rgba(148,163,184,0.22)');
-    fillMappedRanges(readyBufferedRanges, 'rgba(226,232,240,0.30)');
+    fillReadyRanges(readyCachedRanges, 'rgba(148,163,184,0.22)');
+    fillReadyRanges(readyBufferedRanges, 'rgba(226,232,240,0.30)');
     ctx.fillStyle = 'rgba(255,255,255,0.06)';
     for (let tick = 1; tick < 10; tick++) {
       ctx.fillRect(Math.round((tick / 10) * W), 0, 1, H);
@@ -2512,11 +2550,21 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       const count = buf.peaks.length;
       ctx.fillStyle = color;
       for (let x = 0; x < W; x++) {
-        const from = Math.min(count - 1, Math.floor((x / W) * count));
-        const to = Math.min(count, Math.max(from + 1, Math.ceil(((x + 1) / W) * count)));
+        const referenceStart = (x / W) * referenceDuration;
+        const referenceEnd = ((x + 1) / W) * referenceDuration;
+        const trackStart = trackTimeForReference(referenceStart);
+        const trackEnd = trackTimeForReference(referenceEnd);
+        const positionStart = ((trackStart - buf.start) / buf.dur) * count;
+        const positionEnd = ((trackEnd - buf.start) / buf.dur) * count;
+        const lower = Math.min(positionStart, positionEnd);
+        const upper = Math.max(positionStart, positionEnd);
+        const from = Math.max(0, Math.floor(lower));
+        const to = Math.min(count, Math.max(from + 1, Math.ceil(upper)));
         let peak = 0;
-        for (let index = from; index < to; index++) {
-          peak = Math.max(peak, buf.peaks[index]);
+        if (upper > 0 && lower < count) {
+          for (let index = from; index < to; index++) {
+            peak = Math.max(peak, buf.peaks[index]);
+          }
         }
         const height = Math.min(1, peak / 127) * (H / 2 - 2);
         ctx.fillRect(x, H / 2 - height, 1, height * 2);
@@ -2526,10 +2574,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     ctx.fillStyle = 'rgba(255,255,255,0.2)';
     ctx.fillRect(0, H / 2, W, 1);
 
-    const viewportStart = mapReferenceTime(viewStart);
-    const viewportEnd = mapReferenceTime(viewStart + windowSec);
-    const left = xForTrackTime(viewportStart);
-    const right = xForTrackTime(viewportEnd);
+    const left = xForReferenceTime(viewStart);
+    const right = xForReferenceTime(viewStart + windowSec);
     ctx.fillStyle = lane === 'ger'
       ? 'rgba(244,114,182,0.10)'
       : 'rgba(56,189,248,0.10)';
@@ -2542,7 +2588,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     ctx.fillRect(Math.max(left, right - 3), 0, 3, H);
 
     const parkedReferenceTime = viewStart + seekFrac * windowSec;
-    const parkedX = xForTrackTime(mapReferenceTime(parkedReferenceTime));
+    const parkedX = xForReferenceTime(parkedReferenceTime);
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.fillRect(parkedX, 0, 1, H);
   }
@@ -2571,6 +2617,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       engOverviewCanvas.current,
       engOverviewBuf,
       engOverviewDuration,
+      engOverviewDuration,
       '#38bdf8',
       'eng',
     );
@@ -2591,6 +2638,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       gerOverviewCanvas.current,
       gerOverviewBuf,
       gerOverviewDuration,
+      engOverviewDuration,
       '#f472b6',
       'ger',
     );
@@ -2598,6 +2646,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }, [
     gerOverviewBuf,
     gerOverviewDuration,
+    engOverviewDuration,
     canvasW,
     center,
     windowSec,
@@ -2639,40 +2688,33 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   function overviewReferenceTime(
     clientX: number,
-    lane: 'eng' | 'ger',
     canvas: HTMLCanvasElement,
   ) {
     const rect = canvas.getBoundingClientRect();
     const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    if (lane === 'ger') {
-      const sourceTime = fraction * gerOverviewDuration;
-      return sourceTime / stretch + delayMs / 1000;
-    }
     return fraction * engOverviewDuration;
   }
 
   function moveOverviewViewport(
     clientX: number,
-    lane: 'eng' | 'ger',
     canvas: HTMLCanvasElement,
     grabOffset: number,
   ) {
-    if (duration <= 0) return;
+    const referenceDuration = engOverviewDuration || duration;
+    if (referenceDuration <= 0) return;
     const requestedCenter =
-      overviewReferenceTime(clientX, lane, canvas) - grabOffset;
-    const halfWindow = Math.min(windowSec / 2, duration / 2);
-    const maxCenter = Math.max(halfWindow, duration - halfWindow);
+      overviewReferenceTime(clientX, canvas) - grabOffset;
+    const halfWindow = Math.min(windowSec / 2, referenceDuration / 2);
+    const maxCenter = Math.max(halfWindow, referenceDuration - halfWindow);
     setCenter(Math.max(halfWindow, Math.min(maxCenter, requestedCenter)));
   }
 
   function onOverviewPointerDown(
     event: React.PointerEvent<HTMLCanvasElement>,
-    lane: 'eng' | 'ger',
   ) {
     event.preventDefault();
     const pointerTime = overviewReferenceTime(
       event.clientX,
-      lane,
       event.currentTarget,
     );
     const viewportCenter = viewStart + windowSec / 2;
@@ -2680,7 +2722,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       pointerTime >= viewStart && pointerTime <= viewStart + windowSec;
     const grabOffset = withinViewport ? pointerTime - viewportCenter : 0;
     overviewDragRef.current = {
-      lane,
       pointerId: event.pointerId,
       grabOffset,
     };
@@ -2688,7 +2729,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     resetSeekToStart();
     moveOverviewViewport(
       event.clientX,
-      lane,
       event.currentTarget,
       grabOffset,
     );
@@ -2701,7 +2741,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (!drag || drag.pointerId !== event.pointerId) return;
     moveOverviewViewport(
       event.clientX,
-      drag.lane,
       event.currentTarget,
       drag.grabOffset,
     );
@@ -2778,39 +2817,42 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const startFrac = seekFracRef.current;
     const startOffset = startFrac * windowSec; // seconds into the window
     const desiredRefTime = viewStart + startOffset;
-    let activeClipStart = videoClipStart;
+    const loadedVideo = videoRef.current;
+    const loadedVideoStart = Number(loadedVideo?.dataset.clipStart);
+    const loadedVideoLen = Number(loadedVideo?.dataset.clipLen);
+    const canReuseLoadedVideo =
+      Boolean(loadedVideo?.currentSrc)
+      && loadedVideo?.dataset.previewKey === videoPreviewKey
+      && Number.isFinite(loadedVideoStart)
+      && Number.isFinite(loadedVideoLen)
+      && desiredRefTime >= loadedVideoStart
+      && desiredRefTime < loadedVideoStart + loadedVideoLen - 0.25;
+    let activeClipStart = canReuseLoadedVideo ? loadedVideoStart : videoClipStart;
     if (
-      desiredRefTime < videoClipStart
-      || desiredRefTime >= videoClipStart + videoClipLen - 1
+      !canReuseLoadedVideo
+      && (
+        desiredRefTime < videoClipStart
+        || desiredRefTime >= videoClipStart + videoClipLen - 1
+      )
     ) {
       activeClipStart = Math.floor(desiredRefTime / videoSegmentSec) * videoSegmentSec;
     }
-    const activeClipLen = Math.max(
-      1,
-      Math.min(
-        120,
-        duration > 0 ? duration - activeClipStart : videoSegmentSec * 2,
-        videoSegmentSec * 2,
-      ),
-    );
+    const activeClipLen = canReuseLoadedVideo
+      ? loadedVideoLen
+      : Math.max(
+          1,
+          Math.min(
+            120,
+            duration > 0 ? duration - activeClipStart : videoSegmentSec * 2,
+            videoSegmentSec * 2,
+          ),
+        );
     const videoStartAt = desiredRefTime - activeClipStart;
     playbackStartOffsetRef.current = videoStartAt;
     let german: HTMLAudioElement | null = null;
     if (which !== 'eng' && gerStream != null) {
       const germanClip = germanClipForReference(activeClipStart, activeClipLen);
-      const a = new Audio();
-      a.preload = 'auto';
-      a.dataset.clipStart = String(activeClipStart);
-      a.dataset.clipLen = String(activeClipLen);
-      a.onloadedmetadata = () => {
-        markGermanClipCached(activeClipStart, activeClipLen);
-        captureGermanBuffered(a);
-      };
-      a.onloadeddata = () => captureGermanBuffered(a);
-      a.oncanplay = () => captureGermanBuffered(a);
-      a.onprogress = () => captureGermanBuffered(a);
-      a.onended = () => stopAll();
-      a.src = api.audioClipUrl(
+      const audioUrl = api.audioClipUrl(
         path,
         gerStream,
         germanClip.sourceStart,
@@ -2818,8 +2860,37 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         germanClip.lead,
         stretch,
       );
-      a.load();
-      gerAudio.current = a;
+      const audioKey = [
+        path,
+        gerStream,
+        activeClipStart.toFixed(3),
+        activeClipLen.toFixed(3),
+        delayMs,
+        stretch.toFixed(6),
+      ].join('|');
+      let a = gerAudio.current;
+      if (!a || a.dataset.clipKey !== audioKey || !a.currentSrc) {
+        discardGermanAudio();
+        const freshAudio = new Audio();
+        freshAudio.preload = 'auto';
+        freshAudio.dataset.clipStart = String(activeClipStart);
+        freshAudio.dataset.clipLen = String(activeClipLen);
+        freshAudio.dataset.clipKey = audioKey;
+        freshAudio.onloadedmetadata = () => {
+          markGermanClipCached(activeClipStart, activeClipLen);
+          captureGermanBuffered(freshAudio);
+        };
+        freshAudio.onloadeddata = () => captureGermanBuffered(freshAudio);
+        freshAudio.oncanplay = () => captureGermanBuffered(freshAudio);
+        freshAudio.onprogress = () => captureGermanBuffered(freshAudio);
+        freshAudio.onended = () => stopAll();
+        freshAudio.src = audioUrl;
+        gerAudio.current = freshAudio;
+        freshAudio.load();
+        a = freshAudio;
+      } else {
+        captureGermanBuffered(a);
+      }
       german = a;
     }
     // The picture follows the reference (English) timeline; seek into the clip.
@@ -2836,9 +2907,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         || Math.abs(loadedClipStart - activeClipStart) > 0.01
       ) {
         setVideoLoading(true);
+        setBufferedVideoRanges([]);
         v.src = api.videoClipUrl(path, activeClipStart, activeClipLen, quality, engStream);
         v.dataset.clipStart = String(activeClipStart);
         v.dataset.clipLen = String(activeClipLen);
+        v.dataset.previewKey = videoPreviewKey;
         v.load();
       }
       try {
@@ -2860,7 +2933,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         if (token !== playTokenRef.current) return;
         await Promise.all([v.play(), german ? german.play() : Promise.resolve()]);
       } catch {
-        if (token === playTokenRef.current) stopAll();
+        if (token === playTokenRef.current) stopAll(true);
         return;
       }
     }
@@ -3263,11 +3336,15 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     captureVideoBuffered(event.currentTarget);
                   }}
                   onProgress={(event) => captureVideoBuffered(event.currentTarget)}
+                  onEmptied={() => setBufferedVideoRanges([])}
                   onWaiting={pauseGermanForVideo}
                   onSeeking={pauseGermanForVideo}
                   onPlaying={resumeGermanWithVideo}
                   onSeeked={resumeGermanWithVideo}
-                  onError={() => setVideoLoading(false)}
+                  onError={() => {
+                    setVideoLoading(false);
+                    setBufferedVideoRanges([]);
+                  }}
                   className='h-full w-full rounded-md object-contain'
                 />
                 {videoLoading && (
@@ -3312,7 +3389,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   ref={engOverviewCanvas}
                   width={canvasW}
                   height={OVERVIEW_WAVEFORM_HEIGHT}
-                  onPointerDown={(event) => onOverviewPointerDown(event, 'eng')}
+                  onPointerDown={onOverviewPointerDown}
                   onPointerMove={onOverviewPointerMove}
                   onPointerUp={onOverviewPointerEnd}
                   onPointerCancel={onOverviewPointerEnd}
@@ -3402,7 +3479,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   ref={gerOverviewCanvas}
                   width={canvasW}
                   height={OVERVIEW_WAVEFORM_HEIGHT}
-                  onPointerDown={(event) => onOverviewPointerDown(event, 'ger')}
+                  onPointerDown={onOverviewPointerDown}
                   onPointerMove={onOverviewPointerMove}
                   onPointerUp={onOverviewPointerEnd}
                   onPointerCancel={onOverviewPointerEnd}
