@@ -354,6 +354,10 @@ export const api = {
     ),
   audioClipUrl: (path: string, stream: number, start: number, dur: number, lead = 0, rate = 1) =>
     `/api/media/audioclip?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}&lead=${lead}&rate=${rate}`,
+  audioClipCache: (path: string, stream: number, segment: number, delayMs = 0, rate = 1) =>
+    request<{ ranges: Array<{ start: number; end: number }> }>(
+      `/api/media/audioclip/cache?path=${encodeURIComponent(path)}&stream=${stream}&segment=${segment}&delay_ms=${delayMs}&rate=${rate}`,
+    ),
   videoClipUrl: (path: string, start: number, dur: number, height = 480, audio?: number | null) =>
     `/api/media/videoclip?path=${encodeURIComponent(path)}&start=${start}&dur=${dur}&height=${height}${audio == null ? '' : `&audio=${audio}`}`,
   videoClipCache: (path: string, segment: number, height = 480, audio?: number | null) =>

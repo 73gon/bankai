@@ -215,6 +215,22 @@ def _video_clip_cache_key(
     )
 
 
+def _audio_clip_cache_key(
+    path: Path,
+    *,
+    mtime_ns: int,
+    stream: int,
+    start: float,
+    dur: float,
+    lead: float,
+    rate: float,
+) -> str:
+    return (
+        f"{path}|{mtime_ns}|aud3|{stream}|{round(start, 3)}|{round(dur, 3)}"
+        f"|{round(lead, 3)}|{round(rate, 6)}"
+    )
+
+
 def _norm_title(s: str) -> str:
     """Loosely normalise a title/filename so a queue job and its finished
     library file collapse to the same key (one row per movie)."""
@@ -1763,12 +1779,71 @@ def create_app() -> Any:
                     check=False,
                 )
 
-        key = (
-            f"{p}|{st.st_mtime_ns}|aud3|{stream}|{round(start, 3)}|{round(dur, 3)}"
-            f"|{round(lead, 3)}|{round(rate, 6)}"
+        key = _audio_clip_cache_key(
+            p,
+            mtime_ns=st.st_mtime_ns,
+            stream=stream,
+            start=start,
+            dur=dur,
+            lead=lead,
+            rate=rate,
         )
         clip = _cached_clip(key, "mp3", build)
         return FileResponse(clip, media_type="audio/mpeg")
+
+    @app.get("/api/media/audioclip/cache")
+    def media_audioclip_cache(
+        path: str = Query(...),
+        stream: int = Query(..., ge=0),
+        segment: float = Query(30.0, ge=1.0, le=60.0),
+        delay_ms: int = Query(0),
+        rate: float = Query(1.0, ge=0.5, le=2.0),
+    ) -> dict:
+        """Return reference-time ranges whose German preview is disk-cached.
+
+        The review player aligns German preview clips to the same reusable
+        reference-time segment grid as video. This read-only inspection uses
+        that exact affine delay/rate mapping and never starts ffmpeg.
+        """
+        p = _safe_path(path)
+        info = media_mod.probe(p)
+        if info is None or info.duration is None or info.duration <= 0:
+            return {"ranges": []}
+        total_duration = float(info.duration)
+        st = p.stat()
+        delay = delay_ms / 1000.0
+        ranges: list[dict[str, float]] = []
+        segment_count = max(1, math.ceil(total_duration / segment))
+        for index in range(segment_count):
+            reference_start = index * segment
+            span = max(
+                1.0,
+                min(120.0, total_duration - reference_start, segment * 2),
+            )
+            source_start = (reference_start - delay) * rate
+            lead = (
+                min(span, -source_start / rate)
+                if source_start < 0
+                else 0.0
+            )
+            key = _audio_clip_cache_key(
+                p,
+                mtime_ns=st.st_mtime_ns,
+                stream=stream,
+                start=max(0.0, source_start),
+                dur=span,
+                lead=lead,
+                rate=rate,
+            )
+            cached = _clip_cache_path(key, "mp3")
+            if cached.exists() and cached.stat().st_size > 0:
+                ranges.append(
+                    {
+                        "start": reference_start,
+                        "end": reference_start + span,
+                    }
+                )
+        return {"ranges": ranges}
 
     @app.get("/api/media/videoclip/cache")
     def media_videoclip_cache(

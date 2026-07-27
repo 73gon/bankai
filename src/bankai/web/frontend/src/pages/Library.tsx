@@ -1749,6 +1749,25 @@ function mergeTimelineRanges(ranges: TimelineRange[]): TimelineRange[] {
   return merged;
 }
 
+function intersectTimelineRanges(
+  first: TimelineRange[],
+  second: TimelineRange[],
+): TimelineRange[] {
+  const left = mergeTimelineRanges(first);
+  const right = mergeTimelineRanges(second);
+  const intersections: TimelineRange[] = [];
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const start = Math.max(left[leftIndex].start, right[rightIndex].start);
+    const end = Math.min(left[leftIndex].end, right[rightIndex].end);
+    if (end > start) intersections.push({ start, end });
+    if (left[leftIndex].end < right[rightIndex].end) leftIndex += 1;
+    else rightIndex += 1;
+  }
+  return mergeTimelineRanges(intersections);
+}
+
 function fmtClock(s: number): string {
   if (!isFinite(s) || s < 0) s = 0;
   const m = Math.floor(s / 60);
@@ -1781,6 +1800,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [gerOverviewLoading, setGerOverviewLoading] = useState(false);
   const [cachedVideoRanges, setCachedVideoRanges] = useState<TimelineRange[]>([]);
   const [bufferedVideoRanges, setBufferedVideoRanges] = useState<TimelineRange[]>([]);
+  const [cachedGermanRanges, setCachedGermanRanges] = useState<TimelineRange[]>([]);
+  const [bufferedGermanRanges, setBufferedGermanRanges] = useState<TimelineRange[]>([]);
+  const [readinessMode, setReadinessMode] = useState<'both' | 'eng' | 'ger'>('both');
   const [loading, setLoading] = useState(true);
   const [delayMs, setDelayMs] = useState(0);
   const [savedDelay, setSavedDelay] = useState(0);
@@ -1878,6 +1900,38 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     1,
     Math.min(120, duration > 0 ? duration - videoClipStart : videoSegmentSec * 2, videoSegmentSec * 2),
   );
+  const readyCachedRanges = useMemo(
+    () =>
+      readinessMode === 'eng'
+        ? cachedVideoRanges
+        : intersectTimelineRanges(cachedVideoRanges, cachedGermanRanges),
+    [readinessMode, cachedVideoRanges, cachedGermanRanges],
+  );
+  const readyBufferedRanges = useMemo(
+    () =>
+      readinessMode === 'eng'
+        ? bufferedVideoRanges
+        : intersectTimelineRanges(bufferedVideoRanges, bufferedGermanRanges),
+    [readinessMode, bufferedVideoRanges, bufferedGermanRanges],
+  );
+  const readinessLabel =
+    readinessMode === 'eng'
+      ? 'English playback'
+      : readinessMode === 'ger'
+        ? 'German playback'
+        : 'dual-audio playback';
+
+  function germanClipForReference(referenceStart: number, span: number) {
+    const sourceStart = (referenceStart - delayMs / 1000) * stretch;
+    const lead =
+      sourceStart < 0
+        ? Math.min(span, -sourceStart / stretch)
+        : 0;
+    return {
+      sourceStart: Math.max(0, sourceStart),
+      lead,
+    };
+  }
 
   // Move both lane playheads to a fraction (0..1) of the window.
   function parkHeads(frac: number) {
@@ -2133,6 +2187,13 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     );
   }
 
+  function markGermanClipCached(start: number, len: number) {
+    if (!Number.isFinite(start) || !Number.isFinite(len) || len <= 0) return;
+    setCachedGermanRanges((current) =>
+      mergeTimelineRanges([...current, { start, end: start + len }]),
+    );
+  }
+
   function captureVideoBuffered(media: HTMLVideoElement) {
     const clipStart = Number(media.dataset.clipStart);
     if (!Number.isFinite(clipStart)) return;
@@ -2145,6 +2206,23 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     }
     if (ranges.length > 0) {
       setBufferedVideoRanges((current) =>
+        mergeTimelineRanges([...current, ...ranges]),
+      );
+    }
+  }
+
+  function captureGermanBuffered(media: HTMLAudioElement) {
+    const clipStart = Number(media.dataset.clipStart);
+    if (!Number.isFinite(clipStart)) return;
+    const ranges: TimelineRange[] = [];
+    for (let index = 0; index < media.buffered.length; index++) {
+      ranges.push({
+        start: clipStart + media.buffered.start(index),
+        end: clipStart + media.buffered.end(index),
+      });
+    }
+    if (ranges.length > 0) {
+      setBufferedGermanRanges((current) =>
         mergeTimelineRanges([...current, ...ranges]),
       );
     }
@@ -2176,6 +2254,32 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     };
   }, [path, quality, engStream, videoSegmentSec, duration]);
 
+  // German preview clips use the same reference-time grid as the video. Their
+  // keys also include the current delay and drift factor, so an alignment
+  // adjustment deliberately starts a fresh, truthful readiness map.
+  useEffect(() => {
+    let cancelled = false;
+    setCachedGermanRanges([]);
+    setBufferedGermanRanges([]);
+    if (duration > 0 && gerStream != null) {
+      void api
+        .audioClipCache(path, gerStream, videoSegmentSec, delayMs, stretch)
+        .then((result) => {
+          if (!cancelled) {
+            setCachedGermanRanges((current) =>
+              mergeTimelineRanges([...current, ...result.ranges]),
+            );
+          }
+        })
+        .catch(() => {
+          // Cache visualization is optional; preview loading still works.
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [path, gerStream, videoSegmentSec, duration, delayMs, stretch]);
+
   // Load a cache-aligned video segment with only a tiny debounce.
   useEffect(() => {
     const v = videoRef.current;
@@ -2194,30 +2298,62 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, videoClipStart, videoClipLen, quality, engStream]);
 
-  // Warm the previous/next segment in the server cache after the current one
-  // settles. Fetches are sequential to avoid starving waveform/audio work.
+  // Warm the nearby reusable video and German-audio segments after the current
+  // preview settles. Fetches remain sequential so review preparation consumes
+  // at most one ffmpeg slot and cannot starve interactive playback.
   useEffect(() => {
     const controller = new AbortController();
-    const starts = [
+    const nearbyStarts = [
       Math.max(0, videoClipStart - videoSegmentSec),
+      videoClipStart,
       videoClipStart + videoSegmentSec,
-    ].filter((start) => start !== videoClipStart && (duration <= 0 || start < duration));
+    ].filter(
+      (start, index, values) =>
+        (duration <= 0 || start < duration)
+        && values.indexOf(start) === index,
+    );
     const timer = setTimeout(async () => {
-      for (const start of starts) {
+      for (const start of nearbyStarts) {
         if (controller.signal.aborted) break;
         try {
           const span = Math.max(
             1,
             Math.min(120, duration > 0 ? duration - start : videoSegmentSec * 2, videoSegmentSec * 2),
           );
-          const response = await fetch(api.videoClipUrl(path, start, span, quality, engStream), {
-            signal: controller.signal,
-            cache: 'force-cache',
-          });
-          if (response.ok && !controller.signal.aborted) {
-            markVideoClipCached(start, span);
+          if (start !== videoClipStart) {
+            const videoResponse = await fetch(
+              api.videoClipUrl(path, start, span, quality, engStream),
+              {
+                signal: controller.signal,
+                cache: 'force-cache',
+              },
+            );
+            if (videoResponse.ok && !controller.signal.aborted) {
+              markVideoClipCached(start, span);
+            }
+            await videoResponse.body?.cancel();
           }
-          await response.body?.cancel();
+          if (gerStream != null && !controller.signal.aborted) {
+            const germanClip = germanClipForReference(start, span);
+            const audioResponse = await fetch(
+              api.audioClipUrl(
+                path,
+                gerStream,
+                germanClip.sourceStart,
+                span,
+                germanClip.lead,
+                stretch,
+              ),
+              {
+                signal: controller.signal,
+                cache: 'force-cache',
+              },
+            );
+            if (audioResponse.ok && !controller.signal.aborted) {
+              markGermanClipCached(start, span);
+            }
+            await audioResponse.body?.cancel();
+          }
         } catch {
           if (controller.signal.aborted) break;
         }
@@ -2227,7 +2363,18 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       clearTimeout(timer);
       controller.abort();
     };
-  }, [path, videoClipStart, videoSegmentSec, duration, quality, engStream]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    path,
+    videoClipStart,
+    videoSegmentSec,
+    duration,
+    quality,
+    engStream,
+    gerStream,
+    delayMs,
+    stretch,
+  ]);
 
   function fillReferenceRanges(
     ctx: CanvasRenderingContext2D,
@@ -2256,14 +2403,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       ctx,
       W,
       H,
-      cachedVideoRanges,
+      readyCachedRanges,
       'rgba(148,163,184,0.16)',
     );
     fillReferenceRanges(
       ctx,
       W,
       H,
-      bufferedVideoRanges,
+      readyBufferedRanges,
       'rgba(226,232,240,0.20)',
     );
     ctx.fillStyle = 'rgba(255,255,255,0.06)';
@@ -2355,8 +2502,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fillRect(0, 0, W, H);
-    fillMappedRanges(cachedVideoRanges, 'rgba(148,163,184,0.22)');
-    fillMappedRanges(bufferedVideoRanges, 'rgba(226,232,240,0.30)');
+    fillMappedRanges(readyCachedRanges, 'rgba(148,163,184,0.22)');
+    fillMappedRanges(readyBufferedRanges, 'rgba(226,232,240,0.30)');
     ctx.fillStyle = 'rgba(255,255,255,0.06)';
     for (let tick = 1; tick < 10; tick++) {
       ctx.fillRect(Math.round((tick / 10) * W), 0, 1, H);
@@ -2412,13 +2559,13 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   useEffect(() => {
     drawEng();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engBuf, canvasW, canvasH, windowSec, center, cachedVideoRanges, bufferedVideoRanges]);
+  }, [engBuf, canvasW, canvasH, windowSec, center, readyCachedRanges, readyBufferedRanges]);
 
   // German redraws on every delay change too — that's the smooth drag.
   useEffect(() => {
     drawGer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gerBuf, delayMs, stretch, canvasW, canvasH, windowSec, center, cachedVideoRanges, bufferedVideoRanges]);
+  }, [gerBuf, delayMs, stretch, canvasW, canvasH, windowSec, center, readyCachedRanges, readyBufferedRanges]);
 
   useEffect(() => {
     drawOverviewLane(
@@ -2436,8 +2583,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     center,
     windowSec,
     seekFrac,
-    cachedVideoRanges,
-    bufferedVideoRanges,
+    readyCachedRanges,
+    readyBufferedRanges,
   ]);
 
   useEffect(() => {
@@ -2458,8 +2605,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     seekFrac,
     delayMs,
     stretch,
-    cachedVideoRanges,
-    bufferedVideoRanges,
+    readyCachedRanges,
+    readyBufferedRanges,
   ]);
 
   function onGerDown(e: React.MouseEvent) {
@@ -2577,6 +2724,27 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     setWindowSec((w) => Math.min(600, Math.max(1, Math.round(w * factor))));
   }
 
+  function waitUntilMetadata(media: HTMLMediaElement, token: number): Promise<void> {
+    if (media.readyState >= HTMLMediaElement.HAVE_METADATA) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        media.removeEventListener('loadedmetadata', ready);
+        media.removeEventListener('error', failed);
+      };
+      const ready = () => {
+        cleanup();
+        if (token === playTokenRef.current) resolve();
+        else reject(new Error('playback superseded'));
+      };
+      const failed = () => {
+        cleanup();
+        reject(new Error('media failed to load'));
+      };
+      media.addEventListener('loadedmetadata', ready, { once: true });
+      media.addEventListener('error', failed, { once: true });
+    });
+  }
+
   function waitUntilReady(media: HTMLMediaElement, token: number): Promise<void> {
     if (media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && !media.seeking) return Promise.resolve();
     return new Promise((resolve, reject) => {
@@ -2605,6 +2773,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   async function playSection(which: 'both' | 'eng' | 'ger') {
     resumeModeRef.current = which;
+    setReadinessMode(which);
     stopAll();
     const token = ++playTokenRef.current;
     const startFrac = seekFracRef.current;
@@ -2627,19 +2796,30 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     );
     const videoStartAt = desiredRefTime - activeClipStart;
     playbackStartOffsetRef.current = videoStartAt;
-    const dur = Math.max(
-      1,
-      Math.min(activeClipLen - videoStartAt, windowSec - startOffset),
-    );
     let german: HTMLAudioElement | null = null;
     if (which !== 'eng' && gerStream != null) {
-      const sourceStart = (desiredRefTime - delayMs / 1000) * stretch;
-      const lead = sourceStart < 0 ? Math.min(dur, -sourceStart / stretch) : 0;
-      const a = new Audio(
-        api.audioClipUrl(path, gerStream, Math.max(0, sourceStart), dur, lead, stretch),
-      );
+      const germanClip = germanClipForReference(activeClipStart, activeClipLen);
+      const a = new Audio();
       a.preload = 'auto';
+      a.dataset.clipStart = String(activeClipStart);
+      a.dataset.clipLen = String(activeClipLen);
+      a.onloadedmetadata = () => {
+        markGermanClipCached(activeClipStart, activeClipLen);
+        captureGermanBuffered(a);
+      };
+      a.onloadeddata = () => captureGermanBuffered(a);
+      a.oncanplay = () => captureGermanBuffered(a);
+      a.onprogress = () => captureGermanBuffered(a);
       a.onended = () => stopAll();
+      a.src = api.audioClipUrl(
+        path,
+        gerStream,
+        germanClip.sourceStart,
+        activeClipLen,
+        germanClip.lead,
+        stretch,
+      );
+      a.load();
       gerAudio.current = a;
       german = a;
     }
@@ -2662,21 +2842,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         v.dataset.clipLen = String(activeClipLen);
         v.load();
       }
-      if (v.readyState < HTMLMediaElement.HAVE_METADATA) {
-        try {
-          await new Promise<void>((resolve, reject) => {
-            v.addEventListener('loadedmetadata', () => resolve(), { once: true });
-            v.addEventListener('error', () => reject(new Error('video failed to load')), { once: true });
-          });
-        } catch {
-          if (token === playTokenRef.current) setPlaying('none');
-          return;
-        }
-      }
       try {
+        await Promise.all([
+          waitUntilMetadata(v, token),
+          german ? waitUntilMetadata(german, token) : Promise.resolve(),
+        ]);
+        if (token !== playTokenRef.current) return;
         v.currentTime = videoStartAt;
+        if (german) german.currentTime = videoStartAt;
       } catch {
-        /* not seekable yet */
+        if (token === playTokenRef.current) setPlaying('none');
+        return;
       }
       try {
         // Both elements may buffer in parallel, but German audio is not
@@ -2698,7 +2874,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       if (vv && !vv.paused) {
         posSec = startOffset + Math.max(0, vv.currentTime - playbackStartOffsetRef.current);
       }
-      else if (gerAudio.current) posSec = startOffset + gerAudio.current.currentTime;
+      else if (gerAudio.current) {
+        posSec =
+          startOffset
+          + Math.max(0, gerAudio.current.currentTime - playbackStartOffsetRef.current);
+      }
       const frac = Math.min(1, posSec / windowSec);
       livePosRef.current = frac;
       parkHeads(frac);
@@ -2719,7 +2899,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const video = videoRef.current;
     const german = gerAudio.current;
     if (!video || !german || playing === 'none' || playing === 'eng') return;
-    german.currentTime = Math.max(0, video.currentTime - playbackStartOffsetRef.current);
+    if (Math.abs(german.currentTime - video.currentTime) > 0.04) {
+      german.currentTime = video.currentTime;
+    }
     void german.play().catch(() => {});
   }
 
@@ -3105,14 +3287,29 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   {engOverviewLoading && <Loader2 className='h-3 w-3 animate-spin' />}
                 </span>
                 <span className='flex items-center gap-3 text-white'>
-                  <span className='flex items-center gap-1'>
-                    <span className='size-2 rounded-sm bg-muted-foreground/40' />
-                    Cached
-                  </span>
-                  <span className='flex items-center gap-1'>
-                    <span className='size-2 rounded-sm bg-foreground/45' />
-                    Buffered
-                  </span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='flex cursor-help items-center gap-1'>
+                        <span className='size-2 rounded-sm bg-muted-foreground/40' />
+                        Ready on Bankai
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Every clip required for {readinessLabel} is cached on the server.
+                    </TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='flex cursor-help items-center gap-1'>
+                        <span className='size-2 rounded-sm bg-foreground/45' />
+                        Ready now
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Every stream required for {readinessLabel} is already buffered in this browser.
+                    </TooltipContent>
+                  </Tooltip>
+                  <span className='text-muted-foreground'>for {readinessLabel}</span>
                   <span className='font-mono'>{fmtClock(engOverviewDuration)}</span>
                 </span>
               </div>

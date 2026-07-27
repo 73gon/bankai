@@ -812,6 +812,51 @@ def test_audio_clip_applies_leading_silence_and_drift_rate(
     assert "adelay=2500:all=1" in audio_filter
 
 
+def test_audio_clip_cache_reports_aligned_ready_ranges_without_transcoding(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "cached-audio.mkv"
+    movie.write_bytes(b"source")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"clip")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("bankai.web.media.ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr("bankai.web.media.probe", lambda _path: SimpleNamespace(duration=120.0))
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    built = client.get(
+        "/api/media/audioclip",
+        params={
+            "path": str(movie),
+            "stream": 2,
+            "start": 29.4,
+            "dur": 60,
+            "lead": 0,
+            "rate": 1.05,
+        },
+    )
+    cached = client.get(
+        "/api/media/audioclip/cache",
+        params={
+            "path": str(movie),
+            "stream": 2,
+            "segment": 30,
+            "delay_ms": 2000,
+            "rate": 1.05,
+        },
+    )
+
+    assert built.status_code == 200
+    assert cached.status_code == 200
+    assert {"start": 30.0, "end": 90.0} in cached.json()["ranges"]
+    assert len(calls) == 1
+
+
 def test_settings_rejects_unknown_key(client: TestClient) -> None:
     r = client.post("/api/settings", json={"key": "qbittorrent.password", "value": "x"})
     assert r.status_code == 403
