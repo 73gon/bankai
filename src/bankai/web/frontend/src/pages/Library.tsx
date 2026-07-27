@@ -3048,9 +3048,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             <Skeleton className='h-24 w-full' />
           </div>
         ) : (
-          <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2'>
-            {/* Video preview grows to fill the space above the waveforms */}
-            <div className='relative flex min-h-0 flex-1 items-center justify-center'>
+          <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2'>
+            {/* Stable preview height; the studio body scrolls on short screens. */}
+            <div className='relative flex h-[clamp(12rem,38vh,34rem)] shrink-0 items-center justify-center'>
               <div
                 className='relative h-full max-h-full max-w-full overflow-hidden rounded-lg border border-border/60 bg-black p-1 shadow-inner shadow-black/40'
                 style={{ aspectRatio: info?.width && info?.height ? `${info.width} / ${info.height}` : '16 / 9' }}
