@@ -746,6 +746,38 @@ def test_video_clip_muxes_reference_audio(
     assert "-an" not in cmd
 
 
+def test_video_clip_cache_reports_ready_ranges_without_transcoding(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "cached-preview.mkv"
+    movie.write_bytes(b"source")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"clip")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("bankai.web.media.ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr("bankai.web.media.probe", lambda _path: SimpleNamespace(duration=120.0))
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    built = client.get(
+        "/api/media/videoclip",
+        params={"path": str(movie), "start": 30, "dur": 60, "height": 480, "audio": 2},
+    )
+    cached = client.get(
+        "/api/media/videoclip/cache",
+        params={"path": str(movie), "segment": 30, "height": 480, "audio": 2},
+    )
+
+    assert built.status_code == 200
+    assert cached.status_code == 200
+    assert {"start": 30.0, "end": 90.0} in cached.json()["ranges"]
+    assert len(calls) == 1
+
+
 def test_audio_clip_applies_leading_silence_and_drift_rate(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

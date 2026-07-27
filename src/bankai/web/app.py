@@ -175,16 +175,20 @@ def _clips_dir() -> Path:
     return d
 
 
+def _clip_cache_path(key: str, ext: str) -> Path:
+    import hashlib
+
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return _clips_dir() / f"{digest}.{ext}"
+
+
 def _cached_clip(key: str, ext: str, build) -> Path:
     """Return a disk-cached media clip, building it once via ``build(tmp)``.
 
     Clips (short audio/video windows for the review tool) are cached so
     replaying/scrubbing a section is instant and doesn't re-transcode.
     """
-    import hashlib
-
-    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
-    out = _clips_dir() / f"{h}.{ext}"
+    out = _clip_cache_path(key, ext)
     if out.exists() and out.stat().st_size > 0:
         return out
     tmp = out.with_name(out.name + ".tmp")
@@ -194,6 +198,21 @@ def _cached_clip(key: str, ext: str, build) -> Path:
         raise HTTPException(status_code=500, detail="clip build failed")
     tmp.replace(out)
     return out
+
+
+def _video_clip_cache_key(
+    path: Path,
+    *,
+    mtime_ns: int,
+    start: float,
+    dur: float,
+    height: int,
+    audio: int | None,
+) -> str:
+    return (
+        f"{path}|{mtime_ns}|vid3|{round(start, 2)}|{round(dur, 2)}"
+        f"|{height}|{audio}"
+    )
 
 
 def _norm_title(s: str) -> str:
@@ -1751,6 +1770,46 @@ def create_app() -> Any:
         clip = _cached_clip(key, "mp3", build)
         return FileResponse(clip, media_type="audio/mpeg")
 
+    @app.get("/api/media/videoclip/cache")
+    def media_videoclip_cache(
+        path: str = Query(...),
+        segment: float = Query(30.0, ge=1.0, le=60.0),
+        height: int = Query(480, ge=180, le=1080),
+        audio: int | None = Query(None, ge=0),
+    ) -> dict:
+        """Return the reference-time ranges already cached on disk.
+
+        This is a read-only cache inspection: it never starts ffmpeg. The
+        segment grid mirrors the review player's preview URL construction so
+        every returned range can play without waiting for a new transcode.
+        """
+        p = _safe_path(path)
+        info = media_mod.probe(p)
+        if info is None or info.duration is None or info.duration <= 0:
+            return {"ranges": []}
+        total_duration = float(info.duration)
+        st = p.stat()
+        ranges: list[dict[str, float]] = []
+        segment_count = max(1, math.ceil(total_duration / segment))
+        for index in range(segment_count):
+            start = index * segment
+            span = max(
+                1.0,
+                min(120.0, total_duration - start, segment * 2),
+            )
+            key = _video_clip_cache_key(
+                p,
+                mtime_ns=st.st_mtime_ns,
+                start=start,
+                dur=span,
+                height=height,
+                audio=audio,
+            )
+            cached = _clip_cache_path(key, "mp4")
+            if cached.exists() and cached.stat().st_size > 0:
+                ranges.append({"start": start, "end": start + span})
+        return {"ranges": ranges}
+
     @app.get("/api/media/videoclip")
     def media_videoclip(
         path: str = Query(...),
@@ -1819,7 +1878,14 @@ def create_app() -> Any:
                     check=False,
                 )
 
-        key = f"{p}|{st.st_mtime_ns}|vid3|{round(start, 2)}|{round(dur, 2)}|{height}|{audio}"
+        key = _video_clip_cache_key(
+            p,
+            mtime_ns=st.st_mtime_ns,
+            start=start,
+            dur=dur,
+            height=height,
+            audio=audio,
+        )
         clip = _cached_clip(key, "mp4", build)
         return FileResponse(clip, media_type="video/mp4")
 

@@ -203,6 +203,14 @@ async function writeClipboard(value: string): Promise<void> {
 }
 
 function SourceCell({ r }: { r: TitleRow }) {
+  const [copiedSource, setCopiedSource] = useState<string | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
   const sources = [
     {
       label: 'DE',
@@ -226,25 +234,61 @@ function SourceCell({ r }: { r: TitleRow }) {
           <TooltipTrigger asChild>
             <Button
               size='sm'
-              variant='secondary'
-              className='h-7 px-2 font-mono text-xs'
-              aria-label={`Copy ${source.name} source`}
+              variant={copiedSource === source.label ? 'default' : 'secondary'}
+              className='h-7 w-10 px-2 font-mono text-xs'
+              aria-label={
+                copiedSource === source.label
+                  ? `${source.name} source copied`
+                  : `Copy ${source.name} source`
+              }
+              aria-live='polite'
               onClick={async (event) => {
                 event.stopPropagation();
                 try {
                   await writeClipboard(source.url!);
+                  setCopiedSource(source.label);
+                  if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+                  copiedTimerRef.current = setTimeout(() => {
+                    setCopiedSource((current) =>
+                      current === source.label ? null : current,
+                    );
+                  }, 1600);
                   toast.success(`${source.name} source copied`);
                 } catch (error: any) {
                   toast.error(error.message || 'Could not copy source');
                 }
               }}
             >
-              {source.label}
+              <span className='relative grid place-items-center'>
+                <span
+                  className={cn(
+                    'transition-all duration-200',
+                    copiedSource === source.label
+                      ? 'scale-50 opacity-0'
+                      : 'scale-100 opacity-100',
+                  )}
+                >
+                  {source.label}
+                </span>
+                <Check
+                  aria-hidden='true'
+                  className={cn(
+                    'absolute transition-all duration-200',
+                    copiedSource === source.label
+                      ? 'scale-100 opacity-100'
+                      : 'scale-50 opacity-0',
+                  )}
+                />
+              </span>
             </Button>
           </TooltipTrigger>
           <TooltipContent className='max-w-md'>
             <div className='flex flex-col gap-1'>
-              <span className='font-medium'>Copy {source.name} source</span>
+              <span className='font-medium'>
+                {copiedSource === source.label
+                  ? `${source.name} source copied`
+                  : `Copy ${source.name} source`}
+              </span>
               {source.title && <span>{source.title}</span>}
               <span className='break-all font-mono text-xs'>{source.url}</span>
             </div>
@@ -1671,6 +1715,40 @@ function decodePeaks(b64: string): Uint8Array {
   return arr;
 }
 
+type WaveBuffer = {
+  peaks: Uint8Array;
+  start: number;
+  dur: number;
+};
+
+type TimelineRange = {
+  start: number;
+  end: number;
+};
+
+const OVERVIEW_WAVEFORM_HEIGHT = 54;
+
+function mergeTimelineRanges(ranges: TimelineRange[]): TimelineRange[] {
+  const sorted = ranges
+    .filter(
+      (range) =>
+        Number.isFinite(range.start)
+        && Number.isFinite(range.end)
+        && range.end > range.start,
+    )
+    .sort((a, b) => a.start - b.start);
+  const merged: TimelineRange[] = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end + 0.15) {
+      last.end = Math.max(last.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
 function fmtClock(s: number): string {
   if (!isFinite(s) || s < 0) s = 0;
   const m = Math.floor(s / 60);
@@ -1695,8 +1773,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // Both lanes are fetched as WIDE track-time buffers (3× the view) so panning
   // and zooming redraw instantly from memory (real-time), and each lane is
   // robustly scaled to its visible loudness so quiet dialogue stays readable.
-  const [engBuf, setEngBuf] = useState<{ peaks: Uint8Array; start: number; dur: number } | null>(null);
-  const [gerBuf, setGerBuf] = useState<{ peaks: Uint8Array; start: number; dur: number } | null>(null);
+  const [engBuf, setEngBuf] = useState<WaveBuffer | null>(null);
+  const [gerBuf, setGerBuf] = useState<WaveBuffer | null>(null);
+  const [engOverviewBuf, setEngOverviewBuf] = useState<WaveBuffer | null>(null);
+  const [gerOverviewBuf, setGerOverviewBuf] = useState<WaveBuffer | null>(null);
+  const [engOverviewLoading, setEngOverviewLoading] = useState(false);
+  const [gerOverviewLoading, setGerOverviewLoading] = useState(false);
+  const [cachedVideoRanges, setCachedVideoRanges] = useState<TimelineRange[]>([]);
+  const [bufferedVideoRanges, setBufferedVideoRanges] = useState<TimelineRange[]>([]);
   const [loading, setLoading] = useState(true);
   const [delayMs, setDelayMs] = useState(0);
   const [savedDelay, setSavedDelay] = useState(0);
@@ -1756,11 +1840,18 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [replaceFilters, setReplaceFilters] = useState<TorrentFilters>(EMPTY_TORRENT_FILTERS);
 
   const wrapRef = useRef<HTMLDivElement>(null);
+  const engOverviewCanvas = useRef<HTMLCanvasElement>(null);
   const engCanvas = useRef<HTMLCanvasElement>(null);
   const gerCanvas = useRef<HTMLCanvasElement>(null);
+  const gerOverviewCanvas = useRef<HTMLCanvasElement>(null);
   const gerAudio = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const dragRef = useRef<{ x: number; delay: number } | null>(null);
+  const overviewDragRef = useRef<{
+    lane: 'eng' | 'ger';
+    pointerId: number;
+    grabOffset: number;
+  } | null>(null);
   const engHeadRef = useRef<HTMLDivElement>(null);
   const gerHeadRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -1772,6 +1863,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const playbackStartOffsetRef = useRef(0);
 
   const duration = info?.duration ?? 0;
+  const engTrack = info?.audio_tracks.find((t) => t.index === engStream) ?? null;
+  const gerTrack = info?.audio_tracks.find((t) => t.index === gerStream) ?? null;
+  const engOverviewDuration = engTrack?.duration ?? duration;
+  const gerOverviewDuration = gerTrack?.duration ?? duration;
   const viewStart = Math.max(0, center - windowSec / 2);
   const pxPerSec = canvasW / windowSec;
   // Reusable preview segments make nearby seeks hit the same cached file.
@@ -1945,6 +2040,142 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging, delayMs, stretch]);
 
+  // Fetch compact full-track overviews in backend-safe 30-minute chunks.
+  // Chunks are requested sequentially so this background work consumes only
+  // one transcoder slot and cannot crowd out the detailed lanes or preview.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function fetchChunk(
+      stream: number,
+      start: number,
+      dur: number,
+      bins: number,
+    ) {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          return await api.waveform(path, stream, start, dur, bins);
+        } catch (error) {
+          lastError = error;
+          if (cancelled) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+        }
+      }
+      throw lastError;
+    }
+
+    async function fetchOverview(
+      stream: number,
+      totalDuration: number,
+    ): Promise<WaveBuffer> {
+      const targetBins = 2400;
+      const pieces: Uint8Array[] = [];
+      let totalBins = 0;
+      for (let start = 0; start < totalDuration && !cancelled; start += 1800) {
+        const chunkDur = Math.min(1800, totalDuration - start);
+        const chunkBins = Math.max(
+          50,
+          Math.round(targetBins * (chunkDur / totalDuration)),
+        );
+        const response = await fetchChunk(stream, start, chunkDur, chunkBins);
+        const peaks = decodePeaks(response.peaks);
+        pieces.push(peaks);
+        totalBins += peaks.length;
+      }
+      const peaks = new Uint8Array(totalBins);
+      let offset = 0;
+      for (const piece of pieces) {
+        peaks.set(piece, offset);
+        offset += piece.length;
+      }
+      return { peaks, start: 0, dur: totalDuration };
+    }
+
+    setEngOverviewBuf(null);
+    setGerOverviewBuf(null);
+    setEngOverviewLoading(engStream != null && engOverviewDuration > 0);
+    setGerOverviewLoading(gerStream != null && gerOverviewDuration > 0);
+    timer = setTimeout(async () => {
+      if (engStream != null && engOverviewDuration > 0) {
+        try {
+          const overview = await fetchOverview(engStream, engOverviewDuration);
+          if (!cancelled) setEngOverviewBuf(overview);
+        } catch {
+          // The detailed lanes remain usable if a full overview cannot decode.
+        } finally {
+          if (!cancelled) setEngOverviewLoading(false);
+        }
+      }
+      if (gerStream != null && gerOverviewDuration > 0 && !cancelled) {
+        try {
+          const overview = await fetchOverview(gerStream, gerOverviewDuration);
+          if (!cancelled) setGerOverviewBuf(overview);
+        } catch {
+          // The detailed lanes remain usable if a full overview cannot decode.
+        } finally {
+          if (!cancelled) setGerOverviewLoading(false);
+        }
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [path, engStream, gerStream, engOverviewDuration, gerOverviewDuration]);
+
+  function markVideoClipCached(start: number, len: number) {
+    if (!Number.isFinite(start) || !Number.isFinite(len) || len <= 0) return;
+    setCachedVideoRanges((current) =>
+      mergeTimelineRanges([...current, { start, end: start + len }]),
+    );
+  }
+
+  function captureVideoBuffered(media: HTMLVideoElement) {
+    const clipStart = Number(media.dataset.clipStart);
+    if (!Number.isFinite(clipStart)) return;
+    const ranges: TimelineRange[] = [];
+    for (let index = 0; index < media.buffered.length; index++) {
+      ranges.push({
+        start: clipStart + media.buffered.start(index),
+        end: clipStart + media.buffered.end(index),
+      });
+    }
+    if (ranges.length > 0) {
+      setBufferedVideoRanges((current) =>
+        mergeTimelineRanges([...current, ...ranges]),
+      );
+    }
+  }
+
+  // Cached previews depend on the segment grid, quality, and embedded English
+  // track. Restore matching disk-cache ranges when review opens or the cache
+  // key changes; new prefetches are merged into this map in real time.
+  useEffect(() => {
+    let cancelled = false;
+    setCachedVideoRanges([]);
+    setBufferedVideoRanges([]);
+    if (duration > 0) {
+      void api
+        .videoClipCache(path, videoSegmentSec, quality, engStream)
+        .then((result) => {
+          if (!cancelled) {
+            setCachedVideoRanges((current) =>
+              mergeTimelineRanges([...current, ...result.ranges]),
+            );
+          }
+        })
+        .catch(() => {
+          // Cache visualization is optional; preview loading still works.
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [path, quality, engStream, videoSegmentSec, duration]);
+
   // Load a cache-aligned video segment with only a tiny debounce.
   useEffect(() => {
     const v = videoRef.current;
@@ -1956,6 +2187,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       // because two independently fetched elements started at different times.
       v.src = api.videoClipUrl(path, videoClipStart, videoClipLen, quality, engStream);
       v.dataset.clipStart = String(videoClipStart);
+      v.dataset.clipLen = String(videoClipLen);
       v.load();
     }, 75);
     return () => clearTimeout(t);
@@ -1982,6 +2214,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             signal: controller.signal,
             cache: 'force-cache',
           });
+          if (response.ok && !controller.signal.aborted) {
+            markVideoClipCached(start, span);
+          }
           await response.body?.cancel();
         } catch {
           if (controller.signal.aborted) break;
@@ -1994,8 +2229,43 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     };
   }, [path, videoClipStart, videoSegmentSec, duration, quality, engStream]);
 
+  function fillReferenceRanges(
+    ctx: CanvasRenderingContext2D,
+    W: number,
+    H: number,
+    ranges: TimelineRange[],
+    color: string,
+  ) {
+    ctx.fillStyle = color;
+    for (const range of ranges) {
+      const start = Math.max(viewStart, range.start);
+      const end = Math.min(viewStart + windowSec, range.end);
+      if (end <= start) continue;
+      ctx.fillRect(
+        ((start - viewStart) / windowSec) * W,
+        0,
+        Math.max(1, ((end - start) / windowSec) * W),
+        H,
+      );
+    }
+  }
+
   function drawGrid(ctx: CanvasRenderingContext2D, W: number, H: number) {
     ctx.clearRect(0, 0, W, H);
+    fillReferenceRanges(
+      ctx,
+      W,
+      H,
+      cachedVideoRanges,
+      'rgba(148,163,184,0.16)',
+    );
+    fillReferenceRanges(
+      ctx,
+      W,
+      H,
+      bufferedVideoRanges,
+      'rgba(226,232,240,0.20)',
+    );
     ctx.fillStyle = 'rgba(255,255,255,0.06)';
     for (let s = Math.ceil(viewStart); s < viewStart + windowSec; s++) {
       ctx.fillRect((s - viewStart) * pxPerSec, 0, 1, H);
@@ -2016,7 +2286,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // interpolation avoids throwing away sub-pixel transitions.
   function drawLane(
     canvas: HTMLCanvasElement | null,
-    buf: { peaks: Uint8Array; start: number; dur: number } | null,
+    buf: WaveBuffer | null,
     delaySec: number,
     color: string,
     stretch = 1,
@@ -2052,6 +2322,85 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     finishLane(ctx, W, H);
   }
 
+  function drawOverviewLane(
+    canvas: HTMLCanvasElement | null,
+    buf: WaveBuffer | null,
+    totalDuration: number,
+    color: string,
+    lane: 'eng' | 'ger',
+  ) {
+    if (!canvas || totalDuration <= 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    const mapReferenceTime = (referenceTime: number) =>
+      lane === 'ger'
+        ? (referenceTime - delayMs / 1000) * stretch
+        : referenceTime;
+    const xForTrackTime = (trackTime: number) =>
+      (Math.min(totalDuration, Math.max(0, trackTime)) / totalDuration) * W;
+    const fillMappedRanges = (ranges: TimelineRange[], fill: string) => {
+      ctx.fillStyle = fill;
+      for (const range of ranges) {
+        const mappedStart = mapReferenceTime(range.start);
+        const mappedEnd = mapReferenceTime(range.end);
+        if (mappedEnd <= 0 || mappedStart >= totalDuration) continue;
+        const left = xForTrackTime(mappedStart);
+        const right = xForTrackTime(mappedEnd);
+        ctx.fillRect(left, 0, Math.max(1, right - left), H);
+      }
+    };
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(0, 0, W, H);
+    fillMappedRanges(cachedVideoRanges, 'rgba(148,163,184,0.22)');
+    fillMappedRanges(bufferedVideoRanges, 'rgba(226,232,240,0.30)');
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    for (let tick = 1; tick < 10; tick++) {
+      ctx.fillRect(Math.round((tick / 10) * W), 0, 1, H);
+    }
+
+    if (buf && buf.peaks.length > 0) {
+      const count = buf.peaks.length;
+      ctx.fillStyle = color;
+      for (let x = 0; x < W; x++) {
+        const from = Math.min(count - 1, Math.floor((x / W) * count));
+        const to = Math.min(count, Math.max(from + 1, Math.ceil(((x + 1) / W) * count)));
+        let peak = 0;
+        for (let index = from; index < to; index++) {
+          peak = Math.max(peak, buf.peaks[index]);
+        }
+        const height = Math.min(1, peak / 127) * (H / 2 - 2);
+        ctx.fillRect(x, H / 2 - height, 1, height * 2);
+      }
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.fillRect(0, H / 2, W, 1);
+
+    const viewportStart = mapReferenceTime(viewStart);
+    const viewportEnd = mapReferenceTime(viewStart + windowSec);
+    const left = xForTrackTime(viewportStart);
+    const right = xForTrackTime(viewportEnd);
+    ctx.fillStyle = lane === 'ger'
+      ? 'rgba(244,114,182,0.10)'
+      : 'rgba(56,189,248,0.10)';
+    ctx.fillRect(left, 0, Math.max(2, right - left), H);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(left + 1, 1, Math.max(1, right - left - 2), H - 2);
+    ctx.fillStyle = color;
+    ctx.fillRect(left, 0, 3, H);
+    ctx.fillRect(Math.max(left, right - 3), 0, 3, H);
+
+    const parkedReferenceTime = viewStart + seekFrac * windowSec;
+    const parkedX = xForTrackTime(mapReferenceTime(parkedReferenceTime));
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.fillRect(parkedX, 0, 1, H);
+  }
+
   function drawEng() {
     drawLane(engCanvas.current, engBuf, 0, '#38bdf8');
   }
@@ -2063,13 +2412,55 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   useEffect(() => {
     drawEng();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engBuf, canvasW, canvasH, windowSec, center]);
+  }, [engBuf, canvasW, canvasH, windowSec, center, cachedVideoRanges, bufferedVideoRanges]);
 
   // German redraws on every delay change too — that's the smooth drag.
   useEffect(() => {
     drawGer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gerBuf, delayMs, stretch, canvasW, canvasH, windowSec, center]);
+  }, [gerBuf, delayMs, stretch, canvasW, canvasH, windowSec, center, cachedVideoRanges, bufferedVideoRanges]);
+
+  useEffect(() => {
+    drawOverviewLane(
+      engOverviewCanvas.current,
+      engOverviewBuf,
+      engOverviewDuration,
+      '#38bdf8',
+      'eng',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    engOverviewBuf,
+    engOverviewDuration,
+    canvasW,
+    center,
+    windowSec,
+    seekFrac,
+    cachedVideoRanges,
+    bufferedVideoRanges,
+  ]);
+
+  useEffect(() => {
+    drawOverviewLane(
+      gerOverviewCanvas.current,
+      gerOverviewBuf,
+      gerOverviewDuration,
+      '#f472b6',
+      'ger',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    gerOverviewBuf,
+    gerOverviewDuration,
+    canvasW,
+    center,
+    windowSec,
+    seekFrac,
+    delayMs,
+    stretch,
+    cachedVideoRanges,
+    bufferedVideoRanges,
+  ]);
 
   function onGerDown(e: React.MouseEvent) {
     const startX = e.clientX;
@@ -2098,6 +2489,87 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  }
+
+  function overviewReferenceTime(
+    clientX: number,
+    lane: 'eng' | 'ger',
+    canvas: HTMLCanvasElement,
+  ) {
+    const rect = canvas.getBoundingClientRect();
+    const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    if (lane === 'ger') {
+      const sourceTime = fraction * gerOverviewDuration;
+      return sourceTime / stretch + delayMs / 1000;
+    }
+    return fraction * engOverviewDuration;
+  }
+
+  function moveOverviewViewport(
+    clientX: number,
+    lane: 'eng' | 'ger',
+    canvas: HTMLCanvasElement,
+    grabOffset: number,
+  ) {
+    if (duration <= 0) return;
+    const requestedCenter =
+      overviewReferenceTime(clientX, lane, canvas) - grabOffset;
+    const halfWindow = Math.min(windowSec / 2, duration / 2);
+    const maxCenter = Math.max(halfWindow, duration - halfWindow);
+    setCenter(Math.max(halfWindow, Math.min(maxCenter, requestedCenter)));
+  }
+
+  function onOverviewPointerDown(
+    event: React.PointerEvent<HTMLCanvasElement>,
+    lane: 'eng' | 'ger',
+  ) {
+    event.preventDefault();
+    const pointerTime = overviewReferenceTime(
+      event.clientX,
+      lane,
+      event.currentTarget,
+    );
+    const viewportCenter = viewStart + windowSec / 2;
+    const withinViewport =
+      pointerTime >= viewStart && pointerTime <= viewStart + windowSec;
+    const grabOffset = withinViewport ? pointerTime - viewportCenter : 0;
+    overviewDragRef.current = {
+      lane,
+      pointerId: event.pointerId,
+      grabOffset,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resetSeekToStart();
+    moveOverviewViewport(
+      event.clientX,
+      lane,
+      event.currentTarget,
+      grabOffset,
+    );
+  }
+
+  function onOverviewPointerMove(
+    event: React.PointerEvent<HTMLCanvasElement>,
+  ) {
+    const drag = overviewDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    moveOverviewViewport(
+      event.clientX,
+      drag.lane,
+      event.currentTarget,
+      drag.grabOffset,
+    );
+  }
+
+  function onOverviewPointerEnd(
+    event: React.PointerEvent<HTMLCanvasElement>,
+  ) {
+    const drag = overviewDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    overviewDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   }
 
   function zoom(factor: number) {
@@ -2187,6 +2659,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         setVideoLoading(true);
         v.src = api.videoClipUrl(path, activeClipStart, activeClipLen, quality, engStream);
         v.dataset.clipStart = String(activeClipStart);
+        v.dataset.clipLen = String(activeClipLen);
         v.load();
       }
       if (v.readyState < HTMLMediaElement.HAVE_METADATA) {
@@ -2365,8 +2838,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   const drift = delayMs - savedDelay;
 
-  const engTrack = info?.audio_tracks.find((t) => t.index === engStream) ?? null;
-  const gerTrack = info?.audio_tracks.find((t) => t.index === gerStream) ?? null;
   // Length drift between the reference (HQ) and German audio hints at a
   // frame-rate/speed mismatch (e.g. 25fps PAL vs 23.976) even before aligning.
   const lenDrift = engTrack?.duration != null && gerTrack?.duration != null ? engTrack.duration - gerTrack.duration : null;
@@ -2593,11 +3064,24 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     const media = event.currentTarget;
                     const loadedStart = Number(media.dataset.clipStart);
                     if (Number.isFinite(loadedStart)) {
+                      const loadedLen = Number(media.dataset.clipLen);
+                      markVideoClipCached(
+                        loadedStart,
+                        Number.isFinite(loadedLen) ? loadedLen : media.duration,
+                      );
                       media.currentTime = Math.max(0, viewStart - loadedStart);
                     }
+                    captureVideoBuffered(media);
                   }}
-                  onLoadedData={() => setVideoLoading(false)}
-                  onCanPlay={() => setVideoLoading(false)}
+                  onLoadedData={(event) => {
+                    setVideoLoading(false);
+                    captureVideoBuffered(event.currentTarget);
+                  }}
+                  onCanPlay={(event) => {
+                    setVideoLoading(false);
+                    captureVideoBuffered(event.currentTarget);
+                  }}
+                  onProgress={(event) => captureVideoBuffered(event.currentTarget)}
                   onWaiting={pauseGermanForVideo}
                   onSeeking={pauseGermanForVideo}
                   onPlaying={resumeGermanWithVideo}
@@ -2614,6 +3098,42 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             </div>
 
             <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
+              <div className='flex items-center justify-between px-1 text-xs'>
+                <span className='flex items-center gap-2 text-sky-400'>
+                  <Languages className='h-3.5 w-3.5' />
+                  Full English · drag the marked window to navigate
+                  {engOverviewLoading && <Loader2 className='h-3 w-3 animate-spin' />}
+                </span>
+                <span className='flex items-center gap-3 text-white'>
+                  <span className='flex items-center gap-1'>
+                    <span className='size-2 rounded-sm bg-muted-foreground/40' />
+                    Cached
+                  </span>
+                  <span className='flex items-center gap-1'>
+                    <span className='size-2 rounded-sm bg-foreground/45' />
+                    Buffered
+                  </span>
+                  <span className='font-mono'>{fmtClock(engOverviewDuration)}</span>
+                </span>
+              </div>
+              <div className='relative'>
+                <canvas
+                  ref={engOverviewCanvas}
+                  width={canvasW}
+                  height={OVERVIEW_WAVEFORM_HEIGHT}
+                  onPointerDown={(event) => onOverviewPointerDown(event, 'eng')}
+                  onPointerMove={onOverviewPointerMove}
+                  onPointerUp={onOverviewPointerEnd}
+                  onPointerCancel={onOverviewPointerEnd}
+                  className='w-full touch-none cursor-grab rounded-md active:cursor-grabbing'
+                  aria-label='Full English audio overview with draggable visible window'
+                />
+                {engOverviewLoading && (
+                  <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
+                    <Loader2 className='h-4 w-4 animate-spin text-sky-400' />
+                  </div>
+                )}
+              </div>
               <div className='flex items-center justify-between px-1 text-xs'>
                 <span className='flex items-center gap-2 text-sky-400'>
                   <Languages className='h-3.5 w-3.5' /> English (reference · click to seek · scroll to move)
@@ -2752,6 +3272,32 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 {gerLoading && (
                   <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
                     <Loader2 className='h-5 w-5 animate-spin text-pink-400' />
+                  </div>
+                )}
+              </div>
+              <div className='flex items-center justify-between px-1 text-xs'>
+                <span className='flex items-center gap-2 text-pink-400'>
+                  <AudioLines className='h-3.5 w-3.5' />
+                  Full German · drag the marked window to navigate
+                  {gerOverviewLoading && <Loader2 className='h-3 w-3 animate-spin' />}
+                </span>
+                <span className='font-mono text-white'>{fmtClock(gerOverviewDuration)}</span>
+              </div>
+              <div className='relative'>
+                <canvas
+                  ref={gerOverviewCanvas}
+                  width={canvasW}
+                  height={OVERVIEW_WAVEFORM_HEIGHT}
+                  onPointerDown={(event) => onOverviewPointerDown(event, 'ger')}
+                  onPointerMove={onOverviewPointerMove}
+                  onPointerUp={onOverviewPointerEnd}
+                  onPointerCancel={onOverviewPointerEnd}
+                  className='w-full touch-none cursor-grab rounded-md active:cursor-grabbing'
+                  aria-label='Full German audio overview with draggable visible window'
+                />
+                {gerOverviewLoading && (
+                  <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
+                    <Loader2 className='h-4 w-4 animate-spin text-pink-400' />
                   </div>
                 )}
               </div>
