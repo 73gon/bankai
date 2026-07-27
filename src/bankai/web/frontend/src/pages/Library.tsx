@@ -1878,7 +1878,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const gerHeadRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
   const livePosRef = useRef(0);
-  const wasPlayingRef = useRef(false);
   const resumeModeRef = useRef<'both' | 'eng' | 'ger'>('both');
   const seekFracRef = useRef(0);
   const playTokenRef = useRef(0);
@@ -3280,13 +3279,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             </div>
 
             <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
-              <div className='flex items-center justify-between px-1 text-xs'>
-                <span className='flex items-center gap-2 text-sky-400'>
-                  <Languages className='h-3.5 w-3.5' />
-                  Full English · drag the marked window to navigate
-                  {engOverviewLoading && <Loader2 className='h-3 w-3 animate-spin' />}
-                </span>
-                <span className='flex items-center gap-3 text-white'>
+              <div className='flex items-center justify-end px-1 text-xs'>
+                <span className='flex flex-wrap items-center justify-end gap-3 text-white'>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className='flex cursor-help items-center gap-1'>
@@ -3383,75 +3377,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   <span key={i}>{b}</span>
                 ))}
               </div>
-              {/* Drift correction (time-stretch) — auto-suggested, manual override */}
-              <div className='flex flex-wrap items-center gap-2 rounded-md border border-border/50 bg-secondary/20 px-2.5 py-1.5 text-xs'>
-                <label className='flex items-center gap-2 text-white'>
-                  Drift factor
-                  <Input
-                    value={stretchInput}
-                    onChange={(event) => setStretchInput(event.target.value)}
-                    onBlur={() => applyStretchInput()}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') applyStretchInput();
-                    }}
-                    inputMode='decimal'
-                    className='h-7 w-28 font-mono'
-                    aria-label='German audio drift factor'
-                  />
-                </label>
-                <Button size='sm' variant='secondary' className='h-7' onClick={() => applyStretchInput()}>
-                  Apply
-                </Button>
-                <span className='font-mono text-white'>{stretch >= 1 ? '+' : ''}{stretchPct}%</span>
-                {suggestedStretch != null && Math.abs(suggestedStretch - 1) > 0.0005 && (
-                  <Button
-                    size='sm'
-                    variant='secondary'
-                    className='h-7'
-                    onClick={() => {
-                      const next = +suggestedStretch.toFixed(6);
-                      setStretch(next);
-                      setStretchInput(next.toFixed(6));
-                    }}
-                  >
-                    Suggested ×{suggestedStretch.toFixed(4)}
-                  </Button>
-                )}
-                {stretch !== 1 && (
-                  <Button
-                    size='sm'
-                    variant='ghost'
-                    className='h-7'
-                    onClick={() => {
-                      setStretch(1);
-                      setStretchInput('1.000000');
-                    }}
-                  >
-                    Reset
-                  </Button>
-                )}
-                {driftSuspected && (
-                  <span className='text-warning'>
-                    {measuredDriftReliable && measuredDrift != null && sourceFps && referenceFps
-                      ? `Measured ×${measuredDrift.toFixed(4)}`
-                      : fpsStretch != null && sourceFps && referenceFps
-                        ? `FPS ×${fpsStretch.toFixed(4)}`
-                        : 'Track lengths differ'}
-                  </span>
-                )}
-                {!measuredDriftReliable && measuredDrift != null && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className='text-muted-foreground'>
-                        Visual ×{measuredDrift.toFixed(4)} ignored
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      Visual matching confidence was too low to recommend this drift factor.
-                    </TooltipContent>
-                  </Tooltip>
-                )}
-              </div>
               <div className='relative'>
                 <canvas
                   ref={gerCanvas}
@@ -3471,14 +3396,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     <Loader2 className='h-5 w-5 animate-spin text-pink-400' />
                   </div>
                 )}
-              </div>
-              <div className='flex items-center justify-between px-1 text-xs'>
-                <span className='flex items-center gap-2 text-pink-400'>
-                  <AudioLines className='h-3.5 w-3.5' />
-                  Full German · drag the marked window to navigate
-                  {gerOverviewLoading && <Loader2 className='h-3 w-3 animate-spin' />}
-                </span>
-                <span className='font-mono text-white'>{fmtClock(gerOverviewDuration)}</span>
               </div>
               <div className='relative'>
                 <canvas
@@ -3503,38 +3420,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         )}
 
         {!loading && (
-          <div className='shrink-0 space-y-3 border-t border-border bg-card px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.6)]'>
-            {/* Timeline / pan */}
-            <div className='flex items-center gap-3'>
-              <span className='w-12 shrink-0 text-right font-mono text-xs text-white'>{fmtClock(viewStart)}</span>
-              <Slider
-                value={[Math.min(center, duration || center)]}
-                min={0}
-                max={duration || 1}
-                step={0.5}
-                onValueChange={(v) => {
-                  resetSeekToStart();
-                  setCenter(v[0]);
-                }}
-                onPointerDown={() => {
-                  wasPlayingRef.current = playing !== 'none';
-                  if (playing !== 'none') {
-                    resumeModeRef.current = playing;
-                    haltAudioVideo();
-                    setPlaying('none');
-                  }
-                }}
-                onValueCommit={() => {
-                  if (wasPlayingRef.current) {
-                    wasPlayingRef.current = false;
-                    playSection(resumeModeRef.current);
-                  }
-                }}
-                className='flex-1'
-              />
-              <span className='w-12 shrink-0 font-mono text-xs text-white'>{fmtClock(duration)}</span>
-            </div>
-
+          <div className='flex shrink-0 flex-col gap-3 border-t border-border bg-card px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.6)]'>
             <div className='flex flex-wrap items-center gap-3'>
               {/* Zoom */}
               <div className='flex items-center gap-1'>
@@ -3563,6 +3449,76 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   <option value={720}>720p</option>
                   <option value={1080}>1080p</option>
                 </select>
+              </div>
+
+              {/* Drift correction (time-stretch) */}
+              <div className='flex flex-wrap items-center gap-2'>
+                <label className='flex items-center gap-2 text-xs text-white'>
+                  Drift
+                  <Input
+                    value={stretchInput}
+                    onChange={(event) => setStretchInput(event.target.value)}
+                    onBlur={() => applyStretchInput()}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') applyStretchInput();
+                    }}
+                    inputMode='decimal'
+                    className='h-8 w-28 font-mono'
+                    aria-label='German audio drift factor'
+                  />
+                </label>
+                <Button size='sm' variant='secondary' onClick={() => applyStretchInput()}>
+                  Apply
+                </Button>
+                <span className='font-mono text-xs text-white'>
+                  {stretch >= 1 ? '+' : ''}{stretchPct}%
+                </span>
+                {suggestedStretch != null && Math.abs(suggestedStretch - 1) > 0.0005 && (
+                  <Button
+                    size='sm'
+                    variant='secondary'
+                    onClick={() => {
+                      const next = +suggestedStretch.toFixed(6);
+                      setStretch(next);
+                      setStretchInput(next.toFixed(6));
+                    }}
+                  >
+                    Suggested ×{suggestedStretch.toFixed(4)}
+                  </Button>
+                )}
+                {stretch !== 1 && (
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    onClick={() => {
+                      setStretch(1);
+                      setStretchInput('1.000000');
+                    }}
+                  >
+                    Reset drift
+                  </Button>
+                )}
+                {driftSuspected && (
+                  <span className='text-xs text-warning'>
+                    {measuredDriftReliable && measuredDrift != null && sourceFps && referenceFps
+                      ? `Measured ×${measuredDrift.toFixed(4)}`
+                      : fpsStretch != null && sourceFps && referenceFps
+                        ? `FPS ×${fpsStretch.toFixed(4)}`
+                        : 'Track lengths differ'}
+                  </span>
+                )}
+                {!measuredDriftReliable && measuredDrift != null && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='cursor-help text-xs text-muted-foreground'>
+                        Visual ×{measuredDrift.toFixed(4)} ignored
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Visual matching confidence was too low to recommend this drift factor.
+                    </TooltipContent>
+                  </Tooltip>
+                )}
               </div>
 
               {/* Waveform lane height */}
