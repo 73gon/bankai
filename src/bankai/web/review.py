@@ -64,6 +64,10 @@ class ReviewState:
     source_fps: float | None = None
     reference_fps: float | None = None
     drift_ratio: float | None = None
+    # Provenance for the two inputs that produced the reviewed MKV.
+    german_source_url: str | None = None
+    torrent_source_url: str | None = None
+    torrent_source_title: str | None = None
     # Transfer is tracked per-entry (shown as a column on the library row)
     # instead of as a standalone queue job.
     transfer_status: str = "idle"  # idle | transferring | done | failed
@@ -189,6 +193,34 @@ def set_stage(path: str | Path, stage: str, *, note: str | None = None) -> Revie
     return _update(path, change)
 
 
+def reset_for_new_output(path: str | Path) -> ReviewState:
+    """Reset review/operation state after a newly produced MKV is installed."""
+
+    def change(raw: dict) -> None:
+        raw.update(
+            {
+                "stage": "review",
+                "delay_ms": 0,
+                "transferred_at": None,
+                "note": None,
+                "needs_sync_review": False,
+                "sync_confidence": None,
+                "auto_delay_ms": 0,
+                "source_fps": None,
+                "reference_fps": None,
+                "drift_ratio": None,
+                "transfer_status": "idle",
+                "transfer_percent": 0.0,
+                "repack_status": "idle",
+                "repack_percent": 0.0,
+                "repack_kind": None,
+                "updated_at": time.time(),
+            }
+        )
+
+    return _update(path, change)
+
+
 def set_delay(path: str | Path, delay_ms: int) -> ReviewState:
     def change(raw: dict) -> None:
         raw["delay_ms"] = delay_ms
@@ -239,6 +271,27 @@ def set_sync_review(
             raw["reference_fps"] = float(reference_fps)
         if drift_ratio is not None:
             raw["drift_ratio"] = float(drift_ratio)
+        raw["updated_at"] = time.time()
+
+    return _update(path, change)
+
+
+def set_sources(
+    path: str | Path,
+    *,
+    german_source_url: str | None = None,
+    torrent_source_url: str | None = None,
+    torrent_source_title: str | None = None,
+) -> ReviewState:
+    """Persist the German stream and HQ torrent provenance for one output."""
+
+    def change(raw: dict) -> None:
+        if german_source_url is not None:
+            raw["german_source_url"] = german_source_url
+        if torrent_source_url is not None:
+            raw["torrent_source_url"] = torrent_source_url
+        if torrent_source_title is not None:
+            raw["torrent_source_title"] = torrent_source_title
         raw["updated_at"] = time.time()
 
     return _update(path, change)

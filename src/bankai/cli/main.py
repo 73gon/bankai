@@ -1935,6 +1935,11 @@ def review_replace_torrent(
         )
         if not remuxed.ok:
             raise RuntimeError(remuxed.message)
+        review_mod.set_sources(
+            path,
+            torrent_source_url=result.get("source_url"),
+            torrent_source_title=result.get("source_title"),
+        )
         torrent_hash = result.get("torrent_hash")
         if torrent_hash:
             qbit = QBittorrentClient()

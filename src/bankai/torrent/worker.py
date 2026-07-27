@@ -199,6 +199,20 @@ class TorrentWorker(Worker):
             raise PermanentWorkerError(
                 f"selected release dropped below minimum seeders ({chosen.candidate.seeders} < {policy.min_seeders})"
             )
+        torrent_source_url = (
+            chosen.candidate.info_url
+            or chosen.candidate.magnet_uri
+            or chosen.candidate.download_url
+        )
+        background_id = os.environ.get("BANKAI_BG_JOB_ID")
+        if background_id:
+            from bankai.cli import bgjobs
+
+            bgjobs.set_provenance(
+                background_id,
+                torrent_source_url=torrent_source_url,
+                torrent_source_title=chosen.candidate.title,
+            )
 
         # ---- add to qBittorrent -----------------------------------------
         qbit_settings = get_settings().qbittorrent
@@ -252,7 +266,6 @@ class TorrentWorker(Worker):
         if torrent_hash is None:
             raise WorkerError("could not locate just-added torrent in qBittorrent")
 
-        background_id = os.environ.get("BANKAI_BG_JOB_ID")
         if background_id:
             from bankai.torrent import actions as torrent_actions
 
@@ -297,7 +310,18 @@ class TorrentWorker(Worker):
             if not save_root.exists():
                 save_root = Path(save_path_str)
 
-        result: dict[str, Any] = {"torrent_hash": torrent_hash, "name": status.name}
+        result: dict[str, Any] = {
+            "torrent_hash": torrent_hash,
+            "name": status.name,
+            "source_url": torrent_source_url,
+            "source_title": chosen.candidate.title,
+        }
+        artifact_metadata = {
+            "torrent_hash": torrent_hash,
+            "release": chosen.candidate.title,
+            "source_url": torrent_source_url,
+            "indexer": chosen.candidate.indexer,
+        }
         assert ctx.job.id is not None
         if media_kind == "episode":
             # Single episode jobs: locate the matching file in the dir.
@@ -330,7 +354,7 @@ class TorrentWorker(Worker):
                     kind="video",
                     path=picked,
                     size_bytes=picked.stat().st_size,
-                    metadata={"torrent_hash": torrent_hash, "release": chosen.candidate.title},
+                    metadata=artifact_metadata,
                 )
             )
             result["artifact_id"] = artifact.id
@@ -345,7 +369,7 @@ class TorrentWorker(Worker):
                     kind="video",
                     path=picked,
                     size_bytes=picked.stat().st_size,
-                    metadata={"torrent_hash": torrent_hash, "release": chosen.candidate.title},
+                    metadata=artifact_metadata,
                 )
             )
             result["artifact_id"] = artifact.id

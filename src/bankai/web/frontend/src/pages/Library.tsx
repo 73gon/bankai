@@ -181,6 +181,80 @@ function TruncCell({
   );
 }
 
+async function writeClipboard(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // LAN-hosted HTTP pages may not receive the secure Clipboard API.
+    }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('Clipboard access was denied');
+}
+
+function SourceCell({ r }: { r: TitleRow }) {
+  const sources = [
+    {
+      label: 'DE',
+      name: 'German stream',
+      url: r.german_source_url,
+      title: null,
+    },
+    {
+      label: 'HQ',
+      name: 'HQ torrent',
+      url: r.torrent_source_url,
+      title: r.torrent_source_title,
+    },
+  ].filter((source) => source.url);
+
+  if (sources.length === 0) return <span className='text-foreground'>—</span>;
+  return (
+    <div className='flex items-center gap-1'>
+      {sources.map((source) => (
+        <Tooltip key={source.label}>
+          <TooltipTrigger asChild>
+            <Button
+              size='sm'
+              variant='secondary'
+              className='h-7 px-2 font-mono text-xs'
+              aria-label={`Copy ${source.name} source`}
+              onClick={async (event) => {
+                event.stopPropagation();
+                try {
+                  await writeClipboard(source.url!);
+                  toast.success(`${source.name} source copied`);
+                } catch (error: any) {
+                  toast.error(error.message || 'Could not copy source');
+                }
+              }}
+            >
+              {source.label}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent className='max-w-md'>
+            <div className='flex flex-col gap-1'>
+              <span className='font-medium'>Copy {source.name} source</span>
+              {source.title && <span>{source.title}</span>}
+              <span className='break-all font-mono text-xs'>{source.url}</span>
+            </div>
+          </TooltipContent>
+        </Tooltip>
+      ))}
+    </div>
+  );
+}
+
 function TorrentCandidateTable({
   candidates,
   busy,
@@ -422,6 +496,12 @@ function rowStatus(r: TitleRow): Status {
     if (r.job_status === 'deleted' || r.stage === 'deleted') return 'deleted';
     return 'done';
   }
+  if (r.action_required) return 'waiting_action';
+  if (r.pending) return 'queued';
+  if (r.job_status === 'running') return 'downloading';
+  if (r.job_status === 'failed' || r.job_status === 'error') return 'failed';
+  if (r.job_status === 'stopped') return 'stopped';
+  if (r.job_status === 'cancelled') return 'cancelled';
   if (r.stage === 'deleted') return 'deleted';
   if (r.stage === 'repacking' || r.repack_status === 'repacking') return 'repacking';
   if (r.transfer_status === 'transferring') return 'transferring';
@@ -487,6 +567,9 @@ function statusRank(r: TitleRow): number {
     if (r.job_status === 'failed' || r.job_status === 'error') return 2;
     return 3;
   }
+  if (r.action_required || r.job_status === 'running') return 0;
+  if (r.pending) return 1;
+  if (r.job_status === 'failed' || r.job_status === 'error') return 2;
   if (r.stage === 'repacking' || r.repack_status === 'repacking') return 4;
   if (r.stage === 'review') return 4;
   if (r.stage === 'approved') return 5;
@@ -1137,11 +1220,13 @@ export default function Library() {
   function RowView({ r }: { r: TitleRow }) {
     const isLib = r.row_kind === 'library';
     const isJob = r.row_kind === 'job';
-    const canCancel = isJob && r.pending;
-    const canForce = isJob && r.pending;
-    const canStop = isJob && r.job_status === 'running';
-    const canContinue = isJob && r.job_status === 'stopped';
+    const canCancel = !!r.job_id && r.pending;
+    const canForce = !!r.job_id && r.pending;
+    const canStop = !!r.job_id && r.job_status === 'running';
+    const canContinue = !!r.job_id && r.job_status === 'stopped';
     const canDelete = isJob && ['failed', 'error', 'cancelled', 'stopped'].includes(r.job_status || '');
+    const rerunActive =
+      r.pending || ['running', 'stopped'].includes(r.job_status || '');
     const isOpen = expanded === r.id;
     const status = rowStatus(r);
     const isRepacking = r.stage === 'repacking' || r.repack_status === 'repacking';
@@ -1170,6 +1255,9 @@ export default function Library() {
           </td>
           <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-foreground'>{dateTimeLabel(r.created_at)}</td>
           <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-foreground'>{dateTimeLabel(r.updated_at)}</td>
+          <td className='px-2 py-2 align-middle'>
+            <SourceCell r={r} />
+          </td>
           <td className='px-2 py-2 align-middle text-xs text-foreground'>
             <TruncCell text={r.path} mono width='20rem' />
           </td>
@@ -1246,7 +1334,7 @@ export default function Library() {
                 size='icon'
                 variant='ghost'
                 onClick={() => redo(r)}
-                disabled={redoing.has(r.id) || isRepacking}
+                disabled={redoing.has(r.id) || isRepacking || rerunActive}
                 title='Redo — re-run the pipeline for this title'
               >
                 {redoing.has(r.id) ? <Loader2 className='h-4 w-4 animate-spin' /> : <RefreshCw className='h-4 w-4' />}
@@ -1292,7 +1380,7 @@ export default function Library() {
         </tr>
         {isOpen && (
           <tr className='border-t border-border bg-black/20'>
-            <td colSpan={10} className='px-3 py-2'>
+            <td colSpan={11} className='px-3 py-2'>
               {r.job_id ? (
                 <LogPanel text={logs[r.job_id] ?? 'Loading logs…'} />
               ) : (
@@ -1397,6 +1485,7 @@ export default function Library() {
                 <th className='px-2 py-2 text-left font-medium'>Sync</th>
                 <SortHeader col='created_at' label='Created at' className='text-left' />
                 <SortHeader col='updated_at' label='Updated at' className='text-left' />
+                <th className='px-2 py-2 text-left font-medium'>Sources</th>
                 <th className='px-2 py-2 text-left font-medium'>Path</th>
                 <th className='px-2 py-2 text-right font-medium'>Actions</th>
               </tr>

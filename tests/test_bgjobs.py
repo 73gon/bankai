@@ -146,6 +146,34 @@ def test_stopped_job_can_resume_in_same_ledger_entry(
     assert resumed.args == ["run", "Movie 2024"]
 
 
+def test_job_provenance_is_persisted_with_original_stream_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    job = bgjobs.BgJob(
+        id="source12",
+        kind="show",
+        title="Arcane S02E01",
+        args=["run", "Arcane S02E01", "--url", "https://voe.sx/german"],
+        started_at=1.0,
+    )
+    job.german_source_url = bgjobs.argument_value(job.args, "--url")
+    job.save()
+
+    assert bgjobs.set_provenance(
+        job.id,
+        torrent_source_url="https://indexer.test/torrent/1",
+        torrent_source_title="Arcane.S02E01.1080p",
+    )
+    saved = bgjobs.get_job(job.id)
+
+    assert saved is not None
+    assert saved.german_source_url == "https://voe.sx/german"
+    assert saved.torrent_source_url == "https://indexer.test/torrent/1"
+    assert saved.torrent_source_title == "Arcane.S02E01.1080p"
+
+
 def test_progress_snapshot_parses_pipeline_download_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

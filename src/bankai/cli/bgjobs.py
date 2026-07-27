@@ -67,6 +67,9 @@ class BgJob:
     finished_at: float | None = None
     exit_code: int | None = None
     final_path: str | None = None
+    german_source_url: str | None = None
+    torrent_source_url: str | None = None
+    torrent_source_title: str | None = None
 
     @property
     def dir(self) -> Path:
@@ -490,6 +493,38 @@ def get_job(job_id: str) -> BgJob | None:
     return None
 
 
+def argument_value(args: list[str], option: str) -> str | None:
+    """Return the last value supplied for a simple CLI option."""
+    value: str | None = None
+    for index, arg in enumerate(args):
+        if arg == option and index + 1 < len(args):
+            value = args[index + 1]
+        elif arg.startswith(f"{option}="):
+            value = arg.split("=", 1)[1]
+    return value
+
+
+def set_provenance(
+    job_id: str,
+    *,
+    german_source_url: str | None = None,
+    torrent_source_url: str | None = None,
+    torrent_source_title: str | None = None,
+) -> bool:
+    """Persist source provenance on a running background-job ledger."""
+    job = _load_job(job_id)
+    if job is None:
+        return False
+    if german_source_url is not None:
+        job.german_source_url = german_source_url
+    if torrent_source_url is not None:
+        job.torrent_source_url = torrent_source_url
+    if torrent_source_title is not None:
+        job.torrent_source_title = torrent_source_title
+    job.save()
+    return True
+
+
 def _launch(job: BgJob) -> BgJob:
     job.dir.mkdir(parents=True, exist_ok=True)
     job.save()
@@ -539,6 +574,7 @@ def spawn(
             title=title,
             args=args,
             started_at=created_at or time.time(),
+            german_source_url=argument_value(args, "--url"),
         )
     )
 
@@ -685,6 +721,7 @@ __all__ = [
     "BgJob",
     "ProgressPart",
     "ProgressSnapshot",
+    "argument_value",
     "clear_jobs",
     "get_job",
     "jobs_root",
@@ -692,6 +729,7 @@ __all__ = [
     "progress_snapshot",
     "render_tail",
     "resume",
+    "set_provenance",
     "spawn",
     "tail",
     "watch",

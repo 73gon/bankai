@@ -92,6 +92,26 @@ def test_pending_snapshot_exposes_priority_order(monkeypatch: pytest.MonkeyPatch
     assert rows["first"]["queue_total"] == rows["second"]["queue_total"] == 2
 
 
+def test_pending_snapshot_exposes_saved_german_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = PendingJob(
+        id="source1",
+        kind="show",
+        title="Arcane S02E01",
+        args=["run", "Arcane S02E01", "--url", "https://voe.sx/german"],
+        created_at=10,
+    )
+    monkeypatch.setattr(webjobs, "reconcile", lambda: 0)
+    monkeypatch.setattr(webjobs, "_load_pending", lambda: [item])
+    monkeypatch.setattr(webjobs.bgjobs, "list_jobs", lambda: [])
+
+    row = webjobs.snapshot()[0]
+
+    assert row["german_source_url"] == "https://voe.sx/german"
+    assert row["torrent_source_url"] is None
+
+
 def test_reorder_pending_changes_persisted_priority(monkeypatch: pytest.MonkeyPatch) -> None:
     items = [
         PendingJob(id="one", kind="movie", title="One", args=["run", "One"]),

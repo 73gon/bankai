@@ -385,6 +385,10 @@ def snapshot() -> list[dict]:
                 "action_required": bool(action and action.get("status") == "waiting"),
                 "queue_position": None,
                 "queue_total": None,
+                "german_source_url": getattr(j, "german_source_url", None)
+                or bgjobs.argument_value(j.args, "--url"),
+                "torrent_source_url": getattr(j, "torrent_source_url", None),
+                "torrent_source_title": getattr(j, "torrent_source_title", None),
             }
         )
     visible_pending = [item for item in _load_pending() if not _is_operation(item.kind, item.args)]
@@ -416,6 +420,9 @@ def snapshot() -> list[dict]:
                 "action_required": False,
                 "queue_position": queue_position,
                 "queue_total": queue_total,
+                "german_source_url": bgjobs.argument_value(item.args, "--url"),
+                "torrent_source_url": None,
+                "torrent_source_title": None,
             }
         )
     out.sort(key=lambda r: r["started_at"], reverse=True)

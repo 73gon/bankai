@@ -279,6 +279,35 @@ def test_titles_library_uses_file_creation_and_modification_times(
     assert second_row["updated_at"] > row["updated_at"]
 
 
+def test_titles_library_exposes_both_saved_sources(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "Sourced Movie (2024).mkv"
+    movie.write_bytes(b"movie")
+    from bankai.web import review as review_mod
+
+    review_mod.set_sources(
+        movie,
+        german_source_url="https://voe.sx/german",
+        torrent_source_url="https://indexer.test/details/123",
+        torrent_source_title="Sourced.Movie.2024.1080p",
+    )
+    monkeypatch.setattr("bankai.web.jobs.snapshot", lambda: [])
+    monkeypatch.setattr("bankai.web.jobs.transfer_states", lambda: {})
+    monkeypatch.setattr("bankai.web.posters.ensure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bankai.web.posters.cached", lambda _key: None)
+    monkeypatch.setattr("bankai.web.posters.cached_year", lambda _key: None)
+
+    response = client.get("/api/titles")
+
+    assert response.status_code == 200
+    row = response.json()["rows"][0]
+    assert row["german_source_url"] == "https://voe.sx/german"
+    assert row["torrent_source_url"] == "https://indexer.test/details/123"
+    assert row["torrent_source_title"] == "Sourced.Movie.2024.1080p"
+
+
 def test_titles_never_surfaces_a_repack_as_a_job_row(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -323,6 +352,46 @@ def test_titles_hides_atomic_repack_and_replacement_files(client: TestClient) ->
 
     library_rows = [row for row in rows if row["row_kind"] == "library"]
     assert [row["name"] for row in library_rows] == ["The Irishman (2019)"]
+
+
+def test_titles_redo_reuses_source_and_forces_transactional_output(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "Arcane S02E01.mkv"
+    movie.write_bytes(b"existing review file")
+    source = "https://voe.sx/qld3siz1iznp"
+    previous = SimpleNamespace(
+        kind="show",
+        title="Arcane S02E01",
+        args=[
+            "run",
+            "Arcane S02E01",
+            "--url",
+            source,
+            "--kind",
+            "episode",
+            "--out",
+            "C:\\obsolete\\old.mkv",
+        ],
+        started_at=200.0,
+        final_path=str(movie),
+    )
+    queued: list[dict[str, object]] = []
+    monkeypatch.setattr("bankai.cli.bgjobs.list_jobs", lambda: [previous])
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "running", "id": "redo1"},
+    )
+
+    response = client.post("/api/titles/redo", json={"path": str(movie)})
+
+    assert response.status_code == 200
+    args = queued[0]["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--url") + 1] == source
+    assert args.count("--out") == 1
+    assert Path(args[args.index("--out") + 1]) == movie.resolve()
 
 
 def test_queue_force_and_priority_endpoints(

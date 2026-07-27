@@ -207,6 +207,24 @@ def _norm_title(s: str) -> str:
     return s
 
 
+def _set_cli_option(args: list[str], option: str, value: str) -> list[str]:
+    """Return argv with one canonical ``option value`` pair."""
+    updated: list[str] = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == option:
+            skip_next = True
+            continue
+        if arg.startswith(f"{option}="):
+            continue
+        updated.append(arg)
+    updated.extend([option, value])
+    return updated
+
+
 def _extract_year(s: str) -> int | None:
     """Pull a 4-digit year out of a title/filename, if present."""
     m = re.search(r"\((\d{4})\)", s) or re.search(r"\b(19|20)\d{2}\b", s)
@@ -439,14 +457,18 @@ def create_app() -> Any:
         return Path(get_settings().output.directory).resolve()
 
     def _safe_path(raw: str) -> Path:
+        p = _safe_library_output(raw)
+        if not p.exists():
+            raise HTTPException(status_code=404, detail="file not found")
+        return p
+
+    def _safe_library_output(raw: str) -> Path:
         p = Path(raw).resolve()
         root = _library_root()
         try:
             p.relative_to(root)
         except ValueError as exc:
             raise HTTPException(status_code=403, detail="path outside library") from exc
-        if not p.exists():
-            raise HTTPException(status_code=404, detail="file not found")
         return p
 
     # ------------------------------------------------------------------
@@ -1089,6 +1111,9 @@ def create_app() -> Any:
                         else state.repack_percent
                     ),
                     "repack_kind": state.repack_kind,
+                    "german_source_url": state.german_source_url,
+                    "torrent_source_url": state.torrent_source_url,
+                    "torrent_source_title": state.torrent_source_title,
                 }
             )
         return {"entries": out, "library": str(get_settings().output.directory)}
@@ -1173,6 +1198,10 @@ def create_app() -> Any:
                 poster_key, e.series or clean, "series" if e.kind == "episode" else "movie"
             )
             related = job_by_norm.get(norm)
+            related_is_newer = bool(
+                related
+                and float(related.get("started_at") or 0) > float(e.mtime or 0)
+            )
             observed_created_at = min(e.created_at, created_by_norm.get(norm, e.created_at))
             if state.created_at is None:
                 state = review_mod.ensure_created_at(e.path, observed_created_at)
@@ -1201,12 +1230,20 @@ def create_app() -> Any:
                     "series": e.series,
                     "season": e.season,
                     "stage": "review" if state.stage == "deleted" else state.stage,
-                    "reason": rinfo.get("reason")
-                    if rinfo and rinfo.get("status") == "failed"
-                    else None,
-                    "reason_detail": rinfo.get("reason")
-                    if rinfo and rinfo.get("status") == "failed"
-                    else None,
+                    "reason": (
+                        rinfo.get("reason")
+                        if rinfo and rinfo.get("status") == "failed"
+                        else related.get("reason")
+                        if related_is_newer and related
+                        else None
+                    ),
+                    "reason_detail": (
+                        rinfo.get("reason")
+                        if rinfo and rinfo.get("status") == "failed"
+                        else related.get("reason_detail")
+                        if related_is_newer and related
+                        else None
+                    ),
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
@@ -1226,14 +1263,36 @@ def create_app() -> Any:
                     "repack_kind": state.repack_kind,
                     "repack_label": rinfo.get("label") if rinfo else None,
                     "job_id": related["id"] if related else None,
-                    "job_status": None,
-                    "step_label": None,
-                    "overall_percent": None,
-                    "total_steps": None,
-                    "pending": False,
-                    "action_required": False,
-                    "queue_position": None,
-                    "queue_total": None,
+                    "job_status": related.get("status")
+                    if related_is_newer and related
+                    else None,
+                    "step_label": related.get("step_label")
+                    if related_is_newer and related
+                    else None,
+                    "overall_percent": related.get("overall_percent")
+                    if related_is_newer and related
+                    else None,
+                    "total_steps": related.get("total_steps")
+                    if related_is_newer and related
+                    else None,
+                    "pending": bool(related.get("pending"))
+                    if related_is_newer and related
+                    else False,
+                    "action_required": bool(related.get("action_required"))
+                    if related_is_newer and related
+                    else False,
+                    "queue_position": related.get("queue_position")
+                    if related_is_newer and related
+                    else None,
+                    "queue_total": related.get("queue_total")
+                    if related_is_newer and related
+                    else None,
+                    "german_source_url": state.german_source_url
+                    or (related.get("german_source_url") if related else None),
+                    "torrent_source_url": state.torrent_source_url
+                    or (related.get("torrent_source_url") if related else None),
+                    "torrent_source_title": state.torrent_source_title
+                    or (related.get("torrent_source_title") if related else None),
                 }
             )
         # Collapse queue jobs that have no finished library file yet into one
@@ -1307,6 +1366,9 @@ def create_app() -> Any:
                     "action_required": j.get("action_required", False),
                     "queue_position": j.get("queue_position"),
                     "queue_total": j.get("queue_total"),
+                    "german_source_url": j.get("german_source_url"),
+                    "torrent_source_url": j.get("torrent_source_url"),
+                    "torrent_source_title": j.get("torrent_source_title"),
                 }
             )
         return {"rows": rows, "library": str(get_settings().output.directory)}
@@ -1333,7 +1395,18 @@ def create_app() -> Any:
                 best = j
         if best is None or not best.args:
             raise HTTPException(status_code=404, detail="no previous run found to redo")
-        job = webjobs.enqueue(kind=best.kind, title=best.title, args=list(best.args))
+        args = list(best.args)
+        output: Path | None = None
+        if "/" in raw or "\\" in raw:
+            output = _safe_library_output(raw)
+        elif best.final_path:
+            output = _safe_library_output(best.final_path)
+        if output is not None:
+            # An explicit output bypasses the pipeline's normal
+            # skip-existing guard. RemuxWorker writes and verifies a sibling
+            # working file, then atomically replaces this path only on success.
+            args = _set_cli_option(args, "--out", str(output))
+        job = webjobs.enqueue(kind=best.kind, title=best.title, args=args)
         return {"redo": job, "title": best.title}
 
     @app.get("/api/media/info")
@@ -1361,6 +1434,9 @@ def create_app() -> Any:
             "source_fps": state.source_fps,
             "reference_fps": state.reference_fps,
             "drift_ratio": state.drift_ratio,
+            "german_source_url": state.german_source_url,
+            "torrent_source_url": state.torrent_source_url,
+            "torrent_source_title": state.torrent_source_title,
             "audio_tracks": [
                 {
                     "index": t.index,

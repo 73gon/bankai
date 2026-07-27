@@ -35,6 +35,40 @@ def test_set_sync_review_roundtrip(tmp_path: Path) -> None:
     assert st.stage == "review"
 
 
+def test_source_provenance_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+
+    state = review_mod.set_sources(
+        path,
+        german_source_url="https://voe.sx/german",
+        torrent_source_url="magnet:?xt=urn:btih:abc",
+        torrent_source_title="Movie.2024.1080p",
+    )
+
+    assert state.german_source_url == "https://voe.sx/german"
+    assert state.torrent_source_url == "magnet:?xt=urn:btih:abc"
+    assert state.torrent_source_title == "Movie.2024.1080p"
+    assert review_mod.get_state(path).torrent_source_title == "Movie.2024.1080p"
+
+
+def test_new_output_resets_review_and_operation_state(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+    review_mod.set_delay(path, 900)
+    review_mod.set_stage(path, "approved")
+    review_mod.set_transfer(path, "done", percent=100)
+    review_mod.set_repack(path, "repacking", percent=45, kind="audio")
+
+    state = review_mod.reset_for_new_output(path)
+
+    assert state.stage == "review"
+    assert state.delay_ms == 0
+    assert state.transfer_status == "idle"
+    assert state.transfer_percent == 0
+    assert state.repack_status == "idle"
+    assert state.repack_percent == 0
+    assert state.repack_kind is None
+
+
 def test_sync_review_survives_stage_change(tmp_path: Path) -> None:
     path = tmp_path / "movie.mkv"
     review_mod.set_sync_review(path, needs_review=True, confidence=0.5)

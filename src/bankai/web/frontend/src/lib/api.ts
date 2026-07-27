@@ -150,6 +150,9 @@ export interface LibraryEntry {
   repack_status: string;
   repack_percent: number;
   repack_kind: string | null;
+  german_source_url: string | null;
+  torrent_source_url: string | null;
+  torrent_source_title: string | null;
 }
 
 /** Unified one-row-per-title view (library file OR in-flight/failed job). */
@@ -192,6 +195,9 @@ export interface TitleRow {
   repack_label: string | null;
   queue_position: number | null;
   queue_total: number | null;
+  german_source_url: string | null;
+  torrent_source_url: string | null;
+  torrent_source_title: string | null;
 }
 
 export interface AudioTrack {
@@ -225,6 +231,9 @@ export interface MediaInfo {
   source_fps: number | null;
   reference_fps: number | null;
   drift_ratio: number | null;
+  german_source_url: string | null;
+  torrent_source_url: string | null;
+  torrent_source_title: string | null;
   audio_tracks: AudioTrack[];
 }
 

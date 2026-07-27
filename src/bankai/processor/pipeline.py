@@ -274,7 +274,12 @@ class PipelineWorker(Worker):
 
         # Record the alignment outcome so the web UI can flag titles whose
         # automatic sync was low-confidence for a quick manual delay nudge.
-        self._record_sync_review(remux_result.get("path"), visual_meta)
+        self._record_output_review(
+            remux_result.get("path"),
+            visual_meta,
+            german_source_url=original_stream_url,
+            torrent_result=torrent_result,
+        )
 
         # ---- 5. Cleanup intermediates ----------------------------------
         if get_settings().paths.cleanup_after_success:
@@ -532,13 +537,21 @@ class PipelineWorker(Worker):
             return str(media), str(media)
         return str(dub), str(media)
 
-    def _record_sync_review(self, final_path: str | None, visual_meta: dict[str, Any]) -> None:
+    def _record_output_review(
+        self,
+        final_path: str | None,
+        visual_meta: dict[str, Any],
+        *,
+        german_source_url: str,
+        torrent_result: dict[str, Any],
+    ) -> None:
         if not final_path:
             return
         try:
-            from bankai.web.review import set_sync_review
+            from bankai.web import review as review_mod
 
-            set_sync_review(
+            review_mod.reset_for_new_output(final_path)
+            review_mod.set_sync_review(
                 final_path,
                 needs_review=bool(visual_meta.get("needs_review")),
                 confidence=visual_meta.get("confidence"),
@@ -547,8 +560,14 @@ class PipelineWorker(Worker):
                 reference_fps=visual_meta.get("reference_fps"),
                 drift_ratio=visual_meta.get("drift_ratio"),
             )
+            review_mod.set_sources(
+                final_path,
+                german_source_url=german_source_url,
+                torrent_source_url=torrent_result.get("source_url"),
+                torrent_source_title=torrent_result.get("source_title"),
+            )
         except Exception as exc:  # review flagging is best-effort
-            log.debug("[visual-sync] could not record review flag: %s", exc)
+            log.debug("[pipeline] could not record output review metadata: %s", exc)
 
 
 def _account_for_applied_tempo(visual_meta: dict[str, Any], tempo: float) -> None:

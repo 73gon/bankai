@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -70,10 +73,17 @@ class RemuxWorker(Worker):
         track_name = payload.get("track_name", settings.track_name)
         default_track = bool(payload.get("default_track", settings.default_track))
 
+        # Always mux to a hidden working sibling first. This keeps an existing
+        # reviewed file available throughout a rerun and replaces it only
+        # after mkvmerge's output passes identification. The same-directory
+        # os.replace is atomic on the target filesystem.
+        working_out = out_p.with_name(
+            f"{out_p.stem}.partial.{uuid.uuid4().hex[:8]}{out_p.suffix}"
+        )
         cmd = await build_mkvmerge_command(
             video=video_p,
             audio=audio_p,
-            out=out_p,
+            out=working_out,
             language=language,
             track_name=track_name,
             default_track=default_track,
@@ -84,21 +94,33 @@ class RemuxWorker(Worker):
         )
         log.info("[remux] mkvmerge %s", " ".join(cmd[1:]))
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode not in (0, 1):  # mkvmerge returns 1 for warnings
-            raise WorkerError(f"mkvmerge failed (rc={proc.returncode}): {stderr.decode(errors='ignore')[:500] or stdout.decode(errors='ignore')[:500]}")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode not in (0, 1):  # mkvmerge returns 1 for warnings
+                raise WorkerError(
+                    f"mkvmerge failed (rc={proc.returncode}): "
+                    f"{stderr.decode(errors='ignore')[:500] or stdout.decode(errors='ignore')[:500]}"
+                )
 
-        if not out_p.exists():
-            raise WorkerError(f"mkvmerge succeeded but output missing: {out_p}")
+            if not working_out.exists():
+                raise WorkerError(f"mkvmerge succeeded but output missing: {working_out}")
 
-        # Verify with mkvmerge -i.
-        verified = await verify_output(out_p, binary=self._bin)
-        log.info("[remux] verified %s â€” %d tracks", out_p, len(verified.get("tracks", [])))
+            # Verify the working file before it is allowed to replace the
+            # currently reviewed output.
+            verified = await verify_output(working_out, binary=self._bin)
+            log.info(
+                "[remux] verified %s â€” %d tracks",
+                working_out,
+                len(verified.get("tracks", [])),
+            )
+            _atomic_replace(working_out, out_p)
+        finally:
+            working_out.unlink(missing_ok=True)
 
         assert ctx.job.id is not None
         artifact = ctx.repo.add_artifact(
@@ -115,6 +137,20 @@ class RemuxWorker(Worker):
             )
         )
         return {"artifact_id": artifact.id, "path": str(out_p)}
+
+
+def _atomic_replace(source: Path, destination: Path) -> None:
+    """Replace ``destination`` with retry handling for short Windows locks."""
+    for attempt in range(8):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            if attempt == 7:
+                raise WorkerError(f"could not replace existing output: {exc}") from exc
+            time.sleep(min(0.4, 0.025 * (2**attempt)))
+        except OSError as exc:
+            raise WorkerError(f"could not replace existing output: {exc}") from exc
 
 
 async def build_mkvmerge_command(

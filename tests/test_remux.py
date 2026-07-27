@@ -11,7 +11,7 @@ from bankai.config import get_settings, reset_settings_cache
 from bankai.db import StateRepository, initialize
 from bankai.processor.remux import RemuxWorker, build_mkvmerge_command, verify_output
 from bankai.queue.models import Job, JobKind, JobStatus
-from bankai.queue.worker import WorkerContext
+from bankai.queue.worker import WorkerContext, WorkerError
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +92,8 @@ async def test_remux_worker_invokes_mkvmerge(tmp_path: Path, monkeypatch: pytest
                         b'{"tracks":[{"id":0,"type":"video"},{"id":1,"type":"audio"},{"id":2,"type":"audio"}]}',
                         b"",
                     )
-                out.write_bytes(b"MUXED")
+                mux_out = Path(cmd[cmd.index("--output") + 1])
+                mux_out.write_bytes(b"MUXED")
                 return b"", b""
 
         return _P()
@@ -123,6 +124,55 @@ async def test_remux_worker_invokes_mkvmerge(tmp_path: Path, monkeypatch: pytest
     assert Path(result["path"]) == out
     assert out.exists()
     assert len(captured) == 4  # probe video + probe audio + mkvmerge run + verify
+
+
+async def test_remux_worker_preserves_existing_output_when_mux_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "v.mkv"
+    audio = tmp_path / "a.aac"
+    out = tmp_path / "out.mkv"
+    video.write_bytes(b"VIDEO")
+    audio.write_bytes(b"AUDIO")
+    out.write_bytes(b"EXISTING")
+
+    async def fake_exec(*cmd: str, **_kw: object) -> object:
+        class _P:
+            returncode = 0 if "-J" in cmd else 2
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                if "-J" in cmd:
+                    return (
+                        b'{"tracks":[{"id":0,"type":"video"},{"id":1,"type":"audio"}]}',
+                        b"",
+                    )
+                return b"", b"mux failed"
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+    job = repo.create_job(
+        Job(
+            kind=JobKind.REMUX,
+            status=JobStatus.RUNNING,
+            payload={"video": str(video), "audio": str(audio), "out": str(out)},
+        )
+    )
+    ctx = WorkerContext(
+        job=job,
+        repo=repo,
+        work_dir=tmp_path / "work",
+        cancel_token=asyncio.Event(),
+    )
+
+    with pytest.raises(WorkerError, match="mkvmerge failed"):
+        await RemuxWorker().run(ctx)
+
+    assert out.read_bytes() == b"EXISTING"
+    assert list(tmp_path.glob("*.partial.*.mkv")) == []
 
 
 async def test_verify_output_parses_json(monkeypatch: pytest.MonkeyPatch) -> None:
