@@ -46,6 +46,7 @@ class SyncResult:
     path: Path
     offset_seconds: float
     method: str  # "alass" | "manual" | "skip" | "passthrough" | "atempo"
+    tempo: float = 1.0
 
 
 # Common framerate-conversion ratios that show up in dub releases.
@@ -85,7 +86,11 @@ def _classify_ratio(audio_dur: float, video_dur: float, *, tol: float = 0.003) -
     """Return the name of a known tempo ratio if audio/video matches one."""
     if audio_dur <= 0 or video_dur <= 0:
         return None
-    ratio = video_dur / audio_dur
+    # ffmpeg's atempo factor is input duration / desired output duration:
+    # output_duration = input_duration / atempo.  Compare that factor directly
+    # with the known conversion ratios so the classification and the eventual
+    # filter always use the same direction.
+    ratio = audio_dur / video_dur
     for name, target in _KNOWN_TEMPO_RATIOS.items():
         if abs(ratio - target) <= tol:
             return name
@@ -189,7 +194,15 @@ class SyncWorker(Worker):
                         shutil.copyfile(audio_path, out_path)
                         result = SyncResult(path=out_path, offset_seconds=0.0, method="passthrough")
                     else:
-                        tempo = video_dur / audio_dur
+                        # atempo > 1 shortens audio and atempo < 1 lengthens it.
+                        # To make the output match the reference duration:
+                        #
+                        #   audio_dur / tempo = video_dur
+                        #
+                        # The previous reciprocal made already-short PAL-speed
+                        # audio even shorter, producing progressively worse
+                        # drift throughout the feature.
+                        tempo = audio_dur / video_dur
                         log.info(
                             "[sync] applying fps correction (%s, tempo=%.5f)",
                             ratio_name,
@@ -209,6 +222,7 @@ class SyncWorker(Worker):
                 metadata={
                     "offset_seconds": result.offset_seconds,
                     "method": result.method,
+                    "tempo": result.tempo,
                     "source_audio": str(audio_path),
                 },
             )
@@ -218,6 +232,7 @@ class SyncWorker(Worker):
             "path": str(result.path),
             "offset_seconds": result.offset_seconds,
             "method": result.method,
+            "tempo": result.tempo,
         }
 
     async def _apply_offset(self, src: Path, dst: Path, offset: float, *, method: str) -> SyncResult:
@@ -274,7 +289,7 @@ class SyncWorker(Worker):
         if proc.returncode != 0:
             raise SyncError(f"ffmpeg atempo failed: {stderr.decode(errors='ignore')[:500]}")
         # Report the equivalent end-to-end offset (positive = audio shortened).
-        return SyncResult(path=dst, offset_seconds=0.0, method="atempo")
+        return SyncResult(path=dst, offset_seconds=0.0, method="atempo", tempo=tempo)
 
 
 class AlassRunner:

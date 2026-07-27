@@ -1792,9 +1792,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   }, [loading]);
 
   // Windowed waveform fetch (debounced). Both lanes are fetched as WIDE
-  // track-time buffers (3× the visible window: one window of margin on each
-  // side) so panning/zooming redraw instantly from memory and only re-fetch
-  // once the drag settles. German is fetched delay-shifted into track time.
+  // track-time buffers so panning/zooming redraw instantly from memory and
+  // only re-fetch once the drag settles. German uses the same global affine
+  // mapping as playback/repack: source_time = (reference_time - delay) * rate.
   useEffect(() => {
     if (dragging) return;
     // Backend caps bins at 4000 — never request more or it 422s (which would
@@ -1817,10 +1817,22 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         }
         if (gerStream != null) {
           if (!cancelled) setGerLoading(true);
-          const start = Math.max(0, viewStart - windowSec - delayMs / 1000);
+          // Keep the mapped source window within the backend's 1800s cap. At
+          // ordinary drift factors this retains a full visible-window margin
+          // on both sides; unusually large factors still retain as much cache
+          // margin as the endpoint permits.
+          const visibleSourceDur = windowSec * stretch;
+          const margin = Math.min(
+            windowSec,
+            Math.max(0, (1800 - visibleSourceDur) / (2 * stretch)),
+          );
+          const mappedStart = (viewStart - margin - delayMs / 1000) * stretch;
+          const mappedEnd = (viewStart + windowSec + margin - delayMs / 1000) * stretch;
+          const start = Math.max(0, mappedStart);
+          const dur = Math.max(0.05, Math.min(1800, mappedEnd - start));
           tasks.push(
-            api.waveform(path, gerStream, start, bufDur, bins).then((w) => {
-              if (!cancelled) setGerBuf({ peaks: decodePeaks(w.peaks), start, dur: bufDur });
+            api.waveform(path, gerStream, start, dur, bins).then((w) => {
+              if (!cancelled) setGerBuf({ peaks: decodePeaks(w.peaks), start, dur });
             }),
           );
         }
@@ -1842,7 +1854,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       if (retryTimer) clearTimeout(retryTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging]);
+  }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging, delayMs, stretch]);
 
   // Load a cache-aligned video segment with only a tiny debounce.
   useEffect(() => {
@@ -1908,12 +1920,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
 
   // Draw one lane from a wide track-time buffer. `delaySec` shifts the buffer
   // (0 for the reference/English lane, delayMs for German). `stretch` previews
-  // drift correction: the window's left edge stays anchored (aligned by the
-  // delay) and time advances by `stretch` across it, so the user can line up
-  // the left edge with the delay then stretch to match the right edge. The
-  // backend's fixed loudness scale is retained so quiet and loud scenes remain
-  // visually comparable. At close zoom levels the buffer contains detailed
-  // PCM RMS samples; interpolation avoids throwing away sub-pixel transitions.
+  // drift from the global timeline origin, exactly like ffmpeg atempo followed
+  // by mkvmerge delay during the final repack. The backend's fixed loudness
+  // scale is retained so quiet and loud scenes remain visually comparable. At
+  // close zoom levels the buffer contains detailed PCM RMS samples;
+  // interpolation avoids throwing away sub-pixel transitions.
   function drawLane(
     canvas: HTMLCanvasElement | null,
     buf: { peaks: Uint8Array; start: number; dur: number } | null,
@@ -1930,10 +1941,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (buf && buf.peaks.length) {
       const bn = buf.peaks.length;
       const vals = new Float32Array(W);
-      const anchor = viewStart - delaySec;
       for (let x = 0; x < W; x++) {
         const viewTime = viewStart + (x / W) * windowSec;
-        const trackTime = anchor + (viewTime - viewStart) * stretch;
+        const trackTime = (viewTime - delaySec) * stretch;
         const position = ((trackTime - buf.start) / buf.dur) * (bn - 1);
         const left = Math.floor(position);
         const mix = position - left;
@@ -2062,7 +2072,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     );
     let german: HTMLAudioElement | null = null;
     if (which !== 'eng' && gerStream != null) {
-      const sourceStart = viewStart - delayMs / 1000 + startOffset * stretch;
+      const sourceStart = (desiredRefTime - delayMs / 1000) * stretch;
       const lead = sourceStart < 0 ? Math.min(dur, -sourceStart / stretch) : 0;
       const a = new Audio(
         api.audioClipUrl(path, gerStream, Math.max(0, sourceStart), dur, lead, stretch),
@@ -2271,15 +2281,20 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // Length drift between the reference (HQ) and German audio hints at a
   // frame-rate/speed mismatch (e.g. 25fps PAL vs 23.976) even before aligning.
   const lenDrift = engTrack?.duration != null && gerTrack?.duration != null ? engTrack.duration - gerTrack.duration : null;
-  // Prefer the pipeline's MEASURED frame-drift ratio (from visual sync) — the
-  // definitive signal; otherwise fall back to the crude track-length ratio.
+  // Prefer the pipeline's measured frame-drift ratio only when the visual
+  // matcher was confident. Low-confidence estimates (such as a few ambiguous
+  // frames in animation) remain visible as diagnostics but must not become an
+  // actionable suggestion.
   const measuredDrift = info?.drift_ratio ?? null;
+  const measuredDriftReliable =
+    measuredDrift != null && (info?.sync_confidence ?? 0) >= 0.6 && !info?.needs_sync_review;
   const sourceFps = info?.source_fps ?? null;
   const referenceFps = info?.reference_fps ?? info?.video_fps ?? null;
-  // Pipeline drift semantics are source-time / reference-time, so PAL versus
-  // 23.976 is 25 / 23.976 = 1.0427 (speed the German track up by that factor).
-  const fpsStretch = sourceFps && referenceFps ? sourceFps / referenceFps : null;
+  // A source authored at 25fps is shorter than the corresponding 24fps
+  // reference and must be slowed down: atempo = reference_fps / source_fps.
+  const fpsStretch = sourceFps && referenceFps ? referenceFps / sourceFps : null;
   const durationStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
+  const lengthsDiffer = lenDrift != null && Math.abs(lenDrift) > 2;
 
   async function openReplacement() {
     setReplaceOpen(true);
@@ -2356,16 +2371,18 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     }
   }
   const suggestedStretch =
-    measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0005
+    measuredDriftReliable && measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0005
       ? measuredDrift
-      : fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0005
+      : lengthsDiffer && fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0005
         ? fpsStretch
-        : durationStretch;
+        : lengthsDiffer
+          ? durationStretch
+          : null;
   // Flag a real drift: a measured frame-drift, or lengths differing by >2s.
   const driftSuspected =
-    (measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0015) ||
-    (fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0015) ||
-    (durationStretch != null && lenDrift != null && Math.abs(lenDrift) > 2 && Math.abs(durationStretch - 1) > 0.001);
+    (measuredDriftReliable && measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0015) ||
+    (lengthsDiffer && fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0015) ||
+    (lengthsDiffer && durationStretch != null && Math.abs(durationStretch - 1) > 0.001);
   const stretchPct = ((stretch - 1) * 100).toFixed(2);
   function applyStretchInput(value = stretchInput) {
     const parsed = Number(value.replace(',', '.'));
@@ -2609,12 +2626,24 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 )}
                 {driftSuspected && (
                   <span className='text-warning'>
-                    {measuredDrift != null && sourceFps && referenceFps
+                    {measuredDriftReliable && measuredDrift != null && sourceFps && referenceFps
                       ? `Measured ×${measuredDrift.toFixed(4)}`
                       : fpsStretch != null && sourceFps && referenceFps
                         ? `FPS ×${fpsStretch.toFixed(4)}`
                         : 'Track lengths differ'}
                   </span>
+                )}
+                {!measuredDriftReliable && measuredDrift != null && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='text-muted-foreground'>
+                        Visual ×{measuredDrift.toFixed(4)} ignored
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Visual matching confidence was too low to recommend this drift factor.
+                    </TooltipContent>
+                  </Tooltip>
                 )}
               </div>
               <div className='relative'>

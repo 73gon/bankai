@@ -249,6 +249,7 @@ class PipelineWorker(Worker):
                 extract_attempt_index, extract_result = await self._run_extract_attempts(ctx, extract_attempts, extract_attempt_index)
                 audio_path, visual_source = await self._prepare_german_source(ctx, extract_result)
         synced_audio = sync_result["path"]
+        _account_for_applied_tempo(visual_meta, float(sync_result.get("tempo", 1.0) or 1.0))
 
         # ---- 4. Remux ---------------------------------------------------
         _log_stage(4, "remux", "Write final MKV")
@@ -548,6 +549,31 @@ class PipelineWorker(Worker):
             )
         except Exception as exc:  # review flagging is best-effort
             log.debug("[visual-sync] could not record review flag: %s", exc)
+
+
+def _account_for_applied_tempo(visual_meta: dict[str, Any], tempo: float) -> None:
+    """Convert raw-source visual measurements to the final audio timeline.
+
+    Visual matching runs before the sync worker. If that worker time-stretches
+    the German audio, both the raw offset and raw slope must be divided by the
+    applied tempo before they are persisted for review. Otherwise the UI would
+    suggest applying an already-applied PAL/film correction a second time.
+    """
+    if tempo <= 0 or abs(tempo - 1.0) <= 1e-6:
+        return
+    delay_ms = int(visual_meta.get("delay_ms", 0) or 0)
+    if delay_ms:
+        visual_meta["delay_ms"] = round(delay_ms / tempo)
+    drift = visual_meta.get("drift_ratio")
+    if drift is not None:
+        visual_meta["drift_ratio"] = float(drift) / tempo
+    visual_meta["applied_tempo"] = tempo
+    log.info(
+        "[visual-sync] translated measurements after tempo %.6f: delay=%+dms residual_drift=%.6f",
+        tempo,
+        int(visual_meta.get("delay_ms", 0) or 0),
+        float(visual_meta.get("drift_ratio", 1.0) or 1.0),
+    )
 
 
 def _default_output_path(

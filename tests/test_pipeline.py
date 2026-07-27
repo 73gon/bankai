@@ -12,6 +12,7 @@ from bankai.config import get_settings, reset_settings_cache
 from bankai.db import StateRepository, initialize
 from bankai.processor.pipeline import (
     PipelineWorker,
+    _account_for_applied_tempo,
     _extract_attempt_payloads,
     _resolve_episode_fallbacks,
 )
@@ -67,6 +68,27 @@ class _PlaceholderOnceSync(Worker):
         if len(self.calls) == 1:
             raise PlaceholderAudioError(audio_duration=4.7, video_duration=11_686.8)
         return {"path": "/tmp/synced.aac"}
+
+
+def test_account_for_applied_tempo_translates_visual_timeline() -> None:
+    meta: dict[str, Any] = {
+        "delay_ms": 5125,
+        "drift_ratio": 0.9578,
+    }
+
+    _account_for_applied_tempo(meta, 0.9578)
+
+    assert meta["delay_ms"] == 5351
+    assert meta["drift_ratio"] == pytest.approx(1.0)
+    assert meta["applied_tempo"] == pytest.approx(0.9578)
+
+
+def test_account_for_applied_tempo_leaves_passthrough_measurements_unchanged() -> None:
+    meta: dict[str, Any] = {"delay_ms": -250, "drift_ratio": 1.001}
+
+    _account_for_applied_tempo(meta, 1.0)
+
+    assert meta == {"delay_ms": -250, "drift_ratio": 1.001}
 
 
 @pytest.fixture(autouse=True)

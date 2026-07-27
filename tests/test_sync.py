@@ -10,7 +10,13 @@ import pytest
 
 from bankai.config import get_settings, reset_settings_cache
 from bankai.db import StateRepository, initialize
-from bankai.processor.sync import AlassRunner, SyncWorker, _parse_alass_offset
+from bankai.processor.sync import (
+    AlassRunner,
+    SyncResult,
+    SyncWorker,
+    _classify_ratio,
+    _parse_alass_offset,
+)
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import WorkerContext
 
@@ -37,6 +43,14 @@ def test_parse_alass_offset_failure() -> None:
 
     with pytest.raises(SyncError):
         _parse_alass_offset("nothing useful here")
+
+
+def test_classify_short_pal_speed_audio_for_slowdown() -> None:
+    assert _classify_ratio(2313.636, 2415.584) == "pal_to_ndf"
+
+
+def test_classify_long_film_speed_audio_for_speedup() -> None:
+    assert _classify_ratio(2415.584, 2313.636) == "ndf_to_pal"
 
 
 async def test_sync_worker_skip_mode(tmp_path: Path) -> None:
@@ -112,6 +126,51 @@ async def test_sync_worker_manual_offset_invokes_ffmpeg(
     assert result["method"] == "manual"
     assert "-itsoffset" in captured_cmd
     assert "-1.500000" in captured_cmd
+
+
+async def test_sync_worker_uses_audio_over_video_as_atempo_factor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "in.aac"
+    reference = tmp_path / "reference.mkv"
+    audio.write_bytes(b"AUDIO")
+    reference.write_bytes(b"VIDEO")
+    monkeypatch.setenv("BANKAI_SYNC__MODE", "auto")
+    reset_settings_cache()
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+
+    async def fake_duration(path: Path) -> float:
+        return 2313.636 if path == audio else 2415.584
+
+    captured: list[float] = []
+
+    async def fake_apply_tempo(src: Path, dst: Path, tempo: float) -> SyncResult:
+        captured.append(tempo)
+        shutil.copyfile(src, dst)
+        return SyncResult(path=dst, offset_seconds=0.0, method="atempo", tempo=tempo)
+
+    monkeypatch.setattr("bankai.processor.sync._ffprobe_duration", fake_duration)
+    worker = SyncWorker()
+    monkeypatch.setattr(worker, "_apply_tempo", fake_apply_tempo)
+    job = repo.create_job(
+        Job(
+            kind=JobKind.SYNC,
+            status=JobStatus.RUNNING,
+            payload={"audio": str(audio), "reference": str(reference)},
+        )
+    )
+    ctx = WorkerContext(
+        job=job, repo=repo, work_dir=tmp_path / "work", cancel_token=asyncio.Event()
+    )
+
+    result = await worker.run(ctx)
+
+    assert result is not None
+    assert result["method"] == "atempo"
+    assert result["tempo"] == pytest.approx(2313.636 / 2415.584)
+    assert captured == [pytest.approx(2313.636 / 2415.584)]
 
 
 async def test_alass_runner_parses_stdout(monkeypatch: pytest.MonkeyPatch) -> None:

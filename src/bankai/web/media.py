@@ -253,11 +253,11 @@ def _track_duration(stream: dict) -> float | None:
     """Duration of an audio stream in seconds.
 
     MKV audio streams usually carry no ``duration`` field; the real length lives
-    in a ``DURATION`` tag formatted ``HH:MM:SS.fraction``.
+    in a ``DURATION`` tag formatted ``HH:MM:SS.fraction``.  Some ffprobe builds
+    populate ``stream.duration`` with the Matroska container duration even when
+    the audio packets end earlier, so prefer the track-specific tag when it is
+    present.
     """
-    d = _to_float(stream.get("duration"))
-    if d:
-        return d
     tags = stream.get("tags") or {}
     raw = tags.get("DURATION") or tags.get("duration")
     if raw:
@@ -265,8 +265,8 @@ def _track_duration(stream: dict) -> float | None:
             h, m, s = str(raw).split(":")
             return int(h) * 3600 + int(m) * 60 + float(s)
         except (ValueError, IndexError):
-            return None
-    return None
+            pass
+    return _to_float(stream.get("duration"))
 
 
 # --------------------------------------------------------------------------
