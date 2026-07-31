@@ -2358,10 +2358,22 @@ def create_app() -> Any:
         shows = media_mod.scan_server("show", use_cache=not rescan)
         return {
             "movies": [
-                {"name": t.name, "present": t.present, "location": t.location} for t in movies
+                {
+                    "name": t.name,
+                    "present": t.present,
+                    "location": t.location,
+                    "directory": t.directory,
+                }
+                for t in movies
             ],
             "shows": [
-                {"name": t.name, "present": t.present, "location": t.location} for t in shows
+                {
+                    "name": t.name,
+                    "present": t.present,
+                    "location": t.location,
+                    "directory": t.directory,
+                }
+                for t in shows
             ],
         }
 

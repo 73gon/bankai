@@ -32,6 +32,7 @@ Job payload schema::
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -277,7 +278,7 @@ class PipelineWorker(Worker):
         self._record_output_review(
             remux_result.get("path"),
             visual_meta,
-            german_source_url=original_stream_url,
+            german_source_url=str(extract_result.get("source_url") or stream_url),
             torrent_result=torrent_result,
         )
 
@@ -318,6 +319,17 @@ class PipelineWorker(Worker):
             )
             try:
                 result = await self._run_stage(ctx, self._extractor, JobKind.EXTRACT, attempt)
+                source_url = str(attempt.get("url") or "").strip()
+                if source_url:
+                    result = {**result, "source_url": source_url}
+                    background_id = os.environ.get("BANKAI_BG_JOB_ID")
+                    if background_id:
+                        from bankai.cli import bgjobs
+
+                        bgjobs.set_provenance(
+                            background_id,
+                            german_source_url=source_url,
+                        )
                 return index, result
             except Exception as exc:
                 last_error = exc

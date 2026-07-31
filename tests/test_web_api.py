@@ -212,6 +212,29 @@ def test_library_empty(client: TestClient) -> None:
     assert r.json()["entries"] == []
 
 
+def test_server_contents_includes_library_directory(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "bankai.web.media.scan_server",
+        lambda kind, use_cache=True: [
+            SimpleNamespace(
+                name="Bleach" if kind == "show" else "Inception",
+                present=True,
+                location=f"E:\\media\\{kind}s\\title",
+                directory=f"E:\\media\\{kind}s",
+            )
+        ],
+    )
+
+    response = client.get("/api/server/contents")
+
+    assert response.status_code == 200
+    assert response.json()["shows"][0]["directory"] == "E:\\media\\shows"
+    assert response.json()["movies"][0]["directory"] == "E:\\media\\movies"
+
+
 def test_server_rename_moves_movie_folder_and_matching_files(
     client: TestClient,
 ) -> None:

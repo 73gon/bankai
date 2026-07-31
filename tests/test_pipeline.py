@@ -329,6 +329,15 @@ async def test_pipeline_prefers_exact_filmpalast_voe_for_burningseries_episode(
         "filmpalast": FakeFilmpalast,
     }
     monkeypatch.setattr("bankai.scraper.get_backend", lambda site_id: backends[site_id])
+    provenance: list[tuple[str, str | None]] = []
+    monkeypatch.setenv("BANKAI_BG_JOB_ID", "arcane-job")
+    monkeypatch.setattr(
+        "bankai.cli.bgjobs.set_provenance",
+        lambda job_id, **values: provenance.append(
+            (job_id, values.get("german_source_url"))
+        )
+        or True,
+    )
 
     extract = _FakeWorker(JobKind.EXTRACT, {"path": "/tmp/audio.aac"})
     torrent = _FakeWorker(JobKind.TORRENT, {"path": "/tmp/video.mkv"})
@@ -365,6 +374,8 @@ async def test_pipeline_prefers_exact_filmpalast_voe_for_burningseries_episode(
     assert result is not None
     assert extract.calls[0]["url"] == voe_url
     assert extract.calls[0]["hint"] == "ytdlp"
+    assert result["extract"]["source_url"] == voe_url
+    assert provenance == [("arcane-job", voe_url)]
 
 
 def test_filmpalast_extract_attempts_do_not_repeat_wrapper() -> None:

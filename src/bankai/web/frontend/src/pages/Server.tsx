@@ -33,6 +33,19 @@ function fmtSize(bytes: number): string {
   return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
 }
 
+function LocationBadge({ item }: { item: ServerTitle }) {
+  if (!item.present) return <Badge variant='muted'>Missing</Badge>;
+  const directory = item.directory ?? item.location ?? 'Unknown directory';
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant='success' className='max-w-56 truncate font-mono text-[10px]'>{directory}</Badge>
+      </TooltipTrigger>
+      <TooltipContent className='font-mono'>{directory}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameTarget) => void }) {
   const [open, setOpen] = useState(false);
   const [seasons, setSeasons] = useState<ServerSeason[] | null>(null);
@@ -77,7 +90,7 @@ function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameT
           )}
           {it.location ? <PathText text={it.name} tooltip={it.location} className='truncate text-sm' /> : <span className='truncate text-sm'>{it.name}</span>}
         </span>
-        {it.present ? <Badge variant='success'>On server</Badge> : <Badge variant='muted'>Missing</Badge>}
+        <LocationBadge item={it} />
       </button>
       {open && (
         <div className='ml-6 mt-1 space-y-2 border-l border-border/60 pl-3'>
@@ -104,19 +117,26 @@ function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameT
                     ) : (
                       se.episodes.map((ep) => (
                         <div key={ep.path} className='flex items-center justify-between gap-3 rounded px-2 py-1 pl-6 hover:bg-secondary/30'>
-                          <Tooltip>
-                            <TooltipTrigger asChild><span className='truncate text-xs'>{ep.name}</span></TooltipTrigger>
-                            <TooltipContent className='font-mono'>{ep.path}</TooltipContent>
-                          </Tooltip>
+                          <div className='flex min-w-0 items-center gap-1'>
+                            <Tooltip>
+                              <TooltipTrigger asChild><span className='truncate text-xs'>{ep.name}</span></TooltipTrigger>
+                              <TooltipContent className='font-mono'>{ep.path}</TooltipContent>
+                            </Tooltip>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size='icon'
+                                  variant='ghost'
+                                  onClick={() => onRename({ kind: 'episode', name: ep.name, path: ep.path })}
+                                  aria-label='Rename this episode file'
+                                >
+                                  <Pencil />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Rename this episode file</TooltipContent>
+                            </Tooltip>
+                          </div>
                           <span className='ml-auto shrink-0 text-[11px] text-muted-foreground'>{fmtSize(ep.size)}</span>
-                          <Button
-                            size='icon'
-                            variant='ghost'
-                            onClick={() => onRename({ kind: 'episode', name: ep.name, path: ep.path })}
-                            title='Rename this episode file'
-                          >
-                            <Pencil />
-                          </Button>
                         </div>
                       ))
                     ))}
@@ -167,21 +187,28 @@ function Column({
         ) : (
           filtered.map((it) => (
             <div key={it.name} className='flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-secondary/40'>
-              <Tooltip>
-                <TooltipTrigger asChild><span className='truncate text-sm'>{it.name}</span></TooltipTrigger>
-                <TooltipContent className='font-mono'>{it.location || it.name}</TooltipContent>
-              </Tooltip>
-              {it.present ? <Badge variant='success'>On server</Badge> : <Badge variant='muted'>Missing</Badge>}
-              {it.present && it.location && (
-                <Button
-                  size='icon'
-                  variant='ghost'
-                  onClick={() => onRename({ kind: 'movie', name: it.name, path: it.location! })}
-                  title='Rename the movie folder and matching file'
-                >
-                  <Pencil />
-                </Button>
-              )}
+              <div className='flex min-w-0 items-center gap-1'>
+                <Tooltip>
+                  <TooltipTrigger asChild><span className='truncate text-sm'>{it.name}</span></TooltipTrigger>
+                  <TooltipContent className='font-mono'>{it.location || it.name}</TooltipContent>
+                </Tooltip>
+                {it.present && it.location && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size='icon'
+                        variant='ghost'
+                        onClick={() => onRename({ kind: 'movie', name: it.name, path: it.location! })}
+                        aria-label='Rename the movie folder and matching file'
+                      >
+                        <Pencil />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Rename the movie folder and matching file</TooltipContent>
+                  </Tooltip>
+                )}
+              </div>
+              <LocationBadge item={it} />
             </div>
           ))
         )}

@@ -361,6 +361,7 @@ class ServerTitle:
     kind: str  # "movie" | "show"
     present: bool
     location: str | None = None
+    directory: str | None = None
 
 
 _SERVER_CACHE: dict[str, tuple[float, list[ServerTitle]]] = {}
@@ -376,6 +377,7 @@ def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
         if cached and time.time() - cached[0] < ttl:
             return cached[1]
     seen: dict[str, ServerTitle] = {}
+    scores: dict[str, int] = {}
     for d in dirs:
         p = Path(d)
         if not p.is_dir():
@@ -390,16 +392,47 @@ def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
             else:
                 continue
             key = name.casefold()
-            if key not in seen:
+            score = 1
+            new_entry = key not in seen
+            replace = new_entry
+            if not replace and kind == "show" and child.is_dir():
+                existing_score = scores[key]
+                if existing_score < 0:
+                    existing_location = seen[key].location
+                    existing_score = (
+                        _server_video_count(Path(existing_location))
+                        if existing_location
+                        else 0
+                    )
+                    scores[key] = existing_score
+                score = _server_video_count(child)
+                replace = score > existing_score
+            if replace:
                 seen[key] = ServerTitle(
                     name=name,
                     kind="movie" if kind == "movie" else "show",
                     present=True,
                     location=str(child),
+                    directory=str(p),
+                )
+                # Delay recursive counting until a duplicate actually appears.
+                scores[key] = (
+                    -1 if new_entry and kind == "show" and child.is_dir() else score
                 )
     titles = sorted(seen.values(), key=lambda t: t.name.casefold())
     _SERVER_CACHE[cache_key] = (time.time(), titles)
     return titles
+
+
+def _server_video_count(folder: Path) -> int:
+    count = 0
+    try:
+        for child in folder.rglob("*"):
+            if child.is_file() and child.suffix.lower() in _VIDEO_EXTS:
+                count += 1
+    except OSError:
+        pass
+    return count
 
 
 def invalidate_server_cache() -> None:

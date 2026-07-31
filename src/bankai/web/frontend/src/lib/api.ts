@@ -302,6 +302,7 @@ export interface ServerTitle {
   name: string;
   present: boolean;
   location: string | null;
+  directory: string | null;
 }
 
 export interface ServerEpisode {
