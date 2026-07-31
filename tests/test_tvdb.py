@@ -104,7 +104,16 @@ async def test_tvdb_anime_alias_includes_japanese_title() -> None:
         if request.url.path == "/v4/search":
             return httpx.Response(
                 200,
-                json={"data": [{"type": "series", "tvdb_id": 424536, "name": "Frieren"}]},
+                json={
+                    "data": [
+                        {
+                            "type": "series",
+                            "tvdb_id": 424536,
+                            "name": "Frieren",
+                            "aliases": ["Sousou no Frieren"],
+                        }
+                    ]
+                },
             )
         if request.url.path.endswith("/translations/eng"):
             return httpx.Response(200, json={"data": {"name": "Frieren: Beyond Journey's End"}})
@@ -124,6 +133,7 @@ async def test_tvdb_anime_alias_includes_japanese_title() -> None:
 
     assert aliases[0].english_title == "Frieren: Beyond Journey's End"
     assert aliases[0].japanese_title == "葬送のフリーレン"
+    assert aliases[0].aliases == ("Sousou no Frieren",)
 
 
 @pytest.mark.asyncio

@@ -101,6 +101,7 @@ export interface AnimeTVDBMatch {
   japanese_title: string | null;
   year: number | null;
   poster_url: string | null;
+  aliases: string[];
 }
 
 export interface AnimeEntry {

@@ -64,6 +64,7 @@ def test_short_anime_query_does_not_match_a_word_inside_an_unrelated_title() -> 
         tvdb_id=424536,
         kind="show",
         english_title="Frieren: Beyond Journey's End",
+        aliases=("Sousou no Frieren",),
     )
     unrelated = anime.AnimeTVDBMatch(
         tvdb_id=256256,
@@ -79,6 +80,7 @@ def test_short_anime_query_does_not_match_a_word_inside_an_unrelated_title() -> 
     )
 
     assert anime._match_score("Frieren", correct) > 0.9
+    assert anime._match_score("Sousou no Frieren", correct) > 0.9
     assert anime._match_score("Frieren", unrelated) < 0.55
     assert anime._match_score("Frieren", spelling_lookalike) < 0.75
 

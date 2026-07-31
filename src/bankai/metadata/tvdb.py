@@ -33,6 +33,7 @@ class TitleAlias:
     english_title: str | None = None
     german_title: str | None = None
     japanese_title: str | None = None
+    aliases: tuple[str, ...] = ()
     year: int | None = None
     tvdb_id: int | None = None
     kind: MediaKind | None = None
@@ -113,6 +114,7 @@ class TVDBClient:
                 english_title=translations.get("eng") or base.english_title,
                 german_title=translations.get("deu") or base.german_title,
                 japanese_title=translations.get("jpn") or base.japanese_title,
+                aliases=base.aliases,
                 year=int(worldwide_date[:4]) if worldwide_date else base.year,
                 tvdb_id=tvdb_id,
                 kind=base.kind,
@@ -260,6 +262,11 @@ def _alias_from_record(record: dict[str, Any], *, kind: MediaKind) -> TitleAlias
         english_title=english,
         german_title=german,
         japanese_title=_translated_title(record, "jpn"),
+        aliases=tuple(
+            value.strip()
+            for value in _as_list(record.get("aliases"))
+            if isinstance(value, str) and value.strip()
+        ),
         year=_year(record),
         tvdb_id=_record_id(record),
         kind=inferred_kind,

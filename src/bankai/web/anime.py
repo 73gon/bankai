@@ -43,6 +43,7 @@ class AnimeTVDBMatch:
     japanese_title: str | None = None
     year: int | None = None
     poster_url: str | None = None
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,7 +235,7 @@ def _normalise(value: str) -> str:
 
 def _match_score(query: str, candidate: AnimeTVDBMatch) -> float:
     clean = _normalise(query)
-    names = [candidate.english_title, candidate.japanese_title or ""]
+    names = [candidate.english_title, candidate.japanese_title or "", *candidate.aliases]
 
     def score(name: str) -> float:
         normalized = _normalise(name)
@@ -318,6 +319,13 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
             japanese_title=alias.japanese_title or (alias.name if alias.name != english else None),
             year=alias.year,
             poster_url=poster,
+            aliases=tuple(
+                dict.fromkeys(
+                    value
+                    for value in (alias.name, *alias.aliases)
+                    if value and value not in {english, alias.japanese_title}
+                )
+            ),
         )
 
     converted = await asyncio.gather(
