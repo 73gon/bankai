@@ -442,7 +442,13 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except PermissionError:
+        # A process owned by another Windows service account can deny the
+        # query even though it is alive. Treat access denied as existence;
+        # otherwise a harmless cross-account status read rewrites a running
+        # job as failed while its process tree continues in the background.
+        return True
+    except ProcessLookupError:
         return False
     except OSError:
         return False

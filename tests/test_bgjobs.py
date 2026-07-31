@@ -233,3 +233,14 @@ def test_progress_snapshot_parses_transfer_progress(
     assert snapshot.step_label == "Transfer files"
     assert snapshot.overall_percent == 75.0
     assert snapshot.parts["transfer"].percent == 75.0
+
+
+def test_pid_access_denied_still_means_process_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(_pid: int, _signal: int) -> None:
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(bgjobs.os, "kill", denied)
+
+    assert bgjobs._pid_alive(1234) is True
