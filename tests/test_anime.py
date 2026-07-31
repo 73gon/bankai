@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from bankai.metadata.tvdb import TVDBEpisode
-from bankai.processor.anime import episode_identity
+from bankai.processor.anime import _atomic_copy2, episode_identity
 from bankai.web import anime
 from bankai.web.anime import (
     clean_release_title,
@@ -14,6 +15,30 @@ from bankai.web.anime import (
     release_episode_info,
     split_filter_terms,
 )
+
+
+def test_atomic_anime_copy_hides_final_media_name_until_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "download" / "Bleach.mkv"
+    destination = tmp_path / "library" / "Bleach - S17E41.mkv"
+    source.parent.mkdir()
+    destination.parent.mkdir()
+    source.write_bytes(b"episode")
+    original_copy2 = __import__("shutil").copy2
+
+    def observing_copy(src: Path, dst: Path) -> None:
+        assert dst.suffix == ".part"
+        assert not destination.exists()
+        original_copy2(src, dst)
+
+    monkeypatch.setattr("bankai.processor.anime.shutil.copy2", observing_copy)
+
+    _atomic_copy2(source, destination)
+
+    assert destination.read_bytes() == b"episode"
+    assert list(destination.parent.glob("*.part")) == []
 
 
 def test_nyaa_rss_parser_preserves_direct_sources_and_metadata() -> None:

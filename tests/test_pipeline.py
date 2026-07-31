@@ -389,3 +389,62 @@ def test_filmpalast_extract_attempts_do_not_repeat_wrapper() -> None:
 
     assert all(attempt["url"] != "https://filmpalast.to/stream/example" for attempt in attempts)
     assert attempts[0]["url"] == "https://st-us-01.vidsonic.net/e/current"
+    assert [(attempt["url"], attempt["hint"], attempt["fallback_only"]) for attempt in attempts] == [
+        ("https://st-us-01.vidsonic.net/e/current", "ytdlp", False),
+        ("https://st-us-01.vidsonic.net/e/current", "playwright", True),
+        ("https://voe.sx/backup", "ytdlp", False),
+        ("https://voe.sx/backup", "playwright", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_extract_attempts_skip_repeating_a_completed_browser_failure(
+    tmp_path: Path,
+) -> None:
+    class BrowserFailureThenSuccess(Worker):
+        kind = JobKind.EXTRACT
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def run(self, ctx: WorkerContext) -> dict[str, Any] | None:
+            self.calls.append(ctx.job.payload)
+            if "vidsonic" in str(ctx.job.payload["url"]):
+                raise WorkerError(
+                    "playwright fallback failed: no media URL captured at vidsonic"
+                )
+            return {"path": "/tmp/audio.aac"}
+
+    worker = BrowserFailureThenSuccess()
+    pipeline = PipelineWorker(extractor=worker)  # type: ignore[arg-type]
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+    job = repo.create_job(
+        Job(
+            kind=JobKind.PIPELINE,
+            status=JobStatus.RUNNING,
+            payload={"query": "Example", "stream_url": "https://example.test"},
+        )
+    )
+    ctx = WorkerContext(
+        job=job,
+        repo=repo,
+        work_dir=tmp_path / "work",
+        cancel_token=asyncio.Event(),
+    )
+    attempts = _extract_attempt_payloads(
+        stream_url="https://vidsonic.net/e/dead",
+        stream_hint="playwright",
+        stream_site="filmpalast",
+        mirror_urls=["https://voe.sx/working"],
+    )
+
+    index, result = await pipeline._run_extract_attempts(ctx, attempts, 0)
+
+    assert index == 2
+    assert result["source_url"] == "https://voe.sx/working"
+    assert [(call["url"], call["hint"]) for call in worker.calls] == [
+        ("https://vidsonic.net/e/dead", "ytdlp"),
+        ("https://voe.sx/working", "ytdlp"),
+    ]

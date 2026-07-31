@@ -6,7 +6,9 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -30,6 +32,8 @@ _VIDEO_EXTENSIONS = {
     ".wmv",
 }
 _SHOW_RE = re.compile(r"\b[Ss]\d{1,2}[ ._-]?[Ee]\d{1,3}\b")
+_FILE_READY_TIMEOUT_SECONDS = 5 * 60
+_FILE_READY_POLL_SECONDS = 1.0
 
 
 class TransferError(Exception):
@@ -322,20 +326,111 @@ def _native_move(source: Path, destination: Path, *, progress: ProgressCallback)
     """
     tmp = destination.with_name(destination.name + ".part")
     try:
-        tmp.unlink(missing_ok=True)
+        _wait_for_transfer_source(source, progress=progress)
+        _unlink_with_retry(tmp)
         progress("BANKAI_PROGRESS stage=transfer pct=0.0 status=copying")
-        shutil.copy2(source, tmp)
+        _copy_with_retry(source, tmp, progress=progress)
         src_size = source.stat().st_size
         if tmp.stat().st_size != src_size:
             raise TransferError("size mismatch after copy")
-        os.replace(tmp, destination)
+        _replace_with_retry(tmp, destination, progress=progress)
     except OSError as exc:
-        tmp.unlink(missing_ok=True)
+        with suppress(OSError):
+            tmp.unlink(missing_ok=True)
         raise TransferError(f"copy failed: {exc}") from exc
-    try:
+    with suppress(OSError):
         source.unlink(missing_ok=True)
-    except OSError:
-        pass  # copy succeeded; leaving the source is non-fatal
+
+
+def _wait_for_transfer_source(source: Path, *, progress: ProgressCallback) -> None:
+    """Wait until a producer has stopped changing ``source``.
+
+    Library scanners can see a destination while another process is still
+    copying it.  Starting a transfer during that window used to fail instantly
+    with WinError 32.  Two consecutive stable observations keep the transfer
+    queued in its own operation row until the producer has released the file.
+    """
+
+    deadline = time.monotonic() + _FILE_READY_TIMEOUT_SECONDS
+    previous: tuple[int, int] | None = None
+    stable_observations = 0
+    announced = False
+    while True:
+        try:
+            stat = source.stat()
+            current = (stat.st_size, stat.st_mtime_ns)
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise TransferError(f"source did not become readable: {exc}") from exc
+            current = None
+        if current is not None and current == previous:
+            stable_observations += 1
+            if stable_observations >= 2:
+                return
+        else:
+            stable_observations = 0
+            previous = current
+        if not announced:
+            progress("BANKAI_PROGRESS stage=transfer pct=0.0 status=waiting_for_source")
+            announced = True
+        if time.monotonic() >= deadline:
+            raise TransferError("source was still being written after 5 minutes")
+        time.sleep(_FILE_READY_POLL_SECONDS)
+
+
+def _copy_with_retry(source: Path, tmp: Path, *, progress: ProgressCallback) -> None:
+    """Copy after transient Windows sharing violations instead of failing."""
+
+    deadline = time.monotonic() + _FILE_READY_TIMEOUT_SECONDS
+    announced = False
+    while True:
+        before = source.stat()
+        try:
+            _unlink_with_retry(tmp, deadline=deadline)
+            shutil.copy2(source, tmp)
+            after = source.stat()
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise PermissionError("source changed while it was being copied")
+            return
+        except OSError as exc:
+            if not _is_transient_file_lock(exc) or time.monotonic() >= deadline:
+                raise
+            if not announced:
+                progress("BANKAI_PROGRESS stage=transfer pct=0.0 status=waiting_for_file_lock")
+                announced = True
+            time.sleep(_FILE_READY_POLL_SECONDS)
+
+
+def _unlink_with_retry(path: Path, *, deadline: float | None = None) -> None:
+    limit = deadline if deadline is not None else time.monotonic() + _FILE_READY_TIMEOUT_SECONDS
+    while True:
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except OSError as exc:
+            if not _is_transient_file_lock(exc) or time.monotonic() >= limit:
+                raise
+            time.sleep(_FILE_READY_POLL_SECONDS)
+
+
+def _replace_with_retry(source: Path, destination: Path, *, progress: ProgressCallback) -> None:
+    deadline = time.monotonic() + _FILE_READY_TIMEOUT_SECONDS
+    announced = False
+    while True:
+        try:
+            source.replace(destination)
+            return
+        except OSError as exc:
+            if not _is_transient_file_lock(exc) or time.monotonic() >= deadline:
+                raise
+            if not announced:
+                progress("BANKAI_PROGRESS stage=transfer pct=99.0 status=waiting_to_publish")
+                announced = True
+            time.sleep(_FILE_READY_POLL_SECONDS)
+
+
+def _is_transient_file_lock(exc: OSError) -> bool:
+    return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32, 33}
 
 
 def _cleanup_empty_source(source: Path, library_root: Path) -> None:

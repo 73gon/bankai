@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 from bankai import __version__
 from bankai.config import SelectorSettings, get_settings, reset_settings_cache
 from bankai.logging import get_logger
+from bankai.processor.extractor import normalize_stream_url
 from bankai.queue.models import MediaKind
 from bankai.web import anime as anime_mod
 from bankai.web import discover as discover_mod
@@ -1116,15 +1117,16 @@ def create_app() -> Any:
         year = req.year
         if year is None:
             raise HTTPException(status_code=422, detail="year_required")
+        source_url = normalize_stream_url(req.url) if req.url else None
         site = req.site
-        if req.url:
+        if source_url:
             try:
-                site = _stream_site_from_url(req.url)
+                site = _stream_site_from_url(source_url)
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if req.url and site == "filmpalast":
+        if source_url and site == "filmpalast":
             try:
-                mirror_count = await _verify_filmpalast_source(req.url)
+                mirror_count = await _verify_filmpalast_source(source_url)
             except Exception as exc:
                 raise HTTPException(
                     status_code=503,
@@ -1138,7 +1140,12 @@ def create_app() -> Any:
                         "Choose another result or paste a direct German mirror link."
                     ),
                 )
-        movie = BatchMovie(title=req.title, german_title=req.german, url=req.url, year=year)
+        movie = BatchMovie(
+            title=req.title,
+            german_title=req.german,
+            url=source_url,
+            year=year,
+        )
         args = build_movie_args(movie, site=site)
         return webjobs.enqueue(kind="movie", title=f"{req.title} ({year})", args=args)
 
@@ -1150,27 +1157,28 @@ def create_app() -> Any:
             if not req.custom_episodes:
                 raise HTTPException(status_code=400, detail="no custom episodes supplied")
             seen: set[int] = set()
-            custom: list[tuple[CustomEpisodeRequest, str]] = []
+            custom: list[tuple[CustomEpisodeRequest, str, str]] = []
             for ep in req.custom_episodes:
                 if ep.episode < 1:
                     raise HTTPException(status_code=400, detail="episode numbers must be positive")
                 if ep.episode in seen:
                     raise HTTPException(status_code=400, detail=f"duplicate episode {ep.episode}")
                 seen.add(ep.episode)
+                source_url = normalize_stream_url(ep.url)
                 try:
-                    site = _stream_site_from_url(ep.url)
+                    site = _stream_site_from_url(source_url)
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
-                custom.append((ep, site))
+                custom.append((ep, site, source_url))
 
             queued: list[dict] = []
-            for ep, site in sorted(custom, key=lambda item: item[0].episode):
+            for ep, site, source_url in sorted(custom, key=lambda item: item[0].episode):
                 q = f"{req.show.strip()} S{req.season:02d}E{ep.episode:02d}"
                 args = [
                     "run",
                     q,
                     "--url",
-                    ep.url.strip(),
+                    source_url,
                     "--site",
                     site,
                     "--kind",
@@ -1291,11 +1299,12 @@ def create_app() -> Any:
             raise HTTPException(status_code=409, detail="source links can only replace movie sources")
         if job.status not in {"failed", "cancelled"}:
             raise HTTPException(status_code=409, detail="only failed or cancelled movies can be retried")
+        source_url = normalize_stream_url(req.url)
         try:
-            site = _stream_site_from_url(req.url)
+            site = _stream_site_from_url(source_url)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        args = _set_cli_option(list(job.args), "--url", req.url.strip())
+        args = _set_cli_option(list(job.args), "--url", source_url)
         args = _set_cli_option(args, "--site", site)
         return webjobs.enqueue(kind=job.kind, title=job.title, args=args)
 

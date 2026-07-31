@@ -7,6 +7,7 @@ import pytest
 from bankai.backend.transfer import (
     TransferItem,
     TransferResult,
+    _native_move,
     format_transfer_summary,
     plan_transfer,
 )
@@ -96,3 +97,34 @@ def test_transfer_summary_mentions_skipped_existing(tmp_path: Path) -> None:
 
     assert "Skipped existing: 1" in summary
     assert "movie.mkv" in summary
+
+
+def test_native_move_waits_and_retries_transient_file_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "library" / "episode.mkv"
+    destination = tmp_path / "media" / "episode.mkv"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"complete episode")
+    original_copy2 = __import__("shutil").copy2
+    calls = 0
+
+    def flaky_copy2(src: Path, dst: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError(13, "file is in use", str(src))
+        original_copy2(src, dst)
+
+    progress: list[str] = []
+    monkeypatch.setattr("bankai.backend.transfer.shutil.copy2", flaky_copy2)
+    monkeypatch.setattr("bankai.backend.transfer.time.sleep", lambda _seconds: None)
+
+    _native_move(source, destination, progress=progress.append)
+
+    assert calls == 2
+    assert destination.read_bytes() == b"complete episode"
+    assert not source.exists()
+    assert any("waiting_for_file_lock" in line for line in progress)

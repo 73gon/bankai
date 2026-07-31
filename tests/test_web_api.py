@@ -388,6 +388,31 @@ def test_queue_movie_accepts_direct_hoster_and_derives_unknown_site(
     assert args[args.index("--url") + 1] == "https://voe.sx/e/direct-source"
 
 
+def test_queue_movie_normalizes_temporary_vincdn_source(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "queued"},
+    )
+
+    response = client.post(
+        "/api/queue/movie",
+        json={
+            "title": "Charlie and the Chocolate Factory",
+            "year": 2005,
+            "url": "https://fs-11b55d.vincdn.net/stream/x230j40na6411v/token/1785529632",
+        },
+    )
+
+    assert response.status_code == 200
+    args = queued[0]["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--url") + 1] == "https://vinovo.to/d/x230j40na6411v"
+
+
 def test_failed_movie_can_retry_with_replacement_source(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

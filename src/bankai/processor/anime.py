@@ -163,7 +163,7 @@ def _download_root(status: TorrentStatus) -> Path:
 def _copy_with_sidecars(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists() or not get_settings().output.skip_existing:
-        shutil.copy2(source, destination)
+        _atomic_copy2(source, destination)
     for sidecar in source.parent.glob(f"{source.stem}.*"):
         if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
             continue
@@ -172,7 +172,25 @@ def _copy_with_sidecars(source: Path, destination: Path) -> None:
         qualifier = sidecar.name[len(source.stem) :]
         sidecar_target = destination.parent / f"{destination.stem}{qualifier}"
         if not sidecar_target.exists() or not get_settings().output.skip_existing:
-            shutil.copy2(sidecar, sidecar_target)
+            _atomic_copy2(sidecar, sidecar_target)
+
+
+def _atomic_copy2(source: Path, destination: Path) -> None:
+    """Publish a completed anime file atomically.
+
+    A direct ``copy2`` creates the final ``.mkv`` before the copy has
+    finished, allowing the Library scanner and Transfer action to open a file
+    that is still locked by the organizer.  A non-media ``.part`` name keeps
+    it invisible until the final replace.
+    """
+
+    tmp = destination.with_name(f".{destination.name}.{os.getpid()}.part")
+    try:
+        tmp.unlink(missing_ok=True)
+        shutil.copy2(source, tmp)
+        tmp.replace(destination)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 async def _tvdb_episode_map(tvdb_id: int) -> list[TVDBEpisode]:

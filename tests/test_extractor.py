@@ -14,6 +14,7 @@ from bankai.processor.extractor import (
     PlaywrightRunner,
     YtDlpError,
     YtDlpRunner,
+    normalize_stream_url,
 )
 from bankai.queue.models import Job, JobKind
 from bankai.queue.worker import Dispatcher, run_until_idle
@@ -61,6 +62,13 @@ class _FakePlaywright(PlaywrightRunner):
             raise PlaywrightError("no capture")
         runner = ytdlp or YtDlpRunner()
         return await runner.extract(self._captured, out_dir)
+
+
+def test_normalize_stream_url_turns_signed_vincdn_url_into_player_page() -> None:
+    assert normalize_stream_url(
+        "https://fs-11b55d.vincdn.net/stream/x230j40na6411v/token/1785529632"
+    ) == "https://vinovo.to/d/x230j40na6411v"
+    assert normalize_stream_url("https://voe.sx/e/stable") == "https://voe.sx/e/stable"
 
 
 @pytest.mark.asyncio

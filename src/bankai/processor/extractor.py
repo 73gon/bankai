@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
@@ -51,6 +52,28 @@ from bankai.queue.worker import (
 )
 
 log = get_logger(__name__)
+
+_VINCDN_STREAM_PATH = re.compile(r"^/stream/(?P<video_id>[A-Za-z0-9_-]+)(?:/|$)")
+
+
+def normalize_stream_url(url: str) -> str:
+    """Convert short-lived CDN delivery URLs back to stable player pages.
+
+    Vinovo's browser player generates ``*.vincdn.net/stream/...`` URLs that
+    are bound to the browser session and commonly return HTTP 403 from the
+    extraction host.  The first path component is the stable Vinovo video id,
+    so opening its player page lets Playwright obtain a fresh signed URL.
+    """
+
+    value = str(url).strip()
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    match = _VINCDN_STREAM_PATH.match(parsed.path)
+    if match and (host == "vincdn.net" or host.endswith(".vincdn.net")):
+        return urlunsplit(
+            ("https", "vinovo.to", f"/d/{match.group('video_id')}", "", "")
+        )
+    return value
 
 
 class ExtractWorker(Worker):
@@ -69,6 +92,7 @@ class ExtractWorker(Worker):
         url = ctx.job.payload.get("url")
         if not url:
             raise PermanentWorkerError("extract job payload missing 'url'")
+        url = normalize_stream_url(str(url))
         hint = ctx.job.payload.get("hint", "ytdlp")
         site = ctx.job.payload.get("site", "unknown")
         want_video = bool(ctx.job.payload.get("want_video", False))
@@ -228,6 +252,7 @@ async def extract_url(
     Self-contained (no DB/context) so it can back both the pipeline worker and
     the ``bankai extract`` CLI used for remote delegation.
     """
+    url = normalize_stream_url(url)
     ytdlp = ytdlp or YtDlpRunner()
     playwright = playwright or PlaywrightRunner()
     backend_pref = get_settings().scraper.backend  # "ytdlp" | "playwright" | "auto"
@@ -814,15 +839,18 @@ class PlaywrightRunner:
             pages = list(ctx.pages) or [page]
         except Exception:
             pages = [page]
+        visible_selector = ", ".join(f"{selector}:visible" for selector in selectors)
         for pg in pages:
-            frames = [pg, *getattr(pg, "frames", [])]
+            # ``page.frames`` already includes the main frame. The old loop
+            # also queried ``page`` itself and then waited one second for each
+            # of ten selectors, making a dead hoster consume 20+ seconds per
+            # click pass before the actual capture wait even began.
+            frames = list(getattr(pg, "frames", [])) or [pg]
             for frame in frames:
-                for selector in selectors:
-                    try:
-                        await frame.locator(selector).first.click(timeout=1000)
-                        break
-                    except Exception:
-                        continue
+                try:
+                    await frame.locator(visible_selector).first.click(timeout=1500)
+                except Exception:
+                    continue
         # Last resort: click the middle of the viewport to dismiss overlays.
         if not quiet:
             try:

@@ -39,7 +39,7 @@ from typing import Any
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.processor.extractor import ExtractWorker
+from bankai.processor.extractor import ExtractWorker, normalize_stream_url
 from bankai.processor.remux import RemuxWorker
 from bankai.processor.sync import PlaceholderAudioError, SyncWorker
 from bankai.processor.visual_sync import VisualSyncError, estimate_visual_timeline, is_video_file
@@ -130,7 +130,7 @@ class PipelineWorker(Worker):
 
         # ---- 1. Extract dub audio --------------------------------------
         _log_stage(1, "extract", "Extract stream audio")
-        original_stream_url = payload["stream_url"]
+        original_stream_url = normalize_stream_url(payload["stream_url"])
         stream_url = original_stream_url
         stream_hint = payload.get("stream_hint", "ytdlp")
         stream_site = payload.get("stream_site", "unknown")
@@ -308,8 +308,15 @@ class PipelineWorker(Worker):
         start_index: int,
     ) -> tuple[int, dict[str, Any]]:
         last_error: Exception | None = None
+        skip_completed_browser_fallback_for: str | None = None
         for index in range(start_index, len(attempts)):
             attempt = attempts[index]
+            attempt_url = str(attempt.get("url") or "")
+            if (
+                attempt.get("fallback_only")
+                and attempt_url == skip_completed_browser_fallback_for
+            ):
+                continue
             log.info(
                 "[pipeline] extract attempt %d/%d url=%s hint=%s",
                 index + 1,
@@ -333,6 +340,14 @@ class PipelineWorker(Worker):
                 return index, result
             except Exception as exc:
                 last_error = exc
+                detail = str(exc).casefold()
+                if "playwright fallback failed" in detail or "no media url captured" in detail:
+                    # Auto extraction already ran the browser fallback inside
+                    # its yt-dlp attempt. Do not immediately repeat the same
+                    # expensive capture; move to the next mirror. A fallback-
+                    # only attempt remains available when sync later reports a
+                    # successfully downloaded advert/placeholder.
+                    skip_completed_browser_fallback_for = attempt_url
                 if index + 1 >= len(attempts):
                     raise
                 log.warning(
@@ -721,43 +736,51 @@ def _extract_attempt_payloads(
     want_video: bool = False,
     max_height: int | None = None,
 ) -> list[dict[str, Any]]:
-    specs: list[tuple[str, str]] = []
+    specs: list[tuple[str, str, bool]] = []
+    seen_urls: set[str] = set()
+    backend = get_settings().scraper.backend
 
     def add(url: str | None, hint: str | None) -> None:
         if not url or not hint:
             return
-        spec = (url, hint)
-        if spec not in specs:
-            specs.append(spec)
+        normalized = normalize_stream_url(url)
+        if normalized in seen_urls:
+            return
+        seen_urls.add(normalized)
+        if backend == "auto":
+            specs.append((normalized, "ytdlp", False))
+            # Reserved for a later placeholder retry. Ordinary failures that
+            # already include a Playwright failure skip this duplicate.
+            specs.append((normalized, "playwright", True))
+        elif backend == "playwright":
+            specs.append((normalized, "playwright", False))
+        else:
+            specs.append((normalized, "ytdlp", False))
 
     add(stream_url, stream_hint)
     # Try every other hoster mirror (vinovo, streamtape, …) before falling
-    # back to the wrapper page. Each is attempted with yt-dlp first, then the
-    # Playwright/headful-browser capture, since most German hosters are not
-    # natively supported by yt-dlp.
+    # back to the wrapper page. In auto mode each URL gets exactly one yt-dlp
+    # attempt with the Playwright/headful-browser fallback built into it.
     for mirror in mirror_urls or []:
         add(mirror, "ytdlp")
-    for mirror in mirror_urls or []:
-        add(mirror, "playwright")
     # Filmpalast wrappers only link back to the same direct mirrors. Retrying
     # the wrapper after those mirrors fail repeats the same browser work and
     # used to keep a bad source busy for several additional minutes.
     if stream_site != "filmpalast":
         add(wrapper_url, "playwright")
-    add(stream_url, "playwright")
     if stream_site != "filmpalast":
         add(wrapper_url, "ytdlp")
-    add(stream_url, "ytdlp")
     return [
         {
             "url": url,
             "hint": hint,
             "site": stream_site,
             "attempt": i + 1,
+            "fallback_only": fallback_only,
             "want_video": want_video,
             "max_height": max_height,
         }
-        for i, (url, hint) in enumerate(specs)
+        for i, (url, hint, fallback_only) in enumerate(specs)
     ]
 
 
