@@ -39,7 +39,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
@@ -54,6 +54,41 @@ from bankai.queue.worker import (
 log = get_logger(__name__)
 
 _VINCDN_STREAM_PATH = re.compile(r"^/stream/(?P<video_id>[A-Za-z0-9_-]+)(?:/|$)")
+_VINOVO_PLAYER_PATH = re.compile(r"^/(?:d|e)/(?P<video_id>[A-Za-z0-9_-]+)(?:/|$)")
+_VINOVO_URL_API_PATH = re.compile(r"^/api/file/url/(?P<video_id>[A-Za-z0-9_-]+)(?:/|$)")
+
+
+def _is_vincdn_stream_url(url: str) -> bool:
+    parsed = urlsplit(str(url))
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    return bool(
+        _VINCDN_STREAM_PATH.match(parsed.path)
+        and (host == "vincdn.net" or host.endswith(".vincdn.net"))
+    )
+
+
+def _vinovo_stream_from_api(
+    response_url: str,
+    payload: object,
+    *,
+    base_url: str | None,
+) -> str | None:
+    """Build the signed CDN URL returned indirectly by Vinovo's player API."""
+    parsed = urlsplit(str(response_url))
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if host not in {"vinovo.to", "www.vinovo.to"} or not _VINOVO_URL_API_PATH.match(parsed.path):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, str) or not result.strip():
+        return None
+    value = unquote(result.strip())
+    if value.startswith(("http://", "https://")):
+        return value
+    if not base_url:
+        return None
+    return f"{str(base_url).rstrip('/')}/stream/{value.lstrip('/')}"
 
 
 def normalize_stream_url(url: str) -> str:
@@ -61,8 +96,9 @@ def normalize_stream_url(url: str) -> str:
 
     Vinovo's browser player generates ``*.vincdn.net/stream/...`` URLs that
     are bound to the browser session and commonly return HTTP 403 from the
-    extraction host.  The first path component is the stable Vinovo video id,
-    so opening its player page lets Playwright obtain a fresh signed URL.
+    extraction host.  Its ``/d/`` URLs are details/download pages that merely
+    embed the real ``/e/`` player.  Normalize both forms to the top-level
+    player so Playwright can obtain a fresh signed URL without a nested frame.
     """
 
     value = str(url).strip()
@@ -71,7 +107,12 @@ def normalize_stream_url(url: str) -> str:
     match = _VINCDN_STREAM_PATH.match(parsed.path)
     if match and (host == "vincdn.net" or host.endswith(".vincdn.net")):
         return urlunsplit(
-            ("https", "vinovo.to", f"/d/{match.group('video_id')}", "", "")
+            ("https", "vinovo.to", f"/e/{match.group('video_id')}", "", "")
+        )
+    player_match = _VINOVO_PLAYER_PATH.match(parsed.path)
+    if player_match and host in {"vinovo.to", "www.vinovo.to"}:
+        return urlunsplit(
+            ("https", "vinovo.to", f"/e/{player_match.group('video_id')}", "", "")
         )
     return value
 
@@ -615,14 +656,30 @@ class PlaywrightRunner:
         # automated player sessions from the same IP causes hosters to throttle
         # or withhold every manifest. Serialise only this short capture phase;
         # the actual media downloads still run concurrently afterwards.
-        log.info("[playwright] waiting for the shared browser-capture slot")
-        lease = await asyncio.to_thread(_acquire_capture_lease)
-        try:
-            captured, final_url = await self._capture(url)
-        finally:
-            await asyncio.to_thread(_release_capture_lease, lease)
+        normalized_url = normalize_stream_url(url)
+        vinovo = urlsplit(normalized_url).hostname in {"vinovo.to", "www.vinovo.to"}
+        capture_attempts = 2 if vinovo else 1
+        captured: list[str] = []
+        final_url = normalized_url
+        for attempt in range(1, capture_attempts + 1):
+            log.info("[playwright] waiting for the shared browser-capture slot")
+            lease = await asyncio.to_thread(_acquire_capture_lease)
+            try:
+                captured, final_url = await self._capture(normalized_url)
+            finally:
+                await asyncio.to_thread(_release_capture_lease, lease)
+            if captured:
+                break
+            if attempt < capture_attempts:
+                log.warning(
+                    "[playwright] Vinovo did not issue a stream URL; retrying with a fresh browser session"
+                )
         if not captured:
-            raise PlaywrightError(f"no media URL captured at {url}")
+            if vinovo:
+                raise PlaywrightError(
+                    f"Vinovo did not issue a stream URL at {normalized_url}; rerun later or choose another mirror"
+                )
+            raise PlaywrightError(f"no media URL captured at {normalized_url}")
         runner = ytdlp or YtDlpRunner()
         # Filmpalast (and most German hosters) play a short pre-roll ad/intro
         # *before* the real feature stream is requested. We see them all in
@@ -684,6 +741,7 @@ class PlaywrightRunner:
 
         ua = self._user_agent or get_settings().scraper.user_agent
         captured: list[str] = []
+        response_tasks: list[asyncio.Task[Any]] = []
         got_manifest = asyncio.Event()
         final_url = url
 
@@ -695,11 +753,12 @@ class PlaywrightRunner:
             if (
                 path.endswith(".m3u8")
                 or path.endswith(".mp4")
+                or _is_vincdn_stream_url(href)
                 or "video/" in ct
                 or "application/vnd.apple.mpegurl" in ct
             ):
                 captured.append(href)
-                if path.endswith(".m3u8") or "mpegurl" in ct:
+                if path.endswith(".m3u8") or "mpegurl" in ct or _is_vincdn_stream_url(href):
                     got_manifest.set()
 
         # Start the virtual display BEFORE the Playwright driver launches so
@@ -732,6 +791,34 @@ class PlaywrightRunner:
                         except Exception:
                             return
                         _consider(resp.url, ct)
+                        if _VINOVO_URL_API_PATH.match(urlsplit(resp.url).path):
+                            response_tasks.append(asyncio.create_task(_inspect_vinovo_response(resp)))
+
+                    async def _inspect_vinovo_response(resp: Any) -> None:
+                        try:
+                            payload = await resp.json()
+                        except Exception as exc:
+                            log.debug("[playwright] could not read Vinovo URL response: %s", exc)
+                            return
+                        try:
+                            base_url = await page.locator("#video").get_attribute("data-base")
+                        except Exception:
+                            base_url = None
+                        stream_url = _vinovo_stream_from_api(
+                            resp.url,
+                            payload,
+                            base_url=base_url,
+                        )
+                        if stream_url:
+                            log.info("[playwright] captured Vinovo signed stream URL from player API")
+                            _consider(stream_url, "video/mp4")
+                            return
+                        if isinstance(payload, dict):
+                            log.warning(
+                                "[playwright] Vinovo URL API returned no stream (status=%s, message=%s)",
+                                payload.get("status"),
+                                payload.get("message"),
+                            )
 
                     # Also watch requests directly: some hosters fetch the
                     # manifest via XHR whose *response* headers we may miss.
@@ -800,6 +887,8 @@ class PlaywrightRunner:
                             break
                         await asyncio.sleep(1.0)
                         await self._click_play_everywhere(page, quiet=True)
+                    if response_tasks:
+                        await asyncio.gather(*response_tasks, return_exceptions=True)
                 finally:
                     await browser.close()
         finally:

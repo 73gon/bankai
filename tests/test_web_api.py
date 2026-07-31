@@ -410,7 +410,7 @@ def test_queue_movie_normalizes_temporary_vincdn_source(
     assert response.status_code == 200
     args = queued[0]["args"]
     assert isinstance(args, list)
-    assert args[args.index("--url") + 1] == "https://vinovo.to/d/x230j40na6411v"
+    assert args[args.index("--url") + 1] == "https://vinovo.to/e/x230j40na6411v"
 
 
 def test_failed_movie_can_retry_with_replacement_source(
