@@ -179,8 +179,8 @@ class WebSettings(BaseModel):
     # When true, files the browser cannot play natively (e.g. 4K HEVC)
     # are transcoded on the fly with ffmpeg for the in-browser preview.
     transcode_fallback: bool = True
-    # Directories on the media server scanned by the "Server" page to
-    # show which titles already exist there.
+    # Directories on the media server scanned by the "Server" page. Show
+    # transfers also reuse an existing matching series folder in these roots.
     server_movie_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/movies"), Path("/mnt/remote_media/movies")])
     server_show_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/shows"), Path("/mnt/remote_media/shows")])
     # Seconds to cache TVDB discover/trending responses and ffprobe data.

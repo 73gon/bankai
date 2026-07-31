@@ -106,7 +106,8 @@ port = 9988
 max_concurrent_jobs = 2
 # Allow on-the-fly ffmpeg transcode for browsers that can't play 4K/HEVC.
 transcode_fallback = true
-# Directories scanned to show what already exists on the media server.
+# Directories scanned for existing media. New episodes reuse an existing
+# matching series folder in these show roots instead of the default shows_dir.
 server_movie_dirs = ["/mnt/media12/movies", "/mnt/remote_media/movies"]
 server_show_dirs = ["/mnt/media12/shows", "/mnt/remote_media/shows"]
 # TTL for cached TVDB trending/posters and server-content scans.

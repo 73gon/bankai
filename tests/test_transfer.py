@@ -10,7 +10,7 @@ from bankai.backend.transfer import (
     format_transfer_summary,
     plan_transfer,
 )
-from bankai.config import reset_settings_cache
+from bankai.config import get_settings, reset_settings_cache
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +46,44 @@ def test_plan_transfer_detects_show_files(tmp_path: Path) -> None:
         item.destination
         == tmp_path / "media12" / "shows" / "Arcane" / "Season 01" / "Arcane - S01E01.mkv"
     )
+
+
+def test_plan_transfer_reuses_existing_show_folder(tmp_path: Path) -> None:
+    show = tmp_path / "library" / "Series" / "Bleach" / "Season 02" / "Bleach - S02E01.mkv"
+    show.parent.mkdir(parents=True)
+    show.write_bytes(b"new")
+    default_root = tmp_path / "media12" / "shows"
+    alternate_root = tmp_path / "drive-e" / "media" / "shows"
+    existing = alternate_root / "Bleach"
+    (existing / "Season 01").mkdir(parents=True)
+    (existing / "Season 01" / "Bleach - S01E01.mkv").write_bytes(b"old")
+    settings = get_settings()
+    settings.web.server_show_dirs = [default_root, alternate_root]
+
+    (item,) = plan_transfer([show])
+
+    assert item.destination == existing / "Season 02" / "Bleach - S02E01.mkv"
+
+
+def test_plan_transfer_prefers_populated_show_folder(tmp_path: Path) -> None:
+    show = tmp_path / "library" / "Series" / "Bleach" / "Season 03" / "Bleach - S03E01.mkv"
+    show.parent.mkdir(parents=True)
+    show.write_bytes(b"new")
+    default_root = tmp_path / "media12" / "shows"
+    duplicate = default_root / "Bleach" / "Season 01"
+    duplicate.mkdir(parents=True)
+    (duplicate / "Bleach - S01E01.mkv").write_bytes(b"one")
+    established_root = tmp_path / "drive-e" / "media" / "shows"
+    established = established_root / "Bleach" / "Season 02"
+    established.mkdir(parents=True)
+    (established / "Bleach - S02E01.mkv").write_bytes(b"one")
+    (established / "Bleach - S02E02.mkv").write_bytes(b"two")
+    settings = get_settings()
+    settings.web.server_show_dirs = [default_root, established_root]
+
+    (item,) = plan_transfer([show])
+
+    assert item.destination == established_root / "Bleach" / "Season 03" / "Bleach - S03E01.mkv"
 
 
 def test_transfer_summary_mentions_skipped_existing(tmp_path: Path) -> None:

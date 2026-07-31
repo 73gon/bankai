@@ -57,13 +57,19 @@ class TransferResult:
 def plan_transfer(paths: list[Path], *, kind: TransferKind = "auto") -> list[TransferItem]:
     settings = get_settings()
     items: list[TransferItem] = []
+    show_folders: dict[str, Path | None] = {}
     for raw_path in paths:
         path = raw_path.expanduser()
         if not path.exists():
             raise TransferError(f"not found: {path}")
         for source, root in _iter_transfer_files(path):
             resolved_kind = _resolve_kind(source, kind)
-            destination = _destination_for(source, root=root, kind=resolved_kind)
+            destination = _destination_for(
+                source,
+                root=root,
+                kind=resolved_kind,
+                show_folders=show_folders,
+            )
             if source.resolve() == destination.resolve():
                 raise TransferError(f"source and destination are the same: {source}")
             items.append(TransferItem(source=source, destination=destination, kind=resolved_kind))
@@ -181,7 +187,13 @@ def _resolve_kind(source: Path, kind: TransferKind) -> Literal["movie", "show"]:
     return "movie"
 
 
-def _destination_for(source: Path, *, root: Path, kind: Literal["movie", "show"]) -> Path:
+def _destination_for(
+    source: Path,
+    *,
+    root: Path,
+    kind: Literal["movie", "show"],
+    show_folders: dict[str, Path | None],
+) -> Path:
     settings = get_settings()
     output_root = Path(settings.output.directory)
     movies_root = output_root / "Movies"
@@ -192,14 +204,76 @@ def _destination_for(source: Path, *, root: Path, kind: Literal["movie", "show"]
         pass
     for series_root in series_roots:
         try:
-            return Path(settings.transfer.shows_dir) / source.relative_to(series_root)
+            relative = source.relative_to(series_root)
         except ValueError:
-            pass
+            continue
+        if relative.parts:
+            existing = _existing_show_folder(relative.parts[0], cache=show_folders)
+            if existing is not None:
+                return existing.joinpath(*relative.parts[1:])
+        return Path(settings.transfer.shows_dir) / relative
     base = Path(settings.transfer.shows_dir if kind == "show" else settings.transfer.movies_dir)
     try:
         return base / source.relative_to(root)
     except ValueError:
         return base / source.name
+
+
+def _existing_show_folder(show_name: str, *, cache: dict[str, Path | None]) -> Path | None:
+    """Find the established media-server folder for ``show_name``.
+
+    More than one configured disk may contain the same series. Prefer the
+    folder with the most video files so a nearly empty accidental duplicate
+    does not win over the actual library. Configured root order breaks ties.
+    """
+    key = show_name.casefold()
+    if key in cache:
+        return cache[key]
+
+    settings = get_settings()
+    roots = [Path(path) for path in settings.web.server_show_dirs]
+    default_root = Path(settings.transfer.shows_dir)
+    known_roots = {os.path.normcase(os.path.abspath(str(path))) for path in roots}
+    if os.path.normcase(os.path.abspath(str(default_root))) not in known_roots:
+        roots.append(default_root)
+
+    matches: list[tuple[int, int, Path]] = []
+    for order, root in enumerate(roots):
+        match = _matching_child_directory(root, show_name)
+        if match is not None:
+            matches.append((_video_count(match), -order, match))
+
+    selected = max(matches, key=lambda item: (item[0], item[1]))[2] if matches else None
+    cache[key] = selected
+    return selected
+
+
+def _matching_child_directory(root: Path, name: str) -> Path | None:
+    direct = root / name
+    if direct.is_dir():
+        return direct
+    try:
+        return next(
+            (
+                child
+                for child in root.iterdir()
+                if child.is_dir() and child.name.casefold() == name.casefold()
+            ),
+            None,
+        )
+    except OSError:
+        return None
+
+
+def _video_count(folder: Path) -> int:
+    count = 0
+    try:
+        for child in folder.rglob("*"):
+            if child.is_file() and child.suffix.casefold() in _VIDEO_EXTENSIONS:
+                count += 1
+    except OSError:
+        pass
+    return count
 
 
 def _dedupe_items(items: list[TransferItem], *, library_root: Path) -> list[TransferItem]:
