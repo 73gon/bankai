@@ -410,7 +410,7 @@ async def search(
         category = "1_0"
     query_candidates = await tvdb_candidates(query, limit=8) if query.strip() else []
     query_matches = [
-        candidate for candidate in query_candidates[:1] if _match_score(query, candidate) >= 0.55
+        candidate for candidate in query_candidates[:1] if _match_score(query, candidate) >= 0.75
     ]
     aliases: list[str] = []
     for value in [
