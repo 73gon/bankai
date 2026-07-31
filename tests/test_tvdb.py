@@ -127,6 +127,29 @@ async def test_tvdb_anime_alias_includes_japanese_title() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tvdb_search_can_restrict_anime_primary_language() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token-123"}})
+        if request.url.path == "/v4/search":
+            assert request.url.params["language"] == "jpn"
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(404)
+
+    client = TVDBClient(api_key="api-key", transport=httpx.MockTransport(handler))
+    try:
+        aliases = await client.search_aliases(
+            "Frieren",
+            kind=MediaKind.EPISODE,
+            search_language="jpn",
+        )
+    finally:
+        await client.aclose()
+
+    assert aliases == []
+
+
+@pytest.mark.asyncio
 async def test_tvdb_series_episode_map_is_paged() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v4/login":

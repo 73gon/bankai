@@ -229,7 +229,20 @@ def _normalise(value: str) -> str:
 def _match_score(query: str, candidate: AnimeTVDBMatch) -> float:
     clean = _normalise(query)
     names = [candidate.english_title, candidate.japanese_title or ""]
-    return max(SequenceMatcher(None, clean, _normalise(name)).ratio() for name in names if name)
+
+    def score(name: str) -> float:
+        normalized = _normalise(name)
+        if clean == normalized:
+            return 1.0
+        query_words = clean.split()
+        name_words = normalized.split()
+        if query_words and len(query_words) <= len(name_words):
+            for offset in range(len(name_words) - len(query_words) + 1):
+                if name_words[offset : offset + len(query_words)] == query_words:
+                    return 0.96 - min(0.1, offset * 0.01)
+        return SequenceMatcher(None, clean, normalized).ratio() * 0.72
+
+    return max(score(name) for name in names if name)
 
 
 async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]:
@@ -247,10 +260,34 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
         languages=["eng", "jpn"],
     )
     try:
-        series, movies = await asyncio.gather(
-            client.search_aliases(clean, kind=MediaKind.EPISODE, limit=5),
-            client.search_aliases(clean, kind=MediaKind.MOVIE, limit=5),
+        series_eng, series_jpn, movies_eng, movies_jpn = await asyncio.gather(
+            client.search_aliases(
+                clean,
+                kind=MediaKind.EPISODE,
+                limit=3,
+                search_language="eng",
+            ),
+            client.search_aliases(
+                clean,
+                kind=MediaKind.EPISODE,
+                limit=3,
+                search_language="jpn",
+            ),
+            client.search_aliases(
+                clean,
+                kind=MediaKind.MOVIE,
+                limit=3,
+                search_language="eng",
+            ),
+            client.search_aliases(
+                clean,
+                kind=MediaKind.MOVIE,
+                limit=3,
+                search_language="jpn",
+            ),
         )
+        series = [*series_eng, *series_jpn]
+        movies = [*movies_eng, *movies_jpn]
     except Exception as exc:
         log.warning("TVDB anime lookup failed for %r: %s", clean, exc)
         return []
@@ -375,7 +412,10 @@ async def search(
 ) -> AnimeSearchPage:
     if category not in {"1_0", "1_1", "1_2", "1_3", "1_4"}:
         category = "1_0"
-    query_matches = await tvdb_candidates(query, limit=6) if query.strip() else []
+    query_candidates = await tvdb_candidates(query, limit=8) if query.strip() else []
+    query_matches = [
+        candidate for candidate in query_candidates[:1] if _match_score(query, candidate) >= 0.55
+    ]
     aliases: list[str] = []
     for value in [
         query.strip(),

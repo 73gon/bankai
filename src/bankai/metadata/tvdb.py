@@ -78,6 +78,7 @@ class TVDBClient:
         *,
         kind: MediaKind,
         limit: int = 5,
+        search_language: str | None = None,
     ) -> list[TitleAlias]:
         clean = query.strip()
         if not clean:
@@ -87,6 +88,8 @@ class TVDBClient:
         params: dict[str, str | int] = {"query": clean, "limit": limit}
         if tvdb_type:
             params["type"] = tvdb_type
+        if search_language:
+            params["language"] = _normalise_language(search_language)
         response = await self._client.get(
             "search",
             headers={"Authorization": f"Bearer {token}"},
