@@ -8,12 +8,15 @@ the prebuilt React frontend from :data:`STATIC_DIR`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 import mimetypes
 import re
 import subprocess
 import sys
 import threading
+import time
 from array import array
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,6 +44,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # In-memory cache of downsampled audio waveforms keyed by (path, mtime, stream).
 _WAVEFORM_CACHE: dict[tuple, dict] = {}
+_WAVEFORM_CACHE_LOCK = threading.Lock()
 
 # Cap concurrent ffmpeg transcodes. Review scrubbing + many open browser tabs
 # used to spawn dozens of ffmpeg at once, exhausting the request threadpool and
@@ -213,6 +217,48 @@ def _clips_dir() -> Path:
     d = _state_root() / "clips"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _waveforms_dir() -> Path:
+    from bankai.web.review import _state_root
+
+    directory = _state_root() / "waveforms"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _waveform_cache_path(key: tuple) -> Path:
+    digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
+    return _waveforms_dir() / f"{digest}.json"
+
+
+def _waveform_cache_get(key: tuple) -> dict | None:
+    with _WAVEFORM_CACHE_LOCK:
+        hit = _WAVEFORM_CACHE.get(key)
+    if hit is not None:
+        return hit
+    path = _waveform_cache_path(key)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    with _WAVEFORM_CACHE_LOCK:
+        _WAVEFORM_CACHE[key] = value
+    return value
+
+
+def _waveform_cache_put(key: tuple, value: dict) -> None:
+    with _WAVEFORM_CACHE_LOCK:
+        _WAVEFORM_CACHE[key] = value
+        while len(_WAVEFORM_CACHE) > 512:
+            _WAVEFORM_CACHE.pop(next(iter(_WAVEFORM_CACHE)))
+    path = _waveform_cache_path(key)
+    tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
 
 
 def _clip_cache_path(key: str, ext: str) -> Path:
@@ -567,6 +613,13 @@ def create_app() -> Any:
         allow_headers=["*"],
     )
 
+    # Queue/library membership is used by both catalogue pages.  Computing it
+    # used to parse every historical job log for every Search/Discover request.
+    # Keep a short-lived immutable snapshot instead; queue rows themselves
+    # continue to update at their normal cadence.
+    catalog_cache: dict[str, tuple[float, tuple[set[str], set[str], set[str]]]] = {}
+    catalog_cache_lock = threading.Lock()
+
     # ------------------------------------------------------------------
     # Path safety
     # ------------------------------------------------------------------
@@ -623,46 +676,58 @@ def create_app() -> Any:
         Discover doesn't re-offer something you're already downloading."""
         names: set[str] = set()
         try:
-            for j in webjobs.snapshot():
-                nt = _norm_title(j.get("title", ""))
+            titles = webjobs.catalog_titles()
+            # Keep compatibility with empty/test registries whose display
+            # snapshot may be supplied independently.
+            if not titles:
+                titles = {j.get("title", "") for j in webjobs.snapshot()}
+            for title in titles:
+                nt = _norm_title(title)
                 if nt:
                     names.add(nt)
         except Exception:
             pass
         return names
 
-    def _added_titles(kind: str) -> set[str]:
-        """Normalised titles already queued, staged, or on the media server."""
-        names = _server_have(kind) | _active_titles()
+    def _catalog_membership(kind: str) -> tuple[set[str], set[str], set[str]]:
+        """Return ``(server, active, staged)`` title sets with a short TTL."""
+
+        now = time.monotonic()
+        with catalog_cache_lock:
+            cached = catalog_cache.get(kind)
+            if cached and now - cached[0] < 3.0:
+                return tuple(set(values) for values in cached[1])  # type: ignore[return-value]
+        have = _server_have(kind)
+        active = _active_titles()
+        staged: set[str] = set()
         try:
             for entry in media_mod.scan_library():
                 if kind == "movie" and entry.kind == "movie":
-                    names.add(_norm_title(entry.name))
+                    staged.add(_norm_title(entry.name))
                 elif kind == "show" and entry.kind == "episode":
-                    names.add(_norm_title(entry.series or entry.name))
+                    staged.add(_norm_title(entry.series or entry.name))
         except Exception:
             pass
-        return names
+        value = (have, active, staged)
+        with catalog_cache_lock:
+            catalog_cache[kind] = (now, tuple(set(values) for values in value))
+        return value
+
+    def _added_titles(kind: str) -> set[str]:
+        """Normalised titles already queued, staged, or on the media server."""
+        have, active, staged = _catalog_membership(kind)
+        return have | active | staged
 
     def _library_titles(kind: str) -> set[str]:
         """Normalised titles staged in bankai's local review library."""
-        names: set[str] = _server_have(kind)
-        try:
-            for entry in media_mod.scan_library():
-                if kind == "movie" and entry.kind == "movie":
-                    names.add(_norm_title(entry.name))
-                elif kind == "show" and entry.kind == "episode":
-                    names.add(_norm_title(entry.series or entry.name))
-        except Exception:
-            pass
-        return names
+        have, _active, staged = _catalog_membership(kind)
+        return have | staged
 
-    def _filter_discover(items: list, kind: str) -> list:
+    def _filter_discover(items: list, kind: str, membership=None) -> list:
         """Hide upcoming (not-yet-released) titles, anything already on the
         server, and anything already in the queue, so Discover only shows
         things worth downloading now."""
-        have = _server_have(kind)
-        active = _active_titles()
+        have, active, _staged = membership or _catalog_membership(kind)
         out = []
         for it in items:
             if not discover_mod.is_released(it):
@@ -706,7 +771,10 @@ def create_app() -> Any:
     ) -> dict:
         k = "movie" if kind == "movie" else "show"
         result = await discover_mod.browse_page(k, page=page, page_size=page_size)
-        items = _filter_discover(result.items, k)
+        import anyio.to_thread
+
+        membership = await anyio.to_thread.run_sync(_catalog_membership, k)
+        items = _filter_discover(result.items, k, membership)
         return {
             "configured": discover_mod.is_configured(),
             "items": _apply_availability(items, k),
@@ -739,8 +807,11 @@ def create_app() -> Any:
         # hide clearly-unreleased titles; the discover mirror/on-server/queued
         # filters would otherwise hide exactly what the user searched for.
         items = [i for i in paged.items if discover_mod.is_released(i)]
-        added = _added_titles(k)
-        in_library = _library_titles(k)
+        import anyio.to_thread
+
+        have, active, staged = await anyio.to_thread.run_sync(_catalog_membership, k)
+        added = have | active | staged
+        in_library = have | staged
         results: list[dict] = []
         for item in items:
             result = discover_mod.to_dict(item)
@@ -1407,8 +1478,36 @@ def create_app() -> Any:
             )
         return {"entries": out, "library": str(get_settings().output.directory)}
 
-    @app.get("/api/titles")
-    def titles_list() -> dict:
+    titles_cache_lock = threading.Lock()
+    titles_cache_revision: tuple | None = None
+    titles_cache_value: dict | None = None
+
+    def _titles_revision(entries: list) -> tuple:
+        """Cheap exact-enough revision used to coalesce dashboard refreshes."""
+
+        files: list[Path] = [
+            webjobs._pending_path(),
+            review_mod._store_path(),
+            posters_mod._store(),
+        ]
+        root = webjobs.bgjobs.jobs_root()
+        files.extend(root.glob("*/meta.json"))
+        files.extend(root.glob("*/log"))
+        count = 0
+        total_size = 0
+        revision_xor = 0
+        for file in files:
+            try:
+                stat = file.stat()
+            except OSError:
+                continue
+            count += 1
+            total_size += stat.st_size
+            revision_xor ^= stat.st_mtime_ns ^ stat.st_size
+        library = tuple((entry.path, entry.size, entry.mtime) for entry in entries)
+        return (library, count, total_size, revision_xor)
+
+    def _build_titles(entries: list) -> dict:
         """Unified one-row-per-title view merging the library and the queue.
 
         Each movie/episode appears exactly once: a title being downloaded
@@ -1416,11 +1515,15 @@ def create_app() -> Any:
         state (sync, transfer, download progress) is carried as columns, never
         as extra rows.
         """
-        entries = media_mod.scan_library()
-        transfers = webjobs.transfer_states()
-        repacks = webjobs.repack_states()
-        jobs = webjobs.snapshot()  # already excludes transfer jobs
+        # All three views share the same reconciled registry snapshot.  This
+        # prevents a single request from scanning every historical job four or
+        # more times and gives the response a consistent point-in-time view.
+        with webjobs.dashboard_read():
+            transfers = webjobs.transfer_states()
+            repacks = webjobs.repack_states()
+            jobs = webjobs.snapshot()  # already excludes transfer jobs
         review_states = review_mod.all_states()
+        poster_cache = posters_mod.all_cached()
         # Tombstones for files the user explicitly deleted (stage="deleted"),
         # keyed by resolved path — used to relabel their finished job row.
         deleted_paths = {k for k, st in review_states.items() if st.stage == "deleted"}
@@ -1449,7 +1552,11 @@ def create_app() -> Any:
         lib_paths: set[str] = set()
         lib_norms: set[str] = set()
         for e in entries:
-            state = review_mod.get_state(e.path)
+            try:
+                rp = str(Path(e.path).resolve())
+            except OSError:
+                rp = e.path
+            state = review_states.get(rp, review_mod.ReviewState(path=e.path))
             if state.stage == "repacking" and state.repack_status in {"done", "failed"}:
                 state = review_mod.set_repack(
                     e.path,
@@ -1458,10 +1565,6 @@ def create_app() -> Any:
                     kind=state.repack_kind,
                     note=state.note,
                 )
-            try:
-                rp = str(Path(e.path).resolve())
-            except OSError:
-                rp = e.path
             tinfo = transfers.get(rp)
             if tinfo and tinfo["status"] != state.transfer_status:
                 state = review_mod.set_transfer(
@@ -1484,8 +1587,12 @@ def create_app() -> Any:
                 _norm_title(e.series or clean) if e.kind == "episode" else norm
             )
             posters_mod.ensure(
-                poster_key, e.series or clean, "series" if e.kind == "episode" else "movie"
+                poster_key,
+                e.series or clean,
+                "series" if e.kind == "episode" else "movie",
+                known=poster_cache,
             )
+            poster_entry = poster_cache.get(poster_key) or {}
             related = job_by_norm.get(norm)
             related_is_newer = bool(
                 related and float(related.get("started_at") or 0) > float(e.mtime or 0)
@@ -1505,8 +1612,8 @@ def create_app() -> Any:
                     "id": e.path,
                     "title": clean,
                     "kind": e.kind,
-                    "year": _extract_year(e.name) or posters_mod.cached_year(poster_key),
-                    "poster": posters_mod.cached(poster_key),
+                    "year": _extract_year(e.name) or poster_entry.get("year"),
+                    "poster": poster_entry.get("url"),
                     "created_at": created_at,
                     "updated_at": updated_at,
                     "done_at": updated_at,
@@ -1603,7 +1710,13 @@ def create_app() -> Any:
             clean = _clean_title(j.get("title", ""))
             is_ep = j.get("kind") == "show"
             poster_key = ("show:" if is_ep else "movie:") + _norm_title(clean)
-            posters_mod.ensure(poster_key, clean, "series" if is_ep else "movie")
+            posters_mod.ensure(
+                poster_key,
+                clean,
+                "series" if is_ep else "movie",
+                known=poster_cache,
+            )
+            poster_entry = poster_cache.get(poster_key) or {}
             fp = j.get("final_path")
             try:
                 is_deleted = bool(fp) and str(Path(fp).resolve()) in deleted_paths
@@ -1616,8 +1729,8 @@ def create_app() -> Any:
                     "title": clean,
                     "kind": "episode" if is_ep else "movie",
                     "year": _extract_year(j.get("title", ""))
-                    or posters_mod.cached_year(poster_key),
-                    "poster": posters_mod.cached(poster_key),
+                    or poster_entry.get("year"),
+                    "poster": poster_entry.get("url"),
                     "created_at": j.get("started_at"),
                     "updated_at": j.get("updated_at")
                     or j.get("finished_at")
@@ -1659,6 +1772,20 @@ def create_app() -> Any:
                 }
             )
         return {"rows": rows, "library": str(get_settings().output.directory)}
+
+    @app.get("/api/titles")
+    def titles_list() -> dict:
+        nonlocal titles_cache_revision, titles_cache_value
+
+        entries = media_mod.scan_library()
+        revision = _titles_revision(entries)
+        with titles_cache_lock:
+            if titles_cache_value is not None and revision == titles_cache_revision:
+                return titles_cache_value
+            value = _build_titles(entries)
+            titles_cache_revision = revision
+            titles_cache_value = value
+            return value
 
     @app.post("/api/titles/redo")
     def titles_redo(req: PathRequest) -> dict:
@@ -1884,7 +2011,7 @@ def create_app() -> Any:
             raise HTTPException(status_code=404, detail="not found") from exc
         detailed = dur <= 180.0
         key = ("adaptive-v2", str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
-        hit = _WAVEFORM_CACHE.get(key)
+        hit = _waveform_cache_get(key)
         if hit is not None:
             return hit
         ffmpeg = media_mod.ffmpeg_bin()
@@ -1967,7 +2094,7 @@ def create_app() -> Any:
             "peaks": base64.b64encode(bytes(peaks)).decode("ascii"),
             "detail": "pcm" if detailed else "r128",
         }
-        _WAVEFORM_CACHE[key] = out
+        _waveform_cache_put(key, out)
         return out
 
     @app.get("/api/media/audioclip")

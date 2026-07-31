@@ -159,6 +159,7 @@ export default function Search() {
   useEffect(() => {
     window.clearTimeout(debounce.current);
     let cancelled = false;
+    let prefetchTimer: number | undefined;
     const raw = q.trim();
     if (raw.length < 2) {
       setItems([]);
@@ -192,14 +193,22 @@ export default function Search() {
           setTotal(r.total);
           setHasNext(r.has_next);
           const neighbours = [page - 1, page + 1].filter((value) => value >= 0 && (value < page || r.has_next));
-          void Promise.all(
-            neighbours.map(async (neighbour) => {
+          // Keep adjacent navigation warm, but only after the visible results
+          // have painted and one request at a time. Parallel prefetch used to
+          // triple the load caused by every keystroke.
+          prefetchTimer = window.setTimeout(async () => {
+            for (const neighbour of neighbours) {
+              if (cancelled) return;
               const neighbourKey = searchCacheKey(titleQuery || raw, kind, searchBy, neighbour, pageSize);
               if (!searchPageCache.has(neighbourKey)) {
-                searchPageCache.set(neighbourKey, await api.discoverSearch(titleQuery || raw, kind, searchBy, neighbour, pageSize));
+                try {
+                  searchPageCache.set(neighbourKey, await api.discoverSearch(titleQuery || raw, kind, searchBy, neighbour, pageSize));
+                } catch {
+                  return;
+                }
               }
-            }),
-          ).catch(() => undefined);
+            }
+          }, 1200);
         })
         .catch((e) => {
           if (!cancelled) toast.error(e.message);
@@ -211,6 +220,7 @@ export default function Search() {
     return () => {
       cancelled = true;
       window.clearTimeout(debounce.current);
+      if (prefetchTimer) window.clearTimeout(prefetchTimer);
     };
   }, [q, kind, searchBy, page, pageSize]);
 

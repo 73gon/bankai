@@ -280,3 +280,40 @@ def test_pending_snapshot_reports_stream_recovery_wait(
     row = next(row for row in webjobs.snapshot() if row["id"] == "movie1")
 
     assert row["step_label"] == "Waiting for stream source recovery"
+
+
+def test_dashboard_read_reuses_one_registry_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def list_jobs() -> list:
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(webjobs, "reconcile", lambda: 0)
+    monkeypatch.setattr(webjobs, "_load_pending", lambda: [])
+    monkeypatch.setattr(webjobs.bgjobs, "list_jobs", list_jobs)
+
+    with webjobs.dashboard_read():
+        assert webjobs.snapshot() == []
+        assert webjobs.transfer_states() == {}
+        assert webjobs.repack_states() == {}
+
+    assert calls == 1
+
+
+def test_catalog_titles_does_not_parse_progress_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs = [
+        SimpleNamespace(id="done", title="Done Movie", kind="movie", args=[], status="done"),
+        SimpleNamespace(id="failed", title="Failed Movie", kind="movie", args=[], status="failed"),
+    ]
+    pending = PendingJob(id="queued", title="Queued Movie", kind="movie", args=[])
+    monkeypatch.setattr(webjobs.bgjobs, "list_jobs", lambda: jobs)
+    monkeypatch.setattr(webjobs, "_load_pending", lambda: [pending])
+    monkeypatch.setattr(
+        webjobs.bgjobs,
+        "progress_snapshot",
+        lambda _job: pytest.fail("catalog membership must not parse logs"),
+    )
+
+    assert webjobs.catalog_titles() == {"Done Movie", "Queued Movie"}

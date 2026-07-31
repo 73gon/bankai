@@ -132,29 +132,42 @@ export default function Discover() {
       setLoading(true);
     }
     let cancelled = false;
-    api
-      .discoverTrending(kind, page, pageSize)
-      .then((r) => {
-        if (cancelled) return;
-        discoverCache.set(key, r);
-        setConfigured(r.configured);
-        setItems(r.items);
-        setTotal(r.total);
-        setHasNext(r.has_next);
-        const neighbours = [page - 1, page + 1].filter((value) => value >= 0 && (value < page || r.has_next));
-        void Promise.all(
-          neighbours.map(async (neighbour) => {
-            const neighbourKey = discoverKey(kind, neighbour, pageSize);
-            if (!discoverCache.has(neighbourKey)) {
-              discoverCache.set(neighbourKey, await api.discoverTrending(kind, neighbour, pageSize));
+    let refreshTimer: number | undefined;
+    let prefetchTimer: number | undefined;
+    const refresh = () => {
+      api
+        .discoverTrending(kind, page, pageSize)
+        .then((r) => {
+          if (cancelled) return;
+          discoverCache.set(key, r);
+          setConfigured(r.configured);
+          setItems(r.items);
+          setTotal(r.total);
+          setHasNext(r.has_next);
+          const neighbours = [page - 1, page + 1].filter((value) => value >= 0 && (value < page || r.has_next));
+          prefetchTimer = window.setTimeout(async () => {
+            for (const neighbour of neighbours) {
+              if (cancelled) return;
+              const neighbourKey = discoverKey(kind, neighbour, pageSize);
+              if (!discoverCache.has(neighbourKey)) {
+                try {
+                  discoverCache.set(neighbourKey, await api.discoverTrending(kind, neighbour, pageSize));
+                } catch {
+                  return;
+                }
+              }
             }
-          }),
-        ).catch(() => undefined);
-      })
-      .catch((e) => toast.error(e.message))
-      .finally(() => !cancelled && setLoading(false));
+          }, 1200);
+        })
+        .catch((e) => toast.error(e.message))
+        .finally(() => !cancelled && setLoading(false));
+    };
+    // Paint an existing page immediately, then refresh lazily.
+    refreshTimer = window.setTimeout(refresh, cached ? 600 : 0);
     return () => {
       cancelled = true;
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      if (prefetchTimer) window.clearTimeout(prefetchTimer);
     };
   }, [kind, page, pageSize]);
 
@@ -165,7 +178,8 @@ export default function Discover() {
     if (kind !== 'movie') return;
     let n = 0;
     let stop = false;
-    const t = setInterval(async () => {
+    let timer: number | undefined;
+    const refreshAvailability = async () => {
       n += 1;
       try {
         const r = await api.discoverTrending(kind, page, pageSize);
@@ -173,14 +187,15 @@ export default function Discover() {
         discoverCache.set(discoverKey(kind, page, pageSize), r);
         setItems(r.items);
         const pending = r.items.filter((it) => !it.checked).length;
-        if (pending === 0 || n >= 10) clearInterval(t);
+        if (pending > 0 && n < 3) timer = window.setTimeout(() => void refreshAvailability(), 20000);
       } catch {
         /* ignore transient errors */
       }
-    }, 6000);
+    };
+    timer = window.setTimeout(() => void refreshAvailability(), 20000);
     return () => {
       stop = true;
-      clearInterval(t);
+      if (timer) window.clearTimeout(timer);
     };
   }, [kind, page, pageSize]);
 

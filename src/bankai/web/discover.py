@@ -26,6 +26,7 @@ _ARTWORK_BASE = "https://artworks.thetvdb.com"
 _CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
 _DETAIL_CACHE: dict[str, tuple[float, TitleDetails]] = {}
 _BROWSE_META: dict[str, dict] = {}
+_TOKEN_CACHE: tuple[str, str, float, str] | None = None
 # Keys currently being refreshed in the background (stale-while-revalidate),
 # so we never launch duplicate refreshes for the same key.
 _REFRESHING: set[str] = set()
@@ -71,14 +72,25 @@ def is_configured() -> bool:
 
 
 async def _login(client: httpx.AsyncClient) -> str | None:
+    global _TOKEN_CACHE
     m = get_settings().metadata
-    req: dict[str, str] = {"apikey": m.tvdb_api_key}
+    api_key = m.tvdb_api_key
+    pin = m.tvdb_pin or ""
+    cached = _TOKEN_CACHE
+    if cached and cached[0] == api_key and cached[1] == pin and cached[2] > time.time():
+        return cached[3]
+    req: dict[str, str] = {"apikey": api_key}
     if m.tvdb_pin:
         req["pin"] = m.tvdb_pin
     try:
         r = await client.post("login", json=req)
         r.raise_for_status()
-        return (r.json().get("data") or {}).get("token")
+        token = (r.json().get("data") or {}).get("token")
+        if token:
+            # TVDB tokens live longer than this; a conservative local TTL keeps
+            # catalogue navigation fast without risking a long-lived stale JWT.
+            _TOKEN_CACHE = (api_key, pin, time.time() + 30 * 60, token)
+        return token
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("TVDB login failed: %s", exc)
         return None

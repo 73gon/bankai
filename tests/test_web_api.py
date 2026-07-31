@@ -531,6 +531,26 @@ def test_titles_library_uses_file_creation_and_modification_times(
     assert second_row["updated_at"] > row["updated_at"]
 
 
+def test_titles_reuses_unchanged_dashboard_response(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def snapshot() -> list:
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr("bankai.web.jobs.snapshot", snapshot)
+    monkeypatch.setattr("bankai.web.jobs.transfer_states", lambda: {})
+    monkeypatch.setattr("bankai.web.jobs.repack_states", lambda: {})
+
+    assert client.get("/api/titles").status_code == 200
+    assert client.get("/api/titles").status_code == 200
+    assert calls == 1
+
+
 def test_titles_library_exposes_both_saved_sources(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -930,6 +950,18 @@ def test_close_zoom_waveform_uses_detailed_pcm(
     assert response.json()["detail"] == "pcm"
     assert response.json()["bins"] == 600
     assert calls[0][calls[0].index("-f") + 1] == "s16le"
+
+    # Service restarts clear RAM but should not force a full waveform decode
+    # for an unchanged file/window again.
+    from bankai.web import app as app_mod
+
+    app_mod._WAVEFORM_CACHE.clear()
+    cached = client.get(
+        "/api/media/waveform",
+        params={"path": str(movie), "stream": 1, "start": 30, "dur": 9, "bins": 600},
+    )
+    assert cached.status_code == 200
+    assert len(calls) == 1
 
 
 def test_settings_get_masks_secrets(client: TestClient) -> None:

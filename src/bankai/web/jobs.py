@@ -14,6 +14,8 @@ import json
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -29,6 +31,12 @@ _OPERATION_COMMANDS = {"transfer-run", "review-repack", "review-replace-torrent"
 _STREAM_FAILURE_THRESHOLD = 2
 _STREAM_FAILURE_WINDOW_SECONDS = 10 * 60
 _STREAM_FAILURE_COOLDOWN_SECONDS = 15 * 60
+_READ_CONTEXT = threading.local()
+_ROW_CACHE_LOCK = threading.Lock()
+# Completed jobs never change again.  Cache their parsed log/progress row by
+# metadata + log revision so the queue does not re-read hundreds of historical
+# logs on every poll.  Running jobs naturally miss whenever their log grows.
+_ROW_CACHE: dict[str, tuple[tuple[object, ...], dict]] = {}
 
 
 def _is_operation(kind: str | None, args: list[str] | None = None) -> bool:
@@ -67,7 +75,60 @@ def _save_pending(items: list[PendingJob]) -> None:
     tmp.replace(p)
 
 
-def _running_count() -> int:
+def _context_jobs() -> list | None:
+    return getattr(_READ_CONTEXT, "jobs", None)
+
+
+def _context_pending() -> list[PendingJob] | None:
+    return getattr(_READ_CONTEXT, "pending", None)
+
+
+def _call_with_jobs(function, jobs: list):
+    """Call a no-argument helper against ``jobs`` via the read context."""
+
+    previous_jobs = _context_jobs()
+    _READ_CONTEXT.jobs = jobs
+    try:
+        return function()
+    finally:
+        if previous_jobs is None:
+            with suppress(AttributeError):
+                del _READ_CONTEXT.jobs
+        else:
+            _READ_CONTEXT.jobs = previous_jobs
+
+
+@contextmanager
+def dashboard_read() -> Iterator[None]:
+    """Share one reconciled filesystem snapshot across a dashboard request.
+
+    ``/api/titles`` needs pipeline, transfer and repack views.  Previously each
+    helper reconciled and scanned the complete job registry independently.
+    Keeping the snapshot thread-local preserves the public helper APIs (and
+    their tests) while collapsing that repeated work into one pass.
+    """
+
+    reconcile()
+    previous_jobs = _context_jobs()
+    previous_pending = _context_pending()
+    _READ_CONTEXT.jobs = bgjobs.list_jobs()
+    _READ_CONTEXT.pending = _load_pending()
+    try:
+        yield
+    finally:
+        if previous_jobs is None:
+            with suppress(AttributeError):
+                del _READ_CONTEXT.jobs
+        else:
+            _READ_CONTEXT.jobs = previous_jobs
+        if previous_pending is None:
+            with suppress(AttributeError):
+                del _READ_CONTEXT.pending
+        else:
+            _READ_CONTEXT.pending = previous_pending
+
+
+def _running_count(jobs: list | None = None) -> int:
     """Count active or stopped pipelines against the worker-slot limit.
 
     A stopped job reserves its slot; otherwise stopping every active job would
@@ -75,7 +136,11 @@ def _running_count() -> int:
     """
     return sum(
         1
-        for job in bgjobs.list_jobs()
+        for job in (
+            jobs
+            if jobs is not None
+            else (_context_jobs() if _context_jobs() is not None else bgjobs.list_jobs())
+        )
         if job.status in {"running", "stopped"}
         and not _is_operation(job.kind, getattr(job, "args", None))
     )
@@ -90,7 +155,7 @@ def _norm_job_title(title: str) -> str:
     return t
 
 
-def _running_titles() -> set[str]:
+def _running_titles(jobs: list | None = None) -> set[str]:
     """Normalised titles of all running jobs, including transfers.
 
     Transfer titles are prefixed with ``Transfer`` and therefore cannot clash
@@ -99,7 +164,11 @@ def _running_titles() -> set[str]:
     """
     return {
         _norm_job_title(job.title)
-        for job in bgjobs.list_jobs()
+        for job in (
+            jobs
+            if jobs is not None
+            else (_context_jobs() if _context_jobs() is not None else bgjobs.list_jobs())
+        )
         if job.status in {"running", "stopped"}
     }
 
@@ -138,7 +207,11 @@ def reconcile() -> int:
             return 0
         settings = get_settings()
         limit = max(1, settings.web.max_concurrent_jobs)
-        running_titles = _running_titles()
+        jobs = bgjobs.list_jobs()
+        # Keep these no-argument calls compatible with existing scheduler
+        # hooks/tests while they consume the shared context internally.
+        running_titles = _call_with_jobs(_running_titles, jobs)
+        running_count = _call_with_jobs(_running_count, jobs)
         started = 0
 
         # Migrate transfers queued by older releases immediately, even when a
@@ -157,6 +230,8 @@ def reconcile() -> int:
                     created_at=item.created_at,
                 )
                 running_titles.add(nt)
+                if not _is_operation(item.kind, item.args):
+                    running_count += 1
                 started += 1
             except Exception as exc:  # pragma: no cover - spawn failure
                 log.warning("failed to start pending job %s: %s", item.id, exc)
@@ -166,7 +241,7 @@ def reconcile() -> int:
         # invalid. Keep the remaining queue intact until the source has had a
         # chance to recover. Explicit Force start remains available as a
         # deliberate canary and operations above are never held back.
-        cooldown_until = _stream_failure_cooldown_until()
+        cooldown_until = _call_with_jobs(_stream_failure_cooldown_until, jobs)
         if pending and cooldown_until is not None:
             log.warning(
                 "stream extraction circuit open; pending pipelines paused for %.0f seconds",
@@ -175,7 +250,7 @@ def reconcile() -> int:
             _save_pending(pending)
             return started
 
-        while pending and _running_count() < limit:
+        while pending and running_count < limit:
             item = pending.pop(0)
             nt = _norm_job_title(item.title)
             if nt and nt in running_titles:
@@ -188,6 +263,7 @@ def reconcile() -> int:
                     created_at=item.created_at,
                 )
                 running_titles.add(nt)
+                running_count += 1
                 started += 1
             except Exception as exc:  # pragma: no cover - spawn failure
                 log.warning("failed to start pending job %s: %s", item.id, exc)
@@ -322,11 +398,17 @@ def _job_reason(j: bgjobs.BgJob) -> str | None:
     )
 
 
-def _stream_failure_cooldown_until(now: float | None = None) -> float | None:
+def _stream_failure_cooldown_until(
+    now: float | None = None, *, jobs: list | None = None
+) -> float | None:
     """Return the extraction circuit's recovery time after clustered failures."""
     current = time.time() if now is None else now
     failures: list[float] = []
-    for job in bgjobs.list_jobs():
+    for job in (
+        jobs
+        if jobs is not None
+        else (_context_jobs() if _context_jobs() is not None else bgjobs.list_jobs())
+    ):
         if _is_operation(job.kind, getattr(job, "args", None)):
             continue
         finished_at = getattr(job, "finished_at", None)
@@ -345,6 +427,77 @@ def _stream_failure_cooldown_until(now: float | None = None) -> float | None:
     return until if until > current else None
 
 
+def _job_revision(job) -> tuple[object, ...] | None:
+    """Cheap revision for parsed display data, or ``None`` for test doubles."""
+
+    log_path = getattr(job, "log_path", None)
+    job_id = getattr(job, "id", None)
+    if job_id is None or log_path is None:
+        return None
+    try:
+        stat = Path(log_path).stat()
+        log_revision = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        log_revision = (0, 0)
+    return (
+        getattr(job, "status", None),
+        getattr(job, "updated_at", None),
+        getattr(job, "finished_at", None),
+        getattr(job, "exit_code", None),
+        getattr(job, "final_path", None),
+        *log_revision,
+    )
+
+
+def _display_row(job) -> dict:
+    """Build the stable part of a queue row, reusing unchanged log parsing."""
+
+    revision = _job_revision(job)
+    job_id = str(getattr(job, "id", ""))
+    if revision is not None:
+        with _ROW_CACHE_LOCK:
+            cached = _ROW_CACHE.get(job_id)
+        if cached and cached[0] == revision:
+            return dict(cached[1])
+
+    snap = bgjobs.progress_snapshot(job)
+    raw_reason = _job_reason(job)
+    cls = reasons.classify_reason(raw_reason)
+    row = {
+        "id": job.id,
+        "kind": job.kind,
+        "title": job.title,
+        "status": job.status,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "updated_at": job.updated_at or job.finished_at or job.started_at,
+        "exit_code": job.exit_code,
+        "final_path": job.final_path,
+        "reason": cls[1] if cls else None,
+        "reason_code": cls[0] if cls else None,
+        "reason_detail": raw_reason,
+        "step": snap.step,
+        "total_steps": snap.total_steps,
+        "step_label": snap.step_label,
+        "overall_percent": snap.overall_percent,
+        "pending": False,
+        "queue_position": None,
+        "queue_total": None,
+        "german_source_url": getattr(job, "german_source_url", None)
+        or bgjobs.argument_value(job.args, "--url"),
+        "torrent_source_url": getattr(job, "torrent_source_url", None),
+        "torrent_source_title": getattr(job, "torrent_source_title", None),
+    }
+    if revision is not None:
+        with _ROW_CACHE_LOCK:
+            _ROW_CACHE[job_id] = (revision, dict(row))
+            if len(_ROW_CACHE) > 1000:
+                live_ids = {path.parent.name for path in bgjobs.jobs_root().glob("*/meta.json")}
+                for stale_id in set(_ROW_CACHE) - live_ids:
+                    _ROW_CACHE.pop(stale_id, None)
+    return row
+
+
 def snapshot() -> list[dict]:
     """Unified list of running/finished jobs + pending, newest first.
 
@@ -352,48 +505,28 @@ def snapshot() -> list[dict]:
     on the library entry (see :func:`transfer_states`) rather than as their
     own queue point.
     """
-    reconcile()
+    context_jobs = _context_jobs()
+    if context_jobs is None:
+        reconcile()
+    jobs = context_jobs if context_jobs is not None else bgjobs.list_jobs()
     out: list[dict] = []
-    for j in bgjobs.list_jobs():
+    for j in jobs:
         if _is_operation(j.kind, getattr(j, "args", None)):
             continue
-        snap = bgjobs.progress_snapshot(j)
-        raw_reason = _job_reason(j)
-        cls = reasons.classify_reason(raw_reason)
         from bankai.torrent import actions as torrent_actions
 
         action = torrent_actions.get_request(j.id) if j.status == "running" else None
-        out.append(
-            {
-                "id": j.id,
-                "kind": j.kind,
-                "title": j.title,
-                "status": j.status,
-                "started_at": j.started_at,
-                "finished_at": j.finished_at,
-                "updated_at": j.updated_at or j.finished_at or j.started_at,
-                "exit_code": j.exit_code,
-                "final_path": j.final_path,
-                "reason": cls[1] if cls else None,
-                "reason_code": cls[0] if cls else None,
-                "reason_detail": raw_reason,
-                "step": snap.step,
-                "total_steps": snap.total_steps,
-                "step_label": snap.step_label,
-                "overall_percent": snap.overall_percent,
-                "pending": False,
-                "action_required": bool(action and action.get("status") == "waiting"),
-                "queue_position": None,
-                "queue_total": None,
-                "german_source_url": getattr(j, "german_source_url", None)
-                or bgjobs.argument_value(j.args, "--url"),
-                "torrent_source_url": getattr(j, "torrent_source_url", None),
-                "torrent_source_title": getattr(j, "torrent_source_title", None),
-            }
-        )
-    visible_pending = [item for item in _load_pending() if not _is_operation(item.kind, item.args)]
+        row = _display_row(j)
+        row["action_required"] = bool(action and action.get("status") == "waiting")
+        out.append(row)
+    pending = _context_pending()
+    visible_pending = [
+        item
+        for item in (pending if pending is not None else _load_pending())
+        if not _is_operation(item.kind, item.args)
+    ]
     queue_total = len(visible_pending)
-    stream_cooldown = _stream_failure_cooldown_until()
+    stream_cooldown = _call_with_jobs(_stream_failure_cooldown_until, jobs)
     for queue_position, item in enumerate(visible_pending, start=1):
         if _is_operation(item.kind, item.args):
             continue
@@ -429,6 +562,31 @@ def snapshot() -> list[dict]:
     return out
 
 
+def catalog_titles() -> set[str]:
+    """Titles that should be marked as already added without parsing logs.
+
+    Search/Discover only need membership, not progress or failure reasons.  A
+    metadata-only pass is an order of magnitude cheaper than ``snapshot()``
+    and deliberately excludes failed/cancelled attempts so they remain
+    discoverable for a new run.
+    """
+
+    jobs = _context_jobs()
+    if jobs is None:
+        jobs = bgjobs.list_jobs()
+    titles = {
+        job.title
+        for job in jobs
+        if not _is_operation(job.kind, getattr(job, "args", None))
+        and job.status in {"running", "stopped", "done"}
+    }
+    pending = _context_pending()
+    for item in (pending if pending is not None else _load_pending()):
+        if not _is_operation(item.kind, item.args):
+            titles.add(item.title)
+    return titles
+
+
 def _transfer_target(args: list[str]) -> str | None:
     """Return the library path a ``transfer-run`` job operates on."""
     if not args or args[0] != "transfer-run":
@@ -452,9 +610,14 @@ def transfer_states() -> dict[str, dict]:
     status so the library can show transfer progress as a column instead of a
     standalone queue job. Newest job per path wins.
     """
-    reconcile()
+    context_jobs = _context_jobs()
+    if context_jobs is None:
+        reconcile()
     by_path: dict[str, dict] = {}
-    jobs = sorted(bgjobs.list_jobs(), key=lambda j: j.started_at or 0)
+    jobs = sorted(
+        context_jobs if context_jobs is not None else bgjobs.list_jobs(),
+        key=lambda j: j.started_at or 0,
+    )
     for j in jobs:
         if j.kind != "transfer":
             continue
@@ -480,7 +643,8 @@ def transfer_states() -> dict[str, dict]:
             "exit_code": j.exit_code,
         }
     # Include pending transfers (waiting for a slot) as queued transfers.
-    for item in _load_pending():
+    pending = _context_pending()
+    for item in (pending if pending is not None else _load_pending()):
         if item.kind != "transfer":
             continue
         target = _transfer_target(item.args)
@@ -508,9 +672,14 @@ def _operation_target(args: list[str], command: str) -> str | None:
 
 def repack_states() -> dict[str, dict]:
     """Newest detached audio-repack/torrent-replacement state per path."""
-    reconcile()
+    context_jobs = _context_jobs()
+    if context_jobs is None:
+        reconcile()
     by_path: dict[str, dict] = {}
-    for job in sorted(bgjobs.list_jobs(), key=lambda item: item.started_at or 0):
+    for job in sorted(
+        context_jobs if context_jobs is not None else bgjobs.list_jobs(),
+        key=lambda item: item.started_at or 0,
+    ):
         if job.kind not in {"repack", "torrent_replace"}:
             continue
         command = "review-repack" if job.kind == "repack" else "review-replace-torrent"

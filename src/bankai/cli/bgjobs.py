@@ -450,7 +450,23 @@ def _pid_alive(pid: int) -> bool:
 
 def _read_log_tail(path: Path, *, lines: int = 200) -> list[str]:
     try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+        # Progress polling used to decode the entire lifetime log on every
+        # refresh. Long-running downloads can produce multi-megabyte logs, so
+        # read backwards until the requested tail is complete instead.
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            chunks: list[bytes] = []
+            newline_count = 0
+            while position > 0 and newline_count <= lines:
+                size = min(64 * 1024, position)
+                position -= size
+                handle.seek(position)
+                chunk = handle.read(size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+            data = b"".join(reversed(chunks))
+        return data.decode("utf-8", errors="replace").splitlines()[-lines:]
     except Exception:
         return []
 

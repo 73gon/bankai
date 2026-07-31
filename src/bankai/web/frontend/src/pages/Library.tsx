@@ -44,6 +44,7 @@ import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
 let queueRowsCache: TitleRow[] | null = null;
+let queueRowsCachedAt = 0;
 
 // --- ANSI colour rendering for job logs -----------------------------------
 const ANSI_FG: Record<number, string> = {
@@ -814,6 +815,7 @@ export default function Library() {
   const [replacementFilters, setReplacementFilters] = useState<TorrentFilters>(EMPTY_TORRENT_FILTERS);
   const tableScrollRef = useRef<HTMLDivElement>(null);
   const restoreScrollRef = useRef<number | null>(null);
+  const loadInFlightRef = useRef<Promise<void> | null>(null);
   useEffect(() => {
     try {
       const preferences: QueuePreferences = {
@@ -831,22 +833,43 @@ export default function Library() {
   }, [filter, statusFilters, filtersOpen, sortCol, sortDir, pageSize]);
 
   async function load(silent = false, preserveScroll = false) {
-    if (!silent) setLoading(true);
+    if (preserveScroll) restoreScrollRef.current = tableScrollRef.current?.scrollTop ?? null;
+    if (loadInFlightRef.current) return loadInFlightRef.current;
+    const task = (async () => {
+      if (!silent) setLoading(true);
+      try {
+        const r = await api.titles();
+        queueRowsCache = r.rows;
+        queueRowsCachedAt = Date.now();
+        setRows(r.rows);
+      } catch (e: any) {
+        if (!silent) toast.error(e.message);
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    })();
+    loadInFlightRef.current = task;
     try {
-      const r = await api.titles();
-      queueRowsCache = r.rows;
-      if (preserveScroll) restoreScrollRef.current = tableScrollRef.current?.scrollTop ?? null;
-      setRows(r.rows);
-    } catch (e: any) {
-      if (!silent) toast.error(e.message);
+      await task;
     } finally {
-      if (!silent) setLoading(false);
+      if (loadInFlightRef.current === task) loadInFlightRef.current = null;
     }
   }
   useEffect(() => {
-    load(queueRowsCache != null);
-    const t = setInterval(() => load(true), 3000);
-    return () => clearInterval(t);
+    let stopped = false;
+    let timer: number | undefined;
+    const refresh = async (initial: boolean) => {
+      await load(initial ? queueRowsCache != null : true);
+      if (!stopped) timer = window.setTimeout(() => void refresh(false), 5000);
+    };
+    // Cached rows paint immediately. Give navigation/rendering a moment before
+    // the lazy refresh unless the cache is already old.
+    const age = Date.now() - queueRowsCachedAt;
+    timer = window.setTimeout(() => void refresh(true), queueRowsCache && age < 5000 ? 750 : 0);
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, []);
 
   // Live-refresh the log of the currently expanded job so running jobs show
@@ -866,11 +889,15 @@ export default function Library() {
         /* keep the last log we have */
       }
     };
-    fetchLog();
-    const t = setInterval(fetchLog, 3000);
+    let timer: number | undefined;
+    const poll = async () => {
+      await fetchLog();
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 3000);
+    };
+    void poll();
     return () => {
       cancelled = true;
-      clearInterval(t);
+      if (timer) window.clearTimeout(timer);
     };
   }, [expanded]);
 
@@ -1940,6 +1967,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const [seekFrac, setSeekFrac] = useState(0);
   const [videoLoading, setVideoLoading] = useState(true);
   const [gerLoading, setGerLoading] = useState(false);
+  const playbackBusyRef = useRef(true);
+  playbackBusyRef.current = videoLoading || playing !== 'none';
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [replaceMode, setReplaceMode] = useState<'auto' | 'manual'>('manual');
   const [replaceCandidates, setReplaceCandidates] = useState<TorrentCandidate[]>([]);
@@ -2139,50 +2168,48 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const bufDur = windowSec * 3;
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    const fetchAll = async (attempt: number): Promise<void> => {
-      try {
-        const tasks: Promise<void>[] = [];
-        if (engStream != null) {
-          const start = Math.max(0, viewStart - windowSec);
-          tasks.push(
-            api.waveform(path, engStream, start, bufDur, bins).then((w) => {
-              if (!cancelled) setEngBuf({ peaks: decodePeaks(w.peaks), start, dur: bufDur });
-            }),
-          );
-        }
-        if (gerStream != null) {
-          if (!cancelled) setGerLoading(true);
-          // Keep the mapped source window within the backend's 1800s cap. At
-          // ordinary drift factors this retains a full visible-window margin
-          // on both sides; unusually large factors still retain as much cache
-          // margin as the endpoint permits.
-          const visibleSourceDur = windowSec * stretch;
-          const margin = Math.min(
-            windowSec,
-            Math.max(0, (1800 - visibleSourceDur) / (2 * stretch)),
-          );
-          const mappedStart = (viewStart - margin - delayMs / 1000) * stretch;
-          const mappedEnd = (viewStart + windowSec + margin - delayMs / 1000) * stretch;
-          const start = Math.max(0, mappedStart);
-          const dur = Math.max(0.05, Math.min(1800, mappedEnd - start));
-          tasks.push(
-            api.waveform(path, gerStream, start, dur, bins).then((w) => {
-              if (!cancelled) setGerBuf({ peaks: decodePeaks(w.peaks), start, dur });
-            }),
-          );
-        }
-        await Promise.all(tasks);
-        if (!cancelled) setGerLoading(false);
-      } catch {
-        // Likely 503 (transcoder busy) — retry a few times before giving up.
-        if (!cancelled && attempt < 4) {
-          retryTimer = setTimeout(() => fetchAll(attempt + 1), 600);
-        } else if (!cancelled) {
-          setGerLoading(false);
+    const fetchOne = async (run: () => Promise<void>): Promise<void> => {
+      for (let attempt = 0; attempt < 2 && !cancelled; attempt++) {
+        try {
+          await run();
+          return;
+        } catch {
+          if (attempt === 0) {
+            await new Promise<void>((resolve) => {
+              retryTimer = setTimeout(resolve, 1200);
+            });
+          }
         }
       }
     };
-    const t = setTimeout(() => fetchAll(0), 200);
+    const fetchAll = async (): Promise<void> => {
+      const tasks: Promise<void>[] = [];
+      if (engStream != null) {
+        const start = Math.max(0, viewStart - windowSec);
+        tasks.push(fetchOne(async () => {
+          const w = await api.waveform(path, engStream, start, bufDur, bins);
+          if (!cancelled) setEngBuf({ peaks: decodePeaks(w.peaks), start, dur: bufDur });
+        }));
+      }
+      if (gerStream != null) {
+        if (!cancelled) setGerLoading(true);
+        // Keep the mapped source window within the backend's 1800s cap. At
+        // ordinary drift factors this retains a full visible-window margin.
+        const visibleSourceDur = windowSec * stretch;
+        const margin = Math.min(windowSec, Math.max(0, (1800 - visibleSourceDur) / (2 * stretch)));
+        const mappedStart = (viewStart - margin - delayMs / 1000) * stretch;
+        const mappedEnd = (viewStart + windowSec + margin - delayMs / 1000) * stretch;
+        const start = Math.max(0, mappedStart);
+        const dur = Math.max(0.05, Math.min(1800, mappedEnd - start));
+        tasks.push(fetchOne(async () => {
+          const w = await api.waveform(path, gerStream, start, dur, bins);
+          if (!cancelled) setGerBuf({ peaks: decodePeaks(w.peaks), start, dur });
+        }));
+      }
+      await Promise.allSettled(tasks);
+      if (!cancelled) setGerLoading(false);
+    };
+    const t = setTimeout(() => void fetchAll(), 200);
     return () => {
       cancelled = true;
       clearTimeout(t);
@@ -2205,7 +2232,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       bins: number,
     ) {
       let lastError: unknown;
-      for (let attempt = 0; attempt < 4; attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
           return await api.waveform(path, stream, start, dur, bins);
         } catch (error) {
@@ -2248,7 +2275,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     setGerOverviewBuf(null);
     setEngOverviewLoading(engStream != null && engOverviewDuration > 0);
     setGerOverviewLoading(gerStream != null && gerOverviewDuration > 0);
-    timer = setTimeout(async () => {
+    const loadOverviews = async () => {
+      // Full-track decoding is useful context but must never compete with a
+      // requested seek/play. Wait until the preview is idle, then use the
+      // persistent waveform cache chunk by chunk.
+      if (playbackBusyRef.current) {
+        timer = setTimeout(() => void loadOverviews(), 5000);
+        return;
+      }
       if (engStream != null && engOverviewDuration > 0) {
         try {
           const overview = await fetchOverview(engStream, engOverviewDuration);
@@ -2269,7 +2303,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           if (!cancelled) setGerOverviewLoading(false);
         }
       }
-    }, 500);
+    };
+    timer = setTimeout(() => void loadOverviews(), 8000);
 
     return () => {
       cancelled = true;

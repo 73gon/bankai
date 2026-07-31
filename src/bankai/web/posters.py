@@ -23,6 +23,7 @@ log = get_logger(__name__)
 
 _LOCK = threading.Lock()
 _INFLIGHT: set[str] = set()
+_LOAD_CACHE: tuple[str, int, int, dict] | None = None
 
 
 def _store() -> Path:
@@ -30,20 +31,41 @@ def _store() -> Path:
 
 
 def _load() -> dict:
+    global _LOAD_CACHE
     p = _store()
-    if not p.exists():
-        return {}
     try:
-        return json.loads(p.read_text() or "{}")
+        stat = p.stat()
+    except OSError:
+        return {}
+    stamp = (str(p), stat.st_mtime_ns, stat.st_size)
+    cached = _LOAD_CACHE
+    if cached is not None and cached[:3] == stamp:
+        return dict(cached[3])
+    try:
+        data = json.loads(p.read_text() or "{}")
     except (OSError, json.JSONDecodeError):
         return {}
+    _LOAD_CACHE = (*stamp, data)
+    return dict(data)
 
 
 def _save(data: dict) -> None:
+    global _LOAD_CACHE
     p = _store()
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data))
     tmp.replace(p)
+    try:
+        stat = p.stat()
+        _LOAD_CACHE = (str(p), stat.st_mtime_ns, stat.st_size, dict(data))
+    except OSError:
+        _LOAD_CACHE = None
+
+
+def all_cached() -> dict:
+    """Return one poster metadata snapshot for bulk dashboard rendering."""
+
+    return _load()
 
 
 def cached(key: str) -> str | None:
@@ -63,11 +85,11 @@ def _set(key: str, url: str | None, year: int | None) -> None:
         _save(data)
 
 
-def ensure(key: str, query: str, kind: str) -> None:
+def ensure(key: str, query: str, kind: str, *, known: dict | None = None) -> None:
     """Resolve ``query``'s poster + year in the background if not cached."""
     if not query.strip():
         return
-    if key in _load():
+    if key in (known if known is not None else _load()):
         return
     with _LOCK:
         if key in _INFLIGHT:

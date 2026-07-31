@@ -338,7 +338,10 @@ export const api = {
     request<{ tvdb_id: number; kind: string; german: string | null; year: number | null; release_date: string | null }>(
       `/api/discover/german?id=${id}&kind=${kind}`,
     ),
-  posterUrl: (url: string) => `/api/discover/poster?url=${encodeURIComponent(url)}`,
+  // TVDB artwork is a public CDN resource; sending every image through the
+  // single Bankai process created 50-100 avoidable backend requests per page.
+  // Retain the proxy only for legacy/non-HTTPS artwork URLs.
+  posterUrl: (url: string) => url.startsWith('https://') ? url : `/api/discover/poster?url=${encodeURIComponent(url)}`,
 
   search: (q: string, kind: string, site?: string) =>
     request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ''}`),
