@@ -80,7 +80,10 @@ def _vinovo_stream_from_api(
         return None
     if not isinstance(payload, dict):
         return None
-    result = payload.get("result")
+    # Vinovo used ``result`` in older embed.js builds; the live API currently
+    # returns the same signed path as ``token``. Accept both so cached player
+    # scripts and the current endpoint remain compatible.
+    result = payload.get("token") or payload.get("result")
     if not isinstance(result, str) or not result.strip():
         return None
     value = unquote(result.strip())

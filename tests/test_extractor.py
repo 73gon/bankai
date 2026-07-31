@@ -82,14 +82,25 @@ def test_normalize_stream_url_turns_signed_vincdn_url_into_player_page() -> None
 def test_vinovo_api_result_builds_extensionless_signed_stream_url() -> None:
     url = _vinovo_stream_from_api(
         "https://vinovo.to/api/file/url/x230j40na6411v",
-        {"status": "success", "result": "token%2F1785529632"},
+        {"status": "ok", "token": "x230j40na6411v%2Ftoken%2F1785529632"},
         base_url="https://fs-11b55d.vincdn.net",
     )
 
-    assert url == "https://fs-11b55d.vincdn.net/stream/token/1785529632"
+    assert url == (
+        "https://fs-11b55d.vincdn.net/stream/"
+        "x230j40na6411v/token/1785529632"
+    )
     assert _is_vincdn_stream_url(
         "https://fs-11b55d.vincdn.net/stream/x230j40na6411v/token/1785529632"
     )
+
+
+def test_vinovo_legacy_result_field_remains_supported() -> None:
+    assert _vinovo_stream_from_api(
+        "https://vinovo.to/api/file/url/x230j40na6411v",
+        {"status": "success", "result": "x230j40na6411v/old/1785529632"},
+        base_url="https://fs-11b55d.vincdn.net",
+    ) == "https://fs-11b55d.vincdn.net/stream/x230j40na6411v/old/1785529632"
 
 
 def test_vinovo_api_failure_does_not_invent_a_stream_url() -> None:
