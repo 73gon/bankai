@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import httpx
@@ -32,9 +32,18 @@ class TitleAlias:
     name: str | None = None
     english_title: str | None = None
     german_title: str | None = None
+    japanese_title: str | None = None
     year: int | None = None
     tvdb_id: int | None = None
     kind: MediaKind | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TVDBEpisode:
+    season: int
+    episode: int
+    absolute_number: int | None = None
+    name: str | None = None
 
 
 class TVDBClient:
@@ -100,6 +109,7 @@ class TVDBClient:
                 name=base.name,
                 english_title=translations.get("eng") or base.english_title,
                 german_title=translations.get("deu") or base.german_title,
+                japanese_title=translations.get("jpn") or base.japanese_title,
                 year=int(worldwide_date[:4]) if worldwide_date else base.year,
                 tvdb_id=tvdb_id,
                 kind=base.kind,
@@ -107,6 +117,41 @@ class TVDBClient:
             if alias.name or alias.english_title or alias.german_title:
                 aliases.append(alias)
         return aliases
+
+    async def series_episodes(self, tvdb_id: int) -> list[TVDBEpisode]:
+        """Return TVDB's default-order episode map for one series."""
+        token = await self._ensure_token()
+        episodes: list[TVDBEpisode] = []
+        page = 0
+        while page < 100:
+            response = await self._client.get(
+                f"series/{int(tvdb_id)}/episodes/default",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"page": page},
+            )
+            response.raise_for_status()
+            payload = _as_dict(response.json())
+            data = _as_dict(payload.get("data"))
+            rows = _as_list(data.get("episodes"))
+            for raw in rows:
+                row = _as_dict(raw)
+                season = _optional_int(row.get("seasonNumber"))
+                episode = _optional_int(row.get("number"))
+                if season is None or episode is None:
+                    continue
+                episodes.append(
+                    TVDBEpisode(
+                        season=season,
+                        episode=episode,
+                        absolute_number=_optional_int(row.get("absoluteNumber")),
+                        name=_first_text(row, "name", "title"),
+                    )
+                )
+            links = _as_dict(payload.get("links")) or _as_dict(data.get("links"))
+            if not rows or not links.get("next"):
+                break
+            page += 1
+        return episodes
 
     async def _fetch_worldwide_release(
         self,
@@ -211,6 +256,7 @@ def _alias_from_record(record: dict[str, Any], *, kind: MediaKind) -> TitleAlias
         name=name,
         english_title=english,
         german_title=german,
+        japanese_title=_translated_title(record, "jpn"),
         year=_year(record),
         tvdb_id=_record_id(record),
         kind=inferred_kind,
@@ -265,6 +311,13 @@ def _year(record: dict[str, Any]) -> int | None:
     return None
 
 
+def _optional_int(value: object) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def worldwide_release_date(record: dict[str, Any]) -> str | None:
     """Pick the explicit Worldwide date from a TVDB extended movie record.
 
@@ -277,9 +330,7 @@ def worldwide_release_date(record: dict[str, Any]) -> str | None:
     candidates: list[str] = []
     for raw in _as_list(record.get("releases")):
         release = _as_dict(raw)
-        scope = " ".join(
-            str(release.get(key) or "") for key in ("country", "detail")
-        ).casefold()
+        scope = " ".join(str(release.get(key) or "") for key in ("country", "detail")).casefold()
         normalized_scope = re.sub(r"[^a-z]+", "", scope)
         if "worldwide" not in normalized_scope and "global" not in normalized_scope:
             continue
@@ -350,6 +401,8 @@ def _normalise_language(lang: str) -> str:
         return "deu"
     if clean in {"en", "eng"}:
         return "eng"
+    if clean in {"ja", "jp", "jpn"}:
+        return "jpn"
     return clean
 
 
@@ -358,6 +411,8 @@ def _short_language(lang: str) -> str:
         return "de"
     if lang == "eng":
         return "en"
+    if lang == "jpn":
+        return "ja"
     return lang
 
 

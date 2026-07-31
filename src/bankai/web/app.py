@@ -26,6 +26,7 @@ from bankai import __version__
 from bankai.config import SelectorSettings, get_settings, reset_settings_cache
 from bankai.logging import get_logger
 from bankai.queue.models import MediaKind
+from bankai.web import anime as anime_mod
 from bankai.web import discover as discover_mod
 from bankai.web import jobs as webjobs
 from bankai.web import media as media_mod
@@ -209,10 +210,7 @@ def _video_clip_cache_key(
     height: int,
     audio: int | None,
 ) -> str:
-    return (
-        f"{path}|{mtime_ns}|vid3|{round(start, 2)}|{round(dur, 2)}"
-        f"|{height}|{audio}"
-    )
+    return f"{path}|{mtime_ns}|vid3|{round(start, 2)}|{round(dur, 2)}|{height}|{audio}"
 
 
 def _audio_clip_cache_key(
@@ -310,6 +308,18 @@ class ShowQueueRequest(BaseModel):
     episodes: list[int] | None = None
     site: str | None = None
     custom_episodes: list[CustomEpisodeRequest] | None = None
+
+
+class AnimeDownloadRequest(BaseModel):
+    release_title: str
+    torrent_url: str
+    detail_url: str
+    magnet_uri: str
+    info_hash: str
+    tvdb_id: int
+    kind: str
+    english_title: str
+    year: int | None = None
 
 
 class QueuePriorityRequest(BaseModel):
@@ -774,6 +784,7 @@ def create_app() -> Any:
             "season": season,
             "episode": episode,
         }
+
         queries = episode_search_queries(payload) if kind == "episode" else [q]
         categories = _CAT_TV if kind == "episode" else _CAT_MOVIES
 
@@ -827,6 +838,91 @@ def create_app() -> Any:
             ],
         }
 
+    # ------------------------------------------------------------------
+    # Anime (Nyaa-only direct downloads)
+    # ------------------------------------------------------------------
+    @app.get("/api/anime")
+    async def anime_search(
+        q: str = Query(""),
+        category: str = Query("1_0"),
+        page: int = Query(0, ge=0),
+        quality: str | None = Query(None),
+        publisher: str | None = Query(None),
+        title_filters: str | None = Query(None),
+        description_filters: str | None = Query(None),
+        min_seeders: int = Query(0, ge=0),
+    ) -> dict:
+        try:
+            result = await anime_mod.search(
+                q,
+                category=category,
+                page=page,
+                quality=quality,
+                publisher=publisher,
+                title_filters=title_filters,
+                description_filters=description_filters,
+                min_seeders=min_seeders,
+            )
+        except Exception as exc:
+            log.warning("Nyaa search failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"Nyaa search failed: {exc}") from exc
+        return {
+            "configured": discover_mod.is_configured(),
+            "items": [anime_mod.entry_to_dict(item) for item in result.items],
+            "page": result.page,
+            "has_next": result.has_next,
+            "aliases": result.aliases,
+        }
+
+    @app.get("/api/anime/tvdb")
+    async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
+        matches = await anime_mod.tvdb_candidates(q, limit=12)
+        return {
+            "configured": discover_mod.is_configured(),
+            "items": [anime_mod.tvdb_to_dict(item) for item in matches],
+        }
+
+    @app.post("/api/anime/download")
+    def anime_download(req: AnimeDownloadRequest) -> dict:
+        if not req.release_title.strip() or not req.english_title.strip():
+            raise HTTPException(status_code=422, detail="release and English titles are required")
+        if req.tvdb_id <= 0:
+            raise HTTPException(status_code=422, detail="a valid TVDB entry is required")
+        if req.kind not in {"show", "movie"}:
+            raise HTTPException(status_code=422, detail="kind must be show or movie")
+        if not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url):
+            raise HTTPException(
+                status_code=422, detail="anime downloads only accept nyaa.si sources"
+            )
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", req.info_hash.strip()):
+            raise HTTPException(status_code=422, detail="invalid Nyaa info hash")
+        if not req.magnet_uri.casefold().startswith(
+            f"magnet:?xt=urn:btih:{req.info_hash.casefold()}"
+        ):
+            raise HTTPException(status_code=422, detail="magnet does not match the Nyaa torrent")
+        args = [
+            "anime-download",
+            "--release-title",
+            req.release_title.strip(),
+            "--torrent-url",
+            req.torrent_url.strip(),
+            "--detail-url",
+            req.detail_url.strip(),
+            "--magnet-uri",
+            req.magnet_uri.strip(),
+            "--info-hash",
+            req.info_hash.casefold(),
+            "--kind",
+            req.kind,
+            "--tvdb-id",
+            str(req.tvdb_id),
+            "--english-title",
+            req.english_title.strip(),
+        ]
+        if req.year is not None:
+            args.extend(["--year", str(req.year)])
+        return webjobs.enqueue(kind=req.kind, title=req.english_title.strip(), args=args)
+
     @app.get("/api/torrent-actions/{job_id}")
     def torrent_action_get(job_id: str) -> dict:
         from bankai.torrent import actions as torrent_actions
@@ -848,7 +944,9 @@ def create_app() -> Any:
         elif req.magnet_uri:
             magnet = req.magnet_uri.strip()
             if not magnet.casefold().startswith("magnet:?xt=urn:btih:"):
-                raise HTTPException(status_code=422, detail="a valid BitTorrent magnet link is required")
+                raise HTTPException(
+                    status_code=422, detail="a valid BitTorrent magnet link is required"
+                )
             selected = torrent_actions.choose_magnet(job_id, magnet_uri=magnet, title=req.title)
         elif req.candidate_id:
             selected = torrent_actions.choose(job_id, req.candidate_id)
@@ -1234,8 +1332,7 @@ def create_app() -> Any:
             )
             related = job_by_norm.get(norm)
             related_is_newer = bool(
-                related
-                and float(related.get("started_at") or 0) > float(e.mtime or 0)
+                related and float(related.get("started_at") or 0) > float(e.mtime or 0)
             )
             observed_created_at = min(e.created_at, created_by_norm.get(norm, e.created_at))
             if state.created_at is None:
@@ -1298,9 +1395,7 @@ def create_app() -> Any:
                     "repack_kind": state.repack_kind,
                     "repack_label": rinfo.get("label") if rinfo else None,
                     "job_id": related["id"] if related else None,
-                    "job_status": related.get("status")
-                    if related_is_newer and related
-                    else None,
+                    "job_status": related.get("status") if related_is_newer and related else None,
                     "step_label": related.get("step_label")
                     if related_is_newer and related
                     else None,
@@ -1821,11 +1916,7 @@ def create_app() -> Any:
                 min(120.0, total_duration - reference_start, segment * 2),
             )
             source_start = (reference_start - delay) * rate
-            lead = (
-                min(span, -source_start / rate)
-                if source_start < 0
-                else 0.0
-            )
+            lead = min(span, -source_start / rate) if source_start < 0 else 0.0
             key = _audio_clip_cache_key(
                 p,
                 mtime_ns=st.st_mtime_ns,
@@ -2032,7 +2123,9 @@ def create_app() -> Any:
         if req.magnet_uri:
             magnet = req.magnet_uri.strip()
             if not magnet.casefold().startswith("magnet:?xt=urn:btih:"):
-                raise HTTPException(status_code=422, detail="a valid BitTorrent magnet link is required")
+                raise HTTPException(
+                    status_code=422, detail="a valid BitTorrent magnet link is required"
+                )
             candidate = TorrentCandidateRequest(
                 title=query,
                 indexer="Manual magnet",

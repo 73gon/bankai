@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose } from 'lucide-react';
+import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Discover from '@/pages/Discover';
@@ -8,10 +8,12 @@ import Search from '@/pages/Search';
 import Library from '@/pages/Library';
 import Server from '@/pages/Server';
 import Settings from '@/pages/Settings';
+import Anime from '@/pages/Anime';
 
 const NAV = [
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/search', label: 'Search', icon: SearchIcon },
+  { to: '/anime', label: 'Anime', icon: Sparkles },
   { to: '/queue', label: 'Queue', icon: ListVideo },
   { to: '/library', label: 'Library', icon: HardDrive },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -126,6 +128,7 @@ export default function App() {
               <Route path='/' element={<Navigate to='/discover' replace />} />
               <Route path='/discover' element={<Discover />} />
               <Route path='/search' element={<Search />} />
+              <Route path='/anime' element={<Anime />} />
               <Route path='/queue' element={<Library />} />
               <Route path='/library' element={<Server />} />
               <Route path='/server' element={<Navigate to='/library' replace />} />

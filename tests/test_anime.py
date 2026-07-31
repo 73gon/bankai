@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+
+import pytest
+
+from bankai.metadata.tvdb import TVDBEpisode
+from bankai.processor.anime import episode_identity
+from bankai.web import anime
+from bankai.web.anime import clean_release_title, parse_rss, split_filter_terms
+
+
+def test_nyaa_rss_parser_preserves_direct_sources_and_metadata() -> None:
+    payload = """<?xml version="1.0" encoding="UTF-8" ?>
+    <rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa" version="2.0"><channel><item>
+      <title>[SubsPlease] Sousou no Frieren - 01 (1080p) [ABC123].mkv</title>
+      <link>https://nyaa.si/download/1234567.torrent</link>
+      <guid isPermaLink="true">https://nyaa.si/view/1234567</guid>
+      <pubDate>Fri, 29 Sep 2023 15:00:00 -0000</pubDate>
+      <nyaa:seeders>321</nyaa:seeders><nyaa:leechers>8</nyaa:leechers>
+      <nyaa:downloads>999</nyaa:downloads><nyaa:infoHash>0123456789ABCDEF0123456789ABCDEF01234567</nyaa:infoHash>
+      <nyaa:categoryId>1_2</nyaa:categoryId><nyaa:category>Anime - English-translated</nyaa:category>
+      <nyaa:size>1.4 GiB</nyaa:size><nyaa:comments>4</nyaa:comments>
+      <nyaa:trusted>Yes</nyaa:trusted><nyaa:remake>No</nyaa:remake>
+      <description><![CDATA[<p>321 seeders</p>]]></description>
+    </item></channel></rss>"""
+
+    entries = parse_rss(payload)
+
+    assert len(entries) == 1
+    assert entries[0].publisher == "SubsPlease"
+    assert entries[0].quality == "1080p"
+    assert entries[0].seeders == 321
+    assert entries[0].trusted is True
+    assert entries[0].download_url == "https://nyaa.si/download/1234567.torrent"
+    assert entries[0].detail_url == "https://nyaa.si/view/1234567"
+    assert entries[0].magnet_uri.startswith(
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+    )
+
+
+def test_anime_filter_terms_are_or_tokens() -> None:
+    assert split_filter_terms("German, GER; Deutsch\nDual Audio") == [
+        "german",
+        "ger",
+        "deutsch",
+        "dual audio",
+    ]
+
+
+def test_release_title_is_cleaned_for_tvdb_lookup() -> None:
+    assert clean_release_title("[SubsPlease] Sousou no Frieren - 27 (1080p) [ABC].mkv") == (
+        "Sousou no Frieren"
+    )
+
+
+def test_episode_identity_maps_absolute_anime_number_to_tvdb() -> None:
+    episodes = [
+        TVDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
+        TVDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
+    ]
+
+    identity = episode_identity(
+        "[Group] Frieren - 29 [1080p].mkv",
+        release_title="[Group] Frieren Season 2",
+        tvdb_episodes=episodes,
+    )
+
+    assert identity is not None
+    assert (identity.season, identity.episode, identity.title) == (2, 1, "A New Journey")
+
+
+def test_episode_identity_uses_tvdb_absolute_order_without_season_hint() -> None:
+    episodes = [
+        TVDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
+        TVDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
+    ]
+
+    identity = episode_identity(
+        "[Group] Frieren - 29 [1080p].mkv",
+        release_title="[Group] Frieren",
+        tvdb_episodes=episodes,
+    )
+
+    assert identity is not None
+    assert (identity.season, identity.episode, identity.title) == (2, 1, "A New Journey")
+
+
+def test_nyaa_page_keeps_every_release_when_only_leading_rows_are_enriched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample = parse_rss(
+        """<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
+        <title>[Group] Anime - 01 [1080p]</title>
+        <link>https://nyaa.si/download/1.torrent</link><guid>https://nyaa.si/view/1</guid>
+        <nyaa:infoHash>0123456789abcdef0123456789abcdef01234567</nyaa:infoHash>
+        <nyaa:seeders>10</nyaa:seeders><nyaa:downloads>20</nyaa:downloads>
+        <nyaa:size>1 GiB</nyaa:size>
+        </item></channel></rss>"""
+    )[0]
+    rows = [
+        replace(
+            sample,
+            id=index,
+            info_hash=f"{index:040x}",
+            detail_url=f"https://nyaa.si/view/{index}",
+        )
+        for index in range(1, 76)
+    ]
+
+    async def fake_fetch(*args: object, **kwargs: object) -> list[anime.NyaaEntry]:
+        return rows
+
+    async def fake_enrich(
+        entries: list[anime.NyaaEntry], matches: list[anime.AnimeTVDBMatch]
+    ) -> list[anime.NyaaEntry]:
+        assert len(entries) == 20
+        return entries
+
+    monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
+    monkeypatch.setattr(anime, "_enrich_tvdb", fake_enrich)
+
+    page = asyncio.run(anime.search(""))
+
+    assert len(page.items) == 75
+    assert page.has_next is True

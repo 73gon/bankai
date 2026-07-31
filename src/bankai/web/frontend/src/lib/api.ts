@@ -94,6 +94,57 @@ export interface TorrentPolicy {
   max_size_gib: number;
 }
 
+export interface AnimeTVDBMatch {
+  tvdb_id: number;
+  kind: 'show' | 'movie';
+  english_title: string;
+  japanese_title: string | null;
+  year: number | null;
+  poster_url: string | null;
+}
+
+export interface AnimeEntry {
+  id: number;
+  title: string;
+  download_url: string;
+  detail_url: string;
+  magnet_uri: string;
+  info_hash: string;
+  category_id: string;
+  category: string;
+  size: string;
+  size_bytes: number;
+  seeders: number;
+  leechers: number;
+  downloads: number;
+  comments: number;
+  trusted: boolean;
+  remake: boolean;
+  published_at: string | null;
+  publisher: string | null;
+  quality: string | null;
+  description: string;
+  tvdb: AnimeTVDBMatch | null;
+}
+
+export interface AnimeSearchOptions {
+  category?: string;
+  page?: number;
+  quality?: string;
+  publisher?: string;
+  titleFilters?: string;
+  descriptionFilters?: string;
+  minSeeders?: number;
+}
+
+export interface AnimeSearchPage {
+  configured: boolean;
+  items: AnimeEntry[];
+  page: number;
+  has_next: boolean;
+  aliases: string[];
+}
+
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
 
 export interface SearchResult {
@@ -296,6 +347,34 @@ export const api = {
       candidates: TorrentCandidate[];
     }>(`/api/torrents/search?${params.toString()}`);
   },
+  animeSearch: (q: string, options: AnimeSearchOptions = {}) => {
+    const params = new URLSearchParams({ q });
+    if (options.category) params.set('category', options.category);
+    if (options.page != null) params.set('page', String(options.page));
+    if (options.quality) params.set('quality', options.quality);
+    if (options.publisher) params.set('publisher', options.publisher);
+    if (options.titleFilters) params.set('title_filters', options.titleFilters);
+    if (options.descriptionFilters) params.set('description_filters', options.descriptionFilters);
+    if (options.minSeeders != null) params.set('min_seeders', String(options.minSeeders));
+    return request<AnimeSearchPage>(`/api/anime?${params.toString()}`);
+  },
+  animeTvdb: (q: string) =>
+    request<{ configured: boolean; items: AnimeTVDBMatch[] }>(`/api/anime/tvdb?q=${encodeURIComponent(q)}`),
+  animeDownload: (entry: AnimeEntry, match: AnimeTVDBMatch) =>
+    request<Job>('/api/anime/download', {
+      method: 'POST',
+      body: JSON.stringify({
+        release_title: entry.title,
+        torrent_url: entry.download_url,
+        detail_url: entry.detail_url,
+        magnet_uri: entry.magnet_uri,
+        info_hash: entry.info_hash,
+        tvdb_id: match.tvdb_id,
+        kind: match.kind,
+        english_title: match.english_title,
+        year: match.year,
+      }),
+    }),
   torrentAction: (jobId: string) =>
     request<{ job_id: string; query: string; target_runtime_seconds: number | null; candidates: TorrentCandidate[] }>(
       `/api/torrent-actions/${jobId}`,

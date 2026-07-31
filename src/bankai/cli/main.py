@@ -68,8 +68,12 @@ app = typer.Typer(
 )
 jobs_app = typer.Typer(name="jobs", help="Inspect and manage queued jobs.", no_args_is_help=True)
 config_app = typer.Typer(name="config", help="View/edit configuration.", no_args_is_help=True)
-background_app = typer.Typer(name="background", help="Inspect detached background jobs.", no_args_is_help=True)
-metadata_app = typer.Typer(name="metadata", help="Inspect metadata providers.", no_args_is_help=True)
+background_app = typer.Typer(
+    name="background", help="Inspect detached background jobs.", no_args_is_help=True
+)
+metadata_app = typer.Typer(
+    name="metadata", help="Inspect metadata providers.", no_args_is_help=True
+)
 web_app = typer.Typer(name="web", help="Run and manage the web UI.", no_args_is_help=True)
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
@@ -311,7 +315,9 @@ def _identify_via_tvdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
         results = []
 
     if not results:
-        console.print(f"[warn]TheTVDB returned no matches for[/warn] [accent]{query}[/accent] [muted]\u2014 continuing without metadata.[/muted]")
+        console.print(
+            f"[warn]TheTVDB returned no matches for[/warn] [accent]{query}[/accent] [muted]\u2014 continuing without metadata.[/muted]"
+        )
         return MediaIdentity(original=query, kind=kind)
 
     # Cap the list so the picker stays readable.
@@ -344,7 +350,9 @@ def _identify_via_tvdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
 def _root(
     ctx: typer.Context,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
-    config: Annotated[Path | None, typer.Option("--config", "-c", help="Path to config.toml.")] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", help="Path to config.toml.")
+    ] = None,
     version: Annotated[
         bool,
         typer.Option(
@@ -443,7 +451,9 @@ def _menu_run_movie() -> None:
         site="filmpalast",
     )
     job = bgjobs.spawn(kind="movie", title=en_query, args=args)
-    console.print(f"[success]queued[/success] job [accent]{job.id}[/accent] \u2014 \u2018Queue / history\u2019 to watch / cancel.")
+    console.print(
+        f"[success]queued[/success] job [accent]{job.id}[/accent] \u2014 \u2018Queue / history\u2019 to watch / cancel."
+    )
 
 
 def _menu_run_batch() -> None:
@@ -505,7 +515,9 @@ def _menu_run_show() -> None:
 
     result = asyncio.run(list_series_episodes(show, season=season, site=site_id))
     if result is None:
-        console.print(f"[warn]no episodes found for[/warn] [accent]{show}[/accent] S{season:02d} [muted](tried {site_choice if site_id else 'all sites'})[/muted]")
+        console.print(
+            f"[warn]no episodes found for[/warn] [accent]{show}[/accent] S{season:02d} [muted](tried {site_choice if site_id else 'all sites'})[/muted]"
+        )
         return
 
     episodes = sorted(result.episodes, key=lambda e: e.episode)
@@ -554,7 +566,9 @@ def _menu_run_show() -> None:
         if ep.title:
             args.extend(["--episode-title", ep.title])
         job = bgjobs.spawn(kind="show", title=q, args=args)
-        console.print(f"[success]queued[/success] {q} \u2014 job [accent]{job.id}[/accent] [muted]({result.site})[/muted]")
+        console.print(
+            f"[success]queued[/success] {q} \u2014 job [accent]{job.id}[/accent] [muted]({result.site})[/muted]"
+        )
 
 
 def _menu_transfer() -> None:
@@ -699,7 +713,9 @@ def _render_background_progress(job: Any) -> None:
     from bankai.cli import bgjobs
 
     snapshot = bgjobs.progress_snapshot(job)
-    console.print(f"[bold]Step:[/bold] [magenta]{snapshot.step_label}[/magenta]  [bold]Overall:[/bold] {_progress_text(snapshot.overall_percent)}")
+    console.print(
+        f"[bold]Step:[/bold] [magenta]{snapshot.step_label}[/magenta]  [bold]Overall:[/bold] {_progress_text(snapshot.overall_percent)}"
+    )
     if not snapshot.parts:
         return
     table = Table(title="Downloads / transfer", show_lines=False)
@@ -729,7 +745,9 @@ def _job_detail_menu(job: Any) -> None:
 
     while True:
         job = job.refresh()
-        console.rule(f"[bold]{job.title}[/bold]  \u00b7  {job.id}  \u00b7  status={_rich_status(job.status)}")
+        console.rule(
+            f"[bold]{job.title}[/bold]  \u00b7  {job.id}  \u00b7  status={_rich_status(job.status)}"
+        )
         _render_background_progress(job)
         if job.final_path:
             console.print(f"  [green]final:[/green] {job.final_path}")
@@ -753,7 +771,9 @@ def _job_detail_menu(job: Any) -> None:
         elif choice.startswith("Cancel"):
             if Confirm.ask("Send SIGTERM to job?", default=False):
                 ok = job.cancel()
-                console.print("[green]cancelled[/green]" if ok else "[yellow]could not cancel[/yellow]")
+                console.print(
+                    "[green]cancelled[/green]" if ok else "[yellow]could not cancel[/yellow]"
+                )
         elif choice.startswith("Show last"):
             console.print(bgjobs.render_tail(job, lines=50))
         elif choice.startswith("Show full"):
@@ -1061,7 +1081,9 @@ def shell() -> None:
         if line in ("exit", "quit", "q"):
             return
         if line == "help":
-            console.print("Commands: search QUERY, run QUERY [URL], shows SHOW SEASON, queue, config, doctor, exit")
+            console.print(
+                "Commands: search QUERY, run QUERY [URL], shows SHOW SEASON, queue, config, doctor, exit"
+            )
             continue
         try:
             parts = shlex.split(line)
@@ -1098,7 +1120,9 @@ def update(
     """Update this bankai install by rerunning the bundled installer."""
     script = _install_script_path()
     if script is None:
-        console.print("[red]could not find scripts/install.sh[/red]\n[dim]Install once with the curl command from the README, then use `bankai update`.[/dim]")
+        console.print(
+            "[red]could not find scripts/install.sh[/red]\n[dim]Install once with the curl command from the README, then use `bankai update`.[/dim]"
+        )
         raise typer.Exit(code=1)
 
     prefix = script.parent.parent
@@ -1201,9 +1225,15 @@ def extract_audio(
     out_dir: str = typer.Option(..., "--out-dir", help="Directory to write the audio into."),
     site: str = typer.Option("unknown", "--site", help="Backend name (metadata only)."),
     hint: str = typer.Option("ytdlp", "--hint", help="'ytdlp' or 'playwright'."),
-    want_video: bool = typer.Option(False, "--want-video", help="Download video too (for visual sync)."),
-    max_height: int | None = typer.Option(None, "--max-height", help="Cap video height when --want-video."),
-    as_json: bool = typer.Option(False, "--json", help="Print a single JSON result line on stdout."),
+    want_video: bool = typer.Option(
+        False, "--want-video", help="Download video too (for visual sync)."
+    ),
+    max_height: int | None = typer.Option(
+        None, "--max-height", help="Cap video height when --want-video."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print a single JSON result line on stdout."
+    ),
 ) -> None:
     """Extract the German audio for ONE stream URL into --out-dir.
 
@@ -1219,7 +1249,9 @@ def extract_audio(
     outp.mkdir(parents=True, exist_ok=True)
 
     async def go() -> Any:
-        return await extract_url(url, outp, site=site, hint=hint, want_video=want_video, max_height=max_height)
+        return await extract_url(
+            url, outp, site=site, hint=hint, want_video=want_video, max_height=max_height
+        )
 
     result = asyncio.run(go())
     payload = {
@@ -1244,7 +1276,9 @@ def metadata_search(
     media_kind = _metadata_kind(kind)
     aliases = asyncio.run(get_title_aliases(query, kind=media_kind))
     if not aliases:
-        console.print("[yellow]no metadata results[/yellow]\n[dim]Check `metadata.tvdb_api_key` and `metadata.tvdb_enabled`.[/dim]")
+        console.print(
+            "[yellow]no metadata results[/yellow]\n[dim]Check `metadata.tvdb_api_key` and `metadata.tvdb_enabled`.[/dim]"
+        )
         return
     table = Table(title=f"TVDB metadata for {query!r}", show_lines=False)
     for col in ("#", "TVDB ID", "Name", "English", "German", "Year"):
@@ -1442,9 +1476,13 @@ def config_init(
     _print_banner()
     console.print("[bold]Welcome \u2014 a few quick questions.[/bold]\n")
     library = Prompt.ask("Library directory (final MKVs)", default="/mnt/media/bankai")
-    work = Prompt.ask("Work directory (intermediate files)", default=str(Path.home() / ".bankai/work"))
+    work = Prompt.ask(
+        "Work directory (intermediate files)", default=str(Path.home() / ".bankai/work")
+    )
     state = Prompt.ask("State DB path", default=str(Path.home() / ".bankai/state.sqlite3"))
-    downloads = Prompt.ask("qBittorrent downloads dir (host path)", default="/mnt/media/downloads/bankai")
+    downloads = Prompt.ask(
+        "qBittorrent downloads dir (host path)", default="/mnt/media/downloads/bankai"
+    )
     transfer_root = Prompt.ask("Mounted media server root", default="/mnt/media12")
     qbit_url = Prompt.ask("qBittorrent URL", default="http://localhost:8080")
     qbit_user = Prompt.ask("qBittorrent username", default="admin")
@@ -1495,7 +1533,9 @@ def config_init(
     _write_toml(path, data)
     reset_settings_cache()
     console.print(f"\n[green]wrote[/green] {path}")
-    console.print(f"[dim]Add `export BANKAI_CONFIG={path}` to ~/.bashrc to make it the default.[/dim]")
+    console.print(
+        f"[dim]Add `export BANKAI_CONFIG={path}` to ~/.bashrc to make it the default.[/dim]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1639,7 +1679,9 @@ def web_install_service(
     settings = get_settings()
     console.print(f"[green]wrote[/green] {unit}")
     if not no_enable:
-        console.print(f"[green]started[/green] {SERVICE_NAME} \u2014 open [accent]http://{settings.web.host}:{settings.web.port}[/accent]")
+        console.print(
+            f"[green]started[/green] {SERVICE_NAME} \u2014 open [accent]http://{settings.web.host}:{settings.web.port}[/accent]"
+        )
 
 
 @web_app.command("status")
@@ -1777,7 +1819,10 @@ def _queue_movie_batch(path: Path, *, site: str, dry_run: bool) -> None:
     if dry_run:
         return
 
-    jobs = [bgjobs.spawn(kind="movie", title=movie.title, args=build_movie_args(movie, site=site)) for movie in movies]
+    jobs = [
+        bgjobs.spawn(kind="movie", title=movie.title, args=build_movie_args(movie, site=site))
+        for movie in movies
+    ]
     ids = ", ".join(job.id for job in jobs)
     console.print(f"[green]queued[/green] {len(jobs)} movie job(s): {ids}")
 
@@ -1786,10 +1831,14 @@ def _queue_movie_batch(path: Path, *, site: str, dry_run: bool) -> None:
 def transfer(
     paths: Annotated[
         list[Path] | None,
-        typer.Argument(help="Files or folders to move. Defaults to output.directory with --library."),
+        typer.Argument(
+            help="Files or folders to move. Defaults to output.directory with --library."
+        ),
     ] = None,
     kind: str = typer.Option("auto", "--kind", help="auto | movie | show"),
-    library: bool = typer.Option(False, "--library", help="Transfer the configured output directory."),
+    library: bool = typer.Option(
+        False, "--library", help="Transfer the configured output directory."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show planned moves without queueing."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Queue without confirmation."),
 ) -> None:
@@ -1824,7 +1873,9 @@ def _queue_transfer(
     args = ["transfer-run", "--kind", kind, *[str(p) for p in paths]]
     title = "Transfer library" if title_library else f"Transfer {len(paths)} path(s)"
     job = bgjobs.spawn(kind="transfer", title=title, args=args)
-    console.print(f"[green]queued[/green] transfer job [bold]{job.id}[/bold]\n[dim]Watch it with `bankai background watch {job.id}`.[/dim]")
+    console.print(
+        f"[green]queued[/green] transfer job [bold]{job.id}[/bold]\n[dim]Watch it with `bankai background watch {job.id}`.[/dim]"
+    )
 
 
 @app.command("transfer-run", hidden=True)
@@ -1922,7 +1973,9 @@ def review_replace_torrent(
 
     async def go() -> dict[str, Any] | None:
         log.info("BANKAI_PROGRESS stage=replace pct=2 status=searching")
-        result = await _run_worker_once(TorrentWorker(), get_settings().paths.work_dir, payload=payload)
+        result = await _run_worker_once(
+            TorrentWorker(), get_settings().paths.work_dir, payload=payload
+        )
         if not result or not result.get("path"):
             raise RuntimeError("replacement torrent produced no video file")
         log.info("BANKAI_PROGRESS stage=replace pct=92 status=remuxing")
@@ -2017,9 +2070,13 @@ def run(
     offset: float | None = typer.Option(None, "--offset"),
     season_number: int | None = typer.Option(None, "--season", help="Episode season metadata."),
     episode_number: int | None = typer.Option(None, "--episode", help="Episode number metadata."),
-    episode_title: str | None = typer.Option(None, "--episode-title", help="Episode title metadata."),
+    episode_title: str | None = typer.Option(
+        None, "--episode-title", help="Episode title metadata."
+    ),
     series_title: str | None = typer.Option(None, "--series-title", help="Show title metadata."),
-    interactive: bool | None = typer.Option(None, "--interactive/--auto", help="Override scraper.interactive_pick."),
+    interactive: bool | None = typer.Option(
+        None, "--interactive/--auto", help="Override scraper.interactive_pick."
+    ),
 ) -> None:
     """End-to-end pipeline: extract dub, fetch video, sync, remux.
 
@@ -2187,6 +2244,50 @@ def _run_pipeline(
     asyncio.run(go())
 
 
+@app.command("anime-download", hidden=True)
+def anime_download(
+    release_title: str = typer.Option(..., "--release-title"),
+    torrent_url: str = typer.Option(..., "--torrent-url"),
+    detail_url: str = typer.Option(..., "--detail-url"),
+    magnet_uri: str = typer.Option(..., "--magnet-uri"),
+    info_hash: str = typer.Option(..., "--info-hash"),
+    media_kind: str = typer.Option(..., "--kind", help="show | movie"),
+    tvdb_id: int = typer.Option(..., "--tvdb-id"),
+    english_title: str = typer.Option(..., "--english-title"),
+    year: int | None = typer.Option(None, "--year"),
+) -> None:
+    """Download a selected Nyaa release and organize it without syncing."""
+    from bankai.processor.anime import download_anime
+    from bankai.web.anime import is_nyaa_url
+
+    if not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url):
+        console.print("[red]anime downloads only accept nyaa.si sources[/red]")
+        raise typer.Exit(code=1)
+
+    async def go() -> None:
+        try:
+            result = await download_anime(
+                release_title=release_title,
+                torrent_url=torrent_url,
+                detail_url=detail_url,
+                magnet_uri=magnet_uri,
+                info_hash=info_hash,
+                media_kind=media_kind,
+                tvdb_id=tvdb_id,
+                english_title=english_title,
+                year=year,
+            )
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            log.debug("anime download traceback", exc_info=True)
+            log.error("Anime download failed — %s", reason)
+            print(reason, flush=True)
+            raise typer.Exit(code=1) from exc
+        console.print_json(data=result)
+
+    asyncio.run(go())
+
+
 # ---------------------------------------------------------------------------
 # daemon
 # ---------------------------------------------------------------------------
@@ -2300,7 +2401,9 @@ def jobs_retry(job_id: int = typer.Argument(...)) -> None:
     if job is None:
         console.print(f"[red]no such job: {job_id}[/red]")
         raise typer.Exit(code=1)
-    new_payload = job.model_dump(exclude={"id", "created_at", "updated_at", "started_at", "finished_at"})
+    new_payload = job.model_dump(
+        exclude={"id", "created_at", "updated_at", "started_at", "finished_at"}
+    )
     new_payload["status"] = JobStatus.QUEUED
     new_payload["attempts"] = 0
     new_payload["error"] = None

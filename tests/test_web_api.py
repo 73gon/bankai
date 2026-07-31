@@ -26,6 +26,39 @@ from bankai.web.app import (
 from bankai.web.discover import DiscoverItem
 
 
+def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[dict] = []
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"id": "anime-job", **kwargs},
+    )
+    body = {
+        "release_title": "[Group] Frieren - 01 [1080p]",
+        "torrent_url": "https://nyaa.si/download/123.torrent",
+        "detail_url": "https://nyaa.si/view/123",
+        "magnet_uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Frieren",
+        "info_hash": "0123456789abcdef0123456789abcdef01234567",
+        "tvdb_id": 424536,
+        "kind": "show",
+        "english_title": "Frieren: Beyond Journey's End",
+        "year": 2023,
+    }
+
+    response = client.post("/api/anime/download", json=body)
+
+    assert response.status_code == 200
+    assert queued[0]["kind"] == "show"
+    assert queued[0]["args"][0] == "anime-download"
+    assert "--tvdb-id" in queued[0]["args"]
+
+    body["detail_url"] = "https://example.com/view/123"
+    rejected = client.post("/api/anime/download", json=body)
+    assert rejected.status_code == 422
+
+
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     library = tmp_path / "library"
