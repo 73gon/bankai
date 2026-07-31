@@ -129,7 +129,7 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
           <div className='flex flex-col gap-1'>
             <div className='flex flex-wrap items-center gap-2'>
               <h2 className='text-base font-semibold text-foreground'>
-                {entry.tvdb?.english_title ?? 'TVDB match needed'}
+                {entry.tvdb?.english_title ?? 'TVDB match needed'} — Season {entry.season ?? 'N/A'} · Episode {entry.episode ?? 'N/A'}
               </h2>
               {entry.tvdb?.year && <span className='text-sm text-muted-foreground'>{entry.tvdb.year}</span>}
               {entry.tvdb && <Badge variant='info'>{entry.tvdb.kind === 'movie' ? 'Movie' : 'Show'}</Badge>}
@@ -159,8 +159,6 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
           <div className='flex flex-wrap items-center gap-2'>
             {entry.quality && <Badge>{entry.quality}</Badge>}
             {entry.publisher && <Badge variant='secondary'>{entry.publisher}</Badge>}
-            {entry.season != null && <Badge variant='info'>Season {entry.season}</Badge>}
-            {entry.episode != null && <Badge variant='accent'>Episode {entry.episode}</Badge>}
             <Badge variant='success'>{entry.seeders} seeders</Badge>
             <Badge variant='muted'>{entry.leechers} leechers</Badge>
             <Badge variant='muted'>{entry.size}</Badge>

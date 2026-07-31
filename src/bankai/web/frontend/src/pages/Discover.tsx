@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon, Check } from 'lucide-react';
+import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon, Check, Link2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type DiscoverItem, type PagedDiscover, type SearchResult } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Separator } from '@/components/ui/separator';
 import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
 
 const discoverCache = new Map<string, PagedDiscover>();
@@ -42,6 +43,15 @@ function streamSiteFromUrl(raw: string): string {
     // The API performs the authoritative URL validation.
   }
   return 'unknown';
+}
+
+function validStreamUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw.trim());
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname;
+  } catch {
+    return false;
+  }
 }
 
 function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) {
@@ -106,6 +116,7 @@ export default function Discover() {
   const [filmResults, setFilmResults] = useState<SearchResult[]>([]);
   const [loadingFilm, setLoadingFilm] = useState(false);
   const [busyUrl, setBusyUrl] = useState<string | null>(null);
+  const [directMovieUrl, setDirectMovieUrl] = useState('');
 
   useEffect(() => {
     discoverView = { kind, page };
@@ -192,6 +203,7 @@ export default function Discover() {
   async function openItem(item: DiscoverItem) {
     setSelected(item);
     setGerman(null);
+    setDirectMovieUrl('');
     const verifiedResult: SearchResult | null =
       item.available && item.filmpalast_url
         ? {
@@ -297,6 +309,22 @@ export default function Discover() {
     } finally {
       setBusyUrl(null);
     }
+  }
+
+  function queueDirectMovie() {
+    if (!selected) return;
+    const url = directMovieUrl.trim();
+    if (!validStreamUrl(url)) {
+      toast.error('Paste a valid http(s) German source link.');
+      return;
+    }
+    void queueMovie({
+      site: streamSiteFromUrl(url),
+      title: selected.name,
+      year: selected.year ?? null,
+      kind: 'movie',
+      url,
+    });
   }
 
   async function enqueueShow() {
@@ -443,14 +471,14 @@ export default function Discover() {
             </>
           ) : (
             <div className='space-y-3'>
-              <div className='space-y-1'>
-                <label className='text-xs text-muted-foreground'>German source title or direct mirror link</label>
+              <div className='flex flex-col gap-1'>
+                <label className='text-xs text-muted-foreground'>Search German source title</label>
                 <div className='flex gap-2'>
                   <Input
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && reSearchMovie()}
-                    placeholder='Search a title or paste a VOE / Vinovo link…'
+                    placeholder='Search the German movie title…'
                     className='flex-1'
                   />
                   <Button variant='secondary' onClick={reSearchMovie} disabled={loadingFilm || !searchTerm.trim()}>
@@ -467,7 +495,7 @@ export default function Discover() {
                   ))}
                 </div>
               ) : filmResults.length === 0 ? (
-                <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or paste a direct mirror link above.' />
+                <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or use the direct German source field below.' />
               ) : (
                 <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
                   {filmResults.map((r) => (
@@ -494,6 +522,40 @@ export default function Discover() {
                   ))}
                 </div>
               )}
+
+              <div className='flex flex-col gap-3'>
+                <div className='flex items-center gap-3'>
+                  <Separator className='flex-1' />
+                  <span className='text-xs font-medium text-muted-foreground'>or use your own source</span>
+                  <Separator className='flex-1' />
+                </div>
+                <div className='flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-3'>
+                  <div className='flex items-center gap-2 text-sm font-medium text-foreground'>
+                    <Link2 /> Use your own German source
+                  </div>
+                  <p className='text-xs text-muted-foreground'>
+                    Paste a direct VOE, Vidmoly, Vinovo, Filmpalast, or other German video link. It will be used instead of the unavailable automatic result.
+                  </p>
+                  <div className='flex flex-col gap-2 sm:flex-row'>
+                    <Input
+                      type='url'
+                      value={directMovieUrl}
+                      onChange={(event) => setDirectMovieUrl(event.target.value)}
+                      onKeyDown={(event) => event.key === 'Enter' && queueDirectMovie()}
+                      placeholder='https://voe.sx/e/…'
+                      aria-label='Direct German movie source URL'
+                      className='flex-1'
+                    />
+                    <Button
+                      onClick={queueDirectMovie}
+                      disabled={!directMovieUrl.trim() || busyUrl === directMovieUrl.trim()}
+                    >
+                      {busyUrl === directMovieUrl.trim() ? <Loader2 className='animate-spin' /> : <Plus data-icon='inline-start' />}
+                      Queue with link
+                    </Button>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </DialogContent>

@@ -1135,7 +1135,7 @@ def create_app() -> Any:
                     status_code=409,
                     detail=(
                         "This Filmpalast page no longer has a supported German stream mirror. "
-                        "Choose another result."
+                        "Choose another result or paste a direct German mirror link."
                     ),
                 )
         movie = BatchMovie(title=req.title, german_title=req.german, url=req.url, year=year)

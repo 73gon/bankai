@@ -141,6 +141,7 @@ export default function Search() {
   const [filmResults, setFilmResults] = useState<SearchResult[]>([]);
   const [loadingFilm, setLoadingFilm] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [directMovieUrl, setDirectMovieUrl] = useState('');
 
   // show episode picking
   const [picked, setPicked] = useState<SearchResult | null>(null);
@@ -235,6 +236,7 @@ export default function Search() {
     setSelectedEps(new Set());
     setCustomMode(false);
     setCustomUrls({});
+    setDirectMovieUrl('');
     setLoadingFilm(true);
     try {
       let name = item.name;
@@ -369,6 +371,22 @@ export default function Search() {
     setSeason(String(s));
     setCustomUrls({});
     if (picked) loadEpisodes(picked, String(s), seriesTitle, !customMode);
+  }
+
+  function queueDirectMovie() {
+    if (!selected) return;
+    const url = directMovieUrl.trim();
+    if (!validStreamUrl(url)) {
+      toast.error('Paste a valid http(s) German source link.');
+      return;
+    }
+    void queueMovie({
+      site: streamSiteFromUrl(url),
+      title: selected.name,
+      year: selected.year ?? null,
+      kind: 'movie',
+      url,
+    });
   }
 
   function selectCustomSource() {
@@ -579,18 +597,18 @@ export default function Search() {
               {german && german !== selected?.name && <Badge variant='accent'>DE: {german}</Badge>}
             </DialogTitle>
             <DialogDescription>
-              {loadingFilm ? 'Searching German stream sources…' : 'Pick the matching source entry to queue.'}
+              {loadingFilm ? 'Searching German stream sources…' : 'Pick a matching result or use your own German source link below.'}
             </DialogDescription>
           </DialogHeader>
 
-          <div className='space-y-1'>
-            <label className='text-xs text-muted-foreground'>German source title or direct mirror link</label>
+          <div className='flex flex-col gap-1'>
+            <label className='text-xs text-muted-foreground'>Search German source title</label>
             <div className='flex gap-2'>
               <Input
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && reSearch()}
-                placeholder='Search a title or paste a VOE / Vinovo link…'
+                placeholder='Search the German movie title…'
                 className='flex-1'
               />
               <Button variant='secondary' onClick={reSearch} disabled={loadingFilm || !searchTerm.trim()}>
@@ -607,7 +625,7 @@ export default function Search() {
               ))}
             </div>
           ) : filmResults.length === 0 && selected?.kind === 'movie' ? (
-            <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or paste a direct VOE, Vinovo, or other mirror link above.' />
+            <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or use the direct German source field below.' />
           ) : selected?.kind === 'movie' ? (
             <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
               {filmResults.map((r) => (
@@ -801,6 +819,42 @@ export default function Search() {
                   {busy ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
                   Queue {selectedEps.size ? `${selectedEps.size} episode${selectedEps.size === 1 ? '' : 's'}` : customMode ? 'episode links' : 'all'}
                 </Button>
+              </div>
+            </div>
+          )}
+
+          {selected?.kind === 'movie' && (
+            <div className='flex flex-col gap-3'>
+              <div className='flex items-center gap-3'>
+                <Separator className='flex-1' />
+                <span className='text-xs font-medium text-muted-foreground'>or use your own source</span>
+                <Separator className='flex-1' />
+              </div>
+              <div className='flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-3'>
+                <div className='flex items-center gap-2 text-sm font-medium text-foreground'>
+                  <Link2 /> Use your own German source
+                </div>
+                <p className='text-xs text-muted-foreground'>
+                  Paste a direct VOE, Vidmoly, Vinovo, Filmpalast, or other German video link. It will be used instead of the unavailable automatic result.
+                </p>
+                <div className='flex flex-col gap-2 sm:flex-row'>
+                  <Input
+                    type='url'
+                    value={directMovieUrl}
+                    onChange={(event) => setDirectMovieUrl(event.target.value)}
+                    onKeyDown={(event) => event.key === 'Enter' && queueDirectMovie()}
+                    placeholder='https://voe.sx/e/…'
+                    aria-label='Direct German movie source URL'
+                    className='flex-1'
+                  />
+                  <Button
+                    onClick={queueDirectMovie}
+                    disabled={!directMovieUrl.trim() || busy === directMovieUrl.trim()}
+                  >
+                    {busy === directMovieUrl.trim() ? <Loader2 className='animate-spin' /> : <Plus data-icon='inline-start' />}
+                    Queue with link
+                  </Button>
+                </div>
               </div>
             </div>
           )}
