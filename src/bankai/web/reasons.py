@@ -18,6 +18,11 @@ import re
 _RULES: list[tuple[str, str, tuple[str, ...]]] = [
     ("timeout", "Timed out", ("timed out", "timeout")),
     (
+        "indexer",
+        "Torrent indexers unavailable — rerun later",
+        ("torrent indexers unavailable", "all indexers are unavailable"),
+    ),
+    (
         "interrupted",
         "Interrupted",
         ("stopped before completing", "interrupted", "service restart", "sigterm", "sigkill"),

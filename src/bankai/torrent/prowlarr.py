@@ -176,6 +176,32 @@ class ProwlarrClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def indexer_unavailable_reason(self) -> str | None:
+        """Return Prowlarr's explanation when no indexer can be searched.
+
+        Prowlarr answers an aggregate search with ``[]`` both when a healthy
+        search finds no releases and when every indexer has been disabled by
+        its failure backoff.  Consult the health endpoint so callers can keep
+        those two very different outcomes separate.
+        """
+        try:
+            resp = await self._client.get("/api/v1/health")
+            resp.raise_for_status()
+            issues = resp.json()
+        except Exception as exc:
+            log.warning("Prowlarr health check after empty search failed: %s", exc)
+            return None
+        if not isinstance(issues, list):
+            return None
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            message = str(issue.get("message") or "").strip()
+            normalized = message.lower()
+            if "indexer" in normalized and "unavailable" in normalized:
+                return message
+        return None
+
     async def search(
         self,
         query: str,

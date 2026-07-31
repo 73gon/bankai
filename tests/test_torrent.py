@@ -199,6 +199,34 @@ def test_worker_rechecks_current_min_seeders_before_qbit_add(
         reset_settings_cache()
 
 
+def test_worker_reports_unavailable_indexers_instead_of_missing_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableProwlarr:
+        async def search(self, *_args: object, **_kwargs: object) -> list[TorrentCandidate]:
+            return []
+
+        async def indexer_unavailable_reason(self) -> str:
+            return "All indexers are unavailable due to failures for more than 6 hours"
+
+    class NoQbitCalls:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"qBittorrent must not be called: {name}")
+
+    monkeypatch.delenv("BANKAI_BG_JOB_ID", raising=False)
+    worker = TorrentWorker(
+        prowlarr=UnavailableProwlarr(),  # type: ignore[arg-type]
+        qbit=NoQbitCalls(),  # type: ignore[arg-type]
+    )
+    ctx = SimpleNamespace(
+        job=SimpleNamespace(payload={"query": "Backrooms 2026", "kind": "movie"}),
+        cancel_token=None,
+    )
+
+    with pytest.raises(PermanentWorkerError, match="torrent indexers unavailable; rerun later"):
+        asyncio.run(worker.run(ctx))  # type: ignore[arg-type]
+
+
 def test_parse_se_variants() -> None:
     assert parse_se("Show.S01E02.1080p.mkv") == (1, 2)
     assert parse_se("Show.s1e1.mkv") == (1, 1)

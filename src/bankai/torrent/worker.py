@@ -159,6 +159,16 @@ class TorrentWorker(Worker):
                     break
 
         if chosen is None:
+            # An aggregate Prowlarr search returns an empty array when every
+            # indexer is in failure backoff.  Do not misreport that temporary
+            # infrastructure outage as proof that the release does not exist.
+            if not all_candidates:
+                health_check = getattr(self._prowlarr, "indexer_unavailable_reason", None)
+                unavailable_reason = await health_check() if callable(health_check) else None
+                if unavailable_reason:
+                    raise PermanentWorkerError(
+                        f"torrent indexers unavailable; rerun later: {unavailable_reason}"
+                    )
             background_id = os.environ.get("BANKAI_BG_JOB_ID")
             if background_id and all_candidates and ctx.job.payload.get("wait_for_manual", True):
                 from bankai.torrent import actions as torrent_actions
