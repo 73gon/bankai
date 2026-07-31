@@ -379,6 +379,8 @@ class AnimeDownloadRequest(BaseModel):
     kind: str
     english_title: str
     year: int | None = None
+    season: int | None = None
+    episode: int | None = None
 
 
 class QueuePriorityRequest(BaseModel):
@@ -387,11 +389,6 @@ class QueuePriorityRequest(BaseModel):
 
 class SourceRetryRequest(BaseModel):
     url: str
-
-
-class RenameLibraryRequest(BaseModel):
-    path: str
-    title: str
 
 
 class DelayRequest(BaseModel):
@@ -458,6 +455,12 @@ class TorrentChoiceRequest(BaseModel):
 class ServerDirRequest(BaseModel):
     kind: str  # "movie" | "show"
     path: str = ""
+
+
+class ServerRenameRequest(BaseModel):
+    kind: str
+    path: str
+    title: str
 
 
 class SettingRequest(BaseModel):
@@ -984,6 +987,12 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail="a valid TVDB entry is required")
         if req.kind not in {"show", "movie"}:
             raise HTTPException(status_code=422, detail="kind must be show or movie")
+        if req.season is not None and req.season < 1:
+            raise HTTPException(status_code=422, detail="season must be positive")
+        if req.episode is not None and req.episode < 1:
+            raise HTTPException(status_code=422, detail="episode must be positive")
+        if req.kind == "movie" and (req.season is not None or req.episode is not None):
+            raise HTTPException(status_code=422, detail="movies cannot have season or episode overrides")
         if not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url):
             raise HTTPException(
                 status_code=422, detail="anime downloads only accept nyaa.si sources"
@@ -1015,7 +1024,13 @@ def create_app() -> Any:
         ]
         if req.year is not None:
             args.extend(["--year", str(req.year)])
-        season, episode = anime_mod.release_episode_info(req.release_title)
+        if req.season is not None:
+            args.extend(["--season", str(req.season)])
+        if req.episode is not None:
+            args.extend(["--episode", str(req.episode)])
+        detected_season, detected_episode = anime_mod.release_episode_info(req.release_title)
+        season = req.season if req.season is not None else detected_season
+        episode = req.episode if req.episode is not None else detected_episode
         suffix = ""
         if season is not None and episode is not None:
             suffix = f" S{season:02d}E{episode:02d}"
@@ -1739,95 +1754,6 @@ def create_app() -> Any:
             pass
         return {"deleted": True, "path": str(p)}
 
-    @app.post("/api/library/rename")
-    def library_rename(req: RenameLibraryRequest) -> dict:
-        """Rename one staged movie (folder + file) or one episode file."""
-        from bankai.cli import bgjobs
-
-        p = _safe_path(req.path)
-        try:
-            title = _validate_media_title(req.title)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        entry = next(
-            (
-                item
-                for item in media_mod.scan_library()
-                if Path(item.path).resolve() == p
-            ),
-            None,
-        )
-        if entry is None:
-            raise HTTPException(status_code=422, detail="path is not a staged movie or episode")
-        state = review_mod.get_state(p)
-        if state.repack_status == "repacking" or state.transfer_status == "transferring":
-            raise HTTPException(status_code=409, detail="wait for the active operation before renaming")
-        if title == p.stem:
-            return {"renamed": False, "path": str(p), "name": title, "kind": entry.kind}
-
-        old_path = p
-        old_parent = p.parent
-        movie_folder = (
-            entry.kind == "movie"
-            and old_parent != (_library_root() / "Movies").resolve()
-            and old_parent.name == p.stem
-        )
-        new_parent = old_parent.parent / title if movie_folder else old_parent
-        renamed_in_old_parent = old_parent / f"{title}{p.suffix}"
-        new_path = new_parent / f"{title}{p.suffix}"
-        if renamed_in_old_parent.exists() or (movie_folder and new_parent.exists()):
-            raise HTTPException(status_code=409, detail="a file or folder with that title already exists")
-
-        folder_moved = False
-        try:
-            old_path.rename(renamed_in_old_parent)
-            if movie_folder:
-                old_parent.rename(new_parent)
-                folder_moved = True
-            review_mod.move_path(old_path, new_path)
-        except Exception as exc:
-            # Keep the filesystem and review state together if a later step
-            # fails after the first rename.
-            try:
-                if folder_moved and new_parent.exists():
-                    new_parent.rename(old_parent)
-                rollback_source = old_parent / renamed_in_old_parent.name
-                if rollback_source.exists() and not old_path.exists():
-                    rollback_source.rename(old_path)
-            except OSError:
-                log.exception("Could not roll back failed library rename %s", old_path)
-            if isinstance(exc, ValueError):
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            if isinstance(exc, OSError):
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
-            raise
-
-        # Keep completed job rows attached to their renamed library file so
-        # the old title does not reappear as a second standalone queue row.
-        for job in bgjobs.list_jobs():
-            if not job.final_path:
-                continue
-            try:
-                matches = Path(job.final_path).resolve() == old_path
-            except OSError:
-                matches = job.final_path == str(old_path)
-            if not matches:
-                continue
-            job.final_path = str(new_path)
-            job.title = title
-            try:
-                job.save()
-            except OSError:
-                log.warning("Could not update job %s after library rename", job.id)
-
-        return {
-            "renamed": True,
-            "path": str(new_path),
-            "name": title,
-            "kind": entry.kind,
-            "folder_renamed": movie_folder,
-        }
-
     # ------------------------------------------------------------------
     # Streaming + transcode preview
     # ------------------------------------------------------------------
@@ -2461,6 +2387,93 @@ def create_app() -> Any:
                 }
                 for se in seasons
             ],
+        }
+
+    @app.post("/api/server/rename")
+    def server_rename(req: ServerRenameRequest) -> dict:
+        """Rename a media-server movie or one episode within configured roots."""
+        if req.kind not in {"movie", "episode"}:
+            raise HTTPException(status_code=422, detail="kind must be movie or episode")
+        try:
+            title = _validate_media_title(req.title)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        settings = get_settings()
+        roots = settings.web.server_movie_dirs if req.kind == "movie" else settings.web.server_show_dirs
+        allowed = [Path(root).resolve() for root in roots]
+        target = Path(req.path).resolve()
+        if not any(root in target.parents for root in allowed):
+            raise HTTPException(status_code=403, detail="path is outside configured server directories")
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="server item not found")
+
+        renamed_pairs: list[tuple[Path, Path]] = []
+        folder_moved = False
+        old_folder = target if target.is_dir() else None
+        final_path = target
+        try:
+            if req.kind == "episode":
+                if not target.is_file():
+                    raise HTTPException(status_code=422, detail="episode path is not a file")
+                destination = target.with_name(f"{title}{target.suffix}")
+                if destination.exists() and destination != target:
+                    raise HTTPException(status_code=409, detail="an episode with that title already exists")
+                if destination != target:
+                    target.rename(destination)
+                    renamed_pairs.append((target, destination))
+                final_path = destination
+            elif target.is_file():
+                destination = target.with_name(f"{title}{target.suffix}")
+                if destination.exists() and destination != target:
+                    raise HTTPException(status_code=409, detail="a movie with that title already exists")
+                if destination != target:
+                    target.rename(destination)
+                    renamed_pairs.append((target, destination))
+                final_path = destination
+            else:
+                destination = target.parent / title
+                if destination.exists() and destination != target:
+                    raise HTTPException(status_code=409, detail="a movie folder with that title already exists")
+                # Rename matching video/sidecar basenames before the folder so
+                # the movie directory and its contents stay consistently named.
+                for child in list(target.iterdir()):
+                    if not child.is_file() or child.stem != target.name:
+                        continue
+                    renamed = child.with_name(f"{title}{child.suffix}")
+                    if renamed.exists() and renamed != child:
+                        raise HTTPException(status_code=409, detail=f"{renamed.name} already exists")
+                    if renamed != child:
+                        child.rename(renamed)
+                        renamed_pairs.append((child, renamed))
+                if destination != target:
+                    target.rename(destination)
+                    folder_moved = True
+                final_path = destination
+        except HTTPException:
+            for original, renamed in reversed(renamed_pairs):
+                if renamed.exists() and not original.exists():
+                    renamed.rename(original)
+            raise
+        except OSError as exc:
+            try:
+                if folder_moved and old_folder is not None and final_path.exists():
+                    final_path.rename(old_folder)
+                for original, renamed in reversed(renamed_pairs):
+                    current = old_folder / renamed.name if old_folder is not None else renamed
+                    if current.exists() and not original.exists():
+                        current.rename(original)
+            except OSError:
+                log.exception("Could not roll back server rename %s", target)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        media_mod.invalidate_server_cache()
+        return {
+            "renamed": final_path != target,
+            "kind": req.kind,
+            "path": str(final_path),
+            "name": title,
+            "folder_renamed": folder_moved,
         }
 
     @app.get("/api/server/dirs")

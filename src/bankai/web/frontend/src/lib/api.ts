@@ -376,7 +376,11 @@ export const api = {
     request<{ description: string; magnet_uri: string | null; publisher: string | null }>(
       `/api/anime/detail?url=${encodeURIComponent(url)}`,
     ),
-  animeDownload: (entry: AnimeEntry, match: AnimeTVDBMatch) =>
+  animeDownload: (
+    entry: AnimeEntry,
+    match: AnimeTVDBMatch,
+    overrides: { season?: number | null; episode?: number | null } = {},
+  ) =>
     request<Job>('/api/anime/download', {
       method: 'POST',
       body: JSON.stringify({
@@ -389,6 +393,8 @@ export const api = {
         kind: match.kind,
         english_title: match.english_title,
         year: match.year,
+        season: overrides.season ?? null,
+        episode: overrides.episode ?? null,
       }),
     }),
   torrentAction: (jobId: string) =>
@@ -446,11 +452,6 @@ export const api = {
     }),
   mediaInfo: (path: string) => request<MediaInfo>(`/api/media/info?path=${encodeURIComponent(path)}`),
   deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
-  renameLibrary: (path: string, title: string) =>
-    request<{ renamed: boolean; path: string; name: string; kind: string; folder_renamed: boolean }>(
-      '/api/library/rename',
-      { method: 'POST', body: JSON.stringify({ path, title }) },
-    ),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
   transcodeUrl: (path: string, audio = 0, t = 0) => `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}&t=${t}`,
   waveform: (path: string, stream: number, start: number, dur: number, bins: number) =>
@@ -508,6 +509,11 @@ export const api = {
   serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
 
   serverShow: (path: string) => request<{ path: string; seasons: ServerSeason[] }>(`/api/server/show?path=${encodeURIComponent(path)}`),
+  renameServerItem: (kind: 'movie' | 'episode', path: string, title: string) =>
+    request<{ renamed: boolean; kind: string; path: string; name: string; folder_renamed: boolean }>(
+      '/api/server/rename',
+      { method: 'POST', body: JSON.stringify({ kind, path, title }) },
+    ),
 
   serverDirs: () => request<{ movie_dirs: string[]; show_dirs: string[] }>('/api/server/dirs'),
   addServerDir: (kind: 'movie' | 'show', path: string) =>

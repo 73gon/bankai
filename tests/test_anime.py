@@ -45,6 +45,29 @@ def test_nyaa_rss_parser_preserves_direct_sources_and_metadata() -> None:
     )
 
 
+def test_nyaa_detail_preserves_markdown_line_breaks() -> None:
+    class Response:
+        text = """<div id="torrent-description">### Release\n\n| Episode | 41 |\n| --- | --- |</div>"""
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    class Client:
+        @staticmethod
+        async def get(_url: str) -> Response:
+            return Response()
+
+    anime._DETAIL_CACHE.clear()
+    description, _, _ = asyncio.run(
+        anime._detail_url(Client(), "https://nyaa.si/view/markdown-test")
+    )
+
+    assert "### Release" in description
+    assert "\n" in description
+    assert "| Episode | 41 |" in description
+
+
 def test_anime_filter_terms_are_or_tokens() -> None:
     assert split_filter_terms("German, GER; Deutsch\nDual Audio") == [
         "german",
@@ -155,6 +178,23 @@ def test_episode_identity_uses_tvdb_absolute_order_without_season_hint() -> None
 
     assert identity is not None
     assert (identity.season, identity.episode, identity.title) == (2, 1, "A New Journey")
+
+
+def test_episode_identity_honors_manual_season_and_episode() -> None:
+    episodes = [
+        TVDBEpisode(season=3, episode=13, absolute_number=41, name="The Calamity"),
+    ]
+
+    identity = episode_identity(
+        "unknown-release-name.mkv",
+        release_title="Bleach",
+        tvdb_episodes=episodes,
+        season_override=3,
+        episode_override=13,
+    )
+
+    assert identity is not None
+    assert (identity.season, identity.episode, identity.title) == (3, 13, "The Calamity")
 
 
 def test_nyaa_page_keeps_every_release_when_only_leading_rows_are_enriched(

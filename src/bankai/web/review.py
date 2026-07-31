@@ -359,28 +359,6 @@ def forget(path: str | Path) -> None:
             _save(data)
 
 
-def move_path(old_path: str | Path, new_path: str | Path) -> ReviewState:
-    """Move review metadata to a renamed library path without resetting it."""
-    old_key = _key(old_path)
-    new_key = _key(new_path)
-    with _store_lock():
-        data = _load()
-        if old_key == new_key:
-            raw = data.get(old_key, {"path": str(new_path), "stage": "review"})
-            raw["path"] = str(new_path)
-            data[new_key] = raw
-            _save(data)
-            return ReviewState(**raw)
-        if new_key in data:
-            raise ValueError("review state already exists for the destination path")
-        raw = data.pop(old_key, {"path": str(old_path), "stage": "review"})
-        raw["path"] = str(new_path)
-        raw["updated_at"] = time.time()
-        data[new_key] = raw
-        _save(data)
-        return ReviewState(**raw)
-
-
 def all_states() -> dict[str, ReviewState]:
     return {k: ReviewState(**v) for k, v in _load().items()}
 

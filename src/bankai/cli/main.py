@@ -2255,6 +2255,8 @@ def anime_download(
     tvdb_id: int = typer.Option(..., "--tvdb-id"),
     english_title: str = typer.Option(..., "--english-title"),
     year: int | None = typer.Option(None, "--year"),
+    season: int | None = typer.Option(None, "--season"),
+    episode: int | None = typer.Option(None, "--episode"),
 ) -> None:
     """Download a selected Nyaa release and organize it without syncing."""
     from bankai.processor.anime import download_anime
@@ -2276,6 +2278,8 @@ def anime_download(
                 tvdb_id=tvdb_id,
                 english_title=english_title,
                 year=year,
+                season_override=season,
+                episode_override=episode,
             )
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"

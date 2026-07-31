@@ -14,6 +14,8 @@ import {
   Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   api,
   type AnimeEntry,
@@ -186,8 +188,28 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
           </div>
 
           {descriptionOpen && (
-            <div className='rounded-md border border-white/10 bg-black/20 p-3 text-sm leading-relaxed text-foreground'>
-              {descriptionLoading ? 'Loading description…' : description}
+            <div className='flex flex-col gap-3 overflow-x-auto rounded-md border border-white/10 bg-black/20 p-3 text-sm leading-relaxed text-foreground'>
+              {descriptionLoading ? (
+                'Loading description…'
+              ) : (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    h1: (props) => <h1 className='font-serif text-xl font-semibold' {...props} />,
+                    h2: (props) => <h2 className='font-serif text-lg font-semibold' {...props} />,
+                    h3: (props) => <h3 className='font-serif text-base font-semibold' {...props} />,
+                    p: (props) => <p className='whitespace-pre-wrap' {...props} />,
+                    a: (props) => <a className='text-info underline underline-offset-4' target='_blank' rel='noreferrer' {...props} />,
+                    ul: (props) => <ul className='list-disc pl-5' {...props} />,
+                    ol: (props) => <ol className='list-decimal pl-5' {...props} />,
+                    table: (props) => <table className='w-full border-collapse text-left text-xs' {...props} />,
+                    th: (props) => <th className='border border-border bg-secondary px-3 py-2 font-medium' {...props} />,
+                    td: (props) => <td className='border border-border px-3 py-2 align-top' {...props} />,
+                  }}
+                >
+                  {description}
+                </ReactMarkdown>
+              )}
             </div>
           )}
         </div>
@@ -211,6 +233,8 @@ export default function Anime() {
   const [tvdbResults, setTvdbResults] = useState<AnimeTVDBMatch[]>([]);
   const [tvdbLoading, setTvdbLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [manualSeason, setManualSeason] = useState('');
+  const [manualEpisode, setManualEpisode] = useState('');
 
   useEffect(() => {
     animeView = { query, page, filters };
@@ -261,6 +285,8 @@ export default function Anime() {
     setSelectedMatch(entry.tvdb);
     setTvdbResults(entry.tvdb ? [entry.tvdb] : []);
     setTvdbQuery(entry.tvdb?.english_title ?? '');
+    setManualSeason(entry.season == null ? '' : String(entry.season));
+    setManualEpisode(entry.episode == null ? '' : String(entry.episode));
   }
 
   async function findTvdb() {
@@ -282,7 +308,13 @@ export default function Anime() {
     if (!selectedEntry || !selectedMatch) return;
     setDownloading(true);
     try {
-      await api.animeDownload(selectedEntry, selectedMatch);
+      const season = manualSeason.trim() ? Number.parseInt(manualSeason, 10) : null;
+      const episode = manualEpisode.trim() ? Number.parseInt(manualEpisode, 10) : null;
+      if ((season != null && season < 1) || (episode != null && episode < 1)) {
+        toast.error('Season and episode must be positive numbers.');
+        return;
+      }
+      await api.animeDownload(selectedEntry, selectedMatch, { season, episode });
       toast.success(`${selectedMatch.english_title} was added to the queue from Nyaa.`);
       setSelectedEntry(null);
     } catch (error: any) {
@@ -454,6 +486,34 @@ export default function Anime() {
               );
             })}
           </div>
+
+          {selectedMatch?.kind === 'show' && (
+            <div className='grid gap-3 sm:grid-cols-2'>
+              <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
+                Season override
+                <Input
+                  type='number'
+                  min='1'
+                  value={manualSeason}
+                  onChange={(event) => setManualSeason(event.target.value)}
+                  placeholder='Automatic'
+                />
+              </label>
+              <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
+                Episode override
+                <Input
+                  type='number'
+                  min='1'
+                  value={manualEpisode}
+                  onChange={(event) => setManualEpisode(event.target.value)}
+                  placeholder='Automatic'
+                />
+              </label>
+              <p className='text-xs text-muted-foreground sm:col-span-2'>
+                Leave either field empty to use the release filename and TVDB numbering. A manual episode applies only when the torrent contains one video file.
+              </p>
+            </div>
+          )}
 
           {tvdbResults.length === 0 && !tvdbLoading && (
             <EmptyState icon={Users} title='Select a TVDB entry first' description='Search for the anime so its English title, poster, seasons, and episode numbers can be used.' className='py-10' />

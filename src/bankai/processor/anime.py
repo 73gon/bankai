@@ -51,10 +51,41 @@ def episode_identity(
     *,
     release_title: str,
     tvdb_episodes: list[TVDBEpisode],
+    season_override: int | None = None,
+    episode_override: int | None = None,
 ) -> EpisodeIdentity | None:
+    if episode_override is not None:
+        if season_override is not None:
+            matched = next(
+                (
+                    item
+                    for item in tvdb_episodes
+                    if item.season == season_override and item.episode == episode_override
+                ),
+                None,
+            )
+            return EpisodeIdentity(
+                season_override,
+                episode_override,
+                matched.name if matched else None,
+            )
+        absolute = next(
+            (item for item in tvdb_episodes if item.absolute_number == episode_override),
+            None,
+        )
+        if absolute:
+            return EpisodeIdentity(absolute.season, absolute.episode, absolute.name)
+        regular = [item for item in tvdb_episodes if item.season > 0]
+        if 0 < episode_override <= len(regular):
+            item = regular[episode_override - 1]
+            return EpisodeIdentity(item.season, item.episode, item.name)
+        return EpisodeIdentity(1, episode_override)
+
     explicit = parse_se(filename)
     if explicit:
         season, episode = explicit
+        if season_override is not None:
+            season = season_override
         matched = next(
             (item for item in tvdb_episodes if item.season == season and item.episode == episode),
             None,
@@ -65,6 +96,8 @@ def episode_identity(
     if anime_match:
         season = int(anime_match.group("season"))
         episode = int(anime_match.group("episode"))
+        if season_override is not None:
+            season = season_override
         matched = next(
             (item for item in tvdb_episodes if item.season == season and item.episode == episode),
             None,
@@ -76,8 +109,8 @@ def episode_identity(
         return None
     number = int(episode_match.group("episode"))
     season_match = _SEASON_HINT.search(release_title)
-    if season_match:
-        season = int(season_match.group("season"))
+    if season_override is not None or season_match:
+        season = season_override if season_override is not None else int(season_match.group("season"))
         matched = next(
             (item for item in tvdb_episodes if item.season == season and item.episode == number),
             None,
@@ -196,6 +229,8 @@ async def download_anime(
     tvdb_id: int,
     english_title: str,
     year: int | None,
+    season_override: int | None = None,
+    episode_override: int | None = None,
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -259,11 +294,18 @@ async def download_anime(
             outputs.append(destination)
         else:
             tvdb_episodes = await _tvdb_episode_map(tvdb_id)
-            for source in find_video_files(root):
+            sources = find_video_files(root)
+            if episode_override is not None and len(sources) != 1:
+                raise RuntimeError(
+                    "a manual episode override requires a torrent containing exactly one video file"
+                )
+            for source in sources:
                 identity = episode_identity(
                     source.name,
                     release_title=release_title,
                     tvdb_episodes=tvdb_episodes,
+                    season_override=season_override,
+                    episode_override=episode_override,
                 )
                 if identity is None:
                     log.warning("[anime] skipped file with no episode number: %s", source.name)

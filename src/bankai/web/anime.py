@@ -253,7 +253,10 @@ async def _detail_url(
     response.raise_for_status()
     tree = HTMLParser(response.text)
     description_node = tree.css_first("#torrent-description")
-    description = description_node.text(separator=" ", strip=True) if description_node else ""
+    # Nyaa descriptions often contain literal Markdown. Preserve block and
+    # source line breaks so headings, links, and GFM tables remain renderable
+    # instead of collapsing into one long paragraph.
+    description = description_node.text(separator="\n", strip=True) if description_node else ""
     magnet_node = tree.css_first('a[href^="magnet:"]')
     magnet = html.unescape(magnet_node.attributes.get("href", "")) if magnet_node else None
     uploader_node = tree.css_first('a[href^="/user/"]')

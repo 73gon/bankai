@@ -26,7 +26,6 @@ from bankai.web.app import (
     create_app,
 )
 from bankai.web.discover import DiscoverItem
-from bankai.web import review as review_mod
 
 
 def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
@@ -57,6 +56,14 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     assert queued[0]["title"] == "Frieren: Beyond Journey's End E01"
     assert queued[0]["args"][0] == "anime-download"
     assert "--tvdb-id" in queued[0]["args"]
+
+    body["season"] = 3
+    body["episode"] = 13
+    overridden = client.post("/api/anime/download", json=body)
+    assert overridden.status_code == 200
+    assert queued[1]["title"] == "Frieren: Beyond Journey's End S03E13"
+    assert queued[1]["args"][queued[1]["args"].index("--season") + 1] == "3"
+    assert queued[1]["args"][queued[1]["args"].index("--episode") + 1] == "13"
 
     body["detail_url"] = "https://example.com/view/123"
     rejected = client.post("/api/anime/download", json=body)
@@ -205,62 +212,64 @@ def test_library_empty(client: TestClient) -> None:
     assert r.json()["entries"] == []
 
 
-def test_library_rename_moves_movie_folder_file_state_and_job(
+def test_server_rename_moves_movie_folder_and_matching_files(
     client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = Path(get_settings().output.directory)
-    old_folder = root / "Movies" / "Old Movie (2020)"
-    old_folder.mkdir(parents=True)
-    old_file = old_folder / "Old Movie (2020).mkv"
-    old_file.write_bytes(b"movie")
-    review_mod.set_delay(old_file, 125)
-    review_mod.set_stage(old_file, "approved")
-    saved: list[bool] = []
-    job = SimpleNamespace(
-        id="movie-job",
-        final_path=str(old_file),
-        title="Old Movie (2020)",
-        save=lambda: saved.append(True),
-    )
-    monkeypatch.setattr("bankai.cli.bgjobs.list_jobs", lambda: [job])
+    root = Path(get_settings().output.directory).parent / "server-movies"
+    folder = root / "Old Movie (2020)"
+    folder.mkdir(parents=True)
+    (folder / "Old Movie (2020).mkv").write_bytes(b"movie")
+    (folder / "Old Movie (2020).nfo").write_text("metadata")
+    get_settings().web.server_movie_dirs = [root]
 
     response = client.post(
-        "/api/library/rename",
-        json={"path": str(old_file), "title": "New Movie (2020)"},
+        "/api/server/rename",
+        json={"kind": "movie", "path": str(folder), "title": "New Movie (2020)"},
     )
 
     assert response.status_code == 200
-    new_file = root / "Movies" / "New Movie (2020)" / "New Movie (2020).mkv"
-    assert new_file.read_bytes() == b"movie"
-    assert not old_folder.exists()
-    state = review_mod.get_state(new_file)
-    assert state.stage == "approved"
-    assert state.delay_ms == 125
-    assert str(old_file.resolve()) not in review_mod.all_states()
-    assert job.final_path == str(new_file)
-    assert job.title == "New Movie (2020)"
-    assert saved == [True]
+    destination = root / "New Movie (2020)"
+    assert (destination / "New Movie (2020).mkv").read_bytes() == b"movie"
+    assert (destination / "New Movie (2020).nfo").read_text() == "metadata"
+    assert not folder.exists()
 
 
-def test_library_rename_moves_only_one_episode_file(client: TestClient) -> None:
-    root = Path(get_settings().output.directory)
-    season = root / "Shows" / "Example Show" / "Season 01"
+def test_server_rename_moves_only_selected_episode(client: TestClient) -> None:
+    root = Path(get_settings().output.directory).parent / "server-shows"
+    season = root / "Example Show" / "Season 01"
     season.mkdir(parents=True)
-    old_file = season / "Example Show - S01E01 - Old.mkv"
+    episode = season / "Example Show - S01E01 - Old.mkv"
     sibling = season / "Example Show - S01E02 - Keep.mkv"
-    old_file.write_bytes(b"episode-one")
-    sibling.write_bytes(b"episode-two")
+    episode.write_bytes(b"one")
+    sibling.write_bytes(b"two")
+    get_settings().web.server_show_dirs = [root]
 
     response = client.post(
-        "/api/library/rename",
-        json={"path": str(old_file), "title": "Example Show - S01E01 - Pilot"},
+        "/api/server/rename",
+        json={
+            "kind": "episode",
+            "path": str(episode),
+            "title": "Example Show - S01E01 - Pilot",
+        },
     )
 
     assert response.status_code == 200
-    assert (season / "Example Show - S01E01 - Pilot.mkv").read_bytes() == b"episode-one"
-    assert sibling.read_bytes() == b"episode-two"
-    assert season.is_dir()
+    assert (season / "Example Show - S01E01 - Pilot.mkv").read_bytes() == b"one"
+    assert sibling.read_bytes() == b"two"
+
+
+def test_server_rename_rejects_configured_root(client: TestClient) -> None:
+    root = Path(get_settings().output.directory).parent / "server-movies-root"
+    root.mkdir(parents=True)
+    get_settings().web.server_movie_dirs = [root]
+
+    response = client.post(
+        "/api/server/rename",
+        json={"kind": "movie", "path": str(root), "title": "Do Not Rename"},
+    )
+
+    assert response.status_code == 403
+    assert root.exists()
 
 
 def test_queue_snapshot(client: TestClient) -> None:
