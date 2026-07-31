@@ -50,6 +50,12 @@ export interface DiscoverItem {
   filmpalast_url?: string;
 }
 
+export interface VpnStatus {
+  connected: boolean;
+  status: 'connected' | 'disconnected' | 'unavailable';
+  detail: string;
+}
+
 export interface PagedDiscover {
   configured: boolean;
   items: DiscoverItem[];
@@ -319,6 +325,8 @@ export interface SettingRow {
 
 export const api = {
   health: () => request<HealthResponse>('/api/health'),
+  vpnStatus: () => request<VpnStatus>('/api/vpn/status'),
+  vpnConnect: () => request<VpnStatus>('/api/vpn/connect', { method: 'POST' }),
 
   discoverTrending: (kind: string, page = 0, pageSize = 50) => request<PagedDiscover>(`/api/discover/trending?kind=${kind}&page=${page}&page_size=${pageSize}`),
   discoverSearch: (q: string, kind: string, by: DiscoverSearchBy = 'title', page = 0, pageSize = 50) =>
@@ -438,6 +446,11 @@ export const api = {
     }),
   mediaInfo: (path: string) => request<MediaInfo>(`/api/media/info?path=${encodeURIComponent(path)}`),
   deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
+  renameLibrary: (path: string, title: string) =>
+    request<{ renamed: boolean; path: string; name: string; kind: string; folder_renamed: boolean }>(
+      '/api/library/rename',
+      { method: 'POST', body: JSON.stringify({ path, title }) },
+    ),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
   transcodeUrl: (path: string, audio = 0, t = 0) => `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}&t=${t}`,
   waveform: (path: string, stream: number, start: number, dur: number, bins: number) =>

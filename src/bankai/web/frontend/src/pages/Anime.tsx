@@ -395,7 +395,9 @@ export default function Anime() {
           <Button variant='secondary' onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={page === 0 || loading}>
             <ArrowLeft data-icon='inline-start' /> Previous
           </Button>
-          <span className='text-sm text-foreground'>Page {page + 1}</span>
+          <span className='text-sm text-foreground'>
+            Page {page + 1} · {result?.items.length ?? 0} {(result?.items.length ?? 0) === 1 ? 'entry' : 'entries'}
+          </span>
           <Button variant='secondary' onClick={() => setPage((value) => value + 1)} disabled={!result?.has_next || loading}>
             Next <ArrowRight data-icon='inline-end' />
           </Button>

@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles } from 'lucide-react';
+import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { api, type VpnStatus } from '@/lib/api';
+import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
@@ -41,6 +44,86 @@ function useSidebarState() {
 
 function BrandMark() {
   return <span className='font-mono text-[0.95rem] font-semibold tracking-[0.02em] text-foreground'>bankai</span>;
+}
+
+function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
+  const [status, setStatus] = useState<VpnStatus | null>(null);
+  const [connecting, setConnecting] = useState(false);
+
+  async function refresh() {
+    try {
+      setStatus(await api.vpnStatus());
+    } catch (error: any) {
+      setStatus({ connected: false, status: 'unavailable', detail: error.message });
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function connect() {
+    setConnecting(true);
+    try {
+      const next = await api.vpnConnect();
+      setStatus(next);
+      if (next.connected) toast.success('NordVPN connected on laptop.');
+      else toast.error('NordVPN did not report a connected state.');
+    } catch (error: any) {
+      toast.error(error.message);
+      await refresh();
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  const connected = status?.connected === true;
+  const disconnected = status !== null && !connected;
+  const statusLabel = connected ? 'VPN connected' : status?.status === 'unavailable' ? 'VPN status unavailable' : 'VPN disconnected';
+  const dot = (
+    <span
+      aria-hidden='true'
+      className={cn(
+        'size-2.5 shrink-0 rounded-full shadow-[0_0_8px_currentColor]',
+        connected ? 'bg-success text-success' : disconnected ? 'bg-destructive text-destructive' : 'bg-muted-foreground text-muted-foreground',
+      )}
+    />
+  );
+
+  if (collapsed) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {disconnected ? (
+            <Button size='icon' variant='ghost' onClick={() => void connect()} disabled={connecting} aria-label={`${statusLabel}. Connect NordVPN`}>
+              {connecting ? <Loader2 data-icon='inline-start' className='animate-spin' /> : dot}
+            </Button>
+          ) : (
+            <div className='flex size-10 items-center justify-center' aria-label={statusLabel}>{dot}</div>
+          )}
+        </TooltipTrigger>
+        <TooltipContent side='right'>{disconnected ? `${statusLabel} — click to connect` : statusLabel}</TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <div className='flex min-h-10 items-center gap-2 rounded-md border border-border/70 px-3 py-2 text-sm text-foreground'>
+      <span className='font-medium'>VPN</span>
+      <Tooltip>
+        <TooltipTrigger asChild>{dot}</TooltipTrigger>
+        <TooltipContent side='right'>{status?.detail || statusLabel}</TooltipContent>
+      </Tooltip>
+      {disconnected && (
+        <Button className='ml-auto' size='sm' variant='secondary' onClick={() => void connect()} disabled={connecting}>
+          {connecting && <Loader2 data-icon='inline-start' className='animate-spin' />}
+          Connect
+        </Button>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
@@ -120,6 +203,10 @@ export default function App() {
               );
             })}
           </nav>
+
+          <div className={cn('hidden md:flex md:shrink-0', collapsed && 'md:justify-center')}>
+            <VpnSidebarStatus collapsed={collapsed} />
+          </div>
         </aside>
 
         <main className='min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8'>

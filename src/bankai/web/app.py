@@ -11,6 +11,7 @@ import asyncio
 import math
 import mimetypes
 import re
+import subprocess
 import sys
 import threading
 from array import array
@@ -45,6 +46,43 @@ _WAVEFORM_CACHE: dict[tuple, dict] = {}
 # hanging the whole server. Requests that can't get a slot fail fast with 503
 # so the client can show a loader and retry instead of blocking everything.
 _FFMPEG_SLOTS = threading.BoundedSemaphore(4)
+_LAPTOP_VPN_SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+
+
+def _laptop_vpn_command(command: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    """Run one fixed NordVPN command on the configured ``laptop`` SSH host."""
+    if command not in {"status", "connect"}:
+        raise ValueError("unsupported VPN command")
+    # Keller already uses this SSH target for remote extraction, including the
+    # LocalSystem service account's working key. On development machines the
+    # requested ``ssh laptop`` alias remains the fallback.
+    target = get_settings().scraper.remote_extract_ssh.strip() or "laptop"
+    return subprocess.run(
+        [*_LAPTOP_VPN_SSH, target, "nordvpn", command],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _laptop_vpn_status() -> dict:
+    try:
+        result = _laptop_vpn_command("status")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "connected": False,
+            "status": "unavailable",
+            "detail": str(exc)[:500],
+        }
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    connected = bool(re.search(r"^\s*status\s*:\s*connected\b", output, re.I | re.M))
+    return {
+        "connected": connected,
+        "status": "connected" if connected else "disconnected",
+        "detail": output[:500] or f"nordvpn status exited with code {result.returncode}",
+    }
 
 
 def _stream_site_from_url(url: str) -> str:
@@ -269,6 +307,27 @@ def _extract_year(s: str) -> int | None:
         return None
 
 
+def _validate_media_title(raw: str) -> str:
+    """Return a filesystem-safe movie/episode stem for Windows and Linux."""
+    title = raw.strip()
+    if not title or title in {".", ".."}:
+        raise ValueError("title cannot be empty")
+    if len(title) > 180:
+        raise ValueError("title must be 180 characters or fewer")
+    if any(ord(char) < 32 or char in '<>:"/\\|?*' for char in title):
+        raise ValueError('title contains an invalid filename character')
+    if title.endswith((".", " ")):
+        raise ValueError("title cannot end with a dot or space")
+    reserved = {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
+    if title.split(".", 1)[0].upper() in reserved:
+        raise ValueError("title is reserved by Windows")
+    return title
+
+
 def _clean_title(s: str) -> str:
     """Human title without the file extension, ``(year)`` or release cruft."""
     s = re.sub(r"\.[a-z0-9]{2,4}$", "", s, flags=re.I)  # extension
@@ -328,6 +387,11 @@ class QueuePriorityRequest(BaseModel):
 
 class SourceRetryRequest(BaseModel):
     url: str
+
+
+class RenameLibraryRequest(BaseModel):
+    path: str
+    title: str
 
 
 class DelayRequest(BaseModel):
@@ -885,6 +949,21 @@ def create_app() -> Any:
             "configured": discover_mod.is_configured(),
             "items": [anime_mod.tvdb_to_dict(item) for item in matches],
         }
+
+    @app.get("/api/vpn/status")
+    def vpn_status() -> dict:
+        return _laptop_vpn_status()
+
+    @app.post("/api/vpn/connect")
+    def vpn_connect() -> dict:
+        try:
+            result = _laptop_vpn_command("connect", timeout=75)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(status_code=502, detail=f"VPN connection failed: {exc}") from exc
+        if result.returncode != 0:
+            output = (result.stderr or result.stdout or "NordVPN connect failed").strip()
+            raise HTTPException(status_code=502, detail=output[:500])
+        return _laptop_vpn_status()
 
     @app.get("/api/anime/detail")
     async def anime_detail(url: str = Query(...)) -> dict:
@@ -1659,6 +1738,95 @@ def create_app() -> Any:
         except OSError:
             pass
         return {"deleted": True, "path": str(p)}
+
+    @app.post("/api/library/rename")
+    def library_rename(req: RenameLibraryRequest) -> dict:
+        """Rename one staged movie (folder + file) or one episode file."""
+        from bankai.cli import bgjobs
+
+        p = _safe_path(req.path)
+        try:
+            title = _validate_media_title(req.title)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        entry = next(
+            (
+                item
+                for item in media_mod.scan_library()
+                if Path(item.path).resolve() == p
+            ),
+            None,
+        )
+        if entry is None:
+            raise HTTPException(status_code=422, detail="path is not a staged movie or episode")
+        state = review_mod.get_state(p)
+        if state.repack_status == "repacking" or state.transfer_status == "transferring":
+            raise HTTPException(status_code=409, detail="wait for the active operation before renaming")
+        if title == p.stem:
+            return {"renamed": False, "path": str(p), "name": title, "kind": entry.kind}
+
+        old_path = p
+        old_parent = p.parent
+        movie_folder = (
+            entry.kind == "movie"
+            and old_parent != (_library_root() / "Movies").resolve()
+            and old_parent.name == p.stem
+        )
+        new_parent = old_parent.parent / title if movie_folder else old_parent
+        renamed_in_old_parent = old_parent / f"{title}{p.suffix}"
+        new_path = new_parent / f"{title}{p.suffix}"
+        if renamed_in_old_parent.exists() or (movie_folder and new_parent.exists()):
+            raise HTTPException(status_code=409, detail="a file or folder with that title already exists")
+
+        folder_moved = False
+        try:
+            old_path.rename(renamed_in_old_parent)
+            if movie_folder:
+                old_parent.rename(new_parent)
+                folder_moved = True
+            review_mod.move_path(old_path, new_path)
+        except Exception as exc:
+            # Keep the filesystem and review state together if a later step
+            # fails after the first rename.
+            try:
+                if folder_moved and new_parent.exists():
+                    new_parent.rename(old_parent)
+                rollback_source = old_parent / renamed_in_old_parent.name
+                if rollback_source.exists() and not old_path.exists():
+                    rollback_source.rename(old_path)
+            except OSError:
+                log.exception("Could not roll back failed library rename %s", old_path)
+            if isinstance(exc, ValueError):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if isinstance(exc, OSError):
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise
+
+        # Keep completed job rows attached to their renamed library file so
+        # the old title does not reappear as a second standalone queue row.
+        for job in bgjobs.list_jobs():
+            if not job.final_path:
+                continue
+            try:
+                matches = Path(job.final_path).resolve() == old_path
+            except OSError:
+                matches = job.final_path == str(old_path)
+            if not matches:
+                continue
+            job.final_path = str(new_path)
+            job.title = title
+            try:
+                job.save()
+            except OSError:
+                log.warning("Could not update job %s after library rename", job.id)
+
+        return {
+            "renamed": True,
+            "path": str(new_path),
+            "name": title,
+            "kind": entry.kind,
+            "folder_renamed": movie_folder,
+        }
 
     # ------------------------------------------------------------------
     # Streaming + transcode preview

@@ -18,12 +18,15 @@ from bankai.config import get_settings, reset_settings_cache
 from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.web.app import (
     _ebur128_envelope,
+    _laptop_vpn_status,
     _parse_range,
     _stream_site_from_url,
+    _validate_media_title,
     _waveform_envelope,
     create_app,
 )
 from bankai.web.discover import DiscoverItem
+from bankai.web import review as review_mod
 
 
 def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
@@ -81,6 +84,49 @@ def test_health(client: TestClient) -> None:
     body = r.json()
     assert body["status"] == "ok"
     assert "version" in body
+
+
+def test_vpn_status_distinguishes_connected_from_disconnected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "bankai.web.app._laptop_vpn_command",
+        lambda _command: SimpleNamespace(returncode=0, stdout="Status: Disconnected\n", stderr=""),
+    )
+    assert _laptop_vpn_status()["connected"] is False
+
+    monkeypatch.setattr(
+        "bankai.web.app._laptop_vpn_command",
+        lambda _command: SimpleNamespace(returncode=0, stdout="Status: Connected\n", stderr=""),
+    )
+    assert _laptop_vpn_status()["connected"] is True
+
+
+def test_vpn_connect_endpoint_runs_only_fixed_nordvpn_command(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_command(command: str, *, timeout: int = 20) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="Status: Connected\n", stderr="")
+
+    monkeypatch.setattr("bankai.web.app._laptop_vpn_command", fake_command)
+
+    response = client.post("/api/vpn/connect")
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is True
+    assert calls == ["connect", "status"]
+
+
+def test_media_title_validation_rejects_path_and_windows_reserved_names() -> None:
+    assert _validate_media_title("  Movie (2024)  ") == "Movie (2024)"
+    with pytest.raises(ValueError):
+        _validate_media_title("../Movie")
+    with pytest.raises(ValueError):
+        _validate_media_title("CON")
 
 
 def test_discover_search_forwards_movie_search_mode(
@@ -157,6 +203,64 @@ def test_library_empty(client: TestClient) -> None:
     r = client.get("/api/library")
     assert r.status_code == 200
     assert r.json()["entries"] == []
+
+
+def test_library_rename_moves_movie_folder_file_state_and_job(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(get_settings().output.directory)
+    old_folder = root / "Movies" / "Old Movie (2020)"
+    old_folder.mkdir(parents=True)
+    old_file = old_folder / "Old Movie (2020).mkv"
+    old_file.write_bytes(b"movie")
+    review_mod.set_delay(old_file, 125)
+    review_mod.set_stage(old_file, "approved")
+    saved: list[bool] = []
+    job = SimpleNamespace(
+        id="movie-job",
+        final_path=str(old_file),
+        title="Old Movie (2020)",
+        save=lambda: saved.append(True),
+    )
+    monkeypatch.setattr("bankai.cli.bgjobs.list_jobs", lambda: [job])
+
+    response = client.post(
+        "/api/library/rename",
+        json={"path": str(old_file), "title": "New Movie (2020)"},
+    )
+
+    assert response.status_code == 200
+    new_file = root / "Movies" / "New Movie (2020)" / "New Movie (2020).mkv"
+    assert new_file.read_bytes() == b"movie"
+    assert not old_folder.exists()
+    state = review_mod.get_state(new_file)
+    assert state.stage == "approved"
+    assert state.delay_ms == 125
+    assert str(old_file.resolve()) not in review_mod.all_states()
+    assert job.final_path == str(new_file)
+    assert job.title == "New Movie (2020)"
+    assert saved == [True]
+
+
+def test_library_rename_moves_only_one_episode_file(client: TestClient) -> None:
+    root = Path(get_settings().output.directory)
+    season = root / "Shows" / "Example Show" / "Season 01"
+    season.mkdir(parents=True)
+    old_file = season / "Example Show - S01E01 - Old.mkv"
+    sibling = season / "Example Show - S01E02 - Keep.mkv"
+    old_file.write_bytes(b"episode-one")
+    sibling.write_bytes(b"episode-two")
+
+    response = client.post(
+        "/api/library/rename",
+        json={"path": str(old_file), "title": "Example Show - S01E01 - Pilot"},
+    )
+
+    assert response.status_code == 200
+    assert (season / "Example Show - S01E01 - Pilot.mkv").read_bytes() == b"episode-one"
+    assert sibling.read_bytes() == b"episode-two"
+    assert season.is_dir()
 
 
 def test_queue_snapshot(client: TestClient) -> None:

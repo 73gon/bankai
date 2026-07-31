@@ -27,6 +27,7 @@ import {
   CirclePlay,
   ExternalLink,
   Link2,
+  Pencil,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
@@ -800,6 +801,9 @@ export default function Library() {
   const [sourceRetry, setSourceRetry] = useState<TitleRow | null>(null);
   const [sourceUrl, setSourceUrl] = useState('');
   const [sourceRetryBusy, setSourceRetryBusy] = useState(false);
+  const [renameEntry, setRenameEntry] = useState<TitleRow | null>(null);
+  const [renameTitle, setRenameTitle] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
   const [torrentAction, setTorrentAction] = useState<TitleRow | null>(null);
   const [torrentCandidates, setTorrentCandidates] = useState<TorrentCandidate[]>([]);
   const [torrentLoading, setTorrentLoading] = useState(false);
@@ -1027,6 +1031,31 @@ export default function Library() {
       toast.error(error.message);
     } finally {
       setSourceRetryBusy(false);
+    }
+  }
+
+  async function renameLibraryEntry() {
+    if (!renameEntry?.path) return;
+    const title = renameTitle.trim();
+    if (!title) {
+      toast.error('Enter a title.');
+      return;
+    }
+    setRenameBusy(true);
+    try {
+      const result = await api.renameLibrary(renameEntry.path, title);
+      toast.success(
+        result.renamed
+          ? `${renameEntry.kind === 'movie' ? 'Movie folder and file' : 'Episode file'} renamed.`
+          : 'The title is already unchanged.',
+      );
+      setRenameEntry(null);
+      setRenameTitle('');
+      await load(true, true);
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setRenameBusy(false);
     }
   }
 
@@ -1304,6 +1333,7 @@ export default function Library() {
     const isOpen = expanded === r.id;
     const status = rowStatus(r);
     const isRepacking = r.stage === 'repacking' || r.repack_status === 'repacking';
+    const canRename = isLib && !isRepacking && r.transfer_status !== 'transferring';
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
@@ -1387,6 +1417,26 @@ export default function Library() {
                     <TooltipContent>Start now, bypassing the concurrent-job limit</TooltipContent>
                   </Tooltip>
                 </>
+              )}
+              {canRename && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size='icon'
+                      variant='ghost'
+                      onClick={() => {
+                        setRenameEntry(r);
+                        setRenameTitle(r.name);
+                      }}
+                      aria-label={`Rename ${r.kind === 'movie' ? 'movie' : 'episode'}`}
+                    >
+                      <Pencil />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {r.kind === 'movie' ? 'Rename the movie folder and file' : 'Rename this episode file'}
+                  </TooltipContent>
+                </Tooltip>
               )}
               {isLib && (
                 <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={isRepacking}>
@@ -1649,6 +1699,44 @@ export default function Library() {
             </Button>
             <Button variant='destructive' onClick={doDelete}>
               <Trash2 className='h-4 w-4' /> Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!renameEntry}
+        onOpenChange={(open) => {
+          if (!open && !renameBusy) {
+            setRenameEntry(null);
+            setRenameTitle('');
+          }
+        }}
+      >
+        <DialogContent className='max-w-xl'>
+          <DialogHeader>
+            <DialogTitle>Rename {renameEntry?.kind === 'movie' ? 'movie' : 'episode'}</DialogTitle>
+            <DialogDescription>
+              {renameEntry?.kind === 'movie'
+                ? 'The movie file and its matching folder will both receive this exact name.'
+                : 'Only this episode file will be renamed; the show and season folders stay unchanged.'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className='flex flex-col gap-1.5'>
+            <label htmlFor='library-rename-title' className='text-xs text-muted-foreground'>New title</label>
+            <Input
+              id='library-rename-title'
+              value={renameTitle}
+              onChange={(event) => setRenameTitle(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && void renameLibraryEntry()}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setRenameEntry(null)} disabled={renameBusy}>Cancel</Button>
+            <Button onClick={() => void renameLibraryEntry()} disabled={renameBusy || !renameTitle.trim()}>
+              {renameBusy ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Pencil data-icon='inline-start' />}
+              Rename
             </Button>
           </DialogFooter>
         </DialogContent>
