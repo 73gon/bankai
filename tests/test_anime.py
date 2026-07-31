@@ -8,7 +8,12 @@ import pytest
 from bankai.metadata.tvdb import TVDBEpisode
 from bankai.processor.anime import episode_identity
 from bankai.web import anime
-from bankai.web.anime import clean_release_title, parse_rss, split_filter_terms
+from bankai.web.anime import (
+    clean_release_title,
+    parse_rss,
+    release_episode_info,
+    split_filter_terms,
+)
 
 
 def test_nyaa_rss_parser_preserves_direct_sources_and_metadata() -> None:
@@ -47,6 +52,41 @@ def test_anime_filter_terms_are_or_tokens() -> None:
         "deutsch",
         "dual audio",
     ]
+
+
+def test_anime_filters_are_case_insensitive() -> None:
+    entry = parse_rss(
+        """<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
+        <title>[ToonsHub] BLEACH S02E01 German 1080p</title>
+        <link>https://nyaa.si/download/1.torrent</link><guid>https://nyaa.si/view/1</guid>
+        <nyaa:infoHash>0123456789abcdef0123456789abcdef01234567</nyaa:infoHash>
+        <nyaa:seeders>10</nyaa:seeders><nyaa:size>1 GiB</nyaa:size>
+        <description>DEUTSCH audio</description>
+        </item></channel></rss>"""
+    )[0]
+
+    assert anime._matches_filters(
+        entry,
+        quality="1080P",
+        publisher="toonshub",
+        title_terms=split_filter_terms("bleach, german"),
+        description_terms=split_filter_terms("deutsch"),
+        min_seeders=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("[ToonsHub] BLEACH Thousand-Year Blood War S01E41 1080p", (1, 41)),
+        ("[Lazier] Bleach Thousand-Year Blood War - 41 (WEB 1080p)", (None, 41)),
+        ("Frieren 2nd Season - 10 [1080p]", (2, 10)),
+    ],
+)
+def test_release_episode_info_extracts_common_nyaa_notation(
+    title: str, expected: tuple[int | None, int | None]
+) -> None:
+    assert release_episode_info(title) == expected
 
 
 def test_release_title_is_cleaned_for_tvdb_lookup() -> None:
@@ -155,3 +195,38 @@ def test_nyaa_page_keeps_every_release_when_only_leading_rows_are_enriched(
 
     assert len(page.items) == 75
     assert page.has_next is True
+
+
+def test_nonempty_anime_search_enriches_every_visible_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample = parse_rss(
+        """<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
+        <title>[Group] Bleach - 01 [1080p]</title>
+        <link>https://nyaa.si/download/1.torrent</link><guid>https://nyaa.si/view/1</guid>
+        <nyaa:infoHash>0123456789abcdef0123456789abcdef01234567</nyaa:infoHash>
+        <nyaa:seeders>10</nyaa:seeders><nyaa:downloads>20</nyaa:downloads>
+        <nyaa:size>1 GiB</nyaa:size>
+        </item></channel></rss>"""
+    )[0]
+    rows = [replace(sample, id=index, info_hash=f"{index:040x}") for index in range(1, 36)]
+
+    async def fake_tvdb(*args: object, **kwargs: object) -> list[anime.AnimeTVDBMatch]:
+        return []
+
+    async def fake_fetch(*args: object, **kwargs: object) -> list[anime.NyaaEntry]:
+        return rows
+
+    async def fake_enrich(
+        entries: list[anime.NyaaEntry], matches: list[anime.AnimeTVDBMatch]
+    ) -> list[anime.NyaaEntry]:
+        assert len(entries) == len(rows)
+        return entries
+
+    monkeypatch.setattr(anime, "tvdb_candidates", fake_tvdb)
+    monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
+    monkeypatch.setattr(anime, "_enrich_tvdb", fake_enrich)
+
+    page = asyncio.run(anime.search("Bleach"))
+
+    assert len(page.items) == len(rows)

@@ -51,6 +51,7 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
 
     assert response.status_code == 200
     assert queued[0]["kind"] == "show"
+    assert queued[0]["title"] == "Frieren: Beyond Journey's End E01"
     assert queued[0]["args"][0] == "anime-download"
     assert "--tvdb-id" in queued[0]["args"]
 
@@ -222,6 +223,63 @@ def test_queue_movie_accepts_revalidated_filmpalast_source(
 
     assert response.status_code == 200
     assert len(queued) == 1
+
+
+def test_queue_movie_accepts_direct_hoster_and_derives_unknown_site(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "queued"},
+    )
+
+    response = client.post(
+        "/api/queue/movie",
+        json={
+            "title": "Direct Movie",
+            "year": 2024,
+            "site": "filmpalast",
+            "url": "https://voe.sx/e/direct-source",
+        },
+    )
+
+    assert response.status_code == 200
+    args = queued[0]["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--site") + 1] == "unknown"
+    assert args[args.index("--url") + 1] == "https://voe.sx/e/direct-source"
+
+
+def test_failed_movie_can_retry_with_replacement_source(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[dict[str, object]] = []
+    job = SimpleNamespace(
+        id="failed-movie",
+        kind="movie",
+        title="Failed Movie (2024)",
+        status="failed",
+        args=["run", "Failed Movie 2024", "--site", "filmpalast", "--url", "https://filmpalast.to/stream/failed", "--auto"],
+    )
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda _job_id: job)
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "queued"},
+    )
+
+    response = client.post(
+        "/api/queue/failed-movie/retry-with-source",
+        json={"url": "https://voe.sx/e/working-source"},
+    )
+
+    assert response.status_code == 200
+    args = queued[0]["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--site") + 1] == "unknown"
+    assert args[args.index("--url") + 1] == "https://voe.sx/e/working-source"
 
 
 def test_titles_exposes_stable_created_and_updated_timestamps(

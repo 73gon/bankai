@@ -26,6 +26,7 @@ import {
   CirclePause,
   CirclePlay,
   ExternalLink,
+  Link2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
@@ -796,6 +797,9 @@ export default function Library() {
 
   const [review, setReview] = useState<TitleRow | null>(null);
   const [del, setDel] = useState<TitleRow | null>(null);
+  const [sourceRetry, setSourceRetry] = useState<TitleRow | null>(null);
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [sourceRetryBusy, setSourceRetryBusy] = useState(false);
   const [torrentAction, setTorrentAction] = useState<TitleRow | null>(null);
   const [torrentCandidates, setTorrentCandidates] = useState<TorrentCandidate[]>([]);
   const [torrentLoading, setTorrentLoading] = useState(false);
@@ -871,7 +875,7 @@ export default function Library() {
   }, [expanded]);
 
   function typeLabel(r: TitleRow): string {
-    if (r.kind === 'episode') return 'Show';
+    if (r.kind === 'episode' || r.kind === 'show') return 'Show';
     return 'Movie';
   }
 
@@ -999,6 +1003,30 @@ export default function Library() {
         n.delete(r.id);
         return n;
       });
+    }
+  }
+
+  async function retryWithSource() {
+    if (!sourceRetry?.job_id) return;
+    const url = sourceUrl.trim();
+    try {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
+    } catch {
+      toast.error('Enter a valid HTTP or HTTPS source link.');
+      return;
+    }
+    setSourceRetryBusy(true);
+    try {
+      await api.retryJobWithSource(sourceRetry.job_id, url);
+      toast.success(`${sourceRetry.title} is retrying with the new German source.`);
+      setSourceRetry(null);
+      setSourceUrl('');
+      await load(true, true);
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setSourceRetryBusy(false);
     }
   }
 
@@ -1269,6 +1297,8 @@ export default function Library() {
     const canStop = !!r.job_id && r.job_status === 'running';
     const canContinue = !!r.job_id && r.job_status === 'stopped';
     const canDelete = isJob && ['failed', 'error', 'cancelled', 'stopped'].includes(r.job_status || '');
+    const canReplaceSource =
+      isJob && r.kind === 'movie' && ['failed', 'cancelled'].includes(r.job_status || '');
     const rerunActive =
       r.pending || ['running', 'stopped'].includes(r.job_status || '');
     const isOpen = expanded === r.id;
@@ -1373,6 +1403,24 @@ export default function Library() {
                 >
                   <Download className='h-4 w-4' />
                 </Button>
+              )}
+              {canReplaceSource && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size='icon'
+                      variant='ghost'
+                      onClick={() => {
+                        setSourceRetry(r);
+                        setSourceUrl(r.german_source_url ?? '');
+                      }}
+                      aria-label='Retry with another German source link'
+                    >
+                      <Link2 className='h-4 w-4' />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Paste a VOE, Vinovo, or other German mirror and retry</TooltipContent>
+                </Tooltip>
               )}
               <Button
                 size='icon'
@@ -1601,6 +1649,43 @@ export default function Library() {
             </Button>
             <Button variant='destructive' onClick={doDelete}>
               <Trash2 className='h-4 w-4' /> Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!sourceRetry}
+        onOpenChange={(open) => {
+          if (!open && !sourceRetryBusy) {
+            setSourceRetry(null);
+            setSourceUrl('');
+          }
+        }}
+      >
+        <DialogContent className='max-w-xl'>
+          <DialogHeader>
+            <DialogTitle>Retry with another German source</DialogTitle>
+            <DialogDescription>
+              Paste a direct VOE, Vinovo, or another supported HTTP mirror for {sourceRetry?.title}. The failed movie will restart with this link while keeping its original torrent settings.
+            </DialogDescription>
+          </DialogHeader>
+          <div className='space-y-1.5'>
+            <label htmlFor='replacement-source-url' className='text-xs text-muted-foreground'>German video or mirror URL</label>
+            <Input
+              id='replacement-source-url'
+              value={sourceUrl}
+              onChange={(event) => setSourceUrl(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && void retryWithSource()}
+              placeholder='https://voe.sx/e/...'
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setSourceRetry(null)} disabled={sourceRetryBusy}>Cancel</Button>
+            <Button onClick={() => void retryWithSource()} disabled={sourceRetryBusy || !sourceUrl.trim()}>
+              {sourceRetryBusy ? <Loader2 className='h-4 w-4 animate-spin' /> : <RefreshCw className='h-4 w-4' />}
+              Retry movie
             </Button>
           </DialogFooter>
         </DialogContent>

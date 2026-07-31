@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  ChevronDown,
+  ChevronUp,
   Download,
   ExternalLink,
   Film,
@@ -33,6 +35,7 @@ import {
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 type Filters = {
   category: string;
@@ -93,6 +96,29 @@ function Poster({ match }: { match: AnimeTVDBMatch | null }) {
 }
 
 function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () => void }) {
+  const [descriptionOpen, setDescriptionOpen] = useState(false);
+  const [description, setDescription] = useState('');
+  const [descriptionLoading, setDescriptionLoading] = useState(false);
+
+  async function toggleDescription() {
+    if (descriptionOpen) {
+      setDescriptionOpen(false);
+      return;
+    }
+    setDescriptionOpen(true);
+    if (description) return;
+    setDescriptionLoading(true);
+    try {
+      const detail = await api.animeDetail(entry.detail_url);
+      setDescription(detail.description || 'This Nyaa release does not include a description.');
+    } catch (error: any) {
+      toast.error(error.message);
+      setDescriptionOpen(false);
+    } finally {
+      setDescriptionLoading(false);
+    }
+  }
+
   return (
     <Card>
       <CardContent className='flex flex-col gap-4 p-4 sm:flex-row sm:items-stretch'>
@@ -110,7 +136,16 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
                   <ShieldCheck data-icon='inline-start' /> Trusted
                 </Badge>
               )}
-              {entry.remake && <Badge variant='warning'>Remake</Badge>}
+              {entry.remake && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant='warning' className='cursor-help'>Remake</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Nyaa marks this as a replacement or reupload of an earlier torrent, often with corrections or updated files.
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </div>
             {entry.tvdb?.japanese_title && (
               <p className='text-sm text-muted-foreground'>{entry.tvdb.japanese_title}</p>
@@ -122,6 +157,8 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
           <div className='flex flex-wrap items-center gap-2'>
             {entry.quality && <Badge>{entry.quality}</Badge>}
             {entry.publisher && <Badge variant='secondary'>{entry.publisher}</Badge>}
+            {entry.season != null && <Badge variant='info'>Season {entry.season}</Badge>}
+            {entry.episode != null && <Badge variant='accent'>Episode {entry.episode}</Badge>}
             <Badge variant='success'>{entry.seeders} seeders</Badge>
             <Badge variant='muted'>{entry.leechers} leechers</Badge>
             <Badge variant='muted'>{entry.size}</Badge>
@@ -134,10 +171,25 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
                 <ExternalLink data-icon='inline-start' /> Open on Nyaa
               </a>
             </Button>
+            <Button
+              variant='secondary'
+              size='sm'
+              onClick={() => void toggleDescription()}
+              aria-expanded={descriptionOpen}
+            >
+              {descriptionLoading ? <Spinner /> : descriptionOpen ? <ChevronUp data-icon='inline-start' /> : <ChevronDown data-icon='inline-start' />}
+              Description
+            </Button>
             <Button size='sm' onClick={onDownload}>
               <Download data-icon='inline-start' /> Select and download
             </Button>
           </div>
+
+          {descriptionOpen && (
+            <div className='rounded-md border border-white/10 bg-black/20 p-3 text-sm leading-relaxed text-foreground'>
+              {descriptionLoading ? 'Loading description…' : description}
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -241,13 +293,13 @@ export default function Anime() {
   }
 
   return (
-    <div className='flex min-h-full flex-col gap-6'>
+    <div className='flex h-full min-h-0 flex-col gap-4 overflow-hidden'>
       <div className='flex flex-wrap items-baseline gap-2'>
         <h1 className='font-serif text-2xl font-semibold tracking-tight'>Anime</h1>
         <span className='text-sm text-muted-foreground'>— Browse Nyaa and download TVDB-organized anime directly.</span>
       </div>
 
-      <Card>
+      <Card className='shrink-0'>
         <CardHeader>
           <CardTitle>Find a release</CardTitle>
           <CardDescription>
@@ -321,30 +373,33 @@ export default function Anime() {
       </Card>
 
       {aliases.length > 0 && (
-        <div className='flex flex-wrap items-center gap-2 text-xs text-muted-foreground'>
+        <div className='flex shrink-0 flex-wrap items-center gap-2 text-xs text-muted-foreground'>
           <span>Also searched:</span>
           {aliases.map((alias) => <Badge key={alias} variant='secondary'>{alias}</Badge>)}
         </div>
       )}
 
-      {loading && !result ? (
-        <EmptyState icon={Sparkles} title='Loading Nyaa releases' description='Resolving TVDB titles and posters…' />
-      ) : result?.items.length ? (
-        <div className='flex flex-col gap-3'>
-          {result.items.map((entry) => <ResultCard key={entry.info_hash} entry={entry} onDownload={() => openDownload(entry)} />)}
+      <div className='flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/60 bg-card/30'>
+        <div className='min-h-0 flex-1 overflow-y-auto p-3'>
+          {loading && !result ? (
+            <EmptyState icon={Sparkles} title='Loading Nyaa releases' description='Resolving TVDB titles and posters…' />
+          ) : result?.items.length ? (
+            <div className='flex flex-col gap-3'>
+              {result.items.map((entry) => <ResultCard key={entry.info_hash} entry={entry} onDownload={() => openDownload(entry)} />)}
+            </div>
+          ) : (
+            <EmptyState icon={Search} title='No matching Nyaa releases' description='Try fewer filters, another title alias, or the All anime category.' />
+          )}
         </div>
-      ) : (
-        <EmptyState icon={Search} title='No matching Nyaa releases' description='Try fewer filters, another title alias, or the All anime category.' />
-      )}
-
-      <div className='flex items-center justify-between border-t border-border/60 pt-4'>
-        <Button variant='secondary' onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={page === 0 || loading}>
-          <ArrowLeft data-icon='inline-start' /> Previous
-        </Button>
-        <span className='text-sm text-foreground'>Page {page + 1}</span>
-        <Button variant='secondary' onClick={() => setPage((value) => value + 1)} disabled={!result?.has_next || loading}>
-          Next <ArrowRight data-icon='inline-end' />
-        </Button>
+        <div className='flex shrink-0 items-center justify-between border-t border-border/60 bg-card/70 p-3'>
+          <Button variant='secondary' onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={page === 0 || loading}>
+            <ArrowLeft data-icon='inline-start' /> Previous
+          </Button>
+          <span className='text-sm text-foreground'>Page {page + 1}</span>
+          <Button variant='secondary' onClick={() => setPage((value) => value + 1)} disabled={!result?.has_next || loading}>
+            Next <ArrowRight data-icon='inline-end' />
+          </Button>
+        </div>
       </div>
 
       <Dialog open={selectedEntry !== null} onOpenChange={(open) => !open && setSelectedEntry(null)}>

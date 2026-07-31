@@ -55,7 +55,7 @@ def _stream_site_from_url(url: str) -> str:
     """
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("episode URL must be an http(s) link")
+        raise ValueError("source URL must be an http(s) link")
     host = parsed.hostname.lower().rstrip(".")
 
     def is_host(domain: str) -> bool:
@@ -324,6 +324,10 @@ class AnimeDownloadRequest(BaseModel):
 
 class QueuePriorityRequest(BaseModel):
     position: int
+
+
+class SourceRetryRequest(BaseModel):
+    url: str
 
 
 class DelayRequest(BaseModel):
@@ -882,6 +886,17 @@ def create_app() -> Any:
             "items": [anime_mod.tvdb_to_dict(item) for item in matches],
         }
 
+    @app.get("/api/anime/detail")
+    async def anime_detail(url: str = Query(...)) -> dict:
+        try:
+            description, magnet, publisher = await anime_mod.detail(url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            log.warning("Nyaa detail lookup failed for %s: %s", url, exc)
+            raise HTTPException(status_code=502, detail="Nyaa description could not be loaded") from exc
+        return {"description": description, "magnet_uri": magnet, "publisher": publisher}
+
     @app.post("/api/anime/download")
     def anime_download(req: AnimeDownloadRequest) -> dict:
         if not req.release_title.strip() or not req.english_title.strip():
@@ -921,7 +936,19 @@ def create_app() -> Any:
         ]
         if req.year is not None:
             args.extend(["--year", str(req.year)])
-        return webjobs.enqueue(kind=req.kind, title=req.english_title.strip(), args=args)
+        season, episode = anime_mod.release_episode_info(req.release_title)
+        suffix = ""
+        if season is not None and episode is not None:
+            suffix = f" S{season:02d}E{episode:02d}"
+        elif episode is not None:
+            suffix = f" E{episode:02d}"
+        elif season is not None:
+            suffix = f" S{season:02d}"
+        return webjobs.enqueue(
+            kind=req.kind,
+            title=f"{req.english_title.strip()}{suffix}",
+            args=args,
+        )
 
     @app.get("/api/torrent-actions/{job_id}")
     def torrent_action_get(job_id: str) -> dict:
@@ -995,7 +1022,13 @@ def create_app() -> Any:
         year = req.year
         if year is None:
             raise HTTPException(status_code=422, detail="year_required")
-        if req.url and _stream_site_from_url(req.url) == "filmpalast":
+        site = req.site
+        if req.url:
+            try:
+                site = _stream_site_from_url(req.url)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if req.url and site == "filmpalast":
             try:
                 mirror_count = await _verify_filmpalast_source(req.url)
             except Exception as exc:
@@ -1012,7 +1045,7 @@ def create_app() -> Any:
                     ),
                 )
         movie = BatchMovie(title=req.title, german_title=req.german, url=req.url, year=year)
-        args = build_movie_args(movie, site=req.site)
+        args = build_movie_args(movie, site=site)
         return webjobs.enqueue(kind="movie", title=f"{req.title} ({year})", args=args)
 
     @app.post("/api/queue/show")
@@ -1151,6 +1184,26 @@ def create_app() -> Any:
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         return webjobs.enqueue(kind=job.kind, title=job.title, args=job.args)
+
+    @app.post("/api/queue/{job_id}/retry-with-source")
+    def queue_retry_with_source(job_id: str, req: SourceRetryRequest) -> dict:
+        """Retry a failed movie with a user-supplied German mirror URL."""
+        from bankai.cli import bgjobs
+
+        job = bgjobs.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.kind != "movie":
+            raise HTTPException(status_code=409, detail="source links can only replace movie sources")
+        if job.status not in {"failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="only failed or cancelled movies can be retried")
+        try:
+            site = _stream_site_from_url(req.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        args = _set_cli_option(list(job.args), "--url", req.url.strip())
+        args = _set_cli_option(args, "--site", site)
+        return webjobs.enqueue(kind=job.kind, title=job.title, args=args)
 
     @app.delete("/api/queue/{job_id}")
     def queue_delete(job_id: str) -> dict:
@@ -1476,6 +1529,7 @@ def create_app() -> Any:
                     "season": None,
                     "stage": "deleted" if is_deleted else None,
                     "reason": j.get("reason"),
+                    "reason_code": j.get("reason_code"),
                     "reason_detail": j.get("reason_detail"),
                     "delay_ms": 0,
                     "needs_sync_review": False,

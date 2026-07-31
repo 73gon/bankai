@@ -67,6 +67,8 @@ class NyaaEntry:
     published_at: str | None
     publisher: str | None
     quality: str | None
+    season: int | None = None
+    episode: int | None = None
     description: str = ""
     tvdb: AnimeTVDBMatch | None = None
 
@@ -118,6 +120,35 @@ def clean_release_title(title: str) -> str:
     return re.sub(r"\s{2,}", " ", value).strip(" -_()[]") or title.strip()
 
 
+def release_episode_info(title: str) -> tuple[int | None, int | None]:
+    """Extract explicit season and episode markers from a Nyaa release title.
+
+    Anime releases commonly use either TV notation (``S02E01``), a written
+    season plus an episode, or absolute numbering (``Title - 41``).  Absolute
+    episode numbers intentionally keep the season unknown: the anime download
+    worker later maps them to TVDB's absolute episode order without guessing a
+    potentially wrong season.
+    """
+    value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
+    match = re.search(r"\bS(?P<season>\d{1,2})\s*E(?P<episode>\d{1,4})\b", value, re.I)
+    if match:
+        return int(match.group("season")), int(match.group("episode"))
+
+    season_match = (
+        re.search(r"\b(?:season|staffel)\s*(\d{1,2})\b", value, re.I)
+        or re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\s+season\b", value, re.I)
+        or re.search(r"\bS(\d{1,2})\b", value, re.I)
+    )
+    episode_match = (
+        re.search(r"\b(?:episode|ep|e)\s*0*(\d{1,4})(?:v\d+)?\b", value, re.I)
+        or re.search(r"\s+-\s+0*(\d{1,4})(?:v\d+)?(?:\b|\s)", value, re.I)
+    )
+    return (
+        int(season_match.group(1)) if season_match else None,
+        int(episode_match.group(1)) if episode_match else None,
+    )
+
+
 def _publisher(title: str) -> str | None:
     match = re.match(r"\s*\[([^]]+)]", title)
     return match.group(1).strip() if match else None
@@ -153,6 +184,7 @@ def parse_rss(xml: str) -> list[NyaaEntry]:
         match = re.search(r"/view/(\d+)", detail_url)
         info_hash = nyaa("infoHash").lower()
         title = html.unescape(text("title"))
+        season, episode = release_episode_info(title)
         if not match or not info_hash:
             continue
         magnet = (
@@ -184,6 +216,8 @@ def parse_rss(xml: str) -> list[NyaaEntry]:
                 published_at=text("pubDate") or None,
                 publisher=_publisher(title),
                 quality=_quality(title),
+                season=season,
+                episode=episode,
                 description=rss_description,
             )
         )
@@ -209,13 +243,13 @@ async def _fetch_rss(
     return parse_rss(response.text)
 
 
-async def _detail(
-    client: httpx.AsyncClient, entry: NyaaEntry
+async def _detail_url(
+    client: httpx.AsyncClient, detail_url: str
 ) -> tuple[str, str | None, str | None]:
-    hit = _DETAIL_CACHE.get(entry.detail_url)
+    hit = _DETAIL_CACHE.get(detail_url)
     if hit and time.time() - hit[0] < _CACHE_TTL:
         return hit[1]
-    response = await client.get(entry.detail_url)
+    response = await client.get(detail_url)
     response.raise_for_status()
     tree = HTMLParser(response.text)
     description_node = tree.css_first("#torrent-description")
@@ -225,8 +259,19 @@ async def _detail(
     uploader_node = tree.css_first('a[href^="/user/"]')
     uploader = uploader_node.text(strip=True) if uploader_node else None
     result = (description, magnet or None, uploader or None)
-    _DETAIL_CACHE[entry.detail_url] = (time.time(), result)
+    _DETAIL_CACHE[detail_url] = (time.time(), result)
     return result
+
+
+async def detail(detail_url: str) -> tuple[str, str | None, str | None]:
+    """Load one Nyaa description lazily for the result-card disclosure."""
+    if not is_nyaa_url(detail_url):
+        raise ValueError("description URL must point to nyaa.si")
+    headers = {"User-Agent": get_settings().scraper.user_agent}
+    async with httpx.AsyncClient(
+        base_url=_NYAA_BASE, headers=headers, timeout=30, follow_redirects=True
+    ) as client:
+        return await _detail_url(client, detail_url)
 
 
 def _normalise(value: str) -> str:
@@ -455,7 +500,7 @@ async def search(
             ) -> tuple[str, str | None, str | None]:
                 try:
                     async with detail_slots:
-                        return await _detail(client, entry)
+                        return await _detail_url(client, entry.detail_url)
                 except Exception as exc:
                     log.debug("Nyaa description lookup failed for %s: %s", entry.id, exc)
                     return entry.description, None, entry.publisher
@@ -488,7 +533,7 @@ async def search(
     # Keep every Nyaa row so pagination never skips releases. Blank browsing
     # gets fast automatic TVDB matches for the leading rows; all other rows
     # remain downloadable through the explicit TVDB picker.
-    enrich_count = len(items) if query_matches else min(20, len(items))
+    enrich_count = len(items) if query.strip() else min(20, len(items))
     items = [
         *(await _enrich_tvdb(items[:enrich_count], query_matches)),
         *items[enrich_count:],
@@ -510,9 +555,11 @@ __all__ = [
     "AnimeTVDBMatch",
     "NyaaEntry",
     "clean_release_title",
+    "detail",
     "entry_to_dict",
     "is_nyaa_url",
     "parse_rss",
+    "release_episode_info",
     "search",
     "split_filter_terms",
     "tvdb_candidates",

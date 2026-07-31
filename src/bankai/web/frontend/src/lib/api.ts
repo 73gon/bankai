@@ -124,6 +124,8 @@ export interface AnimeEntry {
   published_at: string | null;
   publisher: string | null;
   quality: string | null;
+  season: number | null;
+  episode: number | null;
   description: string;
   tvdb: AnimeTVDBMatch | null;
 }
@@ -227,6 +229,7 @@ export interface TitleRow {
   season: number | null;
   stage: string | null;
   reason: string | null;
+  reason_code?: string | null;
   reason_detail?: string | null;
   delay_ms: number;
   needs_sync_review: boolean;
@@ -361,6 +364,10 @@ export const api = {
   },
   animeTvdb: (q: string) =>
     request<{ configured: boolean; items: AnimeTVDBMatch[] }>(`/api/anime/tvdb?q=${encodeURIComponent(q)}`),
+  animeDetail: (url: string) =>
+    request<{ description: string; magnet_uri: string | null; publisher: string | null }>(
+      `/api/anime/detail?url=${encodeURIComponent(url)}`,
+    ),
   animeDownload: (entry: AnimeEntry, match: AnimeTVDBMatch) =>
     request<Job>('/api/anime/download', {
       method: 'POST',
@@ -413,6 +420,11 @@ export const api = {
       body: JSON.stringify({ position }),
     }),
   retryJob: (id: string) => request(`/api/queue/${id}/retry`, { method: 'POST' }),
+  retryJobWithSource: (id: string, url: string) =>
+    request(`/api/queue/${id}/retry-with-source`, {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }),
   deleteJob: (id: string) =>
     request<{ deleted: boolean; pending: boolean }>(`/api/queue/${id}`, { method: 'DELETE' }),
   jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),

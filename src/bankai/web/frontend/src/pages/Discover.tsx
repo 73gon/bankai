@@ -30,6 +30,20 @@ function normalizeTitle(name: string): string {
     .replace(/[^a-z0-9]/g, '');
 }
 
+function streamSiteFromUrl(raw: string): string {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    const isHost = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+    if (isHost('filmpalast.to')) return 'filmpalast';
+    if (['burningseries.ac', 'bs.to', 'bs.cine.to'].some(isHost)) return 'burningseries';
+    if (isHost('aniworld.to')) return 'aniworld';
+    if (isHost('kinox.to')) return 'kinox';
+  } catch {
+    // The API performs the authoritative URL validation.
+  }
+  return 'unknown';
+}
+
 function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) {
   const [err, setErr] = useState(false);
   return (
@@ -227,7 +241,7 @@ export default function Discover() {
     // Accept a pasted stream link directly (no search) — recognise a URL and
     // build a single result the user can queue as-is.
     if (/^https?:\/\/\S+$/i.test(term)) {
-      const site = /aniworld/i.test(term) ? 'aniworld' : /bs\.to/i.test(term) ? 'bs' : /kinox/i.test(term) ? 'kinox' : 'filmpalast';
+      const site = streamSiteFromUrl(term);
       setFilmResults([{ site, title: selected?.name ?? term, year: selected?.year ?? null, kind: 'movie', url: term }]);
       return;
     }
@@ -402,8 +416,8 @@ export default function Discover() {
             <DialogDescription>
               {selected?.kind === 'movie'
                 ? loadingFilm
-                  ? 'Searching filmpalast…'
-                  : 'Pick the matching filmpalast entry to queue.'
+                  ? 'Searching German sources…'
+                  : 'Pick a source result or paste a direct VOE / Vinovo mirror.'
                 : 'Pick a season and optional episode list to queue.'}
             </DialogDescription>
           </DialogHeader>
@@ -430,13 +444,13 @@ export default function Discover() {
           ) : (
             <div className='space-y-3'>
               <div className='space-y-1'>
-                <label className='text-xs text-muted-foreground'>filmpalast search term</label>
+                <label className='text-xs text-muted-foreground'>German source title or direct mirror link</label>
                 <div className='flex gap-2'>
                   <Input
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && reSearchMovie()}
-                    placeholder='Edit the search term…'
+                    placeholder='Search a title or paste a VOE / Vinovo link…'
                     className='flex-1'
                   />
                   <Button variant='secondary' onClick={reSearchMovie} disabled={loadingFilm || !searchTerm.trim()}>
@@ -453,7 +467,7 @@ export default function Discover() {
                   ))}
                 </div>
               ) : filmResults.length === 0 ? (
-                <EmptyState icon={SearchIcon} title='No filmpalast match' description='Try editing the search term above.' />
+                <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or paste a direct mirror link above.' />
               ) : (
                 <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
                   {filmResults.map((r) => (

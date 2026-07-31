@@ -584,13 +584,13 @@ export default function Search() {
           </DialogHeader>
 
           <div className='space-y-1'>
-            <label className='text-xs text-muted-foreground'>German source search term</label>
+            <label className='text-xs text-muted-foreground'>German source title or direct mirror link</label>
             <div className='flex gap-2'>
               <Input
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && reSearch()}
-                placeholder='Edit the search term…'
+                placeholder='Search a title or paste a VOE / Vinovo link…'
                 className='flex-1'
               />
               <Button variant='secondary' onClick={reSearch} disabled={loadingFilm || !searchTerm.trim()}>
@@ -607,7 +607,7 @@ export default function Search() {
               ))}
             </div>
           ) : filmResults.length === 0 && selected?.kind === 'movie' ? (
-            <EmptyState icon={SearchIcon} title='No German source match' description='This title may not be available from a supported source.' />
+            <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or paste a direct VOE, Vinovo, or other mirror link above.' />
           ) : selected?.kind === 'movie' ? (
             <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
               {filmResults.map((r) => (
