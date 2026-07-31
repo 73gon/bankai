@@ -53,6 +53,27 @@ def test_release_title_is_cleaned_for_tvdb_lookup() -> None:
     assert clean_release_title("[SubsPlease] Sousou no Frieren - 27 (1080p) [ABC].mkv") == (
         "Sousou no Frieren"
     )
+    assert (
+        clean_release_title("[Erai-raws] Sousou no Frieren 2nd Season - 10 [1080p CR WEB-DL]")
+        == "Sousou no Frieren"
+    )
+
+
+def test_short_anime_query_does_not_match_a_word_inside_an_unrelated_title() -> None:
+    correct = anime.AnimeTVDBMatch(
+        tvdb_id=424536,
+        kind="show",
+        english_title="Frieren: Beyond Journey's End",
+    )
+    unrelated = anime.AnimeTVDBMatch(
+        tvdb_id=256256,
+        kind="movie",
+        english_title="Young Ones Are Even Cold in the Summer",
+        japanese_title="Kleine frieren auch im Sommer",
+    )
+
+    assert anime._match_score("Frieren", correct) > 0.9
+    assert anime._match_score("Frieren", unrelated) < 0.55
 
 
 def test_episode_identity_maps_absolute_anime_number_to_tvdb() -> None:

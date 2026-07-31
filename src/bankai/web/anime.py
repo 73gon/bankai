@@ -101,6 +101,12 @@ def clean_release_title(title: str) -> str:
     value = re.sub(r"\s*\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\).*$", "", value)
     value = re.sub(r"\s+(?:season\s+)?\d+\s+(?:complete|batch)\b.*$", "", value, flags=re.I)
     value = re.sub(
+        r"\s+(?:(?:\d+(?:st|nd|rd|th)|final)\s+season|season\s+\d+)\s*$",
+        "",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
         r"(?:\s*[\[(](?:2160p|1080p|720p|480p|4k|uhd|batch|complete|web[- .]?dl|"
         r"webrip|bluray|bdrip|x26[45]|h\.?26[45]|hevc|av1|aac|flac|dual audio)[^\])]*[\])])+$",
         "",
@@ -236,10 +242,8 @@ def _match_score(query: str, candidate: AnimeTVDBMatch) -> float:
             return 1.0
         query_words = clean.split()
         name_words = normalized.split()
-        if query_words and len(query_words) <= len(name_words):
-            for offset in range(len(name_words) - len(query_words) + 1):
-                if name_words[offset : offset + len(query_words)] == query_words:
-                    return 0.96 - min(0.1, offset * 0.01)
+        if query_words and name_words[: len(query_words)] == query_words:
+            return 0.96
         return SequenceMatcher(None, clean, normalized).ratio() * 0.72
 
     return max(score(name) for name in names if name)
@@ -333,38 +337,30 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
 
 
 async def _quick_tvdb_candidates(query: str) -> list[AnimeTVDBMatch]:
-    """Use TVDB's lightweight search record for browse-page enrichment."""
-    movie_hint = bool(re.search(r"\b(?:movie|film|gekijouban|theatrical)\b", query, flags=re.I))
-    kind = "movie" if movie_hint else "show"
-    try:
-        results = await discover.search(query, kind=kind, limit=4)
-    except Exception as exc:
-        log.debug("quick TVDB anime lookup failed for %r: %s", query, exc)
-        return []
-    return [
-        AnimeTVDBMatch(
-            tvdb_id=item.tvdb_id,
-            kind=kind,
-            english_title=item.name,
-            year=item.year,
-            poster_url=item.poster_url,
-        )
-        for item in results
-        if item.tvdb_id is not None
-    ]
+    """Resolve a release title with English/Japanese TVDB translations."""
+    return await tvdb_candidates(query, limit=4)
 
 
 async def _enrich_tvdb(
     entries: list[NyaaEntry], query_matches: list[AnimeTVDBMatch]
 ) -> list[NyaaEntry]:
     semaphore = asyncio.Semaphore(4)
+    release_lookups: dict[str, asyncio.Task[list[AnimeTVDBMatch]]] = {}
+
+    async def release_candidates(release_query: str) -> list[AnimeTVDBMatch]:
+        async with semaphore:
+            return await _quick_tvdb_candidates(release_query)
 
     async def enrich(entry: NyaaEntry) -> NyaaEntry:
         release_query = clean_release_title(entry.title)
         candidates = query_matches
         if not candidates:
-            async with semaphore:
-                candidates = await _quick_tvdb_candidates(release_query)
+            lookup_key = _normalise(release_query)
+            task = release_lookups.get(lookup_key)
+            if task is None:
+                task = asyncio.create_task(release_candidates(release_query))
+                release_lookups[lookup_key] = task
+            candidates = await task
         match = max(candidates, key=lambda item: _match_score(release_query, item), default=None)
         if match is not None and _match_score(release_query, match) < 0.28:
             match = None
