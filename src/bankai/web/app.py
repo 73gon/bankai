@@ -46,6 +46,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 _WAVEFORM_CACHE: dict[tuple, dict] = {}
 _WAVEFORM_CACHE_LOCK = threading.Lock()
 
+# Requests from the review preloader and an immediate Play click can target the
+# exact same clip.  Stripe the cache locks so only one ffmpeg process builds a
+# given key while unrelated clips can still be prepared concurrently.
+_CLIP_CACHE_LOCKS = tuple(threading.Lock() for _ in range(64))
+
 # Cap concurrent ffmpeg transcodes. Review scrubbing + many open browser tabs
 # used to spawn dozens of ffmpeg at once, exhausting the request threadpool and
 # hanging the whole server. Requests that can't get a slot fail fast with 503
@@ -275,15 +280,17 @@ def _cached_clip(key: str, ext: str, build) -> Path:
     replaying/scrubbing a section is instant and doesn't re-transcode.
     """
     out = _clip_cache_path(key, ext)
-    if out.exists() and out.stat().st_size > 0:
+    lock = _CLIP_CACHE_LOCKS[hash(key) % len(_CLIP_CACHE_LOCKS)]
+    with lock:
+        if out.exists() and out.stat().st_size > 0:
+            return out
+        tmp = out.with_name(out.name + ".tmp")
+        build(tmp)
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail="clip build failed")
+        tmp.replace(out)
         return out
-    tmp = out.with_name(out.name + ".tmp")
-    build(tmp)
-    if not tmp.exists() or tmp.stat().st_size == 0:
-        tmp.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail="clip build failed")
-    tmp.replace(out)
-    return out
 
 
 def _video_clip_cache_key(
@@ -1998,8 +2005,10 @@ def create_app() -> Any:
         Only the requested ``[start, start+dur]`` slice is decoded, so this
         stays fast even on weak hardware (a full-movie decode would take
         minutes). Close zoom levels use full-band PCM RMS for millisecond-scale
-        detail; wide views use EBU R128 perceived loudness. Returns base64
-        uint8 peaks; the client maps pixels to peaks using ``start``/``dur``.
+        detail. Wide navigation overviews use aggressively downsampled PCM so
+        an entire movie does not require an expensive real-time loudness pass.
+        Returns base64 uint8 peaks; the client maps pixels to peaks using
+        ``start``/``dur``.
         """
         import base64
         import subprocess
@@ -2010,60 +2019,41 @@ def create_app() -> Any:
         except OSError as exc:
             raise HTTPException(status_code=404, detail="not found") from exc
         detailed = dur <= 180.0
-        key = ("adaptive-v2", str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
+        key = ("adaptive-v3", str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
         hit = _waveform_cache_get(key)
         if hit is not None:
             return hit
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
-        if detailed:
-            cmd = [
-                ffmpeg,
-                "-v",
-                "error",
-                "-nostats",
-                "-ss",
-                str(start),
-                "-t",
-                str(dur),
-                "-i",
-                str(p),
-                "-map",
-                f"0:{stream}",
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "12000",
-                "-f",
-                "s16le",
-                "pipe:1",
-            ]
-            pre_roll = 0.0
-        else:
-            # R128 momentary loudness uses a standardised 400 ms perceptual
-            # window. Decode a lead-in so the first bars are already warm.
-            pre_roll = min(start, 0.4)
-            cmd = [
-                ffmpeg,
-                "-v",
-                "error",
-                "-nostats",
-                "-ss",
-                str(start - pre_roll),
-                "-t",
-                str(dur + pre_roll),
-                "-i",
-                str(p),
-                "-map",
-                f"0:{stream}",
-                "-af",
-                "ebur128=metadata=1:framelog=quiet,ametadata=mode=print:key=lavfi.r128.M:file=-:direct=1",
-                "-f",
-                "null",
-                "-",
-            ]
+        sample_rate = 12000 if detailed else 200
+        cmd = [
+            ffmpeg,
+            "-v",
+            "error",
+            "-nostats",
+            "-ss",
+            str(start),
+            "-t",
+            str(dur),
+            "-i",
+            str(p),
+            "-map",
+            f"0:{stream}",
+            "-vn",
+            *(
+                []
+                if detailed
+                else ["-af", "aformat=channel_layouts=mono,aeval=abs(val(0))"]
+            ),
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-f",
+            "s16le",
+            "pipe:1",
+        ]
         try:
             with _ffmpeg_slot():
                 proc = subprocess.run(
@@ -2075,24 +2065,17 @@ def create_app() -> Any:
             raise HTTPException(status_code=504, detail="waveform decode timed out") from exc
         if proc.returncode != 0:
             raise HTTPException(status_code=422, detail="could not decode audio track")
-        if detailed:
-            samples = array("h")
-            samples.frombytes(proc.stdout[: len(proc.stdout) - (len(proc.stdout) % 2)])
-            if sys.byteorder != "little":  # ffmpeg's s16le output is fixed
-                samples.byteswap()
-            peaks = _waveform_envelope(samples, bins)
-        else:
-            output = proc.stdout.decode("utf-8", errors="replace")
-            measurements = _R128_VALUE_RE.findall(output)
-            skip = round(pre_roll * 10)
-            usable = "\n".join(f"lavfi.r128.M={value}" for value in measurements[skip:])
-            peaks = _ebur128_envelope(usable, bins)
+        samples = array("h")
+        samples.frombytes(proc.stdout[: len(proc.stdout) - (len(proc.stdout) % 2)])
+        if sys.byteorder != "little":  # ffmpeg's s16le output is fixed
+            samples.byteswap()
+        peaks = _waveform_envelope(samples, bins)
         out = {
             "start": start,
             "dur": dur,
             "bins": len(peaks),
             "peaks": base64.b64encode(bytes(peaks)).decode("ascii"),
-            "detail": "pcm" if detailed else "r128",
+            "detail": "pcm" if detailed else "pcm-overview",
         }
         _waveform_cache_put(key, out)
         return out

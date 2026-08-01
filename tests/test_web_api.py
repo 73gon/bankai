@@ -964,6 +964,35 @@ def test_close_zoom_waveform_uses_detailed_pcm(
     assert len(calls) == 1
 
 
+def test_full_track_waveform_uses_fast_low_rate_pcm(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    movie = Path(get_settings().output.directory) / "Movies" / "overview-waveform.mkv"
+    movie.write_bytes(b"source")
+    calls: list[list[str]] = []
+    pcm = array("h", [800, -800] * 20_000).tobytes()
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=pcm, stderr=b"")
+
+    monkeypatch.setattr("bankai.web.media.ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    response = client.get(
+        "/api/media/waveform",
+        params={"path": str(movie), "stream": 1, "start": 0, "dur": 1800, "bins": 1200},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["detail"] == "pcm-overview"
+    assert response.json()["bins"] == 1200
+    assert calls[0][calls[0].index("-ar") + 1] == "200"
+    assert "aeval=abs(val(0))" in calls[0][calls[0].index("-af") + 1]
+    assert calls[0][calls[0].index("-f") + 1] == "s16le"
+
+
 def test_settings_get_masks_secrets(client: TestClient) -> None:
     r = client.get("/api/settings")
     assert r.status_code == 200

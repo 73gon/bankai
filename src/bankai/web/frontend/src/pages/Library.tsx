@@ -1808,7 +1808,9 @@ export default function Library() {
           entry={review}
           onClose={() => {
             setReview(null);
-            load();
+            // The current table is already mounted and usable behind Review.
+            // Reconcile it invisibly instead of replacing it with a skeleton.
+            void load(true, true);
           }}
         />
       )}
@@ -2283,17 +2285,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         timer = setTimeout(() => void loadOverviews(), 5000);
         return;
       }
-      if (engStream != null && engOverviewDuration > 0) {
-        try {
-          const overview = await fetchOverview(engStream, engOverviewDuration);
-          if (!cancelled) setEngOverviewBuf(overview);
-        } catch {
-          // The detailed lanes remain usable if a full overview cannot decode.
-        } finally {
-          if (!cancelled) setEngOverviewLoading(false);
-        }
-      }
-      if (gerStream != null && gerOverviewDuration > 0 && !cancelled) {
+      // German is the independently transcoded preview and therefore the lane
+      // whose readiness matters most. Never make it wait behind a full English
+      // overview on a cold cache.
+      if (gerStream != null && gerOverviewDuration > 0) {
         try {
           const overview = await fetchOverview(gerStream, gerOverviewDuration);
           if (!cancelled) setGerOverviewBuf(overview);
@@ -2303,8 +2298,18 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           if (!cancelled) setGerOverviewLoading(false);
         }
       }
+      if (engStream != null && engOverviewDuration > 0 && !cancelled) {
+        try {
+          const overview = await fetchOverview(engStream, engOverviewDuration);
+          if (!cancelled) setEngOverviewBuf(overview);
+        } catch {
+          // The detailed lanes remain usable if a full overview cannot decode.
+        } finally {
+          if (!cancelled) setEngOverviewLoading(false);
+        }
+      }
     };
-    timer = setTimeout(() => void loadOverviews(), 8000);
+    timer = setTimeout(() => void loadOverviews(), 4000);
 
     return () => {
       cancelled = true;
