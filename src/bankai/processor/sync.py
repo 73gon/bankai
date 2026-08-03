@@ -114,6 +114,20 @@ class PlaceholderAudioError(PermanentWorkerError):
         )
 
 
+class IncompleteAudioError(PermanentWorkerError):
+    """Extracted feature audio is materially shorter than its HQ reference."""
+
+    def __init__(self, *, audio_duration: float, video_duration: float) -> None:
+        self.audio_duration = audio_duration
+        self.video_duration = video_duration
+        missing = video_duration - audio_duration
+        super().__init__(
+            f"German stream is incomplete: it contains {audio_duration:.1f}s but "
+            f"the HQ video contains {video_duration:.1f}s ({missing:.1f}s missing). "
+            "Bankai rejected the truncated download and will try another mirror."
+        )
+
+
 class SyncWorker(Worker):
     kind = JobKind.SYNC
 
@@ -143,6 +157,35 @@ class SyncWorker(Worker):
         log.info("[sync] mode=%s threshold=%.2fs", mode, settings.threshold_seconds)
 
         try:
+            audio_dur: float | None = None
+            video_dur: float | None = None
+            if reference and mode not in ("skip", "manual"):
+                ref_path = Path(reference)
+                if not ref_path.exists():
+                    raise PermanentWorkerError(f"reference not found: {ref_path}")
+                audio_dur = await _ffprobe_duration(audio_path)
+                video_dur = await _ffprobe_duration(ref_path)
+                missing = video_dur - audio_dur
+                log.info(
+                    "[sync] audio=%.3fs video=%.3fs delta=%+.3fs",
+                    audio_dur,
+                    video_dur,
+                    audio_dur - video_dur,
+                )
+                if video_dur > 60 and audio_dur < 0.5 * video_dur:
+                    raise PlaceholderAudioError(
+                        audio_duration=audio_dur,
+                        video_duration=video_dur,
+                    )
+                # Different cuts and credits can differ by a few minutes. A
+                # missing tail larger than both five minutes and 8% of the HQ
+                # runtime is not an edition difference: it is a partial CDN
+                # transfer and must never reach remux/review.
+                if video_dur > 600 and missing > max(300.0, video_dur * 0.08):
+                    raise IncompleteAudioError(
+                        audio_duration=audio_dur,
+                        video_duration=video_dur,
+                    )
             if explicit_tempo is not None and mode not in ("skip",):
                 # Visual sync detected a speed drift and asked us to correct
                 # it directly; re-encode the audio at the given tempo factor.
@@ -158,27 +201,9 @@ class SyncWorker(Worker):
             else:  # auto
                 if not reference:
                     raise PermanentWorkerError("sync mode=auto requires 'reference'")
-                ref_path = Path(reference)
-                if not ref_path.exists():
-                    raise PermanentWorkerError(f"reference not found: {ref_path}")
                 # Duration-based heuristic: compare audio vs video length.
-                audio_dur = await _ffprobe_duration(audio_path)
-                video_dur = await _ffprobe_duration(ref_path)
+                assert audio_dur is not None and video_dur is not None
                 delta = audio_dur - video_dur
-                log.info(
-                    "[sync] audio=%.3fs video=%.3fs delta=%+.3fs",
-                    audio_dur,
-                    video_dur,
-                    delta,
-                )
-                # Sanity check: if the extracted audio is dramatically shorter
-                # than the reference video, the extractor most likely captured
-                # a placeholder/ad/preview rather than the feature stream.
-                if video_dur > 60 and audio_dur < 0.5 * video_dur:
-                    raise PlaceholderAudioError(
-                        audio_duration=audio_dur,
-                        video_duration=video_dur,
-                    )
                 length_tol = max(settings.threshold_seconds, 2.0)
                 if abs(delta) <= length_tol:
                     log.info("[sync] durations match within %.1fs; passthrough", length_tol)

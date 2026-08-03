@@ -13,6 +13,7 @@ from bankai.db import StateRepository, initialize
 from bankai.processor.pipeline import (
     PipelineWorker,
     _account_for_applied_tempo,
+    _derive_content_fps,
     _extract_attempt_payloads,
     _resolve_episode_fallbacks,
 )
@@ -20,6 +21,33 @@ from bankai.processor.sync import PlaceholderAudioError
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import Worker, WorkerContext, WorkerError
 from bankai.scraper.base import EpisodeRef, StreamHandle
+
+
+def test_content_fps_ignores_duplicate_padded_nominal_rate() -> None:
+    assert _derive_content_fps(
+        reference_fps=23.976,
+        drift_ratio=1.0,
+        confidence=0.9,
+        min_confidence=0.6,
+    ) == pytest.approx(23.976)
+
+
+def test_content_fps_derives_pal_cadence_from_visual_timing() -> None:
+    assert _derive_content_fps(
+        reference_fps=23.976,
+        drift_ratio=23.976 / 25.0,
+        confidence=0.9,
+        min_confidence=0.6,
+    ) == pytest.approx(25.0)
+
+
+def test_content_fps_is_omitted_when_visual_match_is_uncertain() -> None:
+    assert _derive_content_fps(
+        reference_fps=24.0,
+        drift_ratio=1.0,
+        confidence=0.4,
+        min_confidence=0.6,
+    ) is None
 
 
 class _FakeWorker(Worker):

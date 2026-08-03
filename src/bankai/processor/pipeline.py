@@ -41,7 +41,7 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.processor.extractor import ExtractWorker, normalize_stream_url
 from bankai.processor.remux import RemuxWorker
-from bankai.processor.sync import PlaceholderAudioError, SyncWorker
+from bankai.processor.sync import IncompleteAudioError, PlaceholderAudioError, SyncWorker
 from bankai.processor.visual_sync import VisualSyncError, estimate_visual_timeline, is_video_file
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import (
@@ -220,7 +220,12 @@ class PipelineWorker(Worker):
             "kind": payload.get("kind", "movie"),
             "category": payload.get("category"),
         }
-        source_duration = await _probe_duration(Path(audio_path))
+        declared_duration_ms = extract_result.get("duration_ms")
+        source_duration = (
+            float(declared_duration_ms) / 1000.0
+            if isinstance(declared_duration_ms, (int, float)) and declared_duration_ms > 0
+            else await _probe_duration(Path(audio_path))
+        )
         if source_duration is not None:
             torrent_payload["target_runtime_seconds"] = source_duration
             log.info("[torrent] German source runtime %.1f min", source_duration / 60.0)
@@ -242,11 +247,14 @@ class PipelineWorker(Worker):
             try:
                 sync_result = await self._run_stage(ctx, self._sync, JobKind.SYNC, sync_payload)
                 break
-            except PlaceholderAudioError:
+            except (PlaceholderAudioError, IncompleteAudioError) as exc:
                 extract_attempt_index += 1
                 if extract_attempt_index >= len(extract_attempts):
                     raise
-                log.warning("[pipeline] extracted audio looked like a placeholder; retrying extract with the next source attempt")
+                log.warning(
+                    "[pipeline] rejected incomplete German stream (%s); retrying extract with the next source attempt",
+                    exc,
+                )
                 extract_attempt_index, extract_result = await self._run_extract_attempts(ctx, extract_attempts, extract_attempt_index)
                 audio_path, visual_source = await self._prepare_german_source(ctx, extract_result)
         synced_audio = sync_result["path"]
@@ -477,12 +485,11 @@ class PipelineWorker(Worker):
         if not is_video_file(source_candidate):
             log.info("[visual-sync] no German video available for matching; skipping")
             return sync_payload, visual_meta
-        # Capture the German source fps + reference fps so the review UI can
-        # show a definitive frame-rate drift (e.g. 25fps PAL vs 23.976).
-        source_fps = await _probe_fps(source_candidate)
+        # The nominal source rate is diagnostic only. Several hosters pad
+        # 24fps content to 60fps with duplicate frames, so it must never drive
+        # sync decisions or be presented as the dub's real content rate.
+        nominal_source_fps = await _probe_fps(source_candidate)
         reference_fps = await _probe_fps(Path(video_path))
-        if source_fps:
-            visual_meta["source_fps"] = source_fps
         if reference_fps:
             visual_meta["reference_fps"] = reference_fps
         try:
@@ -508,6 +515,23 @@ class PipelineWorker(Worker):
         )
         low_confidence = timeline.confidence < settings.visual_min_confidence
         visual_meta["needs_review"] = low_confidence
+        content_fps = _derive_content_fps(
+            reference_fps=reference_fps,
+            drift_ratio=timeline.drift_ratio,
+            confidence=timeline.confidence,
+            min_confidence=settings.visual_min_confidence,
+        )
+        if content_fps:
+            visual_meta["source_fps"] = content_fps
+        if nominal_source_fps:
+            if content_fps and abs(nominal_source_fps - content_fps) > 0.1:
+                log.info(
+                    "[visual-sync] source nominal %.3ffps is duplicate-padded; measured content rate %.3ffps",
+                    nominal_source_fps,
+                    content_fps,
+                )
+            else:
+                log.info("[visual-sync] source nominal frame rate %.3ffps", nominal_source_fps)
 
         # Speed drift: only auto-correct for a known PAL/NDF ratio at high
         # confidence when explicitly enabled; otherwise just report it.
@@ -863,6 +887,24 @@ async def _probe_fps(path: Path) -> float | None:
         return float(raw)
     except (ValueError, ZeroDivisionError):
         return None
+
+
+def _derive_content_fps(
+    *,
+    reference_fps: float | None,
+    drift_ratio: float,
+    confidence: float,
+    min_confidence: float,
+) -> float | None:
+    """Derive source content cadence from visual timing, ignoring duplicates."""
+    if not reference_fps or drift_ratio <= 0 or confidence < min_confidence:
+        return None
+    measured = reference_fps / drift_ratio
+    if not 15.0 <= measured <= 31.0:
+        return None
+    canonical = (23.976, 24.0, 25.0, 29.97, 30.0)
+    nearest = min(canonical, key=lambda value: abs(value - measured))
+    return nearest if abs(nearest - measured) <= 0.12 else measured
 
 
 async def _probe_duration(path: Path) -> float | None:

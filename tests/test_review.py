@@ -35,6 +35,20 @@ def test_set_sync_review_roundtrip(tmp_path: Path) -> None:
     assert st.stage == "review"
 
 
+def test_legacy_duplicate_padded_source_fps_is_sanitized(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+    review_mod.set_sync_review(
+        path,
+        needs_review=False,
+        confidence=0.9,
+        source_fps=60.0,
+        reference_fps=23.976,
+        drift_ratio=1.0,
+    )
+
+    assert review_mod.get_state(path).source_fps == pytest.approx(23.976)
+
+
 def test_source_provenance_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "movie.mkv"
 

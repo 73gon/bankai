@@ -60,7 +60,8 @@ class ReviewState:
     auto_delay_ms: int = 0
     # Frame-rate drift diagnostics captured during visual sync (German source
     # vs the HQ reference). drift_ratio is the measured source/reference speed
-    # ratio; source_fps/reference_fps are the raw stream frame rates.
+    # ratio; source_fps is the measured content cadence (not a hoster's
+    # duplicate-padded nominal rate), while reference_fps is the HQ rate.
     source_fps: float | None = None
     reference_fps: float | None = None
     drift_ratio: float | None = None
@@ -177,6 +178,25 @@ def get_state(path: str | Path) -> ReviewState:
     if raw is None:
         return ReviewState(path=str(path))
     raw.setdefault("path", str(path))
+    # Older pipeline versions stored the container's nominal rate here.
+    # Hoster files are commonly 24fps content padded with duplicate frames to
+    # 60fps, so never expose that stale value as the German content cadence.
+    source_fps = raw.get("source_fps")
+    if isinstance(source_fps, (int, float)) and source_fps > 31:
+        reference_fps = raw.get("reference_fps")
+        drift_ratio = raw.get("drift_ratio")
+        confidence = raw.get("sync_confidence")
+        if (
+            isinstance(reference_fps, (int, float))
+            and isinstance(drift_ratio, (int, float))
+            and drift_ratio > 0
+            and isinstance(confidence, (int, float))
+            and confidence >= 0.6
+        ):
+            measured = reference_fps / drift_ratio
+            raw["source_fps"] = measured if 15 <= measured <= 31 else None
+        else:
+            raw["source_fps"] = None
     return ReviewState(**raw)
 
 

@@ -3225,15 +3225,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // frames in animation) remain visible as diagnostics but must not become an
   // actionable suggestion.
   const measuredDrift = info?.drift_ratio ?? null;
-  const measuredDriftReliable =
-    measuredDrift != null && (info?.sync_confidence ?? 0) >= 0.6 && !info?.needs_sync_review;
+  const measuredDriftReliable = measuredDrift != null && (info?.sync_confidence ?? 0) >= 0.6;
   const sourceFps = info?.source_fps ?? null;
-  const referenceFps = info?.reference_fps ?? info?.video_fps ?? null;
-  // A source authored at 25fps is shorter than the corresponding 24fps
-  // reference and must be slowed down: atempo = reference_fps / source_fps.
-  const fpsStretch = sourceFps && referenceFps ? referenceFps / sourceFps : null;
   const durationStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
   const lengthsDiffer = lenDrift != null && Math.abs(lenDrift) > 2;
+  const knownDurationStretch = durationStretch != null && [23.976 / 25, 24 / 25, 25 / 23.976, 25 / 24]
+    .some((ratio) => Math.abs(durationStretch - ratio) <= 0.003)
+    ? durationStretch
+    : null;
 
   async function openReplacement() {
     setReplaceOpen(true);
@@ -3312,15 +3311,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const suggestedStretch =
     measuredDriftReliable && measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0005
       ? measuredDrift
-      : lengthsDiffer && fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0005
-        ? fpsStretch
-        : lengthsDiffer
-          ? durationStretch
-          : null;
+      : lengthsDiffer ? knownDurationStretch : null;
   // Flag a real drift: a measured frame-drift, or lengths differing by >2s.
   const driftSuspected =
     (measuredDriftReliable && measuredDrift != null && Math.abs(measuredDrift - 1) > 0.0015) ||
-    (lengthsDiffer && fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0015) ||
     (lengthsDiffer && durationStretch != null && Math.abs(durationStretch - 1) > 0.001);
   const stretchPct = ((stretch - 1) * 100).toFixed(2);
   function applyStretchInput(value = stretchInput) {
@@ -3340,7 +3334,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     if (t?.channels) bits.push(`${t.channels}ch`);
     if (t?.sample_rate) bits.push(`${(t.sample_rate / 1000).toFixed(1)} kHz`);
     if (t?.duration != null) bits.push(`len ${fmtClockMs(t.duration)}`);
-    if (videoFps) bits.push(`${videoFps.toFixed(3)} fps`);
+    if (videoFps) bits.push(`video ${videoFps.toFixed(3)} fps`);
     return bits;
   };
 
@@ -3702,11 +3696,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 )}
                 {driftSuspected && (
                   <span className='text-xs text-warning'>
-                    {measuredDriftReliable && measuredDrift != null && sourceFps && referenceFps
+                    {measuredDriftReliable && measuredDrift != null
                       ? `Measured ×${measuredDrift.toFixed(4)}`
-                      : fpsStretch != null && sourceFps && referenceFps
-                        ? `FPS ×${fpsStretch.toFixed(4)}`
-                        : 'Track lengths differ'}
+                      : knownDurationStretch != null
+                        ? `Known frame-rate conversion ×${knownDurationStretch.toFixed(4)}`
+                        : 'German track may be incomplete'}
                   </span>
                 )}
                 {!measuredDriftReliable && measuredDrift != null && (

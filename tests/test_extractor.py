@@ -15,11 +15,42 @@ from bankai.processor.extractor import (
     YtDlpError,
     YtDlpRunner,
     _is_vincdn_stream_url,
+    _validate_downloaded_duration,
     _vinovo_stream_from_api,
     normalize_stream_url,
 )
 from bankai.queue.models import Job, JobKind
 from bankai.queue.worker import Dispatcher, run_until_idle
+
+
+def test_duration_validation_rejects_and_removes_truncated_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media = tmp_path / "partial.mp4"
+    media.write_bytes(b"partial")
+    monkeypatch.setattr(
+        "bankai.processor.extractor._probe_downloaded_duration_seconds",
+        lambda _path: 3_600.0,
+    )
+
+    with pytest.raises(YtDlpError, match=r"1800\.0s missing"):
+        _validate_downloaded_duration(media, 5_400_000)
+
+    assert not media.exists()
+
+
+def test_duration_validation_accepts_small_container_difference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media = tmp_path / "complete.mp4"
+    media.write_bytes(b"complete")
+    monkeypatch.setattr(
+        "bankai.processor.extractor._probe_downloaded_duration_seconds",
+        lambda _path: 5_391.0,
+    )
+
+    assert _validate_downloaded_duration(media, 5_400_000) == 5_391.0
+    assert media.exists()
 
 
 class _FakeYtDlp(YtDlpRunner):

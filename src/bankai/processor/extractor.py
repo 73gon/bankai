@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -177,6 +178,7 @@ class ExtractWorker(Worker):
             "artifact_id": artifact.id,
             "path": str(result.path),
             "codec": result.codec,
+            "duration_ms": result.duration_ms,
             "extractor": result.extractor,
             "has_video": result.has_video,
         }
@@ -324,7 +326,7 @@ async def extract_url(
         )
         try:
             result = await playwright.extract(url, out_dir, ytdlp=ytdlp, want_video=want_video, max_height=max_height)
-        except PlaywrightError as exc:
+        except (PlaywrightError, YtDlpError) as exc:
             log.error("[extract] playwright fallback failed for %s: %s", url, exc)
             raise WorkerError(f"playwright fallback failed: {exc}") from exc
 
@@ -469,6 +471,7 @@ class YtDlpRunner:
         duration = int(info["duration"] * 1000) if isinstance(info, dict) and isinstance(info.get("duration"), (int, float)) else None
         vcodec = info.get("vcodec") if isinstance(info, dict) else None
         has_video = bool(vcodec and vcodec != "none")
+        _validate_downloaded_duration(path, duration)
         return ExtractResult(
             path=path,
             codec=codec,
@@ -556,10 +559,8 @@ class _VirtualDisplay:
                 os.environ["DISPLAY"] = disp
                 log.info("[playwright] started Xvfb on %s for headful capture", disp)
                 return True
-            try:
+            with suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
         return False
 
     def stop(self) -> None:
@@ -688,7 +689,7 @@ class PlaywrightRunner:
         # *before* the real feature stream is requested. We see them all in
         # ``captured``; pick the one with the longest duration via a yt-dlp
         # metadata-only probe (cheap; no download).
-        chosen = await self._pick_longest(captured, runner)
+        chosen, expected_duration = await self._pick_longest(captured, runner)
         log.info("[playwright] selected media URL (longest of %d candidates): %s", len(captured), chosen)
         # Use the final (post-redirect) player URL as the Referer/Origin
         # source — for hosters like voe the manifest CDN validates against
@@ -700,24 +701,33 @@ class PlaywrightRunner:
         # because yt-dlp's urllib path doesn't replay the player's
         # Referer/Origin reliably, while ffmpeg honours -headers.
         try:
-            return await runner.extract(
+            result = await runner.extract(
                 chosen,
                 out_dir,
                 referer=referer,
                 want_video=want_video,
                 max_height=max_height,
             )
+            _validate_downloaded_duration(
+                result.path,
+                round(expected_duration * 1000) if expected_duration > 0 else result.duration_ms,
+            )
+            if result.duration_ms is None and expected_duration > 0:
+                result.duration_ms = round(expected_duration * 1000)
+            return result
         except YtDlpError as exc:
             log.warning(
                 "[playwright] yt-dlp failed (%s) — falling back to direct ffmpeg pull",
                 str(exc).splitlines()[0],
             )
-            return await _ffmpeg_pull(chosen, out_dir, referer=referer)
+            return await _ffmpeg_pull(
+                chosen,
+                out_dir,
+                referer=referer,
+                expected_duration=expected_duration,
+            )
 
-    async def _pick_longest(self, urls: list[str], runner: YtDlpRunner) -> str:
-        if len(urls) == 1:
-            return urls[0]
-
+    async def _pick_longest(self, urls: list[str], runner: YtDlpRunner) -> tuple[str, float]:
         # Probe in parallel; fall back to the first URL if every probe fails.
         async def probe(href: str) -> tuple[str, float]:
             try:
@@ -734,7 +744,7 @@ class PlaywrightRunner:
         # If even the longest is < 60 s, the page probably hasn't yielded
         # the real stream yet \u2014 prefer it anyway, the sync stage will
         # bail out with a clear error if it really is a placeholder.
-        return results[0][0] if results else urls[0]
+        return results[0] if results else (urls[0], 0.0)
 
     async def _capture(self, url: str) -> tuple[list[str], str]:
         try:
@@ -870,10 +880,8 @@ class PlaywrightRunner:
                     final_url = page.url
                     if final_url != url:
                         log.info("[playwright] followed redirect: %s -> %s", url, final_url)
-                    try:
+                    with suppress(Exception):
                         await page.wait_for_load_state("networkidle", timeout=8_000)
-                    except Exception:
-                        pass
                     final_url = page.url
 
                     # Press play in the main frame and any child iframes (voe
@@ -945,10 +953,8 @@ class PlaywrightRunner:
                     continue
         # Last resort: click the middle of the viewport to dismiss overlays.
         if not quiet:
-            try:
+            with suppress(Exception):
                 await page.mouse.click(640, 360)
-            except Exception:
-                pass
 
 
 def _probe_duration_seconds(url: str) -> float:
@@ -975,7 +981,71 @@ def _probe_duration_seconds(url: str) -> float:
     return 0.0
 
 
-async def _ffmpeg_pull(url: str, out_dir: Path, *, referer: str) -> ExtractResult:
+def _probe_downloaded_duration_seconds(path: Path) -> float | None:
+    """Return the duration ffprobe can actually read from a downloaded file."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        duration = float(proc.stdout.strip())
+    except ValueError:
+        return None
+    return duration if duration > 0 else None
+
+
+def _validate_downloaded_duration(path: Path, expected_duration_ms: int | None) -> float | None:
+    """Reject CDN downloads that ended early even though ffmpeg exited zero.
+
+    Some hosters close a long MP4/HLS response mid-transfer. ffmpeg treats the
+    clean EOF as success, so the declared player runtime must be compared with
+    the file that was actually written before the extraction can be accepted.
+    """
+    actual = _probe_downloaded_duration_seconds(path)
+    if actual is None or not expected_duration_ms or expected_duration_ms < 60_000:
+        return actual
+    expected = expected_duration_ms / 1000.0
+    allowed_shortfall = max(15.0, expected * 0.005)
+    missing = expected - actual
+    if missing <= allowed_shortfall:
+        return actual
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        log.warning("[extract] could not remove incomplete download %s", path)
+    raise YtDlpError(
+        "incomplete stream download: player declares "
+        f"{expected:.1f}s but the downloaded file contains {actual:.1f}s "
+        f"({missing:.1f}s missing)"
+    )
+
+
+async def _ffmpeg_pull(
+    url: str,
+    out_dir: Path,
+    *,
+    referer: str,
+    expected_duration: float = 0.0,
+) -> ExtractResult:
     """Direct ffmpeg pull with Referer/Origin headers.
 
     Used when yt-dlp fails on a CDN URL captured by Playwright. ffmpeg
@@ -1024,11 +1094,20 @@ async def _ffmpeg_pull(url: str, out_dir: Path, *, referer: str) -> ExtractResul
         tail = (stderr or b"").decode("utf-8", "replace")
         tail = "\n".join(tail.splitlines()[-10:])
         raise YtDlpError(f"ffmpeg pull failed (exit {proc.returncode}):\n{tail}")
+    actual_duration = await asyncio.to_thread(
+        _validate_downloaded_duration,
+        out_path,
+        round(expected_duration * 1000) if expected_duration > 0 else None,
+    )
     log.info("BANKAI_PROGRESS stage=stream pct=100.0 status=finished")
     return ExtractResult(
         path=out_path,
         codec=None,
-        duration_ms=None,
+        duration_ms=(
+            round(expected_duration * 1000)
+            if expected_duration > 0
+            else round(actual_duration * 1000) if actual_duration else None
+        ),
         extractor="ffmpeg",
     )
 
