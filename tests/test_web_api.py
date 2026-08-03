@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from bankai.config import get_settings, reset_settings_cache
 from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.web.app import (
+    _backfill_review_duration_integrity,
     _ebur128_envelope,
     _laptop_vpn_status,
     _parse_range,
@@ -25,7 +26,7 @@ from bankai.web.app import (
     _waveform_envelope,
     create_app,
 )
-from bankai.web.discover import DiscoverItem
+from bankai.web.discover import DiscoverItem, DiscoverPage
 
 
 def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
@@ -91,6 +92,81 @@ def test_health(client: TestClient) -> None:
     body = r.json()
     assert body["status"] == "ok"
     assert "version" in body
+
+
+def test_discover_backfills_filtered_movies_to_requested_page_size(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_browse(
+        kind: str, *, page: int, page_size: int
+    ) -> DiscoverPage:
+        assert kind == "movie"
+        assert page_size == 100
+        start = page * 100
+        items = [
+            DiscoverItem(
+                name=f"Movie {index}",
+                kind="movie",
+                tvdb_id=index,
+                year=2024,
+                status="Released",
+            )
+            for index in range(start, min(start + 100, 200))
+        ]
+        return DiscoverPage(items, page, 100, 200, page == 0)
+
+    monkeypatch.setattr("bankai.web.discover.browse_page", fake_browse)
+    monkeypatch.setattr(
+        "bankai.web.availability.get_status",
+        lambda title, **_kwargs: {
+            "status": "unavailable" if int(title.split()[-1]) < 30 else "available"
+        },
+    )
+    monkeypatch.setattr("bankai.web.availability.schedule", lambda *_args, **_kwargs: None)
+
+    response = client.get("/api/discover/trending?kind=movie&page=0&page_size=100")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 100
+    assert items[0]["name"] == "Movie 30"
+    assert items[-1]["name"] == "Movie 129"
+
+
+def test_legacy_review_runtime_gap_is_marked_incompatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        "bankai.web.media.scan_library",
+        lambda: [SimpleNamespace(path="legacy.mkv")],
+    )
+    monkeypatch.setattr(
+        "bankai.web.media.probe",
+        lambda _path: SimpleNamespace(
+            duration=7_200.0,
+            audio_tracks=[SimpleNamespace(is_german=True, duration=5_900.0)],
+        ),
+    )
+    monkeypatch.setattr(
+        "bankai.web.review.get_state",
+        lambda _path: SimpleNamespace(
+            duration_compatible=None,
+            sync_confidence=0.91,
+            needs_sync_review=False,
+            auto_delay_ms=250,
+        ),
+    )
+    monkeypatch.setattr(
+        "bankai.web.review.set_sync_review",
+        lambda _path, **kwargs: saved.append(kwargs),
+    )
+
+    _backfill_review_duration_integrity()
+
+    assert saved[0]["duration_compatible"] is False
+    assert saved[0]["confidence"] == pytest.approx(0.2)
+    assert saved[0]["needs_review"] is True
 
 
 def test_vpn_status_distinguishes_connected_from_disconnected(

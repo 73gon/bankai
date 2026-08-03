@@ -9,7 +9,6 @@ import {
   Film,
   Search,
   ShieldCheck,
-  Sparkles,
   Tv,
   Users,
 } from 'lucide-react';
@@ -37,6 +36,7 @@ import {
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 type Filters = {
@@ -57,7 +57,23 @@ const DEFAULT_FILTERS: Filters = {
   minSeeders: '0',
 };
 
-let animeView = { query: '', page: 0, filters: DEFAULT_FILTERS };
+const ANIME_FILTERS_KEY = 'bankai:anime-filters';
+
+function loadAnimeFilters(): Filters {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ANIME_FILTERS_KEY) || '{}') as Partial<Filters>;
+    return Object.fromEntries(
+      Object.entries(DEFAULT_FILTERS).map(([key, fallback]) => [
+        key,
+        typeof saved[key as keyof Filters] === 'string' ? saved[key as keyof Filters] : fallback,
+      ]),
+    ) as Filters;
+  } catch {
+    return { ...DEFAULT_FILTERS };
+  }
+}
+
+let animeView = { query: '', page: 0, filters: loadAnimeFilters() };
 const animeCache = new Map<string, AnimeSearchPage>();
 
 function cacheKey(query: string, page: number, filters: Filters) {
@@ -235,6 +251,14 @@ export default function Anime() {
   const [manualEpisode, setManualEpisode] = useState('');
 
   useEffect(() => {
+    try {
+      localStorage.setItem(ANIME_FILTERS_KEY, JSON.stringify(draftFilters));
+    } catch {
+      /* localStorage can be unavailable in locked-down browsers. */
+    }
+  }, [draftFilters]);
+
+  useEffect(() => {
     animeView = { query, page, filters };
     const key = cacheKey(query, page, filters);
     const cached = animeCache.get(key);
@@ -410,9 +434,18 @@ export default function Anime() {
       )}
 
       <div className='flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/60 bg-card/30'>
+        {loading && result && (
+          <div className='flex shrink-0 items-center gap-2 border-b border-border/60 bg-card/80 px-4 py-2 text-sm text-foreground'>
+            <Spinner /> Loading the requested Nyaa entries…
+          </div>
+        )}
         <div className='min-h-0 flex-1 overflow-y-auto p-3'>
           {loading && !result ? (
-            <EmptyState icon={Sparkles} title='Loading Nyaa releases' description='Resolving TVDB titles and posters…' />
+            <div className='flex flex-col gap-3' aria-label='Loading Nyaa releases'>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <Skeleton key={index} className='h-44 w-full rounded-xl' />
+              ))}
+            </div>
           ) : result?.items.length ? (
             <div className='flex flex-col gap-3'>
               {result.items.map((entry) => <ResultCard key={entry.info_hash} entry={entry} onDownload={() => openDownload(entry)} />)}

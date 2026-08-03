@@ -13,6 +13,7 @@ from bankai.db import StateRepository, initialize
 from bankai.processor.pipeline import (
     PipelineWorker,
     _account_for_applied_tempo,
+    _adjust_sync_confidence_for_duration,
     _derive_content_fps,
     _extract_attempt_payloads,
     _resolve_episode_fallbacks,
@@ -48,6 +49,34 @@ def test_content_fps_is_omitted_when_visual_match_is_uncertain() -> None:
         confidence=0.4,
         min_confidence=0.6,
     ) is None
+
+
+def test_large_runtime_gap_overrides_high_visual_confidence() -> None:
+    meta: dict[str, Any] = {"confidence": 0.94, "needs_review": False}
+
+    _adjust_sync_confidence_for_duration(
+        meta,
+        source_duration=5_400.0,
+        reference_duration=6_600.0,
+    )
+
+    assert meta["confidence"] == pytest.approx(0.2)
+    assert meta["needs_review"] is True
+    assert meta["duration_compatible"] is False
+    assert "20.0 minutes" in meta["reason"]
+
+
+def test_matching_runtime_strengthens_visual_confidence() -> None:
+    meta: dict[str, Any] = {"confidence": 0.7, "needs_review": False}
+
+    _adjust_sync_confidence_for_duration(
+        meta,
+        source_duration=6_599.0,
+        reference_duration=6_600.0,
+    )
+
+    assert meta["confidence"] == pytest.approx(0.79)
+    assert meta["duration_compatible"] is True
 
 
 class _FakeWorker(Worker):

@@ -161,20 +161,18 @@ function TruncCell({
   text,
   tooltip,
   mono,
-  danger,
   width = '16rem',
 }: {
   text: string | null | undefined;
   tooltip?: string | null;
   mono?: boolean;
-  danger?: boolean;
   width?: string;
 }) {
   if (!text) return <span className='text-foreground'>-</span>;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div className={cn('truncate cursor-default', mono && 'font-mono', danger && 'text-destructive')} style={{ maxWidth: width }}>
+        <div className={cn('truncate cursor-default', mono && 'font-mono')} style={{ maxWidth: width }}>
           {text}
         </div>
       </TooltipTrigger>
@@ -183,36 +181,7 @@ function TruncCell({
   );
 }
 
-async function writeClipboard(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(value);
-      return;
-    } catch {
-      // LAN-hosted HTTP pages may not receive the secure Clipboard API.
-    }
-  }
-  const textarea = document.createElement('textarea');
-  textarea.value = value;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand('copy');
-  textarea.remove();
-  if (!copied) throw new Error('Clipboard access was denied');
-}
-
 function SourceCell({ r }: { r: TitleRow }) {
-  const [copiedSource, setCopiedSource] = useState<string | null>(null);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-    },
-    [],
-  );
   const sources = [
     {
       label: 'DE',
@@ -236,60 +205,20 @@ function SourceCell({ r }: { r: TitleRow }) {
           <TooltipTrigger asChild>
             <Button
               size='sm'
-              variant={copiedSource === source.label ? 'default' : 'secondary'}
+              variant='secondary'
               className='h-7 w-10 px-2 font-mono text-xs'
-              aria-label={
-                copiedSource === source.label
-                  ? `${source.name} source copied`
-                  : `Copy ${source.name} source`
-              }
-              aria-live='polite'
-              onClick={async (event) => {
-                event.stopPropagation();
-                try {
-                  await writeClipboard(source.url!);
-                  setCopiedSource(source.label);
-                  if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-                  copiedTimerRef.current = setTimeout(() => {
-                    setCopiedSource((current) =>
-                      current === source.label ? null : current,
-                    );
-                  }, 1600);
-                  toast.success(`${source.name} source copied`);
-                } catch (error: any) {
-                  toast.error(error.message || 'Could not copy source');
-                }
-              }}
+              aria-label={`Open ${source.name} source in a new tab`}
+              asChild
             >
-              <span className='relative grid place-items-center'>
-                <span
-                  className={cn(
-                    'transition-all duration-200',
-                    copiedSource === source.label
-                      ? 'scale-50 opacity-0'
-                      : 'scale-100 opacity-100',
-                  )}
-                >
-                  {source.label}
-                </span>
-                <Check
-                  aria-hidden='true'
-                  className={cn(
-                    'absolute transition-all duration-200',
-                    copiedSource === source.label
-                      ? 'scale-100 opacity-100'
-                      : 'scale-50 opacity-0',
-                  )}
-                />
-              </span>
+              <a href={source.url!} target='_blank' rel='noreferrer' onClick={(event) => event.stopPropagation()}>
+                {source.label}
+              </a>
             </Button>
           </TooltipTrigger>
           <TooltipContent className='max-w-md'>
             <div className='flex flex-col gap-1'>
               <span className='font-medium'>
-                {copiedSource === source.label
-                  ? `${source.name} source copied`
-                  : `Copy ${source.name} source`}
+                Open {source.name} source
               </span>
               {source.title && <span>{source.title}</span>}
               <span className='break-all font-mono text-xs'>{source.url}</span>
@@ -474,7 +403,11 @@ const LogPanel = memo(function LogPanel({ text }: { text: string }) {
 // Fixed set of statuses a row can be in.
 type Status =
   | 'queued'
+  | 'starting'
+  | 'extracting'
   | 'downloading'
+  | 'syncing'
+  | 'remuxing'
   | 'waiting_action'
   | 'failed'
   | 'stopped'
@@ -486,10 +419,14 @@ type Status =
   | 'done'
   | 'deleted';
 
-const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning' | 'success' | 'review' | 'transfer' | 'repack'> = {
-  queued: 'muted',
-  downloading: 'info',
-  waiting_action: 'warning',
+const STATUS_VARIANT: Record<Status, 'queue' | 'starting' | 'extract' | 'torrent' | 'muted' | 'info' | 'destructive' | 'warning' | 'success' | 'review' | 'transfer' | 'repack'> = {
+  queued: 'queue',
+  starting: 'starting',
+  extracting: 'extract',
+  downloading: 'torrent',
+  syncing: 'info',
+  remuxing: 'repack',
+  waiting_action: 'success',
   failed: 'destructive',
   stopped: 'warning',
   cancelled: 'warning',
@@ -502,9 +439,13 @@ const STATUS_VARIANT: Record<Status, 'muted' | 'info' | 'destructive' | 'warning
 };
 
 const STATUS_ROW_TINT: Record<Status, string> = {
-  queued: 'bg-muted/25 hover:bg-muted/35',
-  downloading: 'bg-info/[0.12] hover:bg-info/[0.18]',
-  waiting_action: 'bg-warning/[0.16] hover:bg-warning/[0.22]',
+  queued: 'bg-queue/80 hover:bg-queue',
+  starting: 'bg-starting/[0.15] hover:bg-starting/[0.22]',
+  extracting: 'bg-extract/[0.13] hover:bg-extract/[0.2]',
+  downloading: 'bg-torrent/[0.13] hover:bg-torrent/[0.2]',
+  syncing: 'bg-info/[0.12] hover:bg-info/[0.18]',
+  remuxing: 'bg-repack/[0.13] hover:bg-repack/[0.2]',
+  waiting_action: 'bg-success/[0.14] hover:bg-success/[0.21]',
   failed: 'bg-destructive/[0.14] hover:bg-destructive/[0.2]',
   stopped: 'bg-amber-500/[0.12] hover:bg-amber-500/[0.18]',
   cancelled: 'bg-warning/[0.12] hover:bg-warning/[0.18]',
@@ -518,7 +459,11 @@ const STATUS_ROW_TINT: Record<Status, string> = {
 
 const STATUS_LABEL: Record<Status, string> = {
   queued: 'Queued',
-  downloading: 'Downloading',
+  starting: 'Starting',
+  extracting: 'Extracting stream audio',
+  downloading: 'Downloading torrent',
+  syncing: 'Syncing audio',
+  remuxing: 'Writing final MKV',
   waiting_action: 'Waiting for action',
   failed: 'Failed',
   stopped: 'Stopped',
@@ -531,11 +476,20 @@ const STATUS_LABEL: Record<Status, string> = {
   deleted: 'Deleted',
 };
 
+function runningStatus(r: TitleRow): Status {
+  const step = (r.step_label || '').toLocaleLowerCase();
+  if (step.includes('extract')) return 'extracting';
+  if (step.includes('torrent') || step.includes('download hq')) return 'downloading';
+  if (step.includes('sync')) return 'syncing';
+  if (step.includes('remux') || step.includes('write final')) return 'remuxing';
+  return 'starting';
+}
+
 function rowStatus(r: TitleRow): Status {
   if (r.row_kind === 'job') {
     if (r.action_required) return 'waiting_action';
     if (r.pending) return 'queued';
-    if (r.job_status === 'running') return 'downloading';
+    if (r.job_status === 'running') return runningStatus(r);
     if (r.job_status === 'failed' || r.job_status === 'error') return 'failed';
     if (r.job_status === 'stopped') return 'stopped';
     if (r.job_status === 'cancelled') return 'cancelled';
@@ -544,7 +498,7 @@ function rowStatus(r: TitleRow): Status {
   }
   if (r.action_required) return 'waiting_action';
   if (r.pending) return 'queued';
-  if (r.job_status === 'running') return 'downloading';
+  if (r.job_status === 'running') return runningStatus(r);
   if (r.job_status === 'failed' || r.job_status === 'error') return 'failed';
   if (r.job_status === 'stopped') return 'stopped';
   if (r.job_status === 'cancelled') return 'cancelled';
@@ -566,18 +520,21 @@ function StatusCell({ r }: { r: TitleRow }) {
       </Badge>
     );
   }
-  if (s === 'downloading') {
+  if (['starting', 'extracting', 'downloading', 'syncing', 'remuxing'].includes(s)) {
     const pct = Math.round(r.overall_percent ?? 0);
     return (
       <div className='min-w-[10rem]'>
         <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
           <Loader2 className='h-3 w-3 animate-spin' />
-          {r.step_label || 'Downloading'} {pct > 0 ? `${pct}%` : ''}
+          {r.step_label || STATUS_LABEL[s]} {pct > 0 ? `${pct}%` : ''}
         </Badge>
         {pct > 0 && (
           <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
             <div
-              className='h-full rounded-full bg-gradient-to-r from-info to-transfer'
+              className={cn(
+                'h-full rounded-full',
+                s === 'downloading' ? 'bg-torrent' : s === 'extracting' ? 'bg-extract' : s === 'remuxing' ? 'bg-repack' : 'bg-info',
+              )}
               style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
             />
           </div>
@@ -599,6 +556,13 @@ function StatusCell({ r }: { r: TitleRow }) {
       <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
         <Loader2 className='h-3 w-3 animate-spin' /> {r.repack_label || (r.repack_kind === 'torrent' ? 'Replacing torrent' : 'Repacking')}{' '}
         {pct > 0 ? `${pct}%` : ''}
+      </Badge>
+    );
+  }
+  if (s === 'failed' && r.reason) {
+    return (
+      <Badge variant='destructive' title={r.reason_detail || r.reason} className='max-w-[18rem] truncate'>
+        {r.reason}
       </Badge>
     );
   }
@@ -1277,6 +1241,17 @@ export default function Library() {
 
   function SyncCell({ r }: { r: TitleRow }) {
     if (r.row_kind !== 'library') return <span className='text-foreground'>—</span>;
+    if (r.duration_compatible === false) {
+      const minutes = r.duration_delta_seconds == null ? null : Math.abs(r.duration_delta_seconds) / 60;
+      return (
+        <Badge
+          variant='destructive'
+          title={minutes == null ? 'German and HQ runtimes are incompatible.' : `German and HQ runtimes differ by ${minutes.toFixed(1)} minutes.`}
+        >
+          Out of sync
+        </Badge>
+      );
+    }
     const c = r.sync_confidence;
     if (c == null) {
       if (r.needs_sync_review)
@@ -1347,9 +1322,6 @@ export default function Library() {
           <td className='px-2 py-2 align-middle text-xs text-foreground'>{typeLabel(r)}</td>
           <td className='px-2 py-2 align-middle'>
             <StatusCell r={r} />
-          </td>
-          <td className='px-2 py-2 align-middle text-xs text-foreground'>
-            <TruncCell text={r.reason} tooltip={r.reason_detail || r.reason} danger width='18rem' />
           </td>
           <td className='px-2 py-2 align-middle'>
             <SyncCell r={r} />
@@ -1499,7 +1471,7 @@ export default function Library() {
         </tr>
         {isOpen && (
           <tr className='border-t border-border bg-black/20'>
-            <td colSpan={11} className='px-3 py-2'>
+            <td colSpan={10} className='px-3 py-2'>
               {r.job_id ? (
                 <LogPanel text={logs[r.job_id] ?? 'Loading logs…'} />
               ) : (
@@ -1600,7 +1572,6 @@ export default function Library() {
                 <SortHeader col='title' label='Title' className='text-left' />
                 <SortHeader col='type' label='Type' className='text-left' />
                 <SortHeader col='status' label='Status' className='text-left' />
-                <th className='px-2 py-2 text-left font-medium'>Reason</th>
                 <th className='px-2 py-2 text-left font-medium'>Sync</th>
                 <SortHeader col='created_at' label='Created at' className='text-left' />
                 <SortHeader col='updated_at' label='Updated at' className='text-left' />

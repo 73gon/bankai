@@ -204,6 +204,8 @@ export interface LibraryEntry {
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;
+  duration_delta_seconds: number | null;
+  duration_compatible: boolean | null;
   auto_delay_ms: number;
   transfer_status: string;
   transfer_percent: number;
@@ -240,6 +242,8 @@ export interface TitleRow {
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;
+  duration_delta_seconds: number | null;
+  duration_compatible: boolean | null;
   auto_delay_ms: number;
   transfer_status: string;
   transfer_percent: number;
@@ -288,6 +292,8 @@ export interface MediaInfo {
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;
+  duration_delta_seconds: number | null;
+  duration_compatible: boolean | null;
   auto_delay_ms: number;
   source_fps: number | null;
   reference_fps: number | null;

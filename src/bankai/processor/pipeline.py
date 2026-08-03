@@ -234,6 +234,7 @@ class PipelineWorker(Worker):
                 torrent_payload[k] = payload[k]
         torrent_result = await self._run_stage(ctx, self._torrent, JobKind.TORRENT, torrent_payload)
         video_path = torrent_result["path"]
+        reference_duration = await _probe_duration(Path(video_path))
 
         # ---- 3. Sync audio to video ------------------------------------
         _log_stage(3, "sync", "Sync audio")
@@ -257,7 +258,19 @@ class PipelineWorker(Worker):
                 )
                 extract_attempt_index, extract_result = await self._run_extract_attempts(ctx, extract_attempts, extract_attempt_index)
                 audio_path, visual_source = await self._prepare_german_source(ctx, extract_result)
+                declared_duration_ms = extract_result.get("duration_ms")
+                source_duration = (
+                    float(declared_duration_ms) / 1000.0
+                    if isinstance(declared_duration_ms, (int, float))
+                    and declared_duration_ms > 0
+                    else await _probe_duration(Path(audio_path))
+                )
         synced_audio = sync_result["path"]
+        _adjust_sync_confidence_for_duration(
+            visual_meta,
+            source_duration=source_duration,
+            reference_duration=reference_duration,
+        )
         _account_for_applied_tempo(visual_meta, float(sync_result.get("tempo", 1.0) or 1.0))
 
         # ---- 4. Remux ---------------------------------------------------
@@ -610,6 +623,8 @@ class PipelineWorker(Worker):
                 source_fps=visual_meta.get("source_fps"),
                 reference_fps=visual_meta.get("reference_fps"),
                 drift_ratio=visual_meta.get("drift_ratio"),
+                duration_delta_seconds=visual_meta.get("duration_delta_seconds"),
+                duration_compatible=visual_meta.get("duration_compatible"),
             )
             review_mod.set_sources(
                 final_path,
@@ -825,6 +840,40 @@ _KNOWN_FPS_RATIOS = (
 
 def _is_known_fps_ratio(ratio: float, *, tol: float = 0.004) -> bool:
     return any(abs(ratio - target) <= tol for target in _KNOWN_FPS_RATIOS)
+
+
+def _adjust_sync_confidence_for_duration(
+    visual_meta: dict[str, Any],
+    *,
+    source_duration: float | None,
+    reference_duration: float | None,
+) -> None:
+    """Make whole-track runtime a strong guard on visual-match confidence."""
+    confidence = visual_meta.get("confidence")
+    if (
+        not isinstance(confidence, (int, float))
+        or not source_duration
+        or not reference_duration
+    ):
+        return
+    delta = source_duration - reference_duration
+    ratio = source_duration / reference_duration
+    visual_meta["duration_delta_seconds"] = delta
+    close = abs(delta) <= max(5.0, reference_duration * 0.003)
+    known_conversion = _is_known_fps_ratio(ratio)
+    gross_mismatch = abs(delta) > max(300.0, reference_duration * 0.08)
+    visual_meta["duration_compatible"] = not gross_mismatch
+    if gross_mismatch:
+        visual_meta["confidence"] = min(float(confidence), 0.2)
+        visual_meta["needs_review"] = True
+        visual_meta["reason"] = (
+            f"German/HQ runtimes differ by {abs(delta) / 60.0:.1f} minutes"
+        )
+        return
+    duration_score = 1.0 if close or known_conversion else 0.55
+    visual_meta["confidence"] = min(
+        1.0, max(0.0, float(confidence) * 0.7 + duration_score * 0.3)
+    )
 
 
 async def _probe_has_video(path: Path) -> bool:

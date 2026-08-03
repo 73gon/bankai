@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from array import array
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -57,6 +57,40 @@ _CLIP_CACHE_LOCKS = tuple(threading.Lock() for _ in range(64))
 # so the client can show a loader and retry instead of blocking everything.
 _FFMPEG_SLOTS = threading.BoundedSemaphore(4)
 _LAPTOP_VPN_SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+
+
+def _backfill_review_duration_integrity() -> None:
+    """Populate runtime compatibility for review files made by older builds."""
+    for entry in media_mod.scan_library():
+        state = review_mod.get_state(entry.path)
+        if state.duration_compatible is not None:
+            continue
+        info = media_mod.probe(Path(entry.path))
+        if info is None or not info.duration:
+            continue
+        german = next(
+            (
+                track
+                for track in info.audio_tracks
+                if track.is_german and track.duration and track.duration > 0
+            ),
+            None,
+        )
+        if german is None or german.duration is None:
+            continue
+        delta = german.duration - info.duration
+        incompatible = abs(delta) > max(300.0, info.duration * 0.08)
+        confidence = state.sync_confidence
+        if incompatible and confidence is not None:
+            confidence = min(confidence, 0.2)
+        review_mod.set_sync_review(
+            entry.path,
+            needs_review=state.needs_sync_review or incompatible,
+            confidence=confidence,
+            applied_delay_ms=state.auto_delay_ms,
+            duration_delta_seconds=delta,
+            duration_compatible=not incompatible,
+        )
 
 
 def _laptop_vpn_command(command: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
@@ -593,10 +627,14 @@ def create_app() -> Any:
         # Sync endpoints (media probing/transcoding, library scans) run in the
         # anyio threadpool. Give it headroom so a burst of review clips or many
         # open tabs can't starve lightweight endpoints like /api/health.
+        migration_task: asyncio.Task | None = None
         try:
             import anyio.to_thread
 
             anyio.to_thread.current_default_thread_limiter().total_tokens = 96
+            migration_task = asyncio.create_task(
+                anyio.to_thread.run_sync(_backfill_review_duration_integrity)
+            )
         except Exception:
             pass
         try:
@@ -604,6 +642,9 @@ def create_app() -> Any:
         finally:
             from bankai.web import availability as availability_mod
 
+            if migration_task is not None:
+                with suppress(Exception):
+                    await migration_task
             await availability_mod.shutdown()
 
     app = FastAPI(
@@ -770,6 +811,45 @@ def create_app() -> Any:
             out.append(d)
         return out
 
+    async def _discover_visible_page(
+        kind: str,
+        *,
+        page: int,
+        page_size: int,
+        membership: tuple[set[str], set[str], set[str]],
+    ) -> tuple[list[dict], int | None, bool]:
+        """Paginate the entries that survive membership and mirror checks."""
+        logical_start = page * page_size
+        logical_target = logical_start + page_size + 1
+        raw_page = 0
+        visible: list[dict] = []
+        seen: set[tuple] = set()
+        provider_total: int | None = None
+        provider_has_next = True
+        while len(visible) < logical_target and provider_has_next:
+            result = await discover_mod.browse_page(
+                kind, page=raw_page, page_size=100
+            )
+            if provider_total is None:
+                provider_total = result.total
+            filtered = _filter_discover(result.items, kind, membership)
+            for item in _apply_availability(filtered, kind):
+                identity = (
+                    item.get("tvdb_id"),
+                    _norm_title(str(item.get("name") or "")),
+                    item.get("year"),
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                visible.append(item)
+            provider_has_next = result.has_next
+            raw_page += 1
+
+        items = visible[logical_start : logical_start + page_size]
+        has_next = len(visible) > logical_start + page_size or provider_has_next
+        return items, provider_total, has_next
+
     @app.get("/api/discover/trending")
     async def discover_trending(
         kind: str = Query("movie"),
@@ -777,18 +857,22 @@ def create_app() -> Any:
         page_size: int = Query(50, ge=10, le=100),
     ) -> dict:
         k = "movie" if kind == "movie" else "show"
-        result = await discover_mod.browse_page(k, page=page, page_size=page_size)
         import anyio.to_thread
 
         membership = await anyio.to_thread.run_sync(_catalog_membership, k)
-        items = _filter_discover(result.items, k, membership)
+        items, total, has_next = await _discover_visible_page(
+            k,
+            page=page,
+            page_size=page_size,
+            membership=membership,
+        )
         return {
             "configured": discover_mod.is_configured(),
-            "items": _apply_availability(items, k),
-            "page": result.page,
-            "page_size": result.page_size,
-            "total": result.total,
-            "has_next": result.has_next,
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_next": has_next,
         }
 
     @app.get("/api/discover/search")
@@ -1464,6 +1548,8 @@ def create_app() -> Any:
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
+                    "duration_delta_seconds": state.duration_delta_seconds,
+                    "duration_compatible": state.duration_compatible,
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
                     "transfer_percent": (
@@ -1649,6 +1735,8 @@ def create_app() -> Any:
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
+                    "duration_delta_seconds": state.duration_delta_seconds,
+                    "duration_compatible": state.duration_compatible,
                     "auto_delay_ms": state.auto_delay_ms,
                     "transfer_status": state.transfer_status,
                     "transfer_percent": (
@@ -1757,6 +1845,8 @@ def create_app() -> Any:
                     "delay_ms": 0,
                     "needs_sync_review": False,
                     "sync_confidence": None,
+                    "duration_delta_seconds": None,
+                    "duration_compatible": None,
                     "auto_delay_ms": 0,
                     "transfer_status": "idle",
                     "transfer_percent": 0.0,
@@ -1851,6 +1941,8 @@ def create_app() -> Any:
             "delay_ms": state.delay_ms,
             "needs_sync_review": state.needs_sync_review,
             "sync_confidence": state.sync_confidence,
+            "duration_delta_seconds": state.duration_delta_seconds,
+            "duration_compatible": state.duration_compatible,
             "auto_delay_ms": state.auto_delay_ms,
             "source_fps": state.source_fps,
             "reference_fps": state.reference_fps,

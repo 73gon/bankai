@@ -65,6 +65,8 @@ class ReviewState:
     source_fps: float | None = None
     reference_fps: float | None = None
     drift_ratio: float | None = None
+    duration_delta_seconds: float | None = None
+    duration_compatible: bool | None = None
     # Provenance for the two inputs that produced the reviewed MKV.
     german_source_url: str | None = None
     torrent_source_url: str | None = None
@@ -229,6 +231,8 @@ def reset_for_new_output(path: str | Path) -> ReviewState:
                 "source_fps": None,
                 "reference_fps": None,
                 "drift_ratio": None,
+                "duration_delta_seconds": None,
+                "duration_compatible": None,
                 "transfer_status": "idle",
                 "transfer_percent": 0.0,
                 "repack_status": "idle",
@@ -272,6 +276,8 @@ def set_sync_review(
     source_fps: float | None = None,
     reference_fps: float | None = None,
     drift_ratio: float | None = None,
+    duration_delta_seconds: float | None = None,
+    duration_compatible: bool | None = None,
 ) -> ReviewState:
     """Record the automatic-alignment outcome for a finished library file.
 
@@ -291,6 +297,10 @@ def set_sync_review(
             raw["reference_fps"] = float(reference_fps)
         if drift_ratio is not None:
             raw["drift_ratio"] = float(drift_ratio)
+        if duration_delta_seconds is not None:
+            raw["duration_delta_seconds"] = float(duration_delta_seconds)
+        if duration_compatible is not None:
+            raw["duration_compatible"] = bool(duration_compatible)
         raw["updated_at"] = time.time()
 
     return _update(path, change)
