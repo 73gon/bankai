@@ -27,6 +27,7 @@ import {
   CirclePlay,
   ExternalLink,
   Link2,
+  MoreHorizontal,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
@@ -40,6 +41,7 @@ import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from '@/components/ui/popover';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
@@ -370,7 +372,7 @@ function TorrentPickerTools({
 
 // the user's scroll position). Only auto-scrolls to the bottom when the user is
 // already near it, so reading earlier lines isn't interrupted.
-const LogPanel = memo(function LogPanel({ text }: { text: string }) {
+const LogPanel = memo(function LogPanel({ text, className }: { text: string; className?: string }) {
   const ref = useRef<HTMLPreElement>(null);
   const pinnedRef = useRef(true); // default: stuck to the bottom (newest)
   const lastTopRef = useRef(0);
@@ -393,7 +395,7 @@ const LogPanel = memo(function LogPanel({ text }: { text: string }) {
     <pre
       ref={ref}
       onScroll={onScroll}
-      className='ansi-log max-h-72 overflow-auto rounded-md bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground'
+      className={cn('ansi-log max-h-72 overflow-auto rounded-md bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground', className)}
     >
       <AnsiLog text={cleaned || '(no output yet)'} />
     </pre>
@@ -426,7 +428,7 @@ const STATUS_VARIANT: Record<Status, 'queue' | 'starting' | 'extract' | 'torrent
   downloading: 'torrent',
   syncing: 'info',
   remuxing: 'repack',
-  waiting_action: 'success',
+  waiting_action: 'warning',
   failed: 'destructive',
   stopped: 'warning',
   cancelled: 'warning',
@@ -445,7 +447,7 @@ const STATUS_ROW_TINT: Record<Status, string> = {
   downloading: 'bg-torrent/[0.13] hover:bg-torrent/[0.2]',
   syncing: 'bg-info/[0.12] hover:bg-info/[0.18]',
   remuxing: 'bg-repack/[0.13] hover:bg-repack/[0.2]',
-  waiting_action: 'bg-success/[0.14] hover:bg-success/[0.21]',
+  waiting_action: 'bg-warning/[0.14] hover:bg-warning/[0.21]',
   failed: 'bg-destructive/[0.14] hover:bg-destructive/[0.2]',
   stopped: 'bg-amber-500/[0.12] hover:bg-amber-500/[0.18]',
   cancelled: 'bg-warning/[0.12] hover:bg-warning/[0.18]',
@@ -755,7 +757,7 @@ export default function Library() {
   const [sortDir, setSortDir] = useState<SortDir>(initialPreferences.sortDir);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<PageSize>(initialPreferences.pageSize);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [logEntry, setLogEntry] = useState<TitleRow | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [redoing, setRedoing] = useState<Set<string>>(new Set());
   const [queueBusy, setQueueBusy] = useState<Set<string>>(new Set());
@@ -836,13 +838,10 @@ export default function Library() {
     };
   }, []);
 
-  // Live-refresh the log of the currently expanded job so running jobs show
+  // Live-refresh the log in the modal so running jobs show
   // progress. LogPanel preserves scroll unless the user is at the bottom.
-  const rowsRef = useRef<TitleRow[]>(rows);
-  rowsRef.current = rows;
   useEffect(() => {
-    if (!expanded) return;
-    const jobId = rowsRef.current.find((r) => r.id === expanded)?.job_id;
+    const jobId = logEntry?.job_id;
     if (!jobId) return;
     let cancelled = false;
     const fetchLog = async () => {
@@ -863,7 +862,7 @@ export default function Library() {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [expanded]);
+  }, [logEntry?.job_id]);
 
   function typeLabel(r: TitleRow): string {
     if (r.kind === 'episode' || r.kind === 'show') return 'Show';
@@ -920,11 +919,9 @@ export default function Library() {
     }
   }
 
-  async function toggleExpand(r: TitleRow) {
-    restoreScrollRef.current = tableScrollRef.current?.scrollTop ?? null;
-    const next = expanded === r.id ? null : r.id;
-    setExpanded(next);
-    if (next && r.job_id && logs[r.job_id] === undefined) {
+  async function openLogs(r: TitleRow) {
+    setLogEntry(r);
+    if (r.job_id && logs[r.job_id] === undefined) {
       setLogs((l) => ({ ...l, [r.job_id!]: 'Loading logs…' }));
       try {
         const res = await api.jobLog(r.job_id);
@@ -939,7 +936,7 @@ export default function Library() {
     if (restoreScrollRef.current == null || !tableScrollRef.current) return;
     tableScrollRef.current.scrollTop = restoreScrollRef.current;
     restoreScrollRef.current = null;
-  }, [expanded, rows]);
+  }, [rows]);
 
   async function transferOne(path: string) {
     try {
@@ -1241,6 +1238,14 @@ export default function Library() {
 
   function SyncCell({ r }: { r: TitleRow }) {
     if (r.row_kind !== 'library') return <span className='text-foreground'>—</span>;
+    if (r.sync_user_approved || ['approved', 'transferred'].includes(r.stage || '')) {
+      const appliedDelay = `${r.delay_ms > 0 ? '+' : ''}${r.delay_ms} ms`;
+      return (
+        <Badge variant='success' title={`Approved by you with an applied delay of ${appliedDelay}.`}>
+          Spot on · {appliedDelay}
+        </Badge>
+      );
+    }
     if (r.duration_compatible === false) {
       const minutes = r.duration_delta_seconds == null ? null : Math.abs(r.duration_delta_seconds) / 60;
       return (
@@ -1303,9 +1308,11 @@ export default function Library() {
       isJob && r.kind === 'movie' && ['failed', 'cancelled'].includes(r.job_status || '');
     const rerunActive =
       r.pending || ['running', 'stopped'].includes(r.job_status || '');
-    const isOpen = expanded === r.id;
     const status = rowStatus(r);
     const isRepacking = r.stage === 'repacking' || r.repack_status === 'repacking';
+    const isTransferring = r.transfer_status === 'transferring';
+    const operationLocked = isRepacking || isTransferring;
+    const reviewComplete = r.sync_user_approved || ['approved', 'transferred'].includes(r.stage || '');
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
@@ -1330,9 +1337,6 @@ export default function Library() {
           <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-foreground'>{dateTimeLabel(r.updated_at)}</td>
           <td className='px-2 py-2 align-middle'>
             <SourceCell r={r} />
-          </td>
-          <td className='px-2 py-2 align-middle text-xs text-foreground'>
-            <TruncCell text={r.path} mono width='20rem' />
           </td>
           <td className='px-2 py-2 align-middle' onClick={stop}>
             <div className='flex items-center justify-end gap-1'>
@@ -1387,21 +1391,36 @@ export default function Library() {
                   </Tooltip>
                 </>
               )}
-              {isLib && (
-                <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={isRepacking}>
+              {isLib && !reviewComplete && (
+                <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={operationLocked}>
                   <Play data-icon='inline-start' /> Review
                 </Button>
               )}
+              {isLib && reviewComplete && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button size='icon' variant='ghost' onClick={() => setReview(r)} disabled={operationLocked} aria-label='Open review'>
+                      <Play data-icon='inline-start' />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Open the approved review</TooltipContent>
+                </Tooltip>
+              )}
               {isLib && (
-                <Button
-                  size='icon'
-                  variant='ghost'
-                  onClick={() => openTorrentReplacement(r)}
-                  disabled={isRepacking}
-                  title='Select a new torrent'
-                >
-                  <Download className='h-4 w-4' />
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size='icon'
+                      variant='ghost'
+                      onClick={() => openTorrentReplacement(r)}
+                      disabled={operationLocked}
+                      aria-label='Select a new torrent'
+                    >
+                      <Download data-icon='inline-start' />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Select a new torrent</TooltipContent>
+                </Tooltip>
               )}
               {canReplaceSource && (
                 <Tooltip>
@@ -1425,15 +1444,20 @@ export default function Library() {
                 size='icon'
                 variant='ghost'
                 onClick={() => redo(r)}
-                disabled={redoing.has(r.id) || isRepacking || rerunActive}
+                disabled={redoing.has(r.id) || operationLocked || rerunActive}
                 title='Redo — re-run the pipeline for this title'
               >
                 {redoing.has(r.id) ? <Loader2 className='h-4 w-4 animate-spin' /> : <RefreshCw className='h-4 w-4' />}
               </Button>
               {r.job_id && (
-                <Button size='icon' variant='ghost' onClick={() => toggleExpand(r)} title={isOpen ? 'Hide logs' : 'Show logs'}>
-                  <ScrollText className='h-4 w-4' />
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button size='icon' variant='ghost' onClick={() => openLogs(r)} aria-label='Open logs'>
+                      <ScrollText data-icon='inline-start' />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Open logs</TooltipContent>
+                </Tooltip>
               )}
               {canCancel && (
                 <Button size='icon' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel'>
@@ -1456,30 +1480,19 @@ export default function Library() {
                 </Button>
               )}
               {isLib && (r.stage === 'approved' || r.transfer_status === 'failed') && (
-                <Button size='sm' variant='default' onClick={() => transferOne(r.path!)} title='Send to media server'>
+                <Button size='sm' variant='default' onClick={() => transferOne(r.path!)} disabled={operationLocked} title='Send to media server'>
                   <UploadCloud data-icon='inline-start' />
                   {r.transfer_status === 'failed' ? 'Retry transfer' : 'Transfer'}
                 </Button>
               )}
               {isLib && (
-                <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete' disabled={isRepacking}>
+                <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete' disabled={operationLocked}>
                   <Trash2 className='h-4 w-4 text-red-400' />
                 </Button>
               )}
             </div>
           </td>
         </tr>
-        {isOpen && (
-          <tr className='border-t border-border bg-black/20'>
-            <td colSpan={10} className='px-3 py-2'>
-              {r.job_id ? (
-                <LogPanel text={logs[r.job_id] ?? 'Loading logs…'} />
-              ) : (
-                <p className='text-xs text-muted-foreground'>No log available for this title.</p>
-              )}
-            </td>
-          </tr>
-        )}
       </>
     );
   }
@@ -1487,17 +1500,23 @@ export default function Library() {
   function SortHeader({ col, label, className }: { col: SortCol; label: string; className?: string }) {
     const active = sortCol === col;
     return (
-      <th className={cn('px-2 py-2 font-medium', className)}>
-        <button onClick={() => sortBy(col)} className='inline-flex items-center gap-1 hover:text-foreground'>
+      <th className={cn('px-2 py-2 font-medium', className)} aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+        <button
+          onClick={() => sortBy(col)}
+          className={cn(
+            'inline-flex items-center gap-1 rounded-md px-2 py-1 transition-colors hover:bg-secondary hover:text-foreground',
+            active && 'bg-secondary text-foreground shadow-sm',
+          )}
+        >
           {label}
           {active ? (
             sortDir === 'asc' ? (
-              <ChevronUp className='h-3 w-3' />
+              <ChevronUp className='text-info' />
             ) : (
-              <ChevronDown className='h-3 w-3' />
+              <ChevronDown className='text-info' />
             )
           ) : (
-            <ChevronsUpDown className='h-3 w-3 opacity-40' />
+            <ChevronsUpDown className='opacity-40' />
           )}
         </button>
       </th>
@@ -1576,7 +1595,6 @@ export default function Library() {
                 <SortHeader col='created_at' label='Created at' className='text-left' />
                 <SortHeader col='updated_at' label='Updated at' className='text-left' />
                 <th className='px-2 py-2 text-left font-medium'>Sources</th>
-                <th className='px-2 py-2 text-left font-medium'>Path</th>
                 <th className='px-2 py-2 text-right font-medium'>Actions</th>
               </tr>
             </thead>
@@ -1631,6 +1649,21 @@ export default function Library() {
           </div>
         </div>
       )}
+
+      <Dialog open={!!logEntry} onOpenChange={(open) => !open && setLogEntry(null)}>
+        <DialogContent className='flex max-h-[86vh] w-[94vw] max-w-5xl flex-col overflow-hidden'>
+          <DialogHeader>
+            <DialogTitle>{logEntry ? `${titleWithYear(logEntry)} logs` : 'Job logs'}</DialogTitle>
+            <DialogDescription>
+              Live pipeline output. New entries appear automatically while the job is running.
+            </DialogDescription>
+          </DialogHeader>
+          <LogPanel
+            text={logEntry?.job_id ? logs[logEntry.job_id] ?? 'Loading logs…' : 'No log available for this title.'}
+            className='max-h-none min-h-64 flex-1'
+          />
+        </DialogContent>
+      </Dialog>
 
       {/* Delete confirm */}
       <Dialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
@@ -1812,6 +1845,8 @@ type TimelineRange = {
 };
 
 const OVERVIEW_WAVEFORM_HEIGHT = 54;
+const ENGLISH_WAVE_COLOR = '#d8f3ff';
+const GERMAN_WAVE_COLOR = '#ffffff';
 
 function mergeTimelineRanges(ranges: TimelineRange[]): TimelineRange[] {
   const sorted = ranges
@@ -2558,6 +2593,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     ctx.fillRect(0, H / 2, W, 1);
   }
 
+  function drawBoundary(ctx: CanvasRenderingContext2D, x: number, height: number, color: string) {
+    ctx.fillStyle = color;
+    ctx.fillRect(Math.max(0, Math.min(ctx.canvas.width - 3, x - 1)), 0, 3, height);
+  }
+
   // Draw one lane from a wide track-time buffer. `delaySec` shifts the buffer
   // (0 for the reference/English lane, delayMs for German). `stretch` previews
   // drift from the global timeline origin, exactly like ffmpeg atempo followed
@@ -2570,6 +2610,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     buf: WaveBuffer | null,
     delaySec: number,
     color: string,
+    trackDuration: number,
     stretch = 1,
   ) {
     if (!canvas) return;
@@ -2601,6 +2642,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       }
     }
     finishLane(ctx, W, H);
+    const trackStartReference = delaySec;
+    const trackEndReference = delaySec + trackDuration / stretch;
+    if (trackStartReference >= viewStart && trackStartReference <= viewStart + windowSec) {
+      drawBoundary(ctx, ((trackStartReference - viewStart) / windowSec) * W, H, '#4ade80');
+    }
+    if (trackEndReference >= viewStart && trackEndReference <= viewStart + windowSec) {
+      drawBoundary(ctx, ((trackEndReference - viewStart) / windowSec) * W, H, '#f87171');
+    }
   }
 
   function drawOverviewLane(
@@ -2687,26 +2736,33 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     const parkedX = xForReferenceTime(parkedReferenceTime);
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.fillRect(parkedX, 0, 1, H);
+
+    const trackStartReference = lane === 'ger' ? delayMs / 1000 : 0;
+    const trackEndReference = lane === 'ger'
+      ? delayMs / 1000 + trackDuration / stretch
+      : trackDuration;
+    drawBoundary(ctx, xForReferenceTime(trackStartReference), H, '#4ade80');
+    drawBoundary(ctx, xForReferenceTime(trackEndReference), H, '#f87171');
   }
 
   function drawEng() {
-    drawLane(engCanvas.current, engBuf, 0, '#38bdf8');
+    drawLane(engCanvas.current, engBuf, 0, ENGLISH_WAVE_COLOR, engOverviewDuration);
   }
 
   function drawGer() {
-    drawLane(gerCanvas.current, gerBuf, delayMs / 1000, '#f472b6', stretch);
+    drawLane(gerCanvas.current, gerBuf, delayMs / 1000, GERMAN_WAVE_COLOR, gerOverviewDuration, stretch);
   }
 
   useEffect(() => {
     drawEng();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engBuf, canvasW, canvasH, windowSec, center, readyCachedRanges, readyBufferedRanges]);
+  }, [engBuf, engOverviewDuration, canvasW, canvasH, windowSec, center, readyCachedRanges, readyBufferedRanges]);
 
   // German redraws on every delay change too — that's the smooth drag.
   useEffect(() => {
     drawGer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gerBuf, delayMs, stretch, canvasW, canvasH, windowSec, center, readyCachedRanges, readyBufferedRanges]);
+  }, [gerBuf, gerOverviewDuration, delayMs, stretch, canvasW, canvasH, windowSec, center, readyCachedRanges, readyBufferedRanges]);
 
   useEffect(() => {
     drawOverviewLane(
@@ -2714,7 +2770,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       engOverviewBuf,
       engOverviewDuration,
       engOverviewDuration,
-      '#38bdf8',
+      ENGLISH_WAVE_COLOR,
       'eng',
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2735,7 +2791,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       gerOverviewBuf,
       gerOverviewDuration,
       engOverviewDuration,
-      '#f472b6',
+      GERMAN_WAVE_COLOR,
       'ger',
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3392,11 +3448,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             <Skeleton className='h-24 w-full' />
           </div>
         ) : (
-          <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2'>
-            {/* Stable preview height; the studio body scrolls on short screens. */}
-            <div className='relative flex h-[clamp(12rem,38vh,34rem)] shrink-0 items-center justify-center'>
+          <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2'>
+            <div className='relative flex min-h-40 flex-1 items-center justify-center'>
               <div
-                className='relative h-full max-h-full max-w-full overflow-hidden rounded-lg border border-border/60 bg-black p-1 shadow-inner shadow-black/40'
+                className='relative h-full max-h-full max-w-full overflow-hidden rounded-lg bg-black'
                 style={{ aspectRatio: info?.width && info?.height ? `${info.width} / ${info.height}` : '16 / 9' }}
               >
                 <video
@@ -3427,15 +3482,24 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   }}
                   onProgress={(event) => captureVideoBuffered(event.currentTarget)}
                   onEmptied={() => setBufferedVideoRanges([])}
-                  onWaiting={pauseGermanForVideo}
-                  onSeeking={pauseGermanForVideo}
-                  onPlaying={resumeGermanWithVideo}
+                  onWaiting={() => {
+                    setVideoLoading(true);
+                    pauseGermanForVideo();
+                  }}
+                  onSeeking={() => {
+                    setVideoLoading(true);
+                    pauseGermanForVideo();
+                  }}
+                  onPlaying={() => {
+                    setVideoLoading(false);
+                    resumeGermanWithVideo();
+                  }}
                   onSeeked={resumeGermanWithVideo}
                   onError={() => {
                     setVideoLoading(false);
                     setBufferedVideoRanges([]);
                   }}
-                  className='h-full w-full rounded-md object-contain'
+                  className='h-full w-full object-contain'
                 />
                 {videoLoading && (
                   <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
@@ -3445,7 +3509,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               </div>
             </div>
 
-            <div ref={wrapRef} className='relative flex shrink-0 flex-col gap-1'>
+            <div ref={wrapRef} className='relative flex max-h-[65vh] min-h-0 shrink-0 flex-col gap-1 overflow-y-auto'>
               <div className='flex items-center justify-end px-1 text-xs'>
                 <span className='flex flex-wrap items-center justify-end gap-3 text-white'>
                   <Tooltip>
@@ -3471,6 +3535,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     </TooltipContent>
                   </Tooltip>
                   <span className='text-muted-foreground'>for {readinessLabel}</span>
+                  <span className='flex items-center gap-1'><span className='h-3 w-0.5 bg-success' /> Start</span>
+                  <span className='flex items-center gap-1'><span className='h-3 w-0.5 bg-destructive' /> End</span>
                   <span className='font-mono'>{fmtClock(engOverviewDuration)}</span>
                 </span>
               </div>
@@ -3488,12 +3554,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 />
                 {engOverviewLoading && (
                   <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
-                    <Loader2 className='h-4 w-4 animate-spin text-sky-400' />
+                    <Loader2 className='h-4 w-4 animate-spin text-cyan-100' />
                   </div>
                 )}
               </div>
               <div className='flex items-center justify-between px-1 text-xs'>
-                <span className='flex items-center gap-2 text-sky-400'>
+                <span className='flex items-center gap-2 text-cyan-100'>
                   <Languages className='h-3.5 w-3.5' /> English (reference · click to seek · scroll to move)
                 </span>
                 <span className='font-mono text-white'>
@@ -3519,12 +3585,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   className='pointer-events-none absolute inset-y-0 left-0 z-10 -ml-1.5 w-3'
                   style={{ transform: `translateX(${seekFrac * canvasW}px)` }}
                 >
-                  <div className='absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-sky-300 shadow-[0_0_6px_rgba(56,189,248,0.9)]' />
-                  <div className='absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-sm bg-sky-300' />
+                  <div className='absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-cyan-100 shadow-[0_0_6px_rgba(207,250,254,0.9)]' />
+                  <div className='absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-sm bg-cyan-100' />
                 </div>
               </div>
               <div className='flex items-center justify-between px-1 text-xs'>
-                <span className='flex items-center gap-2 text-pink-400'>
+                <span className='flex items-center gap-2 text-white'>
                   <AudioLines className='h-3.5 w-3.5' /> German (filmpalast · drag to align, click to seek)
                   {gerStream != null && !gerBuf && <Loader2 className='h-3 w-3 animate-spin' />}
                 </span>
@@ -3555,12 +3621,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 />
                 <div
                   ref={gerHeadRef}
-                  className='pointer-events-none absolute inset-y-0 left-0 z-10 w-0.5 bg-pink-300 shadow-[0_0_6px_rgba(244,114,182,0.9)]'
+                  className='pointer-events-none absolute inset-y-0 left-0 z-10 w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)]'
                   style={{ transform: `translateX(${seekFrac * canvasW}px)` }}
                 />
                 {gerLoading && (
                   <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
-                    <Loader2 className='h-5 w-5 animate-spin text-pink-400' />
+                    <Loader2 className='h-5 w-5 animate-spin text-white' />
                   </div>
                 )}
               </div>
@@ -3578,7 +3644,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 />
                 {gerOverviewLoading && (
                   <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
-                    <Loader2 className='h-4 w-4 animate-spin text-pink-400' />
+                    <Loader2 className='h-4 w-4 animate-spin text-white' />
                   </div>
                 )}
               </div>
@@ -3602,21 +3668,42 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 </Button>
               </div>
 
-              {/* Video quality */}
-              <div className='flex items-center gap-1'>
-                <span className='text-xs text-white'>Quality</span>
-                <select
-                  value={quality}
-                  onChange={(e) => setQuality(parseInt(e.target.value, 10))}
-                  className='cursor-pointer rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs transition-colors hover:border-white/20'
-                  aria-label='Video preview quality'
-                >
-                  <option value={360}>360p</option>
-                  <option value={480}>480p</option>
-                  <option value={720}>720p</option>
-                  <option value={1080}>1080p</option>
-                </select>
-              </div>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button size='icon' variant='ghost' aria-label='Review display settings'>
+                    <MoreHorizontal data-icon='inline-start' />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align='start' side='top' className='flex flex-col gap-4'>
+                  <PopoverHeader>
+                    <PopoverTitle>Display settings</PopoverTitle>
+                    <PopoverDescription>Adjust the waveform height and preview quality.</PopoverDescription>
+                  </PopoverHeader>
+                  <div className='flex flex-col gap-2'>
+                    <div className='flex items-center justify-between gap-3 text-xs text-foreground'>
+                      <span>Audio bar height</span>
+                      <span className='font-mono'>{canvasH}px</span>
+                    </div>
+                    <Slider value={[canvasH]} min={100} max={640} step={20} onValueChange={(value) => setCanvasH(value[0])} />
+                  </div>
+                  <div className='flex items-center justify-between gap-3'>
+                    <span className='text-xs text-foreground'>Video quality</span>
+                    <Select value={String(quality)} onValueChange={(value) => setQuality(Number(value))}>
+                      <SelectTrigger className='h-8 w-28' aria-label='Video preview quality'>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value='360'>360p</SelectItem>
+                          <SelectItem value='480'>480p</SelectItem>
+                          <SelectItem value='720'>720p</SelectItem>
+                          <SelectItem value='1080'>1080p</SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </PopoverContent>
+              </Popover>
 
               {/* Drift correction (time-stretch) */}
               <div className='flex flex-wrap items-center gap-2'>
@@ -3686,13 +3773,6 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     </TooltipContent>
                   </Tooltip>
                 )}
-              </div>
-
-              {/* Waveform lane height */}
-              <div className='flex items-center gap-2'>
-                <span className='text-xs text-white'>Bars</span>
-                <Slider value={[canvasH]} min={100} max={640} step={20} onValueChange={(v) => setCanvasH(v[0])} className='w-32' />
-                <span className='w-9 text-right font-mono text-xs text-white'>{canvasH}px</span>
               </div>
 
               {/* Fine nudge */}

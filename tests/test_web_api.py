@@ -719,6 +719,9 @@ def test_titles_redo_reuses_source_and_forces_transactional_output(
             source,
             "--kind",
             "episode",
+            "--skip-sync",
+            "--from-stage",
+            "torrent",
             "--out",
             "C:\\obsolete\\old.mkv",
         ],
@@ -740,6 +743,10 @@ def test_titles_redo_reuses_source_and_forces_transactional_output(
     assert args[args.index("--url") + 1] == source
     assert args.count("--out") == 1
     assert Path(args[args.index("--out") + 1]) == movie.resolve()
+    assert "--skip-sync" not in args
+    assert "--from-stage" not in args
+    assert response.json()["fresh"] is True
+    assert response.json()["stages"] == ["extract", "torrent", "sync", "remux"]
 
 
 def test_queue_force_and_priority_endpoints(
@@ -781,6 +788,7 @@ def test_approve_with_changed_delay_starts_background_repack_on_same_entry(
     assert response.status_code == 200
     assert response.json()["background"] is True
     assert response.json()["stage"] == "repacking"
+    assert response.json()["sync_user_approved"] is True
     assert queued == [
         {
             "kind": "repack",

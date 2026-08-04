@@ -204,6 +204,7 @@ export interface LibraryEntry {
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;
+  sync_user_approved: boolean;
   duration_delta_seconds: number | null;
   duration_compatible: boolean | null;
   auto_delay_ms: number;
@@ -242,6 +243,7 @@ export interface TitleRow {
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;
+  sync_user_approved: boolean;
   duration_delta_seconds: number | null;
   duration_compatible: boolean | null;
   auto_delay_ms: number;
@@ -292,6 +294,7 @@ export interface MediaInfo {
   delay_ms: number;
   needs_sync_review: boolean;
   sync_confidence: number | null;
+  sync_user_approved: boolean;
   duration_delta_seconds: number | null;
   duration_compatible: boolean | null;
   auto_delay_ms: number;
@@ -456,7 +459,7 @@ export const api = {
   library: () => request<{ entries: LibraryEntry[]; library: string }>('/api/library'),
   titles: () => request<{ rows: TitleRow[]; library: string }>('/api/titles'),
   redoTitle: (path: string) =>
-    request<{ redo: any; title: string }>('/api/titles/redo', {
+    request<{ redo: any; title: string; fresh: boolean; stages: string[] }>('/api/titles/redo', {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),

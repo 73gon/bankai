@@ -21,6 +21,7 @@ def test_default_state_has_no_sync_flag(tmp_path: Path) -> None:
     st = review_mod.get_state(tmp_path / "movie.mkv")
     assert st.needs_sync_review is False
     assert st.sync_confidence is None
+    assert st.sync_user_approved is False
     assert st.auto_delay_ms == 0
 
 
@@ -42,6 +43,20 @@ def test_set_sync_review_roundtrip(tmp_path: Path) -> None:
     assert st.duration_compatible is False
     # Stage remains the default review stage.
     assert st.stage == "review"
+
+
+def test_user_sync_approval_is_persisted_and_reset_by_new_analysis(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+
+    approved = review_mod.set_sync_user_approved(path)
+
+    assert approved.sync_user_approved is True
+    assert approved.needs_sync_review is False
+
+    review_mod.set_sync_review(path, needs_review=True, confidence=0.4)
+    refreshed = review_mod.get_state(path)
+    assert refreshed.sync_user_approved is False
+    assert refreshed.needs_sync_review is True
 
 
 def test_legacy_duplicate_padded_source_fps_is_sanitized(tmp_path: Path) -> None:

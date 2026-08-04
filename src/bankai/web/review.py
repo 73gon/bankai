@@ -57,6 +57,10 @@ class ReviewState:
     note: str | None = None
     needs_sync_review: bool = False
     sync_confidence: float | None = None
+    # True only after the user has listened to the result and explicitly
+    # approved it.  Keep this separate from the automatic confidence so the
+    # queue can show the human QC result without rewriting the diagnostics.
+    sync_user_approved: bool = False
     auto_delay_ms: int = 0
     # Frame-rate drift diagnostics captured during visual sync (German source
     # vs the HQ reference). drift_ratio is the measured source/reference speed
@@ -227,6 +231,7 @@ def reset_for_new_output(path: str | Path) -> ReviewState:
                 "note": None,
                 "needs_sync_review": False,
                 "sync_confidence": None,
+                "sync_user_approved": False,
                 "auto_delay_ms": 0,
                 "source_fps": None,
                 "reference_fps": None,
@@ -290,6 +295,7 @@ def set_sync_review(
     def change(raw: dict) -> None:
         raw["needs_sync_review"] = bool(needs_review)
         raw["sync_confidence"] = confidence
+        raw["sync_user_approved"] = False
         raw["auto_delay_ms"] = int(applied_delay_ms)
         if source_fps is not None:
             raw["source_fps"] = float(source_fps)
@@ -301,6 +307,18 @@ def set_sync_review(
             raw["duration_delta_seconds"] = float(duration_delta_seconds)
         if duration_compatible is not None:
             raw["duration_compatible"] = bool(duration_compatible)
+        raw["updated_at"] = time.time()
+
+    return _update(path, change)
+
+
+def set_sync_user_approved(path: str | Path, approved: bool = True) -> ReviewState:
+    """Record the user's explicit sync QC decision for one finished file."""
+
+    def change(raw: dict) -> None:
+        raw["sync_user_approved"] = bool(approved)
+        if approved:
+            raw["needs_sync_review"] = False
         raw["updated_at"] = time.time()
 
     return _update(path, change)

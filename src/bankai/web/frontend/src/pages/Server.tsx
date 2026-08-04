@@ -33,19 +33,6 @@ function fmtSize(bytes: number): string {
   return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
 }
 
-function LocationBadge({ item }: { item: ServerTitle }) {
-  if (!item.present) return <Badge variant='muted'>Missing</Badge>;
-  const directory = item.directory ?? item.location ?? 'Unknown directory';
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge variant='success' className='max-w-56 truncate font-mono text-[10px]'>{directory}</Badge>
-      </TooltipTrigger>
-      <TooltipContent className='font-mono'>{directory}</TooltipContent>
-    </Tooltip>
-  );
-}
-
 function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameTarget) => void }) {
   const [open, setOpen] = useState(false);
   const [seasons, setSeasons] = useState<ServerSeason[] | null>(null);
@@ -90,7 +77,6 @@ function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameT
           )}
           {it.location ? <PathText text={it.name} tooltip={it.location} className='truncate text-sm' /> : <span className='truncate text-sm'>{it.name}</span>}
         </span>
-        <LocationBadge item={it} />
       </button>
       {open && (
         <div className='ml-6 mt-1 space-y-2 border-l border-border/60 pl-3'>
@@ -117,11 +103,14 @@ function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameT
                     ) : (
                       se.episodes.map((ep) => (
                         <div key={ep.path} className='flex items-center justify-between gap-3 rounded px-2 py-1 pl-6 hover:bg-secondary/30'>
-                          <div className='flex min-w-0 items-center gap-1'>
+                          <div className='min-w-0'>
                             <Tooltip>
                               <TooltipTrigger asChild><span className='truncate text-xs'>{ep.name}</span></TooltipTrigger>
                               <TooltipContent className='font-mono'>{ep.path}</TooltipContent>
                             </Tooltip>
+                          </div>
+                          <div className='ml-auto flex shrink-0 items-center gap-1'>
+                            <span className='text-[11px] text-muted-foreground'>{fmtSize(ep.size)}</span>
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
@@ -136,7 +125,6 @@ function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameT
                               <TooltipContent>Rename this episode file</TooltipContent>
                             </Tooltip>
                           </div>
-                          <span className='ml-auto shrink-0 text-[11px] text-muted-foreground'>{fmtSize(ep.size)}</span>
                         </div>
                       ))
                     ))}
@@ -156,6 +144,7 @@ function Column({
   items,
   filter,
   expandable,
+  directories,
   revision,
   onRename,
 }: {
@@ -164,53 +153,72 @@ function Column({
   items: ServerTitle[];
   filter: string;
   expandable?: boolean;
+  directories: string[];
   revision: number;
   onRename: (target: RenameTarget) => void;
 }) {
   const filtered = items.filter((i) => i.name.toLowerCase().includes(filter.toLowerCase()));
-  const present = items.filter((i) => i.present).length;
+  const groups = directories.map((directory) => ({
+    directory,
+    items: filtered.filter((item) => item.directory?.toLocaleLowerCase() === directory.toLocaleLowerCase()),
+  }));
+  const ungrouped = filtered.filter(
+    (item) => !directories.some((directory) => item.directory?.toLocaleLowerCase() === directory.toLocaleLowerCase()),
+  );
+  if (ungrouped.length > 0) groups.push({ directory: 'Other / unavailable', items: ungrouped });
   return (
     <Card className='flex h-full min-h-0 flex-col'>
       <CardHeader className='flex flex-row items-center justify-between'>
         <CardTitle className='flex items-center gap-2'>
           <Icon className='h-4 w-4' /> {title}
         </CardTitle>
-        <Badge variant='muted'>
-          {present}/{items.length} on server
-        </Badge>
+        <span className='text-xs text-muted-foreground'>{items.length} titles</span>
       </CardHeader>
-      <CardContent className='min-h-0 flex-1 space-y-1.5 overflow-auto'>
-        {filtered.length === 0 ? (
+      <CardContent className='min-h-0 flex-1 overflow-auto'>
+        {groups.length === 0 ? (
           <p className='py-6 text-center text-sm text-muted-foreground'>No titles.</p>
-        ) : expandable ? (
-          filtered.map((it) => <ShowRow key={`${it.name}:${revision}`} it={it} onRename={onRename} />)
         ) : (
-          filtered.map((it) => (
-            <div key={it.name} className='flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-secondary/40'>
-              <div className='flex min-w-0 items-center gap-1'>
-                <Tooltip>
-                  <TooltipTrigger asChild><span className='truncate text-sm'>{it.name}</span></TooltipTrigger>
-                  <TooltipContent className='font-mono'>{it.location || it.name}</TooltipContent>
-                </Tooltip>
-                {it.present && it.location && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size='icon'
-                        variant='ghost'
-                        onClick={() => onRename({ kind: 'movie', name: it.name, path: it.location! })}
-                        aria-label='Rename the movie folder and matching file'
-                      >
-                        <Pencil />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Rename the movie folder and matching file</TooltipContent>
-                  </Tooltip>
-                )}
-              </div>
-              <LocationBadge item={it} />
-            </div>
-          ))
+          <div className='flex flex-col gap-4'>
+            {groups.map((group) => (
+              <section key={group.directory} className='overflow-hidden rounded-lg border border-border/70'>
+                <div className='flex items-center justify-between gap-3 bg-secondary/35 px-3 py-2'>
+                  <PathText text={group.directory} tooltip={group.directory} className='truncate font-mono text-xs text-foreground' />
+                  <span className='shrink-0 text-xs text-muted-foreground'>{group.items.length}</span>
+                </div>
+                <div className='flex flex-col gap-0.5 p-1'>
+                  {group.items.length === 0 ? (
+                    <p className='px-2 py-4 text-center text-xs text-muted-foreground'>No matching titles in this directory.</p>
+                  ) : expandable ? (
+                    group.items.map((it) => <ShowRow key={`${it.name}:${revision}`} it={it} onRename={onRename} />)
+                  ) : (
+                    group.items.map((it) => (
+                      <div key={it.name} className='flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-secondary/40'>
+                        <Tooltip>
+                          <TooltipTrigger asChild><span className='min-w-0 truncate text-sm'>{it.name}</span></TooltipTrigger>
+                          <TooltipContent className='font-mono'>{it.location || it.name}</TooltipContent>
+                        </Tooltip>
+                        {it.present && it.location && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size='icon'
+                                variant='ghost'
+                                onClick={() => onRename({ kind: 'movie', name: it.name, path: it.location! })}
+                                aria-label='Rename the movie folder and matching file'
+                              >
+                                <Pencil />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Rename the movie folder and matching file</TooltipContent>
+                          </Tooltip>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            ))}
+          </div>
         )}
       </CardContent>
     </Card>
@@ -378,8 +386,8 @@ export default function Server() {
         </div>
       ) : (
         <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2'>
-          <Column title='Movies' icon={Film} items={movies} filter={filter} revision={revision} onRename={openRename} />
-          <Column title='Shows' icon={Tv} items={shows} filter={filter} expandable revision={revision} onRename={openRename} />
+          <Column title='Movies' icon={Film} items={movies} directories={movieDirs} filter={filter} revision={revision} onRename={openRename} />
+          <Column title='Shows' icon={Tv} items={shows} directories={showDirs} filter={filter} expandable revision={revision} onRename={openRename} />
         </div>
       )}
 

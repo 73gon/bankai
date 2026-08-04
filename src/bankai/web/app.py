@@ -1548,6 +1548,7 @@ def create_app() -> Any:
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
+                    "sync_user_approved": state.sync_user_approved,
                     "duration_delta_seconds": state.duration_delta_seconds,
                     "duration_compatible": state.duration_compatible,
                     "auto_delay_ms": state.auto_delay_ms,
@@ -1735,6 +1736,7 @@ def create_app() -> Any:
                     "delay_ms": state.delay_ms,
                     "needs_sync_review": state.needs_sync_review,
                     "sync_confidence": state.sync_confidence,
+                    "sync_user_approved": state.sync_user_approved,
                     "duration_delta_seconds": state.duration_delta_seconds,
                     "duration_compatible": state.duration_compatible,
                     "auto_delay_ms": state.auto_delay_ms,
@@ -1845,6 +1847,7 @@ def create_app() -> Any:
                     "delay_ms": 0,
                     "needs_sync_review": False,
                     "sync_confidence": None,
+                    "sync_user_approved": False,
                     "duration_delta_seconds": None,
                     "duration_compatible": None,
                     "auto_delay_ms": 0,
@@ -1907,6 +1910,38 @@ def create_app() -> Any:
         if best is None or not best.args:
             raise HTTPException(status_code=404, detail="no previous run found to redo")
         args = list(best.args)
+        if not args or args[0] != "run":
+            raise HTTPException(
+                status_code=409,
+                detail="the previous run cannot be restarted as a full pipeline",
+            )
+        # A Redo is always a fresh end-to-end pipeline.  Older or manually
+        # created job metadata may contain experimental resume/skip flags;
+        # never carry those into a user-requested full restart.
+        shortcut_flags = {
+            "--resume",
+            "--reuse-extract",
+            "--reuse-torrent",
+            "--skip-extract",
+            "--skip-torrent",
+            "--skip-sync",
+        }
+        shortcut_options = {"--from-stage", "--start-at"}
+        fresh_args: list[str] = []
+        skip_value = False
+        for arg in args:
+            if skip_value:
+                skip_value = False
+                continue
+            if arg in shortcut_flags:
+                continue
+            if arg in shortcut_options:
+                skip_value = True
+                continue
+            if any(arg.startswith(f"{option}=") for option in shortcut_options):
+                continue
+            fresh_args.append(arg)
+        args = fresh_args
         output: Path | None = None
         if "/" in raw or "\\" in raw:
             output = _safe_library_output(raw)
@@ -1918,7 +1953,12 @@ def create_app() -> Any:
             # working file, then atomically replaces this path only on success.
             args = _set_cli_option(args, "--out", str(output))
         job = webjobs.enqueue(kind=best.kind, title=best.title, args=args)
-        return {"redo": job, "title": best.title}
+        return {
+            "redo": job,
+            "title": best.title,
+            "fresh": True,
+            "stages": ["extract", "torrent", "sync", "remux"],
+        }
 
     @app.get("/api/media/info")
     def media_info(path: str = Query(...)) -> dict:
@@ -1941,6 +1981,7 @@ def create_app() -> Any:
             "delay_ms": state.delay_ms,
             "needs_sync_review": state.needs_sync_review,
             "sync_confidence": state.sync_confidence,
+            "sync_user_approved": state.sync_user_approved,
             "duration_delta_seconds": state.duration_delta_seconds,
             "duration_compatible": state.duration_compatible,
             "auto_delay_ms": state.auto_delay_ms,
@@ -2455,8 +2496,10 @@ def create_app() -> Any:
             if req.track_index is not None:
                 args.extend(["--track-index", str(req.track_index)])
             job = webjobs.enqueue(kind="repack", title=f"Repack {p.name}", args=args)
+            review_mod.set_sync_user_approved(str(p))
             state = review_mod.set_repack(str(p), "repacking", percent=0.0, kind="audio")
             return {**review_mod.to_dict(state), "background": True, "job": job}
+        review_mod.set_sync_user_approved(str(p))
         state = review_mod.set_stage(str(p), "approved")
         return {**review_mod.to_dict(state), "background": False}
 
@@ -2498,6 +2541,7 @@ def create_app() -> Any:
             title=f"Replace torrent {p.name}",
             args=args,
         )
+        review_mod.set_sync_user_approved(str(p), False)
         state = review_mod.set_repack(str(p), "repacking", percent=0.0, kind="torrent")
         return {**review_mod.to_dict(state), "background": True, "job": job}
 
@@ -2511,6 +2555,7 @@ def create_app() -> Any:
             except HTTPException as exc:
                 errors.append({"path": raw, "detail": str(exc.detail)})
                 continue
+            review_mod.set_sync_user_approved(str(p))
             state = review_mod.set_stage(str(p), "approved")
             approved.append(review_mod.to_dict(state))
         return {"approved": approved, "count": len(approved), "errors": errors}

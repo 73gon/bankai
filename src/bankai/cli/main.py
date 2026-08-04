@@ -1926,6 +1926,7 @@ def review_repack(
         log.info("BANKAI_PROGRESS stage=repack pct=100 status=done")
         console.print_json(data={"final_path": str(path), "message": result.message})
     except Exception as exc:
+        review_mod.set_sync_user_approved(path, False)
         review_mod.set_repack(path, "failed", kind="audio", note=str(exc))
         print(f"{type(exc).__name__}: {exc}", flush=True)
         raise typer.Exit(code=1) from exc
