@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2 } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api, type VpnStatus } from '@/lib/api';
@@ -12,10 +12,12 @@ import Library from '@/pages/Library';
 import Server from '@/pages/Server';
 import Settings from '@/pages/Settings';
 import Anime from '@/pages/Anime';
+import Recent from '@/pages/Recent';
 
 const NAV = [
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/search', label: 'Search', icon: SearchIcon },
+  { to: '/recent', label: 'Recently Released', icon: CalendarClock },
   { to: '/anime', label: 'Anime', icon: Sparkles },
   { to: '/queue', label: 'Queue', icon: ListVideo },
   { to: '/library', label: 'Library', icon: HardDrive },
@@ -215,6 +217,7 @@ export default function App() {
               <Route path='/' element={<Navigate to='/discover' replace />} />
               <Route path='/discover' element={<Discover />} />
               <Route path='/search' element={<Search />} />
+              <Route path='/recent' element={<Recent />} />
               <Route path='/anime' element={<Anime />} />
               <Route path='/queue' element={<Library />} />
               <Route path='/library' element={<Server />} />

@@ -152,6 +152,46 @@ async def test_filmpalast_search_parses_fixture(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_filmpalast_recent_groups_three_pages_and_extracts_release() -> None:
+    requested_paths: list[str] = []
+
+    def listing(page: int, *, next_page: int | None) -> str:
+        next_link = f'<a href="/page/{next_page}">vorwärts +</a>' if next_page else ""
+        return f"""
+        <article class="liste rb">
+          <a class="rb" href="/stream/movie-{page}">
+            <img data-src="/cover/{page}.jpg"><h2>Movie {page}</h2>
+          </a>
+          <span>Release: Movie.{page}.2026.GERMAN.TELESYNC.1080p.X264-GROUP</span>
+          <span>Jahr: 2026 / Spielzeit: 89 min</span>
+        </article>
+        {next_link}
+        """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        page = 1 if request.url.path == "/" else int(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(200, text=listing(page, next_page=page + 1))
+
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid", transport=httpx.MockTransport(handler)
+    )
+    try:
+        results, has_next, source_start, source_end = await backend.recent(1)
+    finally:
+        await backend.aclose()
+
+    assert requested_paths == ["/page/4", "/page/5", "/page/6"]
+    assert (source_start, source_end, has_next) == (4, 6, True)
+    assert [result.title for result in results] == ["Movie 4", "Movie 5", "Movie 6"]
+    assert results[0].release_name == "Movie.4.2026.GERMAN.TELESYNC.1080p.X264-GROUP"
+    assert results[0].poster_url == "http://example.invalid/cover/4.jpg"
+    assert results[0].raw["runtime_minutes"] == "89"
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_series_lookup_tries_direct_slug_first() -> None:
     html = """
     <html>

@@ -162,6 +162,26 @@ export interface SearchResult {
   year: number | null;
   kind: string;
   url: string;
+  release_name?: string | null;
+}
+
+export interface RecentRelease {
+  site: string;
+  title: string;
+  url: string;
+  kind: 'movie' | 'episode';
+  year: number | null;
+  poster_url: string | null;
+  release_name: string | null;
+  runtime_minutes: number | null;
+}
+
+export interface RecentReleasePage {
+  items: RecentRelease[];
+  page: number;
+  source_page_start: number;
+  source_page_end: number;
+  has_next: boolean;
 }
 
 export interface EpisodeItem {
@@ -354,6 +374,7 @@ export const api = {
 
   search: (q: string, kind: string, site?: string) =>
     request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ''}`),
+  recentReleases: (page = 0) => request<RecentReleasePage>(`/api/releases/recent?page=${page}`),
   torrentSearch: (q: string, runtimeSeconds?: number | null, options: TorrentSearchOptions = {}) => {
     const params = new URLSearchParams({ q });
     if (runtimeSeconds) params.set('runtime_seconds', String(runtimeSeconds));

@@ -27,6 +27,7 @@ class SearchResult:
     year: int | None = None
     quality: str | None = None
     poster_url: str | None = None
+    release_name: str | None = None
     raw: dict[str, str] = field(default_factory=dict)
 
 

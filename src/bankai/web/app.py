@@ -57,6 +57,7 @@ _CLIP_CACHE_LOCKS = tuple(threading.Lock() for _ in range(64))
 # so the client can show a loader and retry instead of blocking everything.
 _FFMPEG_SLOTS = threading.BoundedSemaphore(4)
 _LAPTOP_VPN_SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+_RECENT_RELEASE_CACHE: dict[int, tuple[float, dict]] = {}
 
 
 def _backfill_review_duration_integrity() -> None:
@@ -970,10 +971,56 @@ def create_app() -> Any:
                     "year": r.year,
                     "kind": str(r.kind),
                     "url": r.url,
+                    "release_name": r.release_name,
                 }
                 for r in results
             ]
         }
+
+    @app.get("/api/releases/recent")
+    async def recent_releases(page: int = Query(0, ge=0)) -> dict:
+        """Return three Filmpalast listing pages as one Bankai page."""
+        cached = _RECENT_RELEASE_CACHE.get(page)
+        if cached is not None and time.monotonic() - cached[0] < 300:
+            return cached[1]
+
+        from bankai.scraper.backends.filmpalast import FilmpalastBackend
+
+        backend = FilmpalastBackend()
+        try:
+            results, has_next, source_start, source_end = await backend.recent(page)
+        except Exception as exc:
+            log.warning("Filmpalast recent-release fetch failed: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail="Filmpalast's recent releases could not be loaded. Please try again.",
+            ) from exc
+        finally:
+            await backend.aclose()
+
+        payload = {
+            "items": [
+                {
+                    "site": result.site,
+                    "title": result.title,
+                    "url": result.url,
+                    "kind": str(result.kind),
+                    "year": result.year,
+                    "poster_url": result.poster_url,
+                    "release_name": result.release_name,
+                    "runtime_minutes": int(result.raw["runtime_minutes"])
+                    if result.raw.get("runtime_minutes", "").isdigit()
+                    else None,
+                }
+                for result in results
+            ],
+            "page": page,
+            "source_page_start": source_start,
+            "source_page_end": source_end,
+            "has_next": has_next,
+        }
+        _RECENT_RELEASE_CACHE[page] = (time.monotonic(), payload)
+        return payload
 
     @app.get("/api/torrents/search")
     async def torrent_search(

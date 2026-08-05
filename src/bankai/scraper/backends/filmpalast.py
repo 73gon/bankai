@@ -29,6 +29,11 @@ log = get_logger(__name__)
 _BASE = "https://filmpalast.to"
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 _EPISODE_RE = re.compile(r"-s(?P<season>\d{1,2})-?e(?P<episode>\d{1,3})(?:-|$)", re.I)
+_RELEASE_RE = re.compile(
+    r"\bRelease\s*:\s*(?P<release>.+?)(?=\s+(?:Jahr|Spielzeit|Views|Votes|Imdb|IMDb)\s*:|$)",
+    re.I,
+)
+_RUNTIME_RE = re.compile(r"\bSpielzeit\s*:\s*(?P<minutes>\d+)\s*(?:min|Min\.)?", re.I)
 
 
 @register
@@ -67,6 +72,43 @@ class FilmpalastBackend:
         if resp.status_code != 200:
             raise ScraperError(f"filmpalast search failed: HTTP {resp.status_code}")
         return self._parse_search(resp.text, limit=limit)
+
+    async def recent(
+        self,
+        page: int,
+        *,
+        pages_per_page: int = 3,
+    ) -> tuple[list[SearchResult], bool, int, int]:
+        """Return a logical recent-release page assembled from site pages.
+
+        Filmpalast publishes relatively short pages. Bankai intentionally groups
+        three of them into one denser page while preserving the site's ordering.
+        """
+        logical_page = max(0, int(page))
+        group_size = max(1, int(pages_per_page))
+        source_start = logical_page * group_size + 1
+        source_end = source_start + group_size - 1
+        results: list[SearchResult] = []
+        seen: set[str] = set()
+        has_next = False
+
+        for source_page in range(source_start, source_end + 1):
+            path = "/" if source_page == 1 else f"/page/{source_page}"
+            resp = await self._client.get(path)
+            detect_cloudflare(resp)
+            if resp.status_code != 200:
+                raise ScraperError(
+                    f"filmpalast recent page {source_page} failed: HTTP {resp.status_code}"
+                )
+            for item in self._parse_search(resp.text, limit=1_000):
+                if item.url in seen:
+                    continue
+                seen.add(item.url)
+                results.append(item)
+            if source_page == source_end:
+                has_next = _has_page_link(resp.text, source_page + 1)
+
+        return results, has_next, source_start, source_end
 
     async def _search_fallback(self, query: str, *, kind: MediaKind | None, limit: int) -> list[SearchResult]:
         for variant in _query_variants(query):
@@ -126,10 +168,25 @@ class FilmpalastBackend:
             if not title:
                 continue
             poster_el = article.css_first("img")
-            poster = poster_el.attributes.get("src") if poster_el is not None else None
+            poster = None
+            if poster_el is not None:
+                poster = next(
+                    (
+                        poster_el.attributes.get(name)
+                        for name in ("data-src", "data-original", "src")
+                        if poster_el.attributes.get(name)
+                    ),
+                    None,
+                )
             if poster:
                 poster = urljoin(self._base, poster)
+            article_text = " ".join((article.text(separator=" ") or "").split())
+            release_match = _RELEASE_RE.search(article_text)
+            runtime_match = _RUNTIME_RE.search(article_text)
+            release_name = release_match.group("release").strip().rstrip("\u200b") if release_match else None
             year_match = _YEAR_RE.search(title)
+            if year_match is None and release_name:
+                year_match = _YEAR_RE.search(release_name)
             year = int(year_match.group(0)) if year_match else None
             kind = MediaKind.EPISODE if _EPISODE_RE.search(href) or _EPISODE_RE.search(title) else MediaKind.MOVIE
             results.append(
@@ -140,6 +197,8 @@ class FilmpalastBackend:
                     kind=kind,
                     year=year,
                     poster_url=poster,
+                    release_name=release_name,
+                    raw={"runtime_minutes": runtime_match.group("minutes")} if runtime_match else {},
                 )
             )
             if len(results) >= limit:
@@ -453,6 +512,16 @@ def _query_variants(query: str) -> list[str]:
         add(" ".join(words[:n]))
     # Drop the original query (it already failed before fallback ran).
     return [v for v in variants if v.casefold() != q.casefold()]
+
+
+def _has_page_link(html: str, page: int) -> bool:
+    """Return whether the listing links to the requested source page."""
+    tree = HTMLParser(html)
+    expected = f"/page/{page}"
+    return any(
+        (anchor.attributes.get("href") or "").rstrip("/").endswith(expected)
+        for anchor in tree.css("a[href]")
+    )
 
 
 def _slugify(value: str) -> str:

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { GermanRelease } from '@/components/GermanRelease';
 import { Separator } from '@/components/ui/separator';
 import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
 
@@ -250,7 +251,12 @@ export default function Discover() {
       }
       setSearchTerm(name);
       const r = await api.search(name, 'movie');
-      const first = verifiedResult ? [{ ...verifiedResult, title: name }] : [];
+      const verifiedSearchResult = verifiedResult
+        ? r.results.find((result) => result.url === verifiedResult.url)
+        : undefined;
+      const first = verifiedResult
+        ? [{ ...verifiedResult, title: name, release_name: verifiedSearchResult?.release_name }]
+        : [];
       setFilmResults([
         ...first,
         ...r.results.filter((result) => !first.some((verified) => verified.url === result.url)),
@@ -528,6 +534,7 @@ export default function Discover() {
                             Verified German source
                           </Badge>
                         )}
+                        <GermanRelease value={r.release_name} />
                       </div>
                       <Button size='sm' onClick={() => queueMovie(r)} disabled={busyUrl === r.url}>
                         {busyUrl === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}

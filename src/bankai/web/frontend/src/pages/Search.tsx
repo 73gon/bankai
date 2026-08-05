@@ -13,6 +13,7 @@ import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { GermanRelease } from '@/components/GermanRelease';
 import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
 
 const SEARCH_HIDE_LIBRARY_KEY = 'bankai:search-hide-library';
@@ -649,6 +650,7 @@ export default function Search() {
                       <Badge variant='muted' className='mt-1'>
                         {siteLabel(r.site)}
                       </Badge>
+                      <GermanRelease value={r.release_name} />
                     </div>
                     <Button size='sm' onClick={() => queueMovie(r)} disabled={busy === r.url}>
                       {busy === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}

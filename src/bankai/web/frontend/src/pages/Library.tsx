@@ -1307,7 +1307,7 @@ export default function Library() {
     const canReplaceSource =
       isJob && r.kind === 'movie' && ['failed', 'cancelled'].includes(r.job_status || '');
     const rerunActive =
-      r.pending || ['running', 'stopped'].includes(r.job_status || '');
+      r.pending || ['queued', 'running', 'stopped'].includes(r.job_status || '');
     const status = rowStatus(r);
     const isRepacking = r.stage === 'repacking' || r.repack_status === 'repacking';
     const isTransferring = r.transfer_status === 'transferring';
@@ -1391,12 +1391,12 @@ export default function Library() {
                   </Tooltip>
                 </>
               )}
-              {isLib && !reviewComplete && (
+              {isLib && !rerunActive && !reviewComplete && (
                 <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={operationLocked}>
                   <Play data-icon='inline-start' /> Review
                 </Button>
               )}
-              {isLib && reviewComplete && (
+              {isLib && !rerunActive && reviewComplete && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button size='icon' variant='ghost' onClick={() => setReview(r)} disabled={operationLocked} aria-label='Open review'>
@@ -1511,12 +1511,12 @@ export default function Library() {
           {label}
           {active ? (
             sortDir === 'asc' ? (
-              <ChevronUp className='text-info' />
+              <ChevronUp className='size-3 text-foreground' />
             ) : (
-              <ChevronDown className='text-info' />
+              <ChevronDown className='size-3 text-foreground' />
             )
           ) : (
-            <ChevronsUpDown className='opacity-40' />
+            <ChevronsUpDown className='size-3 opacity-40' />
           )}
         </button>
       </th>
