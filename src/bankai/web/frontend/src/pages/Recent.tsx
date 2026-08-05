@@ -21,7 +21,7 @@ function Poster({ item }: { item: RecentRelease }) {
       {item.poster_url && !failed ? (
         <img
           src={api.posterUrl(item.poster_url)}
-          alt=''
+          alt={`${item.title} cover`}
           className='size-full object-cover'
           loading='lazy'
           decoding='async'
@@ -138,7 +138,7 @@ export default function Recent() {
   }
 
   return (
-    <div className='space-y-6'>
+    <div className='flex flex-col gap-6'>
       <header className='flex flex-wrap items-baseline gap-2'>
         <h1 className='text-2xl font-semibold'>Recently Released</h1>
         <span className='text-sm text-muted-foreground'>— Latest German releases from Filmpalast.</span>
@@ -160,41 +160,38 @@ export default function Recent() {
       </div>
 
       {loading && !data ? (
-        <div className='grid gap-4 sm:grid-cols-2 xl:grid-cols-3'>
-          {Array.from({ length: 9 }).map((_, index) => <Skeleton key={index} className='h-64 rounded-lg' />)}
+        <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5'>
+          {Array.from({ length: 10 }).map((_, index) => <Skeleton key={index} className='aspect-[2/3] rounded-lg' />)}
         </div>
       ) : visibleItems.length === 0 ? (
         <EmptyState icon={CalendarClock} title='No recent releases found' description='Try another page or filter.' />
       ) : (
-        <div className='grid gap-4 sm:grid-cols-2 xl:grid-cols-3'>
+        <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5'>
           {visibleItems.map((item) => (
-            <Card key={item.url} className='grid grid-cols-[7rem_minmax(0,1fr)] overflow-hidden'>
-              <div className='p-4 pr-0'><Poster item={item} /></div>
-              <div className='flex min-w-0 flex-col'>
-                <CardHeader className='pb-3'>
-                  <div className='flex flex-wrap items-center gap-2'>
-                    <Badge variant={item.kind === 'movie' ? 'review' : 'info'}>
-                      {item.kind === 'movie' ? 'Movie' : 'Episode'}
-                    </Badge>
-                    {item.year && <span className='text-xs text-muted-foreground'>{item.year}</span>}
-                    {item.runtime_minutes && <span className='text-xs text-muted-foreground'>{item.runtime_minutes} min</span>}
-                  </div>
-                  <CardTitle className='line-clamp-2 font-serif text-base leading-6'>{item.title}</CardTitle>
-                </CardHeader>
-                <CardContent className='flex-1 pb-3'>
-                  <GermanRelease value={item.release_name} className='mt-0' />
-                </CardContent>
-                <CardFooter className='gap-2 pt-0'>
-                  <Button size='sm' variant='secondary' onClick={() => window.open(item.url, '_blank', 'noopener,noreferrer')}>
-                    <ExternalLink data-icon='inline-start' /> Source
+            <Card key={item.url} className='flex min-w-0 flex-col overflow-hidden'>
+              <CardContent className='p-0'>
+                <Poster item={item} />
+              </CardContent>
+              <CardHeader className='flex-1 gap-2 p-4 pb-3'>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Badge variant={item.kind === 'movie' ? 'review' : 'info'}>
+                    {item.kind === 'movie' ? 'Movie' : 'Episode'}
+                  </Badge>
+                  {item.year && <span className='text-xs text-muted-foreground'>{item.year}</span>}
+                  {item.runtime_minutes && <span className='text-xs text-muted-foreground'>{item.runtime_minutes} min</span>}
+                </div>
+                <CardTitle className='line-clamp-2 text-base leading-6'>{item.title}</CardTitle>
+              </CardHeader>
+              <CardFooter className='gap-2 p-4 pt-0'>
+                <Button className='flex-1' size='sm' variant='secondary' onClick={() => window.open(item.url, '_blank', 'noopener,noreferrer')}>
+                  <ExternalLink data-icon='inline-start' /> Source
+                </Button>
+                {item.kind === 'movie' && (
+                  <Button className='flex-1' size='sm' onClick={() => void findTvdb(item)}>
+                    <Plus data-icon='inline-start' /> Add
                   </Button>
-                  {item.kind === 'movie' && (
-                    <Button size='sm' onClick={() => void findTvdb(item)}>
-                      <Plus data-icon='inline-start' /> Add
-                    </Button>
-                  )}
-                </CardFooter>
-              </div>
+                )}
+              </CardFooter>
             </Card>
           ))}
         </div>
@@ -237,11 +234,11 @@ export default function Recent() {
             </Button>
           </div>
           {matching ? (
-            <div className='space-y-2'>{Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className='h-16' />)}</div>
+            <div className='flex flex-col gap-2'>{Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className='h-16' />)}</div>
           ) : matches.length === 0 ? (
             <EmptyState icon={Search} title='No TVDB match yet' description='Adjust the title above and search again.' />
           ) : (
-            <div className='space-y-2'>
+            <div className='flex flex-col gap-2'>
               {matches.map((match) => (
                 <div key={match.tvdb_id ?? match.name} className='flex items-center justify-between gap-3 rounded-lg border border-border/60 p-3'>
                   <div className='min-w-0'>
