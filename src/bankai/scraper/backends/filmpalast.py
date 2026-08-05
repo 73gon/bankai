@@ -78,6 +78,7 @@ class FilmpalastBackend:
         page: int,
         *,
         pages_per_page: int = 3,
+        feed: str = "new",
     ) -> tuple[list[SearchResult], bool, int, int]:
         """Return a logical recent-release page assembled from site pages.
 
@@ -86,6 +87,14 @@ class FilmpalastBackend:
         """
         logical_page = max(0, int(page))
         group_size = max(1, int(pages_per_page))
+        feed_path = {
+            "new": "",
+            "movies": "/movies/new",
+            "shows": "/serien/view",
+            "top": "/movies/top",
+        }.get(feed.strip().casefold())
+        if feed_path is None:
+            raise ValueError("feed must be new, movies, shows, or top")
         source_start = logical_page * group_size + 1
         source_end = source_start + group_size - 1
         results: list[SearchResult] = []
@@ -93,7 +102,9 @@ class FilmpalastBackend:
         has_next = False
 
         for source_page in range(source_start, source_end + 1):
-            path = "/" if source_page == 1 else f"/page/{source_page}"
+            path = feed_path or "/"
+            if source_page > 1:
+                path = f"{feed_path}/page/{source_page}" if feed_path else f"/page/{source_page}"
             resp = await self._client.get(path)
             detect_cloudflare(resp)
             if resp.status_code != 200:

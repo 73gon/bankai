@@ -192,6 +192,38 @@ async def test_filmpalast_recent_groups_three_pages_and_extracts_release() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("feed", "expected_paths"),
+    [
+        ("movies", ["/movies/new", "/movies/new/page/2", "/movies/new/page/3"]),
+        ("shows", ["/serien/view", "/serien/view/page/2", "/serien/view/page/3"]),
+        ("top", ["/movies/top", "/movies/top/page/2", "/movies/top/page/3"]),
+    ],
+)
+async def test_filmpalast_recent_uses_feed_routes(
+    feed: str,
+    expected_paths: list[str],
+) -> None:
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        return httpx.Response(200, text='<a href="/page/99">next</a>')
+
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid", transport=httpx.MockTransport(handler)
+    )
+    try:
+        await backend.recent(0, feed=feed)
+    finally:
+        await backend.aclose()
+
+    assert requested_paths == expected_paths
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_series_lookup_tries_direct_slug_first() -> None:
     html = """
     <html>

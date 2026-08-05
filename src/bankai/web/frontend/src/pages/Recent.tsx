@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CalendarClock, ExternalLink, Film, Loader2, Plus, Search, Tv } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type DiscoverItem, type RecentRelease, type RecentReleasePage } from '@/lib/api';
+import { api, type DiscoverItem, type FilmpalastFeed, type RecentRelease, type RecentReleasePage } from '@/lib/api';
 import { GermanRelease } from '@/components/GermanRelease';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -11,8 +11,28 @@ import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
-const pageCache = new Map<number, RecentReleasePage>();
+const pageCache = new Map<string, RecentReleasePage>();
+
+function pageCacheKey(feed: FilmpalastFeed, page: number) {
+  return `${feed}:${page}`;
+}
+
+function episodeIdentity(item: RecentRelease) {
+  const source = `${item.title} ${item.release_name ?? ''} ${item.url}`;
+  const match = source.match(/\bS(\d{1,2})E(\d{1,3})\b/i);
+  if (!match) return null;
+  const seriesTitle = item.title
+    .replace(/\s*S\d{1,2}E\d{1,3}.*$/i, '')
+    .replace(/\s*\((?:19|20)\d{2}\)\s*$/, '')
+    .trim();
+  return {
+    seriesTitle: seriesTitle || item.title,
+    season: Number(match[1]),
+    episode: Number(match[2]),
+  };
+}
 
 function Poster({ item }: { item: RecentRelease }) {
   const [failed, setFailed] = useState(false);
@@ -38,8 +58,9 @@ function Poster({ item }: { item: RecentRelease }) {
 
 export default function Recent() {
   const [page, setPage] = useState(0);
-  const [data, setData] = useState<RecentReleasePage | null>(() => pageCache.get(0) ?? null);
-  const [loading, setLoading] = useState(!pageCache.has(0));
+  const [feed, setFeed] = useState<FilmpalastFeed>('new');
+  const [data, setData] = useState<RecentReleasePage | null>(() => pageCache.get(pageCacheKey('new', 0)) ?? null);
+  const [loading, setLoading] = useState(!pageCache.has(pageCacheKey('new', 0)));
   const [kind, setKind] = useState<'all' | 'movie' | 'episode'>('all');
   const [selected, setSelected] = useState<RecentRelease | null>(null);
   const [tvdbQuery, setTvdbQuery] = useState('');
@@ -50,25 +71,28 @@ export default function Recent() {
   useEffect(() => {
     let cancelled = false;
     let prefetchTimer: number | undefined;
-    const cached = pageCache.get(page);
+    const key = pageCacheKey(feed, page);
+    const cached = pageCache.get(key);
     if (cached) {
       setData(cached);
       setLoading(false);
     } else {
+      setData(null);
       setLoading(true);
     }
-    api.recentReleases(page)
+    api.recentReleases(page, feed)
       .then((result) => {
         if (cancelled) return;
-        pageCache.set(page, result);
+        pageCache.set(key, result);
         setData(result);
         setLoading(false);
         prefetchTimer = window.setTimeout(async () => {
           const neighbours = [page - 1, page + 1].filter((value) => value >= 0 && (value < page || result.has_next));
           for (const neighbour of neighbours) {
-            if (cancelled || pageCache.has(neighbour)) continue;
+            const neighbourKey = pageCacheKey(feed, neighbour);
+            if (cancelled || pageCache.has(neighbourKey)) continue;
             try {
-              pageCache.set(neighbour, await api.recentReleases(neighbour));
+              pageCache.set(neighbourKey, await api.recentReleases(neighbour, feed));
             } catch {
               return;
             }
@@ -85,20 +109,28 @@ export default function Recent() {
       cancelled = true;
       if (prefetchTimer) window.clearTimeout(prefetchTimer);
     };
-  }, [page]);
+  }, [feed, page]);
 
   const visibleItems = useMemo(
     () => (data?.items ?? []).filter((item) => kind === 'all' || item.kind === kind),
     [data, kind],
   );
 
-  async function findTvdb(item: RecentRelease, query = item.title) {
+  async function findTvdb(item: RecentRelease, query?: string) {
+    const identity = item.kind === 'episode' ? episodeIdentity(item) : null;
+    const term = query ?? identity?.seriesTitle ?? item.title;
     setSelected(item);
-    setTvdbQuery(query);
+    setTvdbQuery(term);
     setMatches([]);
     setMatching(true);
     try {
-      const result = await api.discoverSearch(query, 'movie', 'title', 0, 10);
+      const result = await api.discoverSearch(
+        term,
+        item.kind === 'episode' ? 'show' : 'movie',
+        'title',
+        0,
+        10,
+      );
       setMatches(result.items);
     } catch (error: any) {
       toast.error(error.message);
@@ -107,10 +139,32 @@ export default function Recent() {
     }
   }
 
-  async function queueMovie(match: DiscoverItem) {
+  async function queueSelection(match: DiscoverItem) {
     if (!selected || !match.tvdb_id) return;
     setQueueing(match.tvdb_id);
     try {
+      if (selected.kind === 'episode') {
+        const identity = episodeIdentity(selected);
+        if (!identity) {
+          toast.error('The season and episode could not be detected for this release.');
+          return;
+        }
+        await api.queueShow({
+          show: match.name,
+          season: identity.season,
+          site: selected.site,
+          custom_episodes: [{
+            episode: identity.episode,
+            title: selected.title,
+            url: selected.url,
+          }],
+        });
+        toast.success(
+          `Queued ${match.name} S${String(identity.season).padStart(2, '0')}E${String(identity.episode).padStart(2, '0')}`,
+        );
+        setSelected(null);
+        return;
+      }
       let year = match.year ?? selected.year ?? undefined;
       if (!year) {
         const entered = window.prompt(`Enter the release year for "${match.name}":`, '');
@@ -140,8 +194,8 @@ export default function Recent() {
   return (
     <div className='flex flex-col gap-6'>
       <header className='flex flex-wrap items-baseline gap-2'>
-        <h1 className='text-2xl font-semibold'>Recently Released</h1>
-        <span className='text-sm text-muted-foreground'>— Latest German releases from Filmpalast.</span>
+        <h1 className='text-2xl font-semibold'>Filmpalast</h1>
+        <span className='text-sm text-muted-foreground'>— Browse German new releases, movies, shows, and top titles.</span>
       </header>
 
       <div className='flex flex-wrap items-center justify-between gap-3'>
@@ -152,9 +206,32 @@ export default function Recent() {
             <TabsTrigger value='episode'>Episodes</TabsTrigger>
           </TabsList>
         </Tabs>
+        <Select
+          value={feed}
+          onValueChange={(value) => {
+            const next = value as FilmpalastFeed;
+            setFeed(next);
+            setPage(0);
+            if (next === 'shows') setKind('episode');
+            else if (next === 'movies' || next === 'top') setKind('movie');
+            else setKind('all');
+          }}
+        >
+          <SelectTrigger className='w-44' aria-label='Filmpalast section'>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value='new'>Filmpalast New</SelectItem>
+              <SelectItem value='movies'>Movies</SelectItem>
+              <SelectItem value='shows'>Shows</SelectItem>
+              <SelectItem value='top'>Top</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
         {data && (
           <span className='text-xs text-muted-foreground'>
-            Filmpalast pages {data.source_page_start}–{data.source_page_end} · {data.items.length} releases
+            Pages {data.source_page_start}–{data.source_page_end} · {data.items.length} releases
           </span>
         )}
       </div>
@@ -186,11 +263,9 @@ export default function Recent() {
                 <Button className='flex-1' size='sm' variant='secondary' onClick={() => window.open(item.url, '_blank', 'noopener,noreferrer')}>
                   <ExternalLink data-icon='inline-start' /> Source
                 </Button>
-                {item.kind === 'movie' && (
-                  <Button className='flex-1' size='sm' onClick={() => void findTvdb(item)}>
-                    <Plus data-icon='inline-start' /> Add
-                  </Button>
-                )}
+                <Button className='flex-1' size='sm' onClick={() => void findTvdb(item)}>
+                  <Plus data-icon='inline-start' /> Add
+                </Button>
               </CardFooter>
             </Card>
           ))}
@@ -210,9 +285,9 @@ export default function Recent() {
       <Dialog open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
         <DialogContent className='max-h-[90vh] max-w-3xl overflow-y-auto'>
           <DialogHeader>
-            <DialogTitle>Choose the movie identity</DialogTitle>
+            <DialogTitle>Choose the {selected?.kind === 'episode' ? 'show' : 'movie'} identity</DialogTitle>
             <DialogDescription>
-              Select the matching TVDB movie. Bankai will keep the exact Filmpalast release below as the German source.
+              Select the matching TVDB {selected?.kind === 'episode' ? 'show' : 'movie'}. Bankai will keep the exact Filmpalast release below as the German source.
             </DialogDescription>
           </DialogHeader>
           {selected && (
@@ -245,7 +320,7 @@ export default function Recent() {
                     <div className='truncate font-medium text-foreground'>{match.name}</div>
                     <div className='text-xs text-muted-foreground'>{match.year ?? 'Year unknown'}</div>
                   </div>
-                  <Button size='sm' disabled={!match.tvdb_id || queueing !== null} onClick={() => void queueMovie(match)}>
+                  <Button size='sm' disabled={!match.tvdb_id || queueing !== null} onClick={() => void queueSelection(match)}>
                     {queueing === match.tvdb_id ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Plus data-icon='inline-start' />}
                     Queue
                   </Button>

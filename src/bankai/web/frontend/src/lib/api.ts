@@ -179,10 +179,13 @@ export interface RecentRelease {
 export interface RecentReleasePage {
   items: RecentRelease[];
   page: number;
+  feed: FilmpalastFeed;
   source_page_start: number;
   source_page_end: number;
   has_next: boolean;
 }
+
+export type FilmpalastFeed = 'new' | 'movies' | 'shows' | 'top';
 
 export interface EpisodeItem {
   season: number;
@@ -370,11 +373,15 @@ export const api = {
   // TVDB artwork is a public CDN resource; sending every image through the
   // single Bankai process created 50-100 avoidable backend requests per page.
   // Retain the proxy only for legacy/non-HTTPS artwork URLs.
-  posterUrl: (url: string) => url.startsWith('https://') ? url : `/api/discover/poster?url=${encodeURIComponent(url)}`,
+  posterUrl: (url: string) =>
+    url.includes('filmpalast.to/') || !url.startsWith('https://')
+      ? `/api/discover/poster?url=${encodeURIComponent(url)}`
+      : url,
 
   search: (q: string, kind: string, site?: string) =>
     request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ''}`),
-  recentReleases: (page = 0) => request<RecentReleasePage>(`/api/releases/recent?page=${page}`),
+  recentReleases: (page = 0, feed: FilmpalastFeed = 'new') =>
+    request<RecentReleasePage>(`/api/releases/recent?page=${page}&feed=${feed}`),
   torrentSearch: (q: string, runtimeSeconds?: number | null, options: TorrentSearchOptions = {}) => {
     const params = new URLSearchParams({ q });
     if (runtimeSeconds) params.set('runtime_seconds', String(runtimeSeconds));

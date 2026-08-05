@@ -57,7 +57,7 @@ _CLIP_CACHE_LOCKS = tuple(threading.Lock() for _ in range(64))
 # so the client can show a loader and retry instead of blocking everything.
 _FFMPEG_SLOTS = threading.BoundedSemaphore(4)
 _LAPTOP_VPN_SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
-_RECENT_RELEASE_CACHE: dict[int, tuple[float, dict]] = {}
+_RECENT_RELEASE_CACHE: dict[tuple[str, int], tuple[float, dict]] = {}
 
 
 def _backfill_review_duration_integrity() -> None:
@@ -978,9 +978,16 @@ def create_app() -> Any:
         }
 
     @app.get("/api/releases/recent")
-    async def recent_releases(page: int = Query(0, ge=0)) -> dict:
+    async def recent_releases(
+        page: int = Query(0, ge=0),
+        feed: str = Query("new"),
+    ) -> dict:
         """Return three Filmpalast listing pages as one Bankai page."""
-        cached = _RECENT_RELEASE_CACHE.get(page)
+        normalized_feed = feed.strip().casefold()
+        if normalized_feed not in {"new", "movies", "shows", "top"}:
+            raise HTTPException(status_code=400, detail="feed must be new, movies, shows, or top")
+        cache_key = (normalized_feed, page)
+        cached = _RECENT_RELEASE_CACHE.get(cache_key)
         if cached is not None and time.monotonic() - cached[0] < 300:
             return cached[1]
 
@@ -988,7 +995,9 @@ def create_app() -> Any:
 
         backend = FilmpalastBackend()
         try:
-            results, has_next, source_start, source_end = await backend.recent(page)
+            results, has_next, source_start, source_end = await backend.recent(
+                page, feed=normalized_feed
+            )
         except Exception as exc:
             log.warning("Filmpalast recent-release fetch failed: %s", exc)
             raise HTTPException(
@@ -1015,11 +1024,12 @@ def create_app() -> Any:
                 for result in results
             ],
             "page": page,
+            "feed": normalized_feed,
             "source_page_start": source_start,
             "source_page_end": source_end,
             "has_next": has_next,
         }
-        _RECENT_RELEASE_CACHE[page] = (time.monotonic(), payload)
+        _RECENT_RELEASE_CACHE[cache_key] = (time.monotonic(), payload)
         return payload
 
     @app.get("/api/torrents/search")

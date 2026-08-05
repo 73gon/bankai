@@ -17,7 +17,7 @@ import Recent from '@/pages/Recent';
 const NAV = [
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/search', label: 'Search', icon: SearchIcon },
-  { to: '/recent', label: 'Recently Released', icon: CalendarClock },
+  { to: '/filmpalast', label: 'Filmpalast', icon: CalendarClock },
   { to: '/anime', label: 'Anime', icon: Sparkles },
   { to: '/queue', label: 'Queue', icon: ListVideo },
   { to: '/library', label: 'Library', icon: HardDrive },
@@ -217,7 +217,8 @@ export default function App() {
               <Route path='/' element={<Navigate to='/discover' replace />} />
               <Route path='/discover' element={<Discover />} />
               <Route path='/search' element={<Search />} />
-              <Route path='/recent' element={<Recent />} />
+              <Route path='/filmpalast' element={<Recent />} />
+              <Route path='/recent' element={<Navigate to='/filmpalast' replace />} />
               <Route path='/anime' element={<Anime />} />
               <Route path='/queue' element={<Library />} />
               <Route path='/library' element={<Server />} />
