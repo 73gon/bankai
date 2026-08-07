@@ -3511,24 +3511,16 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 )}
                 {!videoLoading && playing === 'none' && (
                   hasPlayedVideo ? (
-                    <Button
-                      size='icon'
-                      variant='secondary'
-                      className='absolute bottom-3 left-3'
-                      onClick={() => playSection(resumeModeRef.current)}
-                      title='Resume playback'
-                    >
-                      <Play data-icon='inline-start' />
-                    </Button>
+                    <div className='pointer-events-none absolute bottom-3 left-3 opacity-60' aria-hidden='true'>
+                      <Play className='size-5 fill-current' />
+                    </div>
                   ) : (
-                    <Button
-                      size='lg'
-                      variant='secondary'
-                      className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2'
-                      onClick={() => playSection('both')}
+                    <div
+                      className='pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 opacity-60'
+                      aria-hidden='true'
                     >
-                      <Play data-icon='inline-start' /> Play both
-                    </Button>
+                      <Play className='size-12 fill-current' />
+                    </div>
                   )
                 )}
               </div>
