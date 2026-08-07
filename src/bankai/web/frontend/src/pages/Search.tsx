@@ -548,7 +548,7 @@ export default function Search() {
       {!configured ? (
         <EmptyState icon={SearchIcon} title='TheTVDB key not configured' description='Add your TVDB API key in Settings to search.' />
       ) : loading ? (
-        <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6'>
+        <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {Array.from({ length: 12 }).map((_, i) => (
             <Skeleton key={i} className='aspect-[2/3] rounded-lg' />
           ))}
@@ -562,7 +562,7 @@ export default function Search() {
           description={searchBy === 'person' ? 'Try the person’s full name.' : searchBy === 'studio' ? 'Try the company’s full name.' : 'Try a different title.'}
         />
       ) : (
-        <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6'>
+        <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {visibleItems.map((it, index) => (
             <Poster
               key={`${it.kind}-${it.tvdb_id}-${it.name}`}

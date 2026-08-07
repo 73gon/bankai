@@ -242,13 +242,13 @@ export default function Recent() {
       </div>
 
       {loading && !data ? (
-        <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5'>
+        <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {Array.from({ length: 10 }).map((_, index) => <Skeleton key={index} className='aspect-[2/3] rounded-lg' />)}
         </div>
       ) : visibleItems.length === 0 ? (
         <EmptyState icon={CalendarClock} title='No recent releases found' description='Try another page or filter.' />
       ) : (
-        <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5'>
+        <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {visibleItems.map((item) => (
             <Card key={item.url} className='flex min-w-0 flex-col overflow-hidden'>
               <CardContent className='p-0'>

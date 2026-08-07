@@ -417,7 +417,7 @@ export default function Discover() {
               description='Add your TVDB API key in Settings to browse trending titles.'
             />
           ) : loading ? (
-            <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8'>
+            <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
               {Array.from({ length: Math.min(pageSize, 24) }).map((_, i) => (
                 <Skeleton key={i} className='aspect-[2/3] rounded-lg' />
               ))}
@@ -425,7 +425,7 @@ export default function Discover() {
           ) : visibleItems.length === 0 ? (
             <EmptyState icon={Compass} title='Nothing to show' />
           ) : (
-            <div className='grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8'>
+            <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
               {visibleItems.map((it) => (
                 <Poster key={`${it.kind}-${it.tvdb_id}-${it.name}`} item={it} onClick={() => openItem(it)} />
               ))}
