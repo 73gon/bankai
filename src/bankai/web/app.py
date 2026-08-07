@@ -944,6 +944,7 @@ def create_app() -> Any:
         return {
             "tvdb_id": id,
             "kind": k,
+            "english": details.english,
             "german": details.german,
             "year": details.worldwide_year,
             "release_date": details.worldwide_release_date,

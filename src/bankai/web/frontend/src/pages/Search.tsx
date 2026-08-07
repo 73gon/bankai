@@ -253,9 +253,16 @@ export default function Search() {
       let name = item.name;
       if (item.tvdb_id) {
         const g = await api.discoverGerman(item.tvdb_id, item.kind);
-        if (g.year) {
-          setSelected((current) => (current ? { ...current, year: g.year, release_date: g.release_date } : current));
-        }
+        setSelected((current) =>
+          current
+            ? {
+                ...current,
+                name: g.english || current.name,
+                year: g.year || current.year,
+                release_date: g.release_date || current.release_date,
+              }
+            : current,
+        );
         if (g.german) {
           name = g.german;
           setGerman(g.german);

@@ -46,6 +46,8 @@ async def test_title_details_prefers_explicit_worldwide_release_year(
             return httpx.Response(200, json={"data": {"token": "token"}})
         if request.url.path == "/v4/movies/123/translations/deu":
             return httpx.Response(200, json={"data": {"name": "300"}})
+        if request.url.path == "/v4/movies/123/translations/eng":
+            return httpx.Response(200, json={"data": {"name": "Three Hundred"}})
         if request.url.path == "/v4/movies/123/extended":
             return httpx.Response(
                 200,
@@ -65,6 +67,7 @@ async def test_title_details_prefers_explicit_worldwide_release_year(
 
     details = await discover.title_details(123, kind="movie")
 
+    assert details.english == "Three Hundred"
     assert details.german == "300"
     assert details.worldwide_release_date == "2007-03-09"
     assert details.worldwide_year == 2007

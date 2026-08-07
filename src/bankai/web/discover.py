@@ -58,6 +58,7 @@ class DiscoverPage:
 
 @dataclass(frozen=True, slots=True)
 class TitleDetails:
+    english: str | None = None
     german: str | None = None
     worldwide_release_date: str | None = None
 
@@ -642,8 +643,8 @@ async def title_details(tvdb_id: int, *, kind: str) -> TitleDetails:
             return TitleDetails()
         headers = {"Authorization": f"Bearer {token}"}
 
-        async def german_translation() -> str | None:
-            for lang in ("deu", "ger"):
+        async def translation(languages: tuple[str, ...]) -> str | None:
+            for lang in languages:
                 try:
                     response = await client.get(f"{entity}/{tvdb_id}/translations/{lang}", headers=headers)
                     if response.status_code != 200:
@@ -661,8 +662,16 @@ async def title_details(tvdb_id: int, *, kind: str) -> TitleDetails:
             data = await _request_data(client, f"movies/{tvdb_id}/extended", headers=headers)
             return worldwide_release_date(data) if isinstance(data, dict) else None
 
-        german, release_date = await asyncio.gather(german_translation(), worldwide_date())
-    details = TitleDetails(german=german, worldwide_release_date=release_date)
+        english, german, release_date = await asyncio.gather(
+            translation(("eng",)),
+            translation(("deu", "ger")),
+            worldwide_date(),
+        )
+    details = TitleDetails(
+        english=english,
+        german=german,
+        worldwide_release_date=release_date,
+    )
     _DETAIL_CACHE[cache_key] = (time.time(), details)
     return details
 

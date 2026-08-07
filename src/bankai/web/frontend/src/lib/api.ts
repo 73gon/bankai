@@ -367,7 +367,7 @@ export const api = {
       `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}&page=${page}&page_size=${pageSize}`,
     ),
   discoverGerman: (id: number, kind: string) =>
-    request<{ tvdb_id: number; kind: string; german: string | null; year: number | null; release_date: string | null }>(
+    request<{ tvdb_id: number; kind: string; english: string | null; german: string | null; year: number | null; release_date: string | null }>(
       `/api/discover/german?id=${id}&kind=${kind}`,
     ),
   // TVDB artwork is a public CDN resource; sending every image through the

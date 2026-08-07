@@ -1974,6 +1974,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // playhead to move it; playback starts from here.
   const [seekFrac, setSeekFrac] = useState(0);
   const [videoLoading, setVideoLoading] = useState(true);
+  const [hasPlayedVideo, setHasPlayedVideo] = useState(false);
   const [gerLoading, setGerLoading] = useState(false);
   const playbackBusyRef = useRef(true);
   playbackBusyRef.current = videoLoading || playing !== 'none';
@@ -3492,8 +3493,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   }}
                   onPlaying={() => {
                     setVideoLoading(false);
+                    setHasPlayedVideo(true);
                     resumeGermanWithVideo();
                   }}
+                  onEnded={() => stopAll()}
                   onSeeked={resumeGermanWithVideo}
                   onError={() => {
                     setVideoLoading(false);
@@ -3505,6 +3508,28 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   <div className='pointer-events-none absolute inset-0 flex items-center justify-center'>
                     <Loader2 className='h-8 w-8 animate-spin text-white' />
                   </div>
+                )}
+                {!videoLoading && playing === 'none' && (
+                  hasPlayedVideo ? (
+                    <Button
+                      size='icon'
+                      variant='secondary'
+                      className='absolute bottom-3 left-3'
+                      onClick={() => playSection(resumeModeRef.current)}
+                      title='Resume playback'
+                    >
+                      <Play data-icon='inline-start' />
+                    </Button>
+                  ) : (
+                    <Button
+                      size='lg'
+                      variant='secondary'
+                      className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2'
+                      onClick={() => playSection('both')}
+                    >
+                      <Play data-icon='inline-start' /> Play both
+                    </Button>
+                  )
                 )}
               </div>
             </div>

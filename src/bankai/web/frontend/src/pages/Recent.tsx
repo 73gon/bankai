@@ -143,6 +143,11 @@ export default function Recent() {
     if (!selected || !match.tvdb_id) return;
     setQueueing(match.tvdb_id);
     try {
+      const details = await api.discoverGerman(
+        match.tvdb_id,
+        selected.kind === 'episode' ? 'show' : 'movie',
+      );
+      const canonicalName = details.english || match.name;
       if (selected.kind === 'episode') {
         const identity = episodeIdentity(selected);
         if (!identity) {
@@ -150,7 +155,7 @@ export default function Recent() {
           return;
         }
         await api.queueShow({
-          show: match.name,
+          show: canonicalName,
           season: identity.season,
           site: selected.site,
           custom_episodes: [{
@@ -160,12 +165,12 @@ export default function Recent() {
           }],
         });
         toast.success(
-          `Queued ${match.name} S${String(identity.season).padStart(2, '0')}E${String(identity.episode).padStart(2, '0')}`,
+          `Queued ${canonicalName} S${String(identity.season).padStart(2, '0')}E${String(identity.episode).padStart(2, '0')}`,
         );
         setSelected(null);
         return;
       }
-      let year = match.year ?? selected.year ?? undefined;
+      let year = details.year ?? match.year ?? selected.year ?? undefined;
       if (!year) {
         const entered = window.prompt(`Enter the release year for "${match.name}":`, '');
         const parsed = entered ? Number.parseInt(entered, 10) : Number.NaN;
@@ -176,13 +181,13 @@ export default function Recent() {
         year = parsed;
       }
       await api.queueMovie({
-        title: match.name,
+        title: canonicalName,
         german: selected.title,
         url: selected.url,
         site: selected.site,
         year,
       });
-      toast.success(`Queued ${match.name} (${year})`);
+      toast.success(`Queued ${canonicalName} (${year})`);
       setSelected(null);
     } catch (error: any) {
       toast.error(error.message);

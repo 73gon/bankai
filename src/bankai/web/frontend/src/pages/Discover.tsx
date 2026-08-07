@@ -233,29 +233,40 @@ export default function Discover() {
     setFilmResults(verifiedResult ? [verifiedResult] : []);
     setSeason('1');
     setEpisodes('');
+    let canonicalName = item.name;
+    let sourceName = item.name;
+    if (item.tvdb_id) {
+      try {
+        const details = await api.discoverGerman(item.tvdb_id, item.kind);
+        canonicalName = details.english || canonicalName;
+        sourceName = details.german || sourceName;
+        setSelected((current) =>
+          current
+            ? {
+                ...current,
+                name: canonicalName,
+                year: details.year || current.year,
+                release_date: details.release_date || current.release_date,
+              }
+            : current,
+        );
+        if (details.german) setGerman(details.german);
+      } catch (e: any) {
+        toast.error(e.message);
+      }
+    }
     if (item.kind !== 'movie') return;
     // Movies: resolve the German title and search filmpalast so the user
     // picks the actual source (instead of blind-queuing by English name).
     setLoadingFilm(true);
     try {
-      let name = item.name;
-      if (item.tvdb_id) {
-        const g = await api.discoverGerman(item.tvdb_id, item.kind);
-        if (g.year) {
-          setSelected((current) => (current ? { ...current, year: g.year, release_date: g.release_date } : current));
-        }
-        if (g.german) {
-          name = g.german;
-          setGerman(g.german);
-        }
-      }
-      setSearchTerm(name);
-      const r = await api.search(name, 'movie');
+      setSearchTerm(sourceName);
+      const r = await api.search(sourceName, 'movie');
       const verifiedSearchResult = verifiedResult
         ? r.results.find((result) => result.url === verifiedResult.url)
         : undefined;
       const first = verifiedResult
-        ? [{ ...verifiedResult, title: name, release_name: verifiedSearchResult?.release_name }]
+        ? [{ ...verifiedResult, title: sourceName, release_name: verifiedSearchResult?.release_name }]
         : [];
       setFilmResults([
         ...first,
