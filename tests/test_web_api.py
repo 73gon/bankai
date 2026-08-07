@@ -832,6 +832,12 @@ def test_queue_show_accepts_custom_episode_mirror_links(
     assert first_args[first_args.index("--url") + 1] == "https://voe.sx/e/abc123"
     assert first_args[first_args.index("--episode-title") + 1] == "Heavy Is the Crown"
     assert second_args[second_args.index("--site") + 1] == "filmpalast"
+    first_group = first_args[first_args.index("--torrent-group") + 1]
+    second_group = second_args[second_args.index("--torrent-group") + 1]
+    assert first_group == second_group
+    assert first_args[first_args.index("--torrent-group-size") + 1] == "2"
+    assert first_args[first_args.index("--torrent-group-member") + 1] == "S02E01"
+    assert second_args[second_args.index("--torrent-group-member") + 1] == "S02E02"
 
 
 def test_episode_torrent_replacement_passes_show_identity(

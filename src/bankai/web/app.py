@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from array import array
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -1392,6 +1393,8 @@ def create_app() -> Any:
                 custom.append((ep, site, source_url))
 
             queued: list[dict] = []
+            torrent_group = uuid.uuid4().hex
+            torrent_group_size = len(custom)
             for ep, site, source_url in sorted(custom, key=lambda item: item[0].episode):
                 q = f"{req.show.strip()} S{req.season:02d}E{ep.episode:02d}"
                 args = [
@@ -1409,6 +1412,12 @@ def create_app() -> Any:
                     str(ep.episode),
                     "--series-title",
                     req.show.strip(),
+                    "--torrent-group",
+                    torrent_group,
+                    "--torrent-group-size",
+                    str(torrent_group_size),
+                    "--torrent-group-member",
+                    f"S{req.season:02d}E{ep.episode:02d}",
                     "--auto",
                 ]
                 if ep.title:
@@ -1426,6 +1435,8 @@ def create_app() -> Any:
         if not episodes:
             raise HTTPException(status_code=400, detail="no matching episodes")
         queued: list[dict] = []
+        torrent_group = uuid.uuid4().hex
+        torrent_group_size = len(episodes)
         for ep in episodes:
             q = f"{req.show} S{req.season:02d}E{ep.episode:02d}"
             args = [
@@ -1443,6 +1454,12 @@ def create_app() -> Any:
                 str(ep.episode),
                 "--series-title",
                 req.show,
+                "--torrent-group",
+                torrent_group,
+                "--torrent-group-size",
+                str(torrent_group_size),
+                "--torrent-group-member",
+                f"S{req.season:02d}E{ep.episode:02d}",
                 "--auto",
             ]
             if ep.title:

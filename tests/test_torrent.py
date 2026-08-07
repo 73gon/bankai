@@ -23,7 +23,7 @@ from bankai.torrent.matcher import (
 from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.torrent.qbittorrent import QBittorrentClient, TorrentStatus
 from bankai.torrent.selector import TorrentSelector
-from bankai.torrent.worker import TorrentWorker, episode_search_queries
+from bankai.torrent.worker import TorrentWorker, _is_season_pack, episode_search_queries
 
 
 def _c(
@@ -267,6 +267,13 @@ def test_find_video_files_filters_extensions(tmp_path: Path) -> None:
 def test_episode_search_queries_prefers_season_pack() -> None:
     qs = episode_search_queries({"query": "Arcane S01E01", "season": 1, "series_title": "Arcane"})
     assert qs == ["Arcane S01", "Arcane S01E01"]
+
+
+def test_season_pack_detection_excludes_single_episode_releases() -> None:
+    assert _is_season_pack("Arcane.S02.COMPLETE.1080p", 2) is True
+    assert _is_season_pack("Arcane Season 2 1080p", 2) is True
+    assert _is_season_pack("Arcane.S02E01.1080p", 2) is False
+    assert _is_season_pack("Arcane.S01.COMPLETE.1080p", 2) is False
 
 
 def test_episode_search_queries_derives_series_from_query() -> None:

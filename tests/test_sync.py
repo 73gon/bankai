@@ -174,6 +174,46 @@ async def test_sync_worker_uses_audio_over_video_as_atempo_factor(
     assert captured == [pytest.approx(2313.636 / 2415.584)]
 
 
+async def test_sync_worker_preserves_different_cut_when_frame_rates_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "in.aac"
+    reference = tmp_path / "reference.mkv"
+    audio.write_bytes(b"AUDIO")
+    reference.write_bytes(b"VIDEO")
+    monkeypatch.setenv("BANKAI_SYNC__MODE", "auto")
+    reset_settings_cache()
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+
+    async def fake_duration(path: Path) -> float:
+        return 2313.0 if path == audio else 2415.0
+
+    monkeypatch.setattr("bankai.processor.sync._ffprobe_duration", fake_duration)
+    job = repo.create_job(
+        Job(
+            kind=JobKind.SYNC,
+            status=JobStatus.RUNNING,
+            payload={
+                "audio": str(audio),
+                "reference": str(reference),
+                "source_fps": 24.0,
+                "reference_fps": 24.0,
+            },
+        )
+    )
+    ctx = WorkerContext(
+        job=job, repo=repo, work_dir=tmp_path / "work", cancel_token=asyncio.Event()
+    )
+
+    result = await SyncWorker().run(ctx)
+
+    assert result is not None
+    assert result["method"] == "passthrough"
+    assert result["tempo"] == pytest.approx(1.0)
+
+
 async def test_sync_worker_rejects_materially_truncated_feature(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

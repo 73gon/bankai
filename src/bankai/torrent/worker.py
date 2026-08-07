@@ -83,6 +83,25 @@ def episode_search_queries(payload: dict[str, Any]) -> list[str]:
     return ordered
 
 
+def _is_season_pack(title: str, season: object) -> bool:
+    """Return true only for a release naming the season but no episode."""
+
+    try:
+        number = int(season)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    normalized = title.replace(".", " ").replace("_", " ")
+    has_season = bool(
+        re.search(rf"\bS0*{number}\b", normalized, flags=re.I)
+        or re.search(rf"\b(?:season|staffel)\s*0*{number}\b", normalized, flags=re.I)
+    )
+    has_episode = bool(
+        re.search(r"\bS\d{1,2}\s*E\d{1,3}\b", normalized, flags=re.I)
+        or re.search(r"\b\d{1,2}x\d{1,3}\b", normalized, flags=re.I)
+    )
+    return has_season and not has_episode
+
+
 class TorrentWorker(Worker):
     kind = JobKind.TORRENT
 
@@ -113,6 +132,19 @@ class TorrentWorker(Worker):
         selector = self._selector or TorrentSelector()
         manual_raw = ctx.job.payload.get("manual_candidate")
         manual_override = isinstance(manual_raw, dict)
+        torrent_group = ctx.job.payload.get("torrent_group")
+        shared_raw: dict[str, Any] | None = None
+        if media_kind == "episode" and torrent_group:
+            try:
+                from bankai.torrent.groups import get_candidate
+
+                shared_raw = get_candidate(str(torrent_group))
+            except Exception as exc:
+                log.warning("[torrent] could not read shared season selection: %s", exc)
+        if shared_raw:
+            manual_raw = shared_raw
+            manual_override = True
+            log.info("[torrent] reusing the season-pack selection for this episode batch")
 
         # ---- search ------------------------------------------------------
         # Episodes prefer a season pack (single-episode releases usually
@@ -191,6 +223,27 @@ class TorrentWorker(Worker):
                 manual_override = True
             else:
                 raise PermanentWorkerError(f"no candidate met selector criteria (tried {', '.join(attempts) or 'nothing'})")
+        if (
+            media_kind == "episode"
+            and torrent_group
+            and _is_season_pack(chosen.candidate.title, ctx.job.payload.get("season"))
+        ):
+            try:
+                from bankai.torrent.actions import candidate_from_dict, candidate_to_dict
+                from bankai.torrent.groups import remember_candidate
+
+                shared = remember_candidate(
+                    str(torrent_group),
+                    candidate_to_dict(chosen.candidate, eligible=True),
+                )
+                chosen = ScoredCandidate(
+                    candidate=candidate_from_dict(shared),
+                    score=chosen.score,
+                    reasons=("shared season pack",),
+                )
+                manual_override = True
+            except Exception as exc:
+                log.warning("[torrent] could not publish shared season selection: %s", exc)
         policy = get_settings().selector
         log.info(
             "[torrent] picked %s (seeders=%d, configured minimum=%d, runtime=%s, score=%.1f, reasons=%s)",

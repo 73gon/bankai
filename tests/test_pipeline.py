@@ -79,6 +79,26 @@ def test_matching_runtime_strengthens_visual_confidence() -> None:
     assert meta["duration_compatible"] is True
 
 
+def test_episode_cut_difference_is_not_treated_as_pal_conversion() -> None:
+    meta: dict[str, Any] = {
+        "confidence": 0.92,
+        "needs_review": False,
+        "source_fps": 24.0,
+        "reference_fps": 24.0,
+    }
+
+    _adjust_sync_confidence_for_duration(
+        meta,
+        source_duration=2_313.0,
+        reference_duration=2_415.0,
+    )
+
+    assert meta["confidence"] == pytest.approx(0.45)
+    assert meta["needs_review"] is True
+    assert meta["duration_compatible"] is False
+    assert "102 seconds" in meta["reason"]
+
+
 class _FakeWorker(Worker):
     def __init__(self, kind: JobKind, result: dict[str, Any]) -> None:
         self.kind = kind

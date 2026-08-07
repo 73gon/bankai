@@ -97,6 +97,21 @@ def _classify_ratio(audio_dur: float, video_dur: float, *, tol: float = 0.003) -
     return None
 
 
+def same_known_cadence(source_fps: object, reference_fps: object) -> bool:
+    """Return true when both ordinary frame rates describe the same cadence."""
+
+    try:
+        source = float(source_fps)  # type: ignore[arg-type]
+        reference = float(reference_fps)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return (
+        15.0 <= source <= 31.0
+        and 15.0 <= reference <= 31.0
+        and abs(source - reference) <= 0.12
+    )
+
+
 class SyncError(Exception):
     pass
 
@@ -210,7 +225,16 @@ class SyncWorker(Worker):
                     shutil.copyfile(audio_path, out_path)
                     result = SyncResult(path=out_path, offset_seconds=0.0, method="passthrough")
                 else:
-                    ratio_name = _classify_ratio(audio_dur, video_dur)
+                    source_fps = payload.get("source_fps")
+                    reference_fps = payload.get("reference_fps")
+                    matching_cadence = same_known_cadence(source_fps, reference_fps)
+                    ratio_name = None if matching_cadence else _classify_ratio(audio_dur, video_dur)
+                    if matching_cadence:
+                        log.warning(
+                            "[sync] duration mismatch %.3fs but source/reference cadence matches; "
+                            "treating this as a different cut and preserving the German runtime",
+                            delta,
+                        )
                     if ratio_name is None:
                         log.warning(
                             "[sync] duration mismatch %.3fs but no known fps ratio; passthrough (manual offset may be required)",

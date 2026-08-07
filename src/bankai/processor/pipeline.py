@@ -41,7 +41,12 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.processor.extractor import ExtractWorker, normalize_stream_url
 from bankai.processor.remux import RemuxWorker
-from bankai.processor.sync import IncompleteAudioError, PlaceholderAudioError, SyncWorker
+from bankai.processor.sync import (
+    IncompleteAudioError,
+    PlaceholderAudioError,
+    SyncWorker,
+    same_known_cadence,
+)
 from bankai.processor.visual_sync import VisualSyncError, estimate_visual_timeline, is_video_file
 from bankai.queue.models import Job, JobKind, JobStatus
 from bankai.queue.worker import (
@@ -229,7 +234,14 @@ class PipelineWorker(Worker):
         if source_duration is not None:
             torrent_payload["target_runtime_seconds"] = source_duration
             log.info("[torrent] German source runtime %.1f min", source_duration / 60.0)
-        for k in ("season", "episode", "series_title"):
+        for k in (
+            "season",
+            "episode",
+            "series_title",
+            "torrent_group",
+            "torrent_group_size",
+            "torrent_group_member",
+        ):
             if k in payload:
                 torrent_payload[k] = payload[k]
         torrent_result = await self._run_stage(ctx, self._torrent, JobKind.TORRENT, torrent_payload)
@@ -312,6 +324,9 @@ class PipelineWorker(Worker):
                 video_path=video_path,
                 torrent_hash=torrent_result.get("torrent_hash"),
                 final_path=remux_result["path"],
+                torrent_group=payload.get("torrent_group"),
+                torrent_group_size=payload.get("torrent_group_size"),
+                torrent_group_member=payload.get("torrent_group_member"),
             )
 
         return {
@@ -390,6 +405,9 @@ class PipelineWorker(Worker):
         video_path: str,
         torrent_hash: str | None,
         final_path: str,
+        torrent_group: str | None = None,
+        torrent_group_size: int | None = None,
+        torrent_group_member: str | None = None,
     ) -> None:
         """Best-effort removal of intermediate files + source torrent.
 
@@ -400,14 +418,57 @@ class PipelineWorker(Worker):
 
         from bankai.torrent.qbittorrent import QBittorrentClient
 
-        # 1. Remove the torrent + its downloaded files from qBittorrent.
-        if torrent_hash:
+        # 1. Remove the torrent + its downloaded files from qBittorrent. For
+        # an explicitly queued episode batch, retain every torrent until all
+        # distinct selected episodes have completed. Later scheduler waves can
+        # therefore attach to the already-complete season pack instantly.
+        torrent_hashes = (torrent_hash,) if torrent_hash else ()
+        group_claimed = False
+        if torrent_hash and torrent_group and torrent_group_size and torrent_group_member:
             try:
-                qbit = QBittorrentClient()
-                await qbit.remove(torrent_hash, delete_files=True)
-                log.info("[cleanup] removed torrent %s + files", torrent_hash[:8])
+                from bankai.torrent.groups import mark_complete
+
+                release = mark_complete(
+                    str(torrent_group),
+                    member_id=str(torrent_group_member),
+                    expected=int(torrent_group_size),
+                    torrent_hash=torrent_hash,
+                )
+                torrent_hashes = release.torrent_hashes if release.cleanup else ()
+                group_claimed = release.cleanup
+                if not release.cleanup:
+                    log.info(
+                        "[cleanup] retained shared season torrent %s (%d/%d episodes complete)",
+                        torrent_hash[:8],
+                        release.completed,
+                        release.expected,
+                    )
             except Exception as exc:
-                log.warning("[cleanup] failed to remove torrent %s: %s", torrent_hash[:8], exc)
+                torrent_hashes = ()
+                log.warning("[cleanup] could not update shared torrent group: %s", exc)
+
+        torrent_cleanup_ok = True
+        for cleanup_hash in torrent_hashes:
+            qbit = QBittorrentClient()
+            try:
+                await qbit.remove(cleanup_hash, delete_files=True)
+                log.info("[cleanup] removed torrent %s + files", cleanup_hash[:8])
+            except Exception as exc:
+                torrent_cleanup_ok = False
+                log.warning("[cleanup] failed to remove torrent %s: %s", cleanup_hash[:8], exc)
+            finally:
+                await qbit.aclose()
+        if group_claimed and torrent_group and torrent_group_member:
+            try:
+                from bankai.torrent.groups import finish_cleanup
+
+                finish_cleanup(
+                    str(torrent_group),
+                    member_id=str(torrent_group_member),
+                    success=torrent_cleanup_ok,
+                )
+            except Exception as exc:
+                log.warning("[cleanup] could not finish shared torrent cleanup: %s", exc)
 
         # 2. Remove intermediate audio artifacts.
         for label, p in (("extracted-audio", audio_path), ("synced-audio", synced_audio)):
@@ -503,6 +564,10 @@ class PipelineWorker(Worker):
         # sync decisions or be presented as the dub's real content rate.
         nominal_source_fps = await _probe_fps(source_candidate)
         reference_fps = await _probe_fps(Path(video_path))
+        if nominal_source_fps:
+            sync_payload["source_fps"] = nominal_source_fps
+        if reference_fps:
+            sync_payload["reference_fps"] = reference_fps
         if reference_fps:
             visual_meta["reference_fps"] = reference_fps
         try:
@@ -534,6 +599,26 @@ class PipelineWorker(Worker):
             confidence=timeline.confidence,
             min_confidence=settings.visual_min_confidence,
         )
+        matching_nominal_cadence = same_known_cadence(
+            nominal_source_fps,
+            reference_fps,
+        )
+        if matching_nominal_cadence:
+            # A duration ratio near PAL conversion can also be caused by a
+            # different edit (shorter credits, recaps, censorship, etc.). If
+            # both actual video streams report the same ordinary cadence, the
+            # visual slope cannot justify changing playback speed.
+            content_fps = nominal_source_fps
+            if abs(timeline.drift_ratio - 1.0) > 0.005:
+                visual_meta["drift_ratio"] = 1.0
+                visual_meta["needs_review"] = True
+                visual_meta["reason"] = (
+                    "Source and reference use the same frame rate but have different cuts"
+                )
+                log.warning(
+                    "[visual-sync] ignored apparent drift %.5f because source/reference cadence matches",
+                    timeline.drift_ratio,
+                )
         if content_fps:
             visual_meta["source_fps"] = content_fps
         if nominal_source_fps:
@@ -548,7 +633,7 @@ class PipelineWorker(Worker):
 
         # Speed drift: only auto-correct for a known PAL/NDF ratio at high
         # confidence when explicitly enabled; otherwise just report it.
-        drift = timeline.drift_ratio
+        drift = float(visual_meta.get("drift_ratio", timeline.drift_ratio))
         if abs(drift - 1.0) > 0.005:
             if settings.visual_apply_drift and not low_confidence and _is_known_fps_ratio(drift):
                 # source runs at `drift` x reference; play the audio at that
@@ -860,14 +945,29 @@ def _adjust_sync_confidence_for_duration(
     ratio = source_duration / reference_duration
     visual_meta["duration_delta_seconds"] = delta
     close = abs(delta) <= max(5.0, reference_duration * 0.003)
-    known_conversion = _is_known_fps_ratio(ratio)
+    matching_cadence = same_known_cadence(
+        visual_meta.get("source_fps"),
+        visual_meta.get("reference_fps"),
+    )
+    known_conversion = _is_known_fps_ratio(ratio) and not matching_cadence
+    material_mismatch = (
+        abs(delta) > max(30.0, reference_duration * 0.02)
+        and not known_conversion
+    )
     gross_mismatch = abs(delta) > max(300.0, reference_duration * 0.08)
-    visual_meta["duration_compatible"] = not gross_mismatch
+    visual_meta["duration_compatible"] = not (material_mismatch or gross_mismatch)
     if gross_mismatch:
         visual_meta["confidence"] = min(float(confidence), 0.2)
         visual_meta["needs_review"] = True
         visual_meta["reason"] = (
             f"German/HQ runtimes differ by {abs(delta) / 60.0:.1f} minutes"
+        )
+        return
+    if material_mismatch:
+        visual_meta["confidence"] = min(float(confidence), 0.45)
+        visual_meta["needs_review"] = True
+        visual_meta["reason"] = (
+            f"German/HQ runtimes differ by {abs(delta):.0f} seconds at the same playback speed"
         )
         return
     duration_score = 1.0 if close or known_conversion else 0.55

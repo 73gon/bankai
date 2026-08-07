@@ -2075,6 +2075,9 @@ def run(
         None, "--episode-title", help="Episode title metadata."
     ),
     series_title: str | None = typer.Option(None, "--series-title", help="Show title metadata."),
+    torrent_group: str | None = typer.Option(None, "--torrent-group", hidden=True),
+    torrent_group_size: int | None = typer.Option(None, "--torrent-group-size", hidden=True),
+    torrent_group_member: str | None = typer.Option(None, "--torrent-group-member", hidden=True),
     interactive: bool | None = typer.Option(
         None, "--interactive/--auto", help="Override scraper.interactive_pick."
     ),
@@ -2107,6 +2110,12 @@ def run(
         extra_payload["episode_title"] = episode_title
     if series_title:
         extra_payload["series_title"] = series_title
+    if torrent_group:
+        extra_payload["torrent_group"] = torrent_group
+    if torrent_group_size is not None:
+        extra_payload["torrent_group_size"] = torrent_group_size
+    if torrent_group_member:
+        extra_payload["torrent_group_member"] = torrent_group_member
     _run_pipeline(
         query=query,
         url=url,
