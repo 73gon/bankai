@@ -255,6 +255,7 @@ def test_discover_search_marks_titles_already_added(
             DiscoverItem(name="Queued Movie", kind="movie", year=2024),
             DiscoverItem(name="Staged Movie", kind="movie", year=2023),
             DiscoverItem(name="Server Movie", kind="movie", year=2022),
+            DiscoverItem(name="Maleficent: Mistress of Evil", kind="movie", year=2019),
             DiscoverItem(name="New Movie", kind="movie", year=2021),
         ]
 
@@ -267,7 +268,10 @@ def test_discover_search_marks_titles_already_added(
     )
     monkeypatch.setattr(
         "bankai.web.media.scan_server",
-        lambda kind: [SimpleNamespace(name="Server Movie (2022)")],
+        lambda kind: [
+            SimpleNamespace(name="Server Movie (2022)"),
+            SimpleNamespace(name="Maleficent 2 - Mistress of Evil (2019)"),
+        ],
     )
 
     response = client.get("/api/discover/search", params={"q": "Movie", "kind": "movie"})
@@ -278,8 +282,13 @@ def test_discover_search_marks_titles_already_added(
         "Queued Movie": True,
         "Staged Movie": True,
         "Server Movie": True,
+        "Maleficent: Mistress of Evil": True,
         "New Movie": False,
     }
+    in_library_by_name = {
+        item["name"]: item["in_library"] for item in response.json()["items"]
+    }
+    assert in_library_by_name["Maleficent: Mistress of Evil"] is True
 
 
 def test_library_empty(client: TestClient) -> None:

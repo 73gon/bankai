@@ -368,6 +368,30 @@ def _norm_title(s: str) -> str:
     return s
 
 
+def _title_membership_keys(title: str) -> set[str]:
+    """Return conservative aliases used only for catalog membership checks.
+
+    Media folders sometimes insert a sequel number that the canonical TVDB
+    title omits (``Maleficent 2 - Mistress of Evil`` versus
+    ``Maleficent: Mistress of Evil``). Ignore such a standalone number only
+    when at least three other title words remain, so short numbered sequels
+    such as ``Frozen 2`` never collapse into the original.
+    """
+
+    keys = {_norm_title(title)}
+    value = title.lower()
+    value = re.sub(r"\.[a-z0-9]{2,4}$", "", value)
+    value = re.sub(r"\(?\b(?:19|20)\d{2}\b\)?", "", value)
+    tokens = re.findall(r"[a-z0-9]+", value)
+    sequel_numbers = {
+        token for token in tokens if token.isdigit() and 1 <= int(token) <= 20
+    }
+    words = [token for token in tokens if token not in sequel_numbers]
+    if sequel_numbers and len(words) >= 3:
+        keys.add("".join(words))
+    return {key for key in keys if key}
+
+
 def _set_cli_option(args: list[str], option: str, value: str) -> list[str]:
     """Return argv with one canonical ``option value`` pair."""
     updated: list[str] = []
@@ -716,7 +740,7 @@ def create_app() -> Any:
         have: set[str] = set()
         try:
             for t in media_mod.scan_server(kind):
-                have.add(_norm_title(t.name))
+                have.update(_title_membership_keys(t.name))
         except Exception:
             pass
         return have
@@ -732,9 +756,7 @@ def create_app() -> Any:
             if not titles:
                 titles = {j.get("title", "") for j in webjobs.snapshot()}
             for title in titles:
-                nt = _norm_title(title)
-                if nt:
-                    names.add(nt)
+                names.update(_title_membership_keys(title))
         except Exception:
             pass
         return names
@@ -753,9 +775,9 @@ def create_app() -> Any:
         try:
             for entry in media_mod.scan_library():
                 if kind == "movie" and entry.kind == "movie":
-                    staged.add(_norm_title(entry.name))
+                    staged.update(_title_membership_keys(entry.name))
                 elif kind == "show" and entry.kind == "episode":
-                    staged.add(_norm_title(entry.series or entry.name))
+                    staged.update(_title_membership_keys(entry.series or entry.name))
         except Exception:
             pass
         value = (have, active, staged)
