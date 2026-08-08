@@ -1974,7 +1974,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   // playhead to move it; playback starts from here.
   const [seekFrac, setSeekFrac] = useState(0);
   const [videoLoading, setVideoLoading] = useState(true);
-  const [hasPlayedVideo, setHasPlayedVideo] = useState(false);
+  const [videoRetryNonce, setVideoRetryNonce] = useState(0);
   const [gerLoading, setGerLoading] = useState(false);
   const playbackBusyRef = useRef(true);
   playbackBusyRef.current = videoLoading || playing !== 'none';
@@ -2004,6 +2004,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const seekFracRef = useRef(0);
   const playTokenRef = useRef(0);
   const playbackStartOffsetRef = useRef(0);
+  const videoRetryAttemptsRef = useRef(0);
+  const videoRetryKeyRef = useRef('');
+  const videoRetryTimerRef = useRef<number | undefined>(undefined);
 
   const duration = info?.duration ?? 0;
   const engTrack = info?.audio_tracks.find((t) => t.index === engStream) ?? null;
@@ -2352,6 +2355,46 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     setBufferedVideoRanges(mergeTimelineRanges(ranges));
   }
 
+  function videoReadyForCurrentView(media: HTMLVideoElement): boolean {
+    const clipStart = Number(media.dataset.clipStart);
+    const clipLen = Number(media.dataset.clipLen);
+    return (
+      media === videoRef.current
+      && !media.error
+      && media.dataset.previewKey === videoPreviewKey
+      && Number.isFinite(clipStart)
+      && Number.isFinite(clipLen)
+      && viewStart >= clipStart
+      && viewStart + windowSec <= clipStart + clipLen + 0.01
+      && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
+      && !media.seeking
+    );
+  }
+
+  function settleVideoReadiness(media: HTMLVideoElement) {
+    const ready = videoReadyForCurrentView(media);
+    setVideoLoading(!ready);
+    if (ready) {
+      videoRetryAttemptsRef.current = 0;
+      if (videoRetryTimerRef.current) window.clearTimeout(videoRetryTimerRef.current);
+      captureVideoBuffered(media);
+    }
+  }
+
+  function retryVideoPreview(media: HTMLVideoElement) {
+    if (media !== videoRef.current || videoRetryAttemptsRef.current >= 3) return;
+    videoRetryAttemptsRef.current += 1;
+    if (videoRetryTimerRef.current) window.clearTimeout(videoRetryTimerRef.current);
+    videoRetryTimerRef.current = window.setTimeout(
+      () => setVideoRetryNonce((value) => value + 1),
+      400 * videoRetryAttemptsRef.current,
+    );
+  }
+
+  useEffect(() => () => {
+    if (videoRetryTimerRef.current) window.clearTimeout(videoRetryTimerRef.current);
+  }, []);
+
   function captureGermanBuffered(media: HTMLAudioElement) {
     if (media !== gerAudio.current) return;
     const clipStart = Number(media.dataset.clipStart);
@@ -2423,23 +2466,31 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    const requestKey = `${videoPreviewKey}|${videoClipStart}|${videoClipLen}`;
+    if (videoRetryKeyRef.current !== requestKey) {
+      videoRetryKeyRef.current = requestKey;
+      videoRetryAttemptsRef.current = 0;
+      if (videoRetryTimerRef.current) window.clearTimeout(videoRetryTimerRef.current);
+    }
     const loadedStart = Number(v.dataset.clipStart);
     const loadedLen = Number(v.dataset.clipLen);
     const canReuseCurrentClip =
       Boolean(v.currentSrc)
+      && !v.error
+      && v.readyState >= HTMLMediaElement.HAVE_METADATA
       && v.dataset.previewKey === videoPreviewKey
       && Number.isFinite(loadedStart)
       && Number.isFinite(loadedLen)
       && viewStart >= loadedStart
       && viewStart + windowSec <= loadedStart + loadedLen + 0.01;
     if (canReuseCurrentClip) {
+      setVideoLoading(true);
       try {
         v.currentTime = Math.max(0, viewStart - loadedStart);
       } catch {
         /* metadata may still be settling; playback will seek after it loads */
       }
-      setVideoLoading(false);
-      captureVideoBuffered(v);
+      settleVideoReadiness(v);
       return;
     }
     setVideoLoading(true);
@@ -2462,6 +2513,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     videoClipStart,
     videoClipLen,
     videoPreviewKey,
+    videoRetryNonce,
     quality,
     engStream,
     viewStart,
@@ -3462,6 +3514,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   preload='auto'
                   onLoadedMetadata={(event) => {
                     const media = event.currentTarget;
+                    setVideoLoading(true);
                     const loadedStart = Number(media.dataset.clipStart);
                     if (Number.isFinite(loadedStart)) {
                       const loadedLen = Number(media.dataset.clipLen);
@@ -3474,12 +3527,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     captureVideoBuffered(media);
                   }}
                   onLoadedData={(event) => {
-                    setVideoLoading(false);
-                    captureVideoBuffered(event.currentTarget);
+                    settleVideoReadiness(event.currentTarget);
                   }}
                   onCanPlay={(event) => {
-                    setVideoLoading(false);
-                    captureVideoBuffered(event.currentTarget);
+                    settleVideoReadiness(event.currentTarget);
                   }}
                   onProgress={(event) => captureVideoBuffered(event.currentTarget)}
                   onEmptied={() => setBufferedVideoRanges([])}
@@ -3493,14 +3544,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   }}
                   onPlaying={() => {
                     setVideoLoading(false);
-                    setHasPlayedVideo(true);
                     resumeGermanWithVideo();
                   }}
                   onEnded={() => stopAll()}
-                  onSeeked={resumeGermanWithVideo}
-                  onError={() => {
-                    setVideoLoading(false);
+                  onSeeked={(event) => {
+                    settleVideoReadiness(event.currentTarget);
+                    resumeGermanWithVideo();
+                  }}
+                  onError={(event) => {
+                    setVideoLoading(true);
                     setBufferedVideoRanges([]);
+                    retryVideoPreview(event.currentTarget);
                   }}
                   className='h-full w-full object-contain'
                 />
@@ -3510,18 +3564,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   </div>
                 )}
                 {!videoLoading && playing === 'none' && (
-                  hasPlayedVideo ? (
-                    <div className='pointer-events-none absolute bottom-3 left-3 opacity-60' aria-hidden='true'>
-                      <Play className='size-5 fill-current' />
-                    </div>
-                  ) : (
-                    <div
-                      className='pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 opacity-60'
-                      aria-hidden='true'
-                    >
-                      <Play className='size-12 fill-current' />
-                    </div>
-                  )
+                  <div className='pointer-events-none absolute bottom-3 left-3 opacity-60' aria-hidden='true'>
+                    <Play className='size-5 fill-current' />
+                  </div>
                 )}
               </div>
             </div>

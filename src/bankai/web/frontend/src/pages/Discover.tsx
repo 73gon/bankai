@@ -471,6 +471,7 @@ export default function Discover() {
           <DialogHeader>
             <DialogTitle className='flex items-center gap-2'>
               {selected?.name}
+              {selected?.year && <span className='text-sm font-normal text-muted-foreground'>({selected.year})</span>}
               {german && german !== selected?.name && <Badge variant='accent'>DE: {german}</Badge>}
             </DialogTitle>
             <DialogDescription>

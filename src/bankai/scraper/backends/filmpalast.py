@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from typing import ClassVar
 from urllib.parse import quote, urljoin, urlparse
 
@@ -34,6 +35,18 @@ _RELEASE_RE = re.compile(
     re.I,
 )
 _RUNTIME_RE = re.compile(r"\bSpielzeit\s*:\s*(?P<minutes>\d+)\s*(?:min|Min\.)?", re.I)
+_DETAIL_YEAR_RE = re.compile(r"(?:Ver.{0,3}ffentlicht|Jahr)\s*:\s*(?P<year>(?:19|20)\d{2})", re.I)
+
+
+def _detail_release_metadata(tree: HTMLParser) -> tuple[str | None, int | None]:
+    release_element = tree.css_first("#release_text, .sliderReleaseTitle")
+    release_name = None
+    if release_element is not None:
+        release_name = " ".join((release_element.text(separator=" ") or "").split()) or None
+    detail_text = " ".join((tree.text(separator=" ") or "").split())
+    year_match = _DETAIL_YEAR_RE.search(detail_text)
+    year = int(year_match.group("year")) if year_match else None
+    return release_name, year
 
 
 @register
@@ -154,14 +167,51 @@ class FilmpalastBackend:
         if not title:
             title = slug.replace("-", " ").title()
         year_match = _YEAR_RE.search(title)
+        release_name, detail_year = _detail_release_metadata(tree)
         return SearchResult(
             site=self.site_id,
             title=title,
             url=url,
             kind=MediaKind.EPISODE if _EPISODE_RE.search(slug) else MediaKind.MOVIE,
-            year=int(year_match.group(0)) if year_match else None,
+            year=int(year_match.group(0)) if year_match else detail_year,
             poster_url=None,
+            release_name=release_name,
         )
+
+    async def enrich_search_results(self, results: list[SearchResult]) -> list[SearchResult]:
+        """Fill filename/year from detail pages when search cards omit them.
+
+        Filmpalast's search listing currently contains neither field, while the
+        linked detail page exposes both in ``#release_text`` and Shortinfos.
+        Fetch in a small bounded pool so opening the picker remains responsive.
+        """
+
+        gate = asyncio.Semaphore(4)
+
+        async def enrich(result: SearchResult) -> SearchResult:
+            if result.release_name and result.year:
+                return result
+            async with gate:
+                try:
+                    response = await self._client.get(result.url)
+                except Exception as exc:  # pragma: no cover - network guard
+                    log.debug("filmpalast detail metadata failed: %s", exc)
+                    return result
+            if response.status_code != 200:
+                return result
+            try:
+                tree = HTMLParser(response.text)
+                release_name, year = _detail_release_metadata(tree)
+            except Exception as exc:  # pragma: no cover - malformed upstream HTML
+                log.debug("filmpalast detail metadata parse failed: %s", exc)
+                return result
+            return replace(
+                result,
+                release_name=result.release_name or release_name,
+                year=result.year or year,
+            )
+
+        return list(await asyncio.gather(*(enrich(result) for result in results)))
 
     def _parse_search(self, html: str, *, limit: int) -> list[SearchResult]:
         tree = HTMLParser(html)

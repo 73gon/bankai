@@ -965,6 +965,17 @@ def create_app() -> Any:
 
         media_kind = MediaKind.MOVIE if kind == "movie" else MediaKind.EPISODE
         results = await search_stream_sources(q, site=site, limit=limit, kind=media_kind)
+        filmpalast_results = [result for result in results if result.site == "filmpalast"]
+        if filmpalast_results:
+            from bankai.scraper.backends.filmpalast import FilmpalastBackend
+
+            backend = FilmpalastBackend()
+            try:
+                enriched = await backend.enrich_search_results(filmpalast_results)
+            finally:
+                await backend.aclose()
+            by_url = {result.url: result for result in enriched}
+            results = [by_url.get(result.url, result) for result in results]
         return {
             "results": [
                 {

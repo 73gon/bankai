@@ -126,6 +126,15 @@ async def test_filmpalast_search_parses_fixture(monkeypatch: pytest.MonkeyPatch)
     html = (FIXTURES / "filmpalast" / "search_inception.html").read_text(encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/stream/"):
+            year = request.url.path.rsplit("-", 1)[-1]
+            return httpx.Response(
+                200,
+                text=(
+                    f'<span id="release_text">{request.url.path[8:]}.GERMAN.1080p.WEB.H264</span>'
+                    f'<li>Veröffentlicht: {year}</li>'
+                ),
+            )
         assert request.url.path.startswith("/search/title/")
         return httpx.Response(200, text=html)
 
@@ -136,6 +145,7 @@ async def test_filmpalast_search_parses_fixture(monkeypatch: pytest.MonkeyPatch)
     backend._client = httpx.AsyncClient(base_url="http://example.invalid", transport=transport)
     try:
         results = await backend.search("Inception", kind=MediaKind.MOVIE)
+        results = await backend.enrich_search_results(results)
     finally:
         await backend.aclose()
 
@@ -149,6 +159,7 @@ async def test_filmpalast_search_parses_fixture(monkeypatch: pytest.MonkeyPatch)
     assert inception.poster_url == "http://example.invalid/media/cover/inception.jpg"
     assert inception.kind is MediaKind.MOVIE
     assert inception.site == "filmpalast"
+    assert inception.release_name == "inception-2010.GERMAN.1080p.WEB.H264"
 
 
 @pytest.mark.asyncio
@@ -297,6 +308,14 @@ async def test_filmpalast_search_falls_back_to_shorter_query() -> None:
     queried: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/stream/"):
+            return httpx.Response(
+                200,
+                text=(
+                    '<span id="release_text">Green.Book.2018.GERMAN.1080p.BluRay.x264</span>'
+                    '<li>Veröffentlicht: 2018</li>'
+                ),
+            )
         assert request.url.path.startswith("/search/title/")
         from urllib.parse import unquote
 
@@ -312,12 +331,14 @@ async def test_filmpalast_search_falls_back_to_shorter_query() -> None:
     backend._client = httpx.AsyncClient(base_url="http://example.invalid", transport=transport)
     try:
         results = await backend.search("Green Book - Eine besondere Freundschaft", kind=MediaKind.MOVIE)
+        results = await backend.enrich_search_results(results)
     finally:
         await backend.aclose()
 
     assert len(results) == 1
     assert "Green Book" in results[0].title
     assert "Green Book" in queried
+    assert results[0].release_name == "Green.Book.2018.GERMAN.1080p.BluRay.x264"
 
 
 @pytest.mark.asyncio

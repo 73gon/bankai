@@ -10,7 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { GermanRelease } from '@/components/GermanRelease';
@@ -18,6 +18,21 @@ import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type Cata
 
 const SEARCH_HIDE_LIBRARY_KEY = 'bankai:search-hide-library';
 const searchPageCache = new Map<string, PagedDiscover>();
+const FAMOUS_STUDIOS = [
+  'Disney',
+  'Netflix',
+  'Pixar',
+  'Marvel Studios',
+  'Lucasfilm',
+  'Warner Bros.',
+  'Universal Pictures',
+  'Paramount Pictures',
+  'Sony Pictures',
+  'Amazon Studios',
+  'DreamWorks Animation',
+  'A24',
+  'Studio Ghibli',
+] as const;
 
 function searchCacheKey(query: string, kind: string, by: string, page: number, pageSize: number) {
   return `${kind}:${by}:${query.toLocaleLowerCase()}:${page}:${pageSize}`;
@@ -539,6 +554,26 @@ export default function Search() {
             autoFocus
           />
         </div>
+        {kind === 'movie' && searchBy === 'studio' && (
+          <Select
+            value={FAMOUS_STUDIOS.includes(q as (typeof FAMOUS_STUDIOS)[number]) ? q : ''}
+            onValueChange={(value) => {
+              setQ(value);
+              setPage(0);
+            }}
+          >
+            <SelectTrigger className='w-48' aria-label='Choose a famous studio'>
+              <SelectValue placeholder='Famous studios' />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {FAMOUS_STUDIOS.map((studio) => (
+                  <SelectItem key={studio} value={studio}>{studio}</SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        )}
         <label className='flex items-center gap-2 whitespace-nowrap text-sm text-foreground'>
           <Switch checked={hideLibrary} onCheckedChange={setHideLibrary} aria-label='Hide movies already in library' />
           Hide library titles
@@ -612,6 +647,7 @@ export default function Search() {
           <DialogHeader>
             <DialogTitle className='flex items-center gap-2'>
               {selected?.name}
+              {selected?.year && <span className='text-sm font-normal text-muted-foreground'>({selected.year})</span>}
               {german && german !== selected?.name && <Badge variant='accent'>DE: {german}</Badge>}
             </DialogTitle>
             <DialogDescription>
