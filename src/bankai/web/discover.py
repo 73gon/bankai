@@ -11,7 +11,8 @@ import asyncio
 import datetime
 import threading
 import time
-from dataclasses import asdict, dataclass
+import unicodedata
+from dataclasses import asdict, dataclass, replace
 
 import httpx
 
@@ -25,6 +26,7 @@ _BASE_URL = "https://api4.thetvdb.com/v4"
 _ARTWORK_BASE = "https://artworks.thetvdb.com"
 _CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
 _DETAIL_CACHE: dict[str, tuple[float, TitleDetails]] = {}
+_ENGLISH_TITLE_CACHE: dict[tuple[str, int], tuple[float, str | None]] = {}
 _BROWSE_META: dict[str, dict] = {}
 _TOKEN_CACHE: tuple[str, str, float, str] | None = None
 # Keys currently being refreshed in the background (stale-while-revalidate),
@@ -131,7 +133,7 @@ def _abs_image(url: object) -> str | None:
 
 
 def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
-    name = rec.get("name") or rec.get("title") or rec.get("slug") or "Untitled"
+    name = _inline_english_title(rec) or rec.get("name") or rec.get("title") or rec.get("slug") or "Untitled"
     worldwide_date = worldwide_release_date(rec) if kind == "movie" else None
     date = worldwide_date or rec.get("first_air_time") or rec.get("release_date") or rec.get("firstAired") or rec.get("date")
     date_s = str(date)[:10] if date else None
@@ -154,6 +156,141 @@ def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
         release_date=date_s,
         status=str(status) if status else None,
     )
+
+
+def _inline_english_title(rec: dict) -> str | None:
+    """Read an English title already embedded in a TVDB response.
+
+    Search records and base movie records use slightly different shapes. Keep
+    this deliberately tolerant so an API response that already contains the
+    translation does not require a second request.
+    """
+    for key in ("name_translated", "title_translated", "englishName", "english_name"):
+        value = rec.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    translations = rec.get("translations")
+    if isinstance(translations, dict):
+        for key in ("eng", "en", "English"):
+            value = translations.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                name = value.get("name") or value.get("title")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+    elif isinstance(translations, list):
+        for translation in translations:
+            if not isinstance(translation, dict):
+                continue
+            language = str(
+                translation.get("language")
+                or translation.get("languageCode")
+                or translation.get("language_code")
+                or ""
+            ).casefold()
+            if language not in {"eng", "en", "english"}:
+                continue
+            name = translation.get("name") or translation.get("title")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+
+    aliases = rec.get("aliases")
+    if isinstance(aliases, list):
+        for alias in aliases:
+            if not isinstance(alias, dict):
+                continue
+            language = str(
+                alias.get("language")
+                or alias.get("languageCode")
+                or alias.get("language_code")
+                or ""
+            ).casefold()
+            if language not in {"eng", "en", "english"}:
+                continue
+            name = alias.get("name") or alias.get("title")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return None
+
+
+def _needs_english_lookup(rec: dict) -> bool:
+    language = str(
+        rec.get("originalLanguage")
+        or rec.get("original_language")
+        or rec.get("primaryLanguage")
+        or rec.get("primary_language")
+        or ""
+    ).casefold()
+    if language:
+        return language not in {"eng", "en", "english"}
+    name = str(rec.get("name") or rec.get("title") or "")
+    # TVDB does not consistently include originalLanguage on old base records.
+    # A title without any Latin letters (Japanese, Korean, Cyrillic, etc.) must
+    # be resolved before it is safe to expose as the catalogue title.
+    return bool(name) and not any("LATIN" in unicodedata.name(ch, "") for ch in name)
+
+
+async def _english_translation(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    *,
+    kind: str,
+    tvdb_id: int,
+) -> str | None:
+    key = (kind, tvdb_id)
+    ttl = get_settings().web.cache_ttl_seconds
+    hit = _ENGLISH_TITLE_CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    entity = "movies" if kind == "movie" else "series"
+    data = await _request_data(
+        client,
+        f"{entity}/{tvdb_id}/translations/eng",
+        headers=headers,
+    )
+    title = None
+    if isinstance(data, dict):
+        value = data.get("name") or data.get("title")
+        if isinstance(value, str) and value.strip():
+            title = value.strip()
+    _ENGLISH_TITLE_CACHE[key] = (time.time(), title)
+    return title
+
+
+async def _items_from_records(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    records: list[dict],
+    kind: str,
+) -> list[DiscoverItem]:
+    """Convert TVDB records while guaranteeing canonical English titles."""
+    semaphore = asyncio.Semaphore(8)
+
+    async def convert(rec: dict) -> DiscoverItem | None:
+        item = _item_from_record(rec, kind)
+        inline = _inline_english_title(rec)
+        if inline:
+            return replace(item, name=inline)
+        if not _needs_english_lookup(rec):
+            return item
+        if item.tvdb_id is None:
+            return None
+        async with semaphore:
+            english = await _english_translation(
+                client,
+                headers,
+                kind=kind,
+                tvdb_id=item.tvdb_id,
+            )
+        # Never expose a known foreign/original-script title as the canonical
+        # UI identity. Apart from presentation, that caused every unresolved
+        # non-Latin title to normalise to the same empty membership key.
+        return replace(item, name=english) if english else None
+
+    converted = await asyncio.gather(*(convert(record) for record in records))
+    return [item for item in converted if item is not None]
 
 
 async def _request_data(
@@ -229,7 +366,7 @@ async def _person_movies(
         )
     )
 
-    credits: list[DiscoverItem] = []
+    credit_records: list[dict] = []
     for person in extended_data:
         if not isinstance(person, dict):
             continue
@@ -244,8 +381,9 @@ async def _person_movies(
             if movie_id is None or not isinstance(movie, dict) or not movie.get("name"):
                 continue
             record = {**movie, "tvdb_id": movie_id}
-            credits.append(_item_from_record(record, "movie"))
+            credit_records.append(record)
 
+    credits = await _items_from_records(client, headers, credit_records, "movie")
     return _dedupe_items(credits, limit)
 
 
@@ -314,11 +452,14 @@ async def _studio_movies(
             for company_id in company_ids
         )
     )
-    buckets = [
-        [_item_from_record(record, "movie") for record in data if isinstance(record, dict)]
+    record_buckets = [
+        [record for record in data if isinstance(record, dict)]
         for data in movie_data
         if isinstance(data, list)
     ]
+    buckets = await asyncio.gather(
+        *(_items_from_records(client, headers, records, "movie") for records in record_buckets)
+    )
     # Round-robin avoids one broad parent company crowding out more specific
     # matching studios while preserving TVDB's score order within each list.
     merged: list[DiscoverItem] = []
@@ -368,11 +509,8 @@ async def search(
                 headers=headers,
                 params=params,
             )
-            items = (
-                [_item_from_record(record, kind) for record in data if isinstance(record, dict)]
-                if isinstance(data, list)
-                else []
-            )
+            records = [record for record in data if isinstance(record, dict)] if isinstance(data, list) else []
+            items = await _items_from_records(client, headers, records, kind)
     _cache_put(cache_key, items)
     return items
 
@@ -452,7 +590,8 @@ async def search_page(
             payload = response.json()
             data = payload.get("data") or []
             links = payload.get("links") or {}
-            items = [_item_from_record(record, kind) for record in data if isinstance(record, dict)]
+            records = [record for record in data if isinstance(record, dict)]
+            items = await _items_from_records(client, {"Authorization": f"Bearer {token}"}, records, kind)
             total = _to_int(links.get("total_items"))
             if total is not None:
                 has_next = (page + 1) * page_size < total
@@ -495,7 +634,8 @@ async def browse_page(kind: str, *, page: int, page_size: int = 50) -> DiscoverP
                 payload = response.json()
                 data = payload.get("data") or []
                 links = payload.get("links") or {}
-                converted = [_item_from_record(record, kind) for record in data if isinstance(record, dict)]
+                records = [record for record in data if isinstance(record, dict)]
+                converted = await _items_from_records(client, headers, records, kind)
             except (httpx.HTTPError, ValueError) as exc:
                 log.warning("TVDB browse page %s failed: %s", number, exc)
                 return [], {}
@@ -553,7 +693,8 @@ async def trending(kind: str, *, limit: int = 60) -> list[DiscoverItem]:
                 break
             if not data:
                 break
-            items.extend(_item_from_record(rec, kind) for rec in data if isinstance(rec, dict))
+            records = [rec for rec in data if isinstance(rec, dict)]
+            items.extend(await _items_from_records(client, headers, records, kind))
             page += 1
     items = items[:limit]
     _cache_put(cache_key, items)
@@ -595,10 +736,8 @@ async def new_releases(kind: str, *, limit: int = 24) -> list[DiscoverItem]:
             except (httpx.HTTPError, ValueError) as exc:
                 log.warning("TVDB new releases failed: %s", exc)
                 break
-            for rec in data:
-                if not isinstance(rec, dict):
-                    continue
-                base = _item_from_record(rec, kind)
+            records = [rec for rec in data if isinstance(rec, dict)]
+            for base in await _items_from_records(client, headers, records, kind):
                 if base.tvdb_id in seen:
                     continue
                 seen.add(base.tvdb_id)

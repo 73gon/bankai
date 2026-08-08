@@ -16,10 +16,12 @@ def _configured_tvdb(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_settings_cache()
     discover._CACHE.clear()
     discover._DETAIL_CACHE.clear()
+    discover._ENGLISH_TITLE_CACHE.clear()
     discover._BROWSE_META.clear()
     yield
     discover._CACHE.clear()
     discover._DETAIL_CACHE.clear()
+    discover._ENGLISH_TITLE_CACHE.clear()
     discover._BROWSE_META.clear()
     reset_settings_cache()
 
@@ -107,6 +109,76 @@ async def test_studio_search_uses_tvdb_company_filter(monkeypatch: pytest.Monkey
     items = await discover.search("Disney", kind="movie", search_by="studio")
 
     assert [(item.name, item.tvdb_id, item.year) for item in items] == [("Inside Out", 789, 2015)]
+
+
+@pytest.mark.asyncio
+async def test_studio_search_resolves_original_script_to_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token"}})
+        if request.url.path == "/v4/search":
+            return httpx.Response(
+                200,
+                json={"data": [{"tvdb_id": "123", "name": "Studio Ghibli"}]},
+            )
+        if request.url.path == "/v4/movies/filter":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": 276,
+                            "name": "千と千尋の神隠し",
+                            "originalLanguage": "jpn",
+                            "year": "2001",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v4/movies/276/translations/eng":
+            return httpx.Response(200, json={"data": {"name": "Spirited Away"}})
+        return httpx.Response(404)
+
+    _mock_tvdb(monkeypatch, handler)
+
+    items = await discover.search("Studio Ghibli", kind="movie", search_by="studio")
+
+    assert [(item.name, item.tvdb_id, item.year) for item in items] == [
+        ("Spirited Away", 276, 2001)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_title_search_prefers_inline_english_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token"}})
+        if request.url.path == "/v4/search":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": 573,
+                            "name": "ハウルの動く城",
+                            "name_translated": "Howl's Moving Castle",
+                            "originalLanguage": "jpn",
+                            "year": "2004",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    _mock_tvdb(monkeypatch, handler)
+
+    items = await discover.search("Howl", kind="movie")
+
+    assert [item.name for item in items] == ["Howl's Moving Castle"]
 
 
 @pytest.mark.asyncio

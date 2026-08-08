@@ -805,7 +805,7 @@ def create_app() -> Any:
             if not discover_mod.is_released(it):
                 continue
             nt = _norm_title(it.name)
-            if nt in have or nt in active:
+            if nt and (nt in have or nt in active):
                 continue
             out.append(it)
         return out
@@ -930,8 +930,9 @@ def create_app() -> Any:
         results: list[dict] = []
         for item in items:
             result = discover_mod.to_dict(item)
-            result["added"] = _norm_title(item.name) in added
-            result["in_library"] = _norm_title(item.name) in in_library
+            key = _norm_title(item.name)
+            result["added"] = bool(key and key in added)
+            result["in_library"] = bool(key and key in in_library)
             results.append(result)
         return {
             "configured": discover_mod.is_configured(),
