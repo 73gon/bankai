@@ -34,6 +34,8 @@ class TorrentStatus:
     upspeed: int = 0
     seeds: int = 0
     peers: int = 0
+    seeds_total: int = 0
+    peers_total: int = 0
     added_on: int = 0
 
 
@@ -223,5 +225,7 @@ def _to_status(row: dict[str, Any]) -> TorrentStatus:
         upspeed=int(row.get("upspeed") or 0),
         seeds=int(row.get("num_seeds") or 0),
         peers=int(row.get("num_leechs") or 0),
+        seeds_total=int(row.get("num_complete") or 0),
+        peers_total=int(row.get("num_incomplete") or 0),
         added_on=int(row.get("added_on") or 0),
     )

@@ -1,5 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, Gauge, Loader2, RefreshCw, Search, Upload, Users } from 'lucide-react';
+import {
+  CheckCircle2,
+  ChevronsDown,
+  ChevronsUp,
+  CircleHelp,
+  CirclePause,
+  Clock3,
+  Download,
+  Gauge,
+  Loader2,
+  RefreshCw,
+  Search,
+  TriangleAlert,
+  Upload,
+  Users,
+  type LucideIcon,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type QBittorrentItem } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -17,7 +33,7 @@ function formatBytes(value: number) {
 }
 
 function formatSpeed(value: number) {
-  return value > 0 ? `${formatBytes(value)}/s` : '—';
+  return `${formatBytes(value)}/s`;
 }
 
 function formatEta(value: number, progress: number) {
@@ -41,21 +57,42 @@ function formatAdded(value: number) {
   }).format(new Date(value * 1000));
 }
 
-function stateLabel(state: string) {
-  return state
-    .replace(/DL$/, '')
-    .replace(/UP$/, '')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/^./, (letter) => letter.toUpperCase());
-}
+type StatusStyle = {
+  label: string;
+  icon: LucideIcon;
+  badge: 'repack' | 'info' | 'success' | 'warning' | 'destructive' | 'muted';
+  row: string;
+  iconColor: string;
+  progress: string;
+};
 
-function stateVariant(state: string): 'success' | 'info' | 'warning' | 'destructive' | 'secondary' {
-  const normalized = state.toLowerCase();
-  if (normalized.includes('error') || normalized.includes('missing')) return 'destructive';
-  if (normalized.includes('downloading') || normalized.includes('forceddl')) return 'info';
-  if (normalized.includes('uploading') || normalized.includes('forcedup')) return 'success';
-  if (normalized.includes('stalled') || normalized.includes('queued') || normalized.includes('checking')) return 'warning';
-  return 'secondary';
+function torrentStatus(item: QBittorrentItem): StatusStyle {
+  const state = item.state.toLowerCase();
+  if (state.includes('error') || state.includes('missing')) {
+    return { label: 'Error', icon: TriangleAlert, badge: 'destructive', row: 'bg-destructive/[0.08] hover:bg-destructive/[0.13]', iconColor: 'text-destructive', progress: 'bg-destructive' };
+  }
+  if (state.includes('queued')) {
+    return { label: 'Queued', icon: Clock3, badge: 'warning', row: 'bg-warning/[0.08] hover:bg-warning/[0.13]', iconColor: 'text-warning', progress: 'bg-warning' };
+  }
+  if (state.includes('stalled')) {
+    return { label: 'Stalled', icon: CirclePause, badge: 'success', row: 'bg-success/[0.08] hover:bg-success/[0.13]', iconColor: 'text-success', progress: 'bg-success' };
+  }
+  if (state.includes('downloading') || state.includes('forceddl') || state.includes('metadl')) {
+    return { label: 'Downloading', icon: ChevronsDown, badge: 'success', row: 'bg-success/[0.08] hover:bg-success/[0.13]', iconColor: 'text-success', progress: 'bg-success' };
+  }
+  if (state.includes('uploading') || state.includes('forcedup')) {
+    return { label: 'Seeding', icon: ChevronsUp, badge: 'info', row: 'bg-info/[0.08] hover:bg-info/[0.13]', iconColor: 'text-info', progress: 'bg-info' };
+  }
+  if (state.includes('checking') || state.includes('moving') || state.includes('allocating')) {
+    return { label: 'Checking', icon: RefreshCw, badge: 'warning', row: 'bg-warning/[0.08] hover:bg-warning/[0.13]', iconColor: 'text-warning', progress: 'bg-warning' };
+  }
+  if (item.progress >= 1) {
+    return { label: 'Completed', icon: CheckCircle2, badge: 'repack', row: 'bg-repack/[0.08] hover:bg-repack/[0.13]', iconColor: 'text-repack', progress: 'bg-repack' };
+  }
+  if (state.includes('paused') || state.includes('stopped')) {
+    return { label: 'Paused', icon: CirclePause, badge: 'muted', row: 'bg-muted/20 hover:bg-muted/30', iconColor: 'text-muted-foreground', progress: 'bg-muted-foreground' };
+  }
+  return { label: 'Unknown', icon: CircleHelp, badge: 'muted', row: 'bg-muted/20 hover:bg-muted/30', iconColor: 'text-muted-foreground', progress: 'bg-muted-foreground' };
 }
 
 export default function QBittorrent() {
@@ -160,23 +197,30 @@ export default function QBittorrent() {
             <tbody>
               {visible.map((item) => {
                 const percent = Math.max(0, Math.min(100, item.progress * 100));
+                const status = torrentStatus(item);
+                const StatusIcon = status.icon;
                 return (
-                  <tr key={item.hash} className='border-t border-border/60 bg-card/45 transition-colors hover:bg-secondary/20'>
-                    <td className='max-w-[28rem] px-4 py-3 font-medium text-foreground'><div className='truncate' title={item.name}>{item.name}</div></td>
-                    <td className='px-3 py-3'><Badge variant={stateVariant(item.state)}>{stateLabel(item.state)}</Badge></td>
+                  <tr key={item.hash} className={cn('border-t border-border/60 transition-colors', status.row)}>
+                    <td className='max-w-[28rem] px-4 py-3 font-medium text-foreground'>
+                      <div className='flex items-center gap-2'>
+                        <StatusIcon className={cn('size-4 shrink-0', status.iconColor)} aria-hidden='true' />
+                        <div className='truncate' title={item.name}>{item.name}</div>
+                      </div>
+                    </td>
+                    <td className='px-3 py-3'><Badge variant={status.badge}>{status.label}</Badge></td>
                     <td className='whitespace-nowrap px-3 py-3 font-mono text-xs'>{formatBytes(item.size_bytes)}</td>
                     <td className='px-3 py-3'>
                       <div className='flex items-center gap-2'>
                         <div className='h-2 flex-1 overflow-hidden rounded-full bg-secondary'>
-                          <div className='h-full rounded-full bg-primary transition-[width] duration-300' style={{ width: `${percent}%` }} />
+                          <div className={cn('h-full rounded-full transition-[width] duration-300', status.progress)} style={{ width: `${percent}%` }} />
                         </div>
                         <span className='w-12 text-right font-mono text-xs'>{percent.toFixed(1)}%</span>
                       </div>
                     </td>
-                    <td className='px-3 py-3 text-right font-mono'>{item.seeds}</td>
-                    <td className='px-3 py-3 text-right font-mono'>{item.peers}</td>
-                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono text-xs text-info'>{formatSpeed(item.dlspeed)}</td>
-                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono text-xs text-success'>{formatSpeed(item.upspeed)}</td>
+                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono'>{item.seeds} ({item.seeds_total})</td>
+                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono'>{item.peers} ({item.peers_total})</td>
+                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono text-xs'>{formatSpeed(item.dlspeed)}</td>
+                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono text-xs'>{formatSpeed(item.upspeed)}</td>
                     <td className='whitespace-nowrap px-3 py-3 font-mono text-xs'>{formatEta(item.eta, item.progress)}</td>
                     <td className='whitespace-nowrap px-4 py-3 text-xs text-muted-foreground'>{formatAdded(item.added_on)}</td>
                   </tr>

@@ -163,6 +163,26 @@ async def test_filmpalast_search_parses_fixture(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_filmpalast_search_skips_rating_star_when_selecting_poster() -> None:
+    html = """
+    <article class="liste rb">
+      <a class="rb" href="/stream/spider-man-homecoming">
+        <img src="/themes/downloadarchive/images/star_on.png">
+        <img data-src="/media/cover/spider-man-homecoming.jpg">
+        <h2>Spider-Man: Homecoming</h2>
+      </a>
+    </article>
+    """
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    try:
+        results = backend._parse_search(html, limit=10)
+    finally:
+        await backend.aclose()
+
+    assert results[0].poster_url == "http://example.invalid/media/cover/spider-man-homecoming.jpg"
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_recent_groups_three_pages_and_extracts_release() -> None:
     requested_paths: list[str] = []
 

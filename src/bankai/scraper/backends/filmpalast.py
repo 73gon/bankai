@@ -316,10 +316,9 @@ class FilmpalastBackend:
             title = (title_el.text() or "").strip()
             if not title:
                 continue
-            poster_el = article.css_first("img")
             poster = None
-            if poster_el is not None:
-                poster = next(
+            for poster_el in article.css("img"):
+                candidate = next(
                     (
                         poster_el.attributes.get(name)
                         for name in ("data-src", "data-original", "src")
@@ -327,6 +326,16 @@ class FilmpalastBackend:
                     ),
                     None,
                 )
+                if not candidate:
+                    continue
+                normalized_candidate = candidate.casefold()
+                if any(
+                    marker in normalized_candidate
+                    for marker in ("star_on", "star_off", "star_half", "rating_star")
+                ):
+                    continue
+                poster = candidate
+                break
             if poster:
                 poster = urljoin(self._base, poster)
             article_text = " ".join((article.text(separator=" ") or "").split())

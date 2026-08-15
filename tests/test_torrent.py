@@ -300,6 +300,8 @@ def test_qbittorrent_status_includes_dashboard_metrics() -> None:
             "eta": 120,
             "num_seeds": 14,
             "num_leechs": 6,
+            "num_complete": 383,
+            "num_incomplete": 27,
             "added_on": 1_700_000_000,
         }
     )
@@ -307,6 +309,8 @@ def test_qbittorrent_status_includes_dashboard_metrics() -> None:
     assert status.upspeed == 300
     assert status.seeds == 14
     assert status.peers == 6
+    assert status.seeds_total == 383
+    assert status.peers_total == 27
     assert status.added_on == 1_700_000_000
 
 

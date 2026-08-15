@@ -257,28 +257,28 @@ export default function Recent() {
         <span className='text-sm text-muted-foreground'>— Browse German new releases, movies, shows, and top titles.</span>
       </header>
 
-      <form className='flex max-w-3xl gap-2' onSubmit={searchFilmpalast}>
-        <div className='relative flex-1'>
-          <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-          <Input
-            className='pl-9 pr-9'
-            value={browseQuery}
-            onChange={(event) => setBrowseQuery(event.target.value)}
-            placeholder='Search Filmpalast movies and shows…'
-          />
-          {searchResults && (
-            <button type='button' className='absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground' onClick={clearSearch} aria-label='Clear Filmpalast search'>
-              <X className='size-4' />
-            </button>
-          )}
-        </div>
-        <Button type='submit' disabled={!browseQuery.trim() || searching}>
-          {searching ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Search data-icon='inline-start' />}
-          Search
-        </Button>
-      </form>
+      <div className='flex flex-wrap items-center gap-3'>
+        <form className='flex min-w-80 max-w-2xl flex-1 gap-2' onSubmit={searchFilmpalast}>
+          <div className='relative flex-1'>
+            <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
+            <Input
+              className='pl-9 pr-9'
+              value={browseQuery}
+              onChange={(event) => setBrowseQuery(event.target.value)}
+              placeholder='Search Filmpalast movies and shows…'
+            />
+            {searchResults && (
+              <button type='button' className='absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground' onClick={clearSearch} aria-label='Clear Filmpalast search'>
+                <X className='size-4' />
+              </button>
+            )}
+          </div>
+          <Button type='submit' disabled={!browseQuery.trim() || searching}>
+            {searching ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Search data-icon='inline-start' />}
+            Search
+          </Button>
+        </form>
 
-      <div className='flex flex-col gap-3'>
         <Tabs
           value={feed}
           onValueChange={(value) => {
@@ -292,27 +292,25 @@ export default function Recent() {
             else setKind('all');
           }}
         >
-          <TabsList className='h-auto w-full justify-start overflow-x-auto sm:w-fit'>
+          <TabsList className='h-auto justify-start overflow-x-auto'>
             <TabsTrigger value='new'>New</TabsTrigger>
             <TabsTrigger value='movies'>Movies</TabsTrigger>
             <TabsTrigger value='shows'>Shows</TabsTrigger>
             <TabsTrigger value='top'>Top titles</TabsTrigger>
           </TabsList>
         </Tabs>
-      </div>
 
-      <div className='flex flex-wrap items-center justify-between gap-3'>
         <Tabs value={kind} onValueChange={(value) => setKind(value as typeof kind)}>
-          <TabsList className='border-0 bg-transparent shadow-none'>
+          <TabsList>
             <TabsTrigger value='all'>All</TabsTrigger>
             <TabsTrigger value='movie'>Movies</TabsTrigger>
             <TabsTrigger value='episode'>Episodes</TabsTrigger>
           </TabsList>
         </Tabs>
         {searchResults ? (
-          <span className='text-xs text-muted-foreground'>{searchResults.length} search results</span>
+          <span className='ml-auto text-xs text-muted-foreground'>{searchResults.length} search results</span>
         ) : data && (
-          <span className='text-xs text-muted-foreground'>
+          <span className='ml-auto text-xs text-muted-foreground'>
             Pages {data.source_page_start}–{data.source_page_end} · {data.items.length} releases
           </span>
         )}

@@ -2203,6 +2203,8 @@ def create_app() -> Any:
                     "size_bytes": torrent.size_bytes,
                     "seeds": torrent.seeds,
                     "peers": torrent.peers,
+                    "seeds_total": torrent.seeds_total,
+                    "peers_total": torrent.peers_total,
                     "dlspeed": torrent.dlspeed,
                     "upspeed": torrent.upspeed,
                     "eta": torrent.eta,

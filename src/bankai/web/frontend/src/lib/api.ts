@@ -216,6 +216,8 @@ export interface QBittorrentItem {
   size_bytes: number;
   seeds: number;
   peers: number;
+  seeds_total: number;
+  peers_total: number;
   dlspeed: number;
   upspeed: number;
   eta: number;

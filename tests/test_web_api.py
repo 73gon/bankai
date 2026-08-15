@@ -123,6 +123,8 @@ def test_qbittorrent_torrents_returns_all_dashboard_fields(
                     upspeed=100,
                     seeds=12,
                     peers=4,
+                    seeds_total=383,
+                    peers_total=27,
                     added_on=1_700_000_000,
                 )
             ]
@@ -140,6 +142,8 @@ def test_qbittorrent_torrents_returns_all_dashboard_fields(
         "size_bytes": 4_000,
         "seeds": 12,
         "peers": 4,
+        "seeds_total": 383,
+        "peers_total": 27,
         "dlspeed": 900,
         "upspeed": 100,
         "eta": 42,
