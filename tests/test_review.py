@@ -73,6 +73,31 @@ def test_legacy_duplicate_padded_source_fps_is_sanitized(tmp_path: Path) -> None
     assert review_mod.get_state(path).source_fps == pytest.approx(23.976)
 
 
+def test_declared_source_video_fps_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+    review_mod.set_sync_review(
+        path,
+        needs_review=True,
+        source_fps=23.976,
+        source_video_fps=23.0,
+        reference_fps=23.976,
+    )
+
+    state = review_mod.get_state(path)
+    assert state.source_video_fps == pytest.approx(23.0)
+    assert state.source_fps == pytest.approx(23.976)
+
+
+def test_source_video_fps_backfill_preserves_review_decisions(tmp_path: Path) -> None:
+    path = tmp_path / "movie.mkv"
+    review_mod.set_sync_user_approved(path)
+
+    state = review_mod.set_source_video_fps(path, 24.0)
+
+    assert state.source_video_fps == pytest.approx(24.0)
+    assert state.sync_user_approved is True
+
+
 def test_source_provenance_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "movie.mkv"
 

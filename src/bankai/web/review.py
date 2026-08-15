@@ -67,6 +67,10 @@ class ReviewState:
     # ratio; source_fps is the measured content cadence (not a hoster's
     # duplicate-padded nominal rate), while reference_fps is the HQ rate.
     source_fps: float | None = None
+    # Frame rate declared by the original German source video's container.
+    # This is kept separately because it can disagree with measured content
+    # cadence (for example duplicate-padded streams).
+    source_video_fps: float | None = None
     reference_fps: float | None = None
     drift_ratio: float | None = None
     duration_delta_seconds: float | None = None
@@ -234,6 +238,7 @@ def reset_for_new_output(path: str | Path) -> ReviewState:
                 "sync_user_approved": False,
                 "auto_delay_ms": 0,
                 "source_fps": None,
+                "source_video_fps": None,
                 "reference_fps": None,
                 "drift_ratio": None,
                 "duration_delta_seconds": None,
@@ -279,6 +284,7 @@ def set_sync_review(
     confidence: float | None = None,
     applied_delay_ms: int = 0,
     source_fps: float | None = None,
+    source_video_fps: float | None = None,
     reference_fps: float | None = None,
     drift_ratio: float | None = None,
     duration_delta_seconds: float | None = None,
@@ -299,6 +305,8 @@ def set_sync_review(
         raw["auto_delay_ms"] = int(applied_delay_ms)
         if source_fps is not None:
             raw["source_fps"] = float(source_fps)
+        if source_video_fps is not None:
+            raw["source_video_fps"] = float(source_video_fps)
         if reference_fps is not None:
             raw["reference_fps"] = float(reference_fps)
         if drift_ratio is not None:
@@ -307,6 +315,16 @@ def set_sync_review(
             raw["duration_delta_seconds"] = float(duration_delta_seconds)
         if duration_compatible is not None:
             raw["duration_compatible"] = bool(duration_compatible)
+        raw["updated_at"] = time.time()
+
+    return _update(path, change)
+
+
+def set_source_video_fps(path: str | Path, fps: float) -> ReviewState:
+    """Backfill the German source container's declared frame rate."""
+
+    def change(raw: dict) -> None:
+        raw["source_video_fps"] = float(fps)
         raw["updated_at"] = time.time()
 
     return _update(path, change)

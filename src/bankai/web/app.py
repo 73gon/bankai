@@ -61,6 +61,41 @@ _LAPTOP_VPN_SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
 _RECENT_RELEASE_CACHE: dict[tuple[str, int], tuple[float, dict]] = {}
 
 
+def _backfill_review_source_video_fps() -> None:
+    """Recover declared German FPS for outputs made before it was persisted."""
+
+    from bankai.cli import bgjobs
+
+    by_output: dict[str, float] = {}
+    for job in bgjobs.list_jobs():
+        if not job.final_path:
+            continue
+        fps = bgjobs.source_video_fps(job)
+        if fps is None:
+            continue
+        try:
+            by_output[str(Path(job.final_path).resolve())] = fps
+        except OSError:
+            continue
+    if not by_output:
+        return
+    for entry in media_mod.scan_library():
+        state = review_mod.get_state(entry.path)
+        if state.source_video_fps is not None:
+            continue
+        try:
+            fps = by_output.get(str(Path(entry.path).resolve()))
+        except OSError:
+            continue
+        if fps is not None:
+            review_mod.set_source_video_fps(entry.path, fps)
+
+
+def _backfill_review_metadata() -> None:
+    _backfill_review_source_video_fps()
+    _backfill_review_duration_integrity()
+
+
 def _backfill_review_duration_integrity() -> None:
     """Populate runtime compatibility for review files made by older builds."""
     for entry in media_mod.scan_library():
@@ -171,7 +206,12 @@ async def _verify_filmpalast_source(url: str) -> int:
         await backend.aclose()
 
 
-def _waveform_envelope(samples: Any, bins: int) -> bytearray:
+def _waveform_envelope(
+    samples: Any,
+    bins: int,
+    *,
+    smoothing_radius: int = 1,
+) -> bytearray:
     """Build a stable dBFS loudness envelope from full-band PCM samples.
 
     Each bin uses winsorised RMS: the loudest two percent of samples are capped
@@ -197,11 +237,14 @@ def _waveform_envelope(samples: Any, bins: int) -> bytearray:
 
     if not any(power > 0 for power in powers):
         return bytearray(len(powers))
-    # A short ~3-bin integration window follows perceived energy and prevents
-    # one narrow sample bin from looking more important than it sounds.
+    # Overview lanes benefit from a short integration window. Detailed review
+    # lanes pass radius=0 so transient edges remain available for alignment.
     smoothed: list[float] = []
     for index in range(len(powers)):
-        nearby = powers[max(0, index - 1) : min(len(powers), index + 2)]
+        nearby = powers[
+            max(0, index - smoothing_radius) :
+            min(len(powers), index + smoothing_radius + 1)
+        ]
         smoothed.append(sum(nearby) / len(nearby))
     floor_db = -72.0
     values = bytearray()
@@ -659,7 +702,7 @@ def create_app() -> Any:
 
             anyio.to_thread.current_default_thread_limiter().total_tokens = 96
             migration_task = asyncio.create_task(
-                anyio.to_thread.run_sync(_backfill_review_duration_integrity)
+                anyio.to_thread.run_sync(_backfill_review_metadata)
             )
         except Exception:
             pass
@@ -986,7 +1029,19 @@ def create_app() -> Any:
     ) -> dict:
         from bankai.backend import search_stream_sources
 
-        media_kind = MediaKind.MOVIE if kind == "movie" else MediaKind.EPISODE
+        normalized_kind = kind.strip().casefold()
+        if normalized_kind not in {"all", "movie", "episode", "show"}:
+            raise HTTPException(
+                status_code=400,
+                detail="kind must be all, movie, episode, or show",
+            )
+        media_kind = (
+            None
+            if normalized_kind == "all"
+            else MediaKind.MOVIE
+            if normalized_kind == "movie"
+            else MediaKind.EPISODE
+        )
         results = await search_stream_sources(q, site=site, limit=limit, kind=media_kind)
         filmpalast_results = [result for result in results if result.site == "filmpalast"]
         if filmpalast_results:
@@ -1008,9 +1063,64 @@ def create_app() -> Any:
                     "kind": str(r.kind),
                     "url": r.url,
                     "release_name": r.release_name,
+                    "poster_url": r.poster_url,
+                    "runtime_minutes": int(r.raw["runtime_minutes"])
+                    if r.raw.get("runtime_minutes", "").isdigit()
+                    else None,
                 }
                 for r in results
             ]
+        }
+
+    @app.get("/api/filmpalast/detail")
+    async def filmpalast_detail(url: str = Query(...)) -> dict:
+        try:
+            site = _stream_site_from_url(url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if site != "filmpalast":
+            raise HTTPException(status_code=422, detail="a Filmpalast title URL is required")
+
+        from bankai.scraper.backends.filmpalast import FilmpalastBackend, is_supported_hoster
+
+        backend = FilmpalastBackend()
+        try:
+            details = await backend.title_details(url)
+        except Exception as exc:
+            log.warning("Filmpalast detail fetch failed: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail="The Filmpalast title details could not be loaded. Please try again.",
+            ) from exc
+        finally:
+            await backend.aclose()
+
+        return {
+            "title": details.title,
+            "url": details.url,
+            "kind": str(details.kind),
+            "year": details.year,
+            "poster_url": details.poster_url,
+            "release_name": details.release_name,
+            "runtime_minutes": details.runtime_minutes,
+            "mirrors": [
+                {
+                    "url": mirror.url,
+                    "host": (urlparse(mirror.url).hostname or mirror.url).removeprefix("www."),
+                    "hint": mirror.hint,
+                    "supported": is_supported_hoster(mirror.url),
+                }
+                for mirror in details.mirrors
+            ],
+            "episodes": [
+                {
+                    "season": episode.season,
+                    "episode": episode.episode,
+                    "title": episode.title or None,
+                    "url": episode.url,
+                }
+                for episode in details.episodes
+            ],
         }
 
     @app.get("/api/releases/recent")
@@ -2069,6 +2179,39 @@ def create_app() -> Any:
             "stages": ["extract", "torrent", "sync", "remux"],
         }
 
+    @app.get("/api/qbittorrent/torrents")
+    async def qbittorrent_torrents() -> dict:
+        """Return every torrent visible to the configured qBittorrent user."""
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        try:
+            async with QBittorrentClient() as client:
+                torrents = await client.list_torrents()
+        except Exception as exc:
+            log.warning("qBittorrent listing failed: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail="qBittorrent could not be reached. Check its connection settings.",
+            ) from exc
+        return {
+            "items": [
+                {
+                    "hash": torrent.hash,
+                    "name": torrent.name,
+                    "state": torrent.state,
+                    "progress": torrent.progress,
+                    "size_bytes": torrent.size_bytes,
+                    "seeds": torrent.seeds,
+                    "peers": torrent.peers,
+                    "dlspeed": torrent.dlspeed,
+                    "upspeed": torrent.upspeed,
+                    "eta": torrent.eta,
+                    "added_on": torrent.added_on,
+                }
+                for torrent in torrents
+            ]
+        }
+
     @app.get("/api/media/info")
     def media_info(path: str = Query(...)) -> dict:
         p = _safe_path(path)
@@ -2095,6 +2238,7 @@ def create_app() -> Any:
             "duration_compatible": state.duration_compatible,
             "auto_delay_ms": state.auto_delay_ms,
             "source_fps": state.source_fps,
+            "source_video_fps": state.source_video_fps,
             "reference_fps": state.reference_fps,
             "drift_ratio": state.drift_ratio,
             "german_source_url": state.german_source_url,
@@ -2261,14 +2405,14 @@ def create_app() -> Any:
         except OSError as exc:
             raise HTTPException(status_code=404, detail="not found") from exc
         detailed = dur <= 180.0
-        key = ("adaptive-v3", str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
+        key = ("adaptive-v4", str(p), st.st_mtime_ns, stream, round(start, 2), round(dur, 2), bins)
         hit = _waveform_cache_get(key)
         if hit is not None:
             return hit
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
-        sample_rate = 12000 if detailed else 200
+        sample_rate = 48000 if detailed else 200
         cmd = [
             ffmpeg,
             "-v",
@@ -2311,7 +2455,11 @@ def create_app() -> Any:
         samples.frombytes(proc.stdout[: len(proc.stdout) - (len(proc.stdout) % 2)])
         if sys.byteorder != "little":  # ffmpeg's s16le output is fixed
             samples.byteswap()
-        peaks = _waveform_envelope(samples, bins)
+        peaks = _waveform_envelope(
+            samples,
+            bins,
+            smoothing_radius=0 if detailed else 1,
+        )
         out = {
             "start": start,
             "dur": dur,

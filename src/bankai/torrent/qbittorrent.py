@@ -31,6 +31,10 @@ class TorrentStatus:
     size_bytes: int
     dlspeed: int
     eta: int
+    upspeed: int = 0
+    seeds: int = 0
+    peers: int = 0
+    added_on: int = 0
 
 
 _DONE_STATES = {"uploading", "stalledUP", "queuedUP", "pausedUP", "forcedUP", "checkingUP"}
@@ -216,4 +220,8 @@ def _to_status(row: dict[str, Any]) -> TorrentStatus:
         size_bytes=int(row.get("size") or 0),
         dlspeed=int(row.get("dlspeed") or 0),
         eta=int(row.get("eta") or 0),
+        upspeed=int(row.get("upspeed") or 0),
+        seeds=int(row.get("num_seeds") or 0),
+        peers=int(row.get("num_leechs") or 0),
+        added_on=int(row.get("added_on") or 0),
     )

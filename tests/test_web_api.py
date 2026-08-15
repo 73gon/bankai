@@ -15,7 +15,10 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bankai.config import get_settings, reset_settings_cache
+from bankai.queue.models import MediaKind
+from bankai.scraper.base import EpisodeRef, StreamHandle
 from bankai.torrent.prowlarr import TorrentCandidate
+from bankai.torrent.qbittorrent import TorrentStatus
 from bankai.web.app import (
     _backfill_review_duration_integrity,
     _ebur128_envelope,
@@ -92,6 +95,98 @@ def test_health(client: TestClient) -> None:
     body = r.json()
     assert body["status"] == "ok"
     assert "version" in body
+
+
+def test_qbittorrent_torrents_returns_all_dashboard_fields(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeQBittorrent:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def list_torrents(self) -> list[TorrentStatus]:
+            return [
+                TorrentStatus(
+                    hash="abc",
+                    name="Ninja Turtles",
+                    state="downloading",
+                    progress=0.75,
+                    save_path="/downloads",
+                    content_path="/downloads/movie.mkv",
+                    size_bytes=4_000,
+                    dlspeed=900,
+                    eta=42,
+                    upspeed=100,
+                    seeds=12,
+                    peers=4,
+                    added_on=1_700_000_000,
+                )
+            ]
+
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", FakeQBittorrent)
+    response = client.get("/api/qbittorrent/torrents")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item == {
+        "hash": "abc",
+        "name": "Ninja Turtles",
+        "state": "downloading",
+        "progress": 0.75,
+        "size_bytes": 4_000,
+        "seeds": 12,
+        "peers": 4,
+        "dlspeed": 900,
+        "upspeed": 100,
+        "eta": 42,
+        "added_on": 1_700_000_000,
+    }
+
+
+def test_filmpalast_detail_returns_file_mirrors_and_episodes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFilmpalast:
+        async def title_details(self, url: str) -> SimpleNamespace:
+            assert url == "https://filmpalast.to/stream/arcane"
+            return SimpleNamespace(
+                title="Arcane",
+                url=url,
+                kind=MediaKind.EPISODE,
+                year=2021,
+                poster_url=None,
+                release_name="Arcane.S01E01.GERMAN.1080p",
+                runtime_minutes=42,
+                mirrors=(StreamHandle(site="filmpalast", url="https://voe.sx/primary", hint="playwright"),),
+                episodes=(EpisodeRef(site="filmpalast", series_title="Arcane", season=1, episode=1, title="Pilot", url="https://filmpalast.to/stream/arcane-s01e01"),),
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("bankai.scraper.backends.filmpalast.FilmpalastBackend", FakeFilmpalast)
+    response = client.get(
+        "/api/filmpalast/detail",
+        params={"url": "https://filmpalast.to/stream/arcane"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["release_name"] == "Arcane.S01E01.GERMAN.1080p"
+    assert body["mirrors"][0]["host"] == "voe.sx"
+    assert body["mirrors"][0]["supported"] is True
+    assert body["episodes"][0]["episode"] == 1
+
+    rejected = client.get(
+        "/api/filmpalast/detail",
+        params={"url": "https://example.com/not-allowed"},
+    )
+    assert rejected.status_code == 422
 
 
 def test_discover_backfills_filtered_movies_to_requested_page_size(
@@ -1048,6 +1143,7 @@ def test_close_zoom_waveform_uses_detailed_pcm(
     assert response.status_code == 200
     assert response.json()["detail"] == "pcm"
     assert response.json()["bins"] == 600
+    assert calls[0][calls[0].index("-ar") + 1] == "48000"
     assert calls[0][calls[0].index("-f") + 1] == "s16le"
 
     # Service restarts clear RAM but should not force a full waveform decode

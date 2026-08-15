@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import ClassVar
 from urllib.parse import quote, urljoin, urlparse
 
@@ -47,6 +47,19 @@ def _detail_release_metadata(tree: HTMLParser) -> tuple[str | None, int | None]:
     year_match = _DETAIL_YEAR_RE.search(detail_text)
     year = int(year_match.group("year")) if year_match else None
     return release_name, year
+
+
+@dataclass(frozen=True, slots=True)
+class FilmpalastTitleDetails:
+    title: str
+    url: str
+    kind: MediaKind
+    year: int | None
+    poster_url: str | None
+    release_name: str | None
+    runtime_minutes: int | None
+    mirrors: tuple[StreamHandle, ...]
+    episodes: tuple[EpisodeRef, ...]
 
 
 @register
@@ -212,6 +225,81 @@ class FilmpalastBackend:
             )
 
         return list(await asyncio.gather(*(enrich(result) for result in results)))
+
+    async def title_details(self, url: str) -> FilmpalastTitleDetails:
+        """Load a Filmpalast title page, its release filename, and mirrors."""
+        try:
+            response = await self._client.get(url)
+        except Exception as exc:
+            raise ScraperError(f"filmpalast detail fetch failed: {exc}") from exc
+        detect_cloudflare(response)
+        if response.status_code != 200:
+            raise ScraperError(f"filmpalast detail fetch failed: HTTP {response.status_code}")
+
+        tree = HTMLParser(response.text)
+        slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+        title_element = tree.css_first("h1, h2, .name")
+        title = (title_element.text() or "").strip() if title_element is not None else ""
+        if not title:
+            title = slug.replace("-", " ").title()
+        release_name, detail_year = _detail_release_metadata(tree)
+        year_match = _YEAR_RE.search(title)
+
+        poster_url = None
+        poster_element = tree.css_first(
+            "meta[property='og:image'], meta[name='twitter:image'], .detail img, img"
+        )
+        if poster_element is not None:
+            poster_url = next(
+                (
+                    poster_element.attributes.get(name)
+                    for name in ("content", "data-src", "data-original", "src")
+                    if poster_element.attributes.get(name)
+                ),
+                None,
+            )
+        if poster_url:
+            poster_url = urljoin(self._base, poster_url)
+
+        detail_text = " ".join((tree.text(separator=" ") or "").split())
+        runtime_match = _RUNTIME_RE.search(detail_text)
+        episode_match = _EPISODE_RE.search(slug)
+        episodes: list[EpisodeRef] = []
+        seen_episodes: set[str] = set()
+        for anchor in tree.css("a[href*='/stream/']"):
+            href = anchor.attributes.get("href") or ""
+            match = _EPISODE_RE.search(href)
+            episode_url = urljoin(self._base, href)
+            if not match or episode_url in seen_episodes:
+                continue
+            seen_episodes.add(episode_url)
+            episodes.append(
+                EpisodeRef(
+                    site=self.site_id,
+                    series_title=title,
+                    season=int(match.group("season")),
+                    episode=int(match.group("episode")),
+                    title=(anchor.text() or "").strip(),
+                    url=episode_url,
+                )
+            )
+        episodes.sort(key=lambda episode: (episode.season, episode.episode))
+
+        mirrors = tuple(
+            StreamHandle(site=self.site_id, url=hoster, hint=_hoster_hint(hoster))
+            for hoster in sorted(self._extract_hosters(response.text), key=_hoster_rank)
+        )
+        return FilmpalastTitleDetails(
+            title=title,
+            url=url,
+            kind=MediaKind.EPISODE if episode_match or episodes else MediaKind.MOVIE,
+            year=int(year_match.group(0)) if year_match else detail_year,
+            poster_url=poster_url,
+            release_name=release_name,
+            runtime_minutes=int(runtime_match.group("minutes")) if runtime_match else None,
+            mirrors=mirrors,
+            episodes=tuple(episodes),
+        )
 
     def _parse_search(self, html: str, *, limit: int) -> list[SearchResult]:
         tree = HTMLParser(html)

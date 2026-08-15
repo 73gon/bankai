@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2 } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api, type VpnStatus } from '@/lib/api';
@@ -13,12 +13,14 @@ import Server from '@/pages/Server';
 import Settings from '@/pages/Settings';
 import Anime from '@/pages/Anime';
 import Recent from '@/pages/Recent';
+import QBittorrent from '@/pages/QBittorrent';
 
 const NAV = [
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/search', label: 'Search', icon: SearchIcon },
   { to: '/filmpalast', label: 'Filmpalast', icon: CalendarClock },
   { to: '/anime', label: 'Anime', icon: Sparkles },
+  { to: '/qbittorrent', label: 'qBittorrent', icon: Download },
   { to: '/queue', label: 'Queue', icon: ListVideo },
   { to: '/library', label: 'Library', icon: HardDrive },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -220,6 +222,7 @@ export default function App() {
               <Route path='/filmpalast' element={<Recent />} />
               <Route path='/recent' element={<Navigate to='/filmpalast' replace />} />
               <Route path='/anime' element={<Anime />} />
+              <Route path='/qbittorrent' element={<QBittorrent />} />
               <Route path='/queue' element={<Library />} />
               <Route path='/library' element={<Server />} />
               <Route path='/server' element={<Navigate to='/library' replace />} />

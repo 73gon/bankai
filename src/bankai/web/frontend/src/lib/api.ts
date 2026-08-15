@@ -163,6 +163,8 @@ export interface SearchResult {
   kind: string;
   url: string;
   release_name?: string | null;
+  poster_url?: string | null;
+  runtime_minutes?: number | null;
 }
 
 export interface RecentRelease {
@@ -186,6 +188,39 @@ export interface RecentReleasePage {
 }
 
 export type FilmpalastFeed = 'new' | 'movies' | 'shows' | 'top';
+
+export interface FilmpalastMirror {
+  url: string;
+  host: string;
+  hint: 'ytdlp' | 'playwright' | 'direct';
+  supported: boolean;
+}
+
+export interface FilmpalastDetails {
+  title: string;
+  url: string;
+  kind: 'movie' | 'episode';
+  year: number | null;
+  poster_url: string | null;
+  release_name: string | null;
+  runtime_minutes: number | null;
+  mirrors: FilmpalastMirror[];
+  episodes: EpisodeItem[];
+}
+
+export interface QBittorrentItem {
+  hash: string;
+  name: string;
+  state: string;
+  progress: number;
+  size_bytes: number;
+  seeds: number;
+  peers: number;
+  dlspeed: number;
+  upspeed: number;
+  eta: number;
+  added_on: number;
+}
 
 export interface EpisodeItem {
   season: number;
@@ -322,6 +357,7 @@ export interface MediaInfo {
   duration_compatible: boolean | null;
   auto_delay_ms: number;
   source_fps: number | null;
+  source_video_fps: number | null;
   reference_fps: number | null;
   drift_ratio: number | null;
   german_source_url: string | null;
@@ -382,6 +418,10 @@ export const api = {
     request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&kind=${kind}${site ? `&site=${site}` : ''}`),
   recentReleases: (page = 0, feed: FilmpalastFeed = 'new') =>
     request<RecentReleasePage>(`/api/releases/recent?page=${page}&feed=${feed}`),
+  filmpalastDetails: (url: string) =>
+    request<FilmpalastDetails>(`/api/filmpalast/detail?url=${encodeURIComponent(url)}`),
+  qbittorrentTorrents: () =>
+    request<{ items: QBittorrentItem[] }>('/api/qbittorrent/torrents'),
   torrentSearch: (q: string, runtimeSeconds?: number | null, options: TorrentSearchOptions = {}) => {
     const params = new URLSearchParams({ q });
     if (runtimeSeconds) params.set('runtime_seconds', String(runtimeSeconds));

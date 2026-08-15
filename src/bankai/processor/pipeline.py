@@ -566,6 +566,11 @@ class PipelineWorker(Worker):
         reference_fps = await _probe_fps(Path(video_path))
         if nominal_source_fps:
             sync_payload["source_fps"] = nominal_source_fps
+            # Keep the source container's declared cadence as a separate
+            # diagnostic.  It remains useful when visual matching is skipped
+            # or fails, but must not replace ``source_fps`` below: hosters can
+            # advertise a padded nominal rate that differs from content time.
+            visual_meta["source_video_fps"] = nominal_source_fps
         if reference_fps:
             sync_payload["reference_fps"] = reference_fps
         if reference_fps:
@@ -706,6 +711,7 @@ class PipelineWorker(Worker):
                 confidence=visual_meta.get("confidence"),
                 applied_delay_ms=int(visual_meta.get("delay_ms", 0) or 0),
                 source_fps=visual_meta.get("source_fps"),
+                source_video_fps=visual_meta.get("source_video_fps"),
                 reference_fps=visual_meta.get("reference_fps"),
                 drift_ratio=visual_meta.get("drift_ratio"),
                 duration_delta_seconds=visual_meta.get("duration_delta_seconds"),

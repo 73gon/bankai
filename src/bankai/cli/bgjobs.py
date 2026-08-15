@@ -196,6 +196,10 @@ class BgJob:
 
 
 _FAILURE_REASON_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning))\b:?\s*(.*)$")
+_SOURCE_VIDEO_FPS_RE = re.compile(
+    r"\[visual-sync\]\s+source nominal frame rate\s+(?P<fps>\d+(?:\.\d+)?)fps",
+    re.IGNORECASE,
+)
 # A continuation of a wrapped exception message ends when we hit a blank line,
 # a new traceback frame / box border, a log timestamp, or a BANKAI marker.
 _REASON_BOUNDARY_RE = re.compile(r'^(?:[+|\u2502\u2570\u256d\u2500]|\d{4}-\d\d-\d\d|BANKAI_|File ")')
@@ -232,6 +236,20 @@ def failure_reason(job: BgJob) -> str | None:
             break
         parts.append(s)
     return _shorten_reason(" ".join(parts))
+
+
+def source_video_fps(job: BgJob) -> float | None:
+    """Return the German source video's declared FPS recorded in a job log."""
+
+    for line in reversed(_read_log_tail(job.log_path, lines=800)):
+        match = _SOURCE_VIDEO_FPS_RE.search(line)
+        if match:
+            try:
+                fps = float(match.group("fps"))
+                return fps if fps > 0 else None
+            except ValueError:
+                return None
+    return None
 
 
 def _shorten_reason(reason: str) -> str | None:

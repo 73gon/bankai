@@ -21,7 +21,7 @@ from bankai.torrent.matcher import (
     pick_movie_file,
 )
 from bankai.torrent.prowlarr import TorrentCandidate
-from bankai.torrent.qbittorrent import QBittorrentClient, TorrentStatus
+from bankai.torrent.qbittorrent import QBittorrentClient, TorrentStatus, _to_status
 from bankai.torrent.selector import TorrentSelector
 from bankai.torrent.worker import TorrentWorker, _is_season_pack, episode_search_queries
 
@@ -285,6 +285,29 @@ def test_episode_search_queries_derives_series_from_query() -> None:
 def test_episode_search_queries_without_season_is_query_only() -> None:
     qs = episode_search_queries({"query": "Some Show S02E05"})
     assert qs == ["Some Show S02E05"]
+
+
+def test_qbittorrent_status_includes_dashboard_metrics() -> None:
+    status = _to_status(
+        {
+            "hash": "abc123",
+            "name": "Movie",
+            "state": "downloading",
+            "progress": 0.42,
+            "size": 8_000,
+            "dlspeed": 2_000,
+            "upspeed": 300,
+            "eta": 120,
+            "num_seeds": 14,
+            "num_leechs": 6,
+            "added_on": 1_700_000_000,
+        }
+    )
+
+    assert status.upspeed == 300
+    assert status.seeds == 14
+    assert status.peers == 6
+    assert status.added_on == 1_700_000_000
 
 
 def test_qbittorrent_poll_retries_transient_read_error(

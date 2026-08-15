@@ -2174,10 +2174,11 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   useEffect(() => {
     if (dragging) return;
     // Backend caps bins at 4000 — never request more or it 422s (which would
-    // silently leave a lane blank). ~3 bins per visible pixel across the buffer.
+    // silently leave a lane blank). A two-window buffer and four bins per
+    // pixel retain roughly two independent measurements per visible pixel.
     const MAX_BINS = 4000;
-    const bins = Math.min(MAX_BINS, Math.max(600, Math.round(canvasW * 3)));
-    const bufDur = windowSec * 3;
+    const bins = Math.min(MAX_BINS, Math.max(800, Math.round(canvasW * 4)));
+    const bufDur = windowSec * 2;
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const fetchOne = async (run: () => Promise<void>): Promise<void> => {
@@ -2208,7 +2209,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         // Keep the mapped source window within the backend's 1800s cap. At
         // ordinary drift factors this retains a full visible-window margin.
         const visibleSourceDur = windowSec * stretch;
-        const margin = Math.min(windowSec, Math.max(0, (1800 - visibleSourceDur) / (2 * stretch)));
+        const margin = Math.min(windowSec / 2, Math.max(0, (1800 - visibleSourceDur) / (2 * stretch)));
         const mappedStart = (viewStart - margin - delayMs / 1000) * stretch;
         const mappedEnd = (viewStart + windowSec + margin - delayMs / 1000) * stretch;
         const start = Math.max(0, mappedStart);
@@ -2260,7 +2261,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       stream: number,
       totalDuration: number,
     ): Promise<WaveBuffer> {
-      const targetBins = 2400;
+      const targetBins = 4000;
       const pieces: Uint8Array[] = [];
       let totalBins = 0;
       for (let start = 0; start < totalDuration && !cancelled; start += 1800) {
@@ -3307,6 +3308,14 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
   const measuredDrift = info?.drift_ratio ?? null;
   const measuredDriftReliable = measuredDrift != null && (info?.sync_confidence ?? 0) >= 0.6;
   const sourceFps = info?.source_fps ?? null;
+  const sourceVideoFps = info?.source_video_fps ?? null;
+  const referenceFps = info?.reference_fps ?? info?.video_fps ?? null;
+  const fpsStretch = sourceVideoFps != null
+    && referenceFps != null
+    && sourceVideoFps >= 15
+    && sourceVideoFps <= 31
+    ? referenceFps / sourceVideoFps
+    : null;
   const durationStretch = engTrack?.duration && gerTrack?.duration && engTrack.duration > 0 ? gerTrack.duration / engTrack.duration : null;
   const lengthsDiffer = lenDrift != null && Math.abs(lenDrift) > 2;
   const knownDurationStretch = durationStretch != null && [23.976 / 25, 24 / 25, 25 / 23.976, 25 / 24]
@@ -3408,13 +3417,20 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     setStretch(next);
     setStretchInput(next.toFixed(6));
   }
-  const trackMeta = (t: AudioTrack | null, videoFps: number | null | undefined) => {
+  const trackMeta = (
+    t: AudioTrack | null,
+    videoFps: number | null | undefined,
+    contentFps?: number | null,
+  ) => {
     const bits: string[] = [];
     if (t?.codec) bits.push(t.codec.toUpperCase());
     if (t?.channels) bits.push(`${t.channels}ch`);
     if (t?.sample_rate) bits.push(`${(t.sample_rate / 1000).toFixed(1)} kHz`);
     if (t?.duration != null) bits.push(`len ${fmtClockMs(t.duration)}`);
     if (videoFps) bits.push(`video ${videoFps.toFixed(3)} fps`);
+    if (contentFps && (!videoFps || Math.abs(contentFps - videoFps) > 0.01)) {
+      bits.push(`measured content ${contentFps.toFixed(3)} fps`);
+    }
     return bits;
   };
 
@@ -3668,7 +3684,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 )}
               </div>
               <div className='flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-border/60 bg-secondary/30 px-3 py-1.5 font-mono text-xs text-white md:text-sm'>
-                {trackMeta(gerTrack, sourceFps).map((b, i) => (
+                {trackMeta(gerTrack, sourceVideoFps ?? sourceFps, sourceFps).map((b, i) => (
                   <span key={i}>{b}</span>
                 ))}
               </div>
@@ -3789,6 +3805,20 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 <span className='font-mono text-xs text-white'>
                   {stretch >= 1 ? '+' : ''}{stretchPct}%
                 </span>
+                {fpsStretch != null && Math.abs(fpsStretch - 1) > 0.0005 && (
+                  <Button
+                    size='sm'
+                    variant='secondary'
+                    title='Apply the HQ FPS divided by the German source video FPS. Declared FPS can differ from actual content cadence, so preview before approving.'
+                    onClick={() => {
+                      const next = +fpsStretch.toFixed(6);
+                      setStretch(next);
+                      setStretchInput(next.toFixed(6));
+                    }}
+                  >
+                    FPS {referenceFps?.toFixed(3)} ÷ {sourceVideoFps?.toFixed(3)} → ×{fpsStretch.toFixed(6)}
+                  </Button>
+                )}
                 {suggestedStretch != null && Math.abs(suggestedStretch - 1) > 0.0005 && (
                   <Button
                     size='sm'

@@ -11,8 +11,8 @@ bankai fuses the **German dub audio** scraped from a streaming site (filmpalast,
 aniworld, …) with the **HQ English video** obtained via torrent into a single
 Plex/Jellyfin-ready MKV. It is operated through:
 
-* a **CLI** (`bankai …`)
-* a **web control panel** (`bankai web serve`) — served on port 9988
+- a **CLI** (`bankai …`)
+- a **web control panel** (`bankai web serve`) — served on port 9988
 
 ---
 
@@ -92,45 +92,45 @@ tests/                       pytest — always target 107 pass
 
 ### keller (primary — runs the web UI + pipeline jobs)
 
-| Property | Value |
-|---|---|
-| Host | `192.168.178.27` |
-| SSH | `ssh keller` (alias; lands in Windows PowerShell) |
-| OS | Windows 11 native |
-| Repo | `C:\bankai` |
-| venv | `C:\bankai\.venv` |
-| Config | `C:\bankai\config.toml` (env: `BANKAI_CONFIG=C:\bankai\config.toml`) |
-| Web service | nssm `bankai-web` (Automatic / LocalSystem) |
-| Web URL | `http://192.168.178.27:9988` |
-| Logs | `C:\bankai\logs\web.log` |
-| ffmpeg/ffprobe | `C:\bankai\bin\` |
-| mkvmerge | `C:\Program Files\MKVToolNix\` |
-| Library (staging) | `C:\bankai\library\` |
-| Approved media | `G:\media\movies` / `G:\media\shows` |
-| Pending jobs JSON | `C:\Windows\System32\config\systemprofile\AppData\Local\bankai\web_pending.json` |
-| Review state JSON | same `AppData\Local\bankai\review.json` |
-| Downloads (local) | `C:\bankai\downloads\` |
-| path_map | `/downloads` → `C:/bankai/downloads` |
-| Selector config | `preferred_resolutions=["1080p","2160p"]`, `min_seeders=15`, `min_size_gib=1.0`, `max_size_gib=25` |
-| max_concurrent_jobs | `1` (string coerced to int by Pydantic) |
+| Property            | Value                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------- |
+| Host                | `192.168.178.27`                                                                                   |
+| SSH                 | `ssh keller` (alias; lands in Windows PowerShell)                                                  |
+| OS                  | Windows 11 native                                                                                  |
+| Repo                | `C:\bankai`                                                                                        |
+| venv                | `C:\bankai\.venv`                                                                                  |
+| Config              | `C:\bankai\config.toml` (env: `BANKAI_CONFIG=C:\bankai\config.toml`)                               |
+| Web service         | nssm `bankai-web` (Automatic / LocalSystem)                                                        |
+| Web URL             | `http://192.168.178.27:9988`                                                                       |
+| Logs                | `C:\bankai\logs\web.log`                                                                           |
+| ffmpeg/ffprobe      | `C:\bankai\bin\`                                                                                   |
+| mkvmerge            | `C:\Program Files\MKVToolNix\`                                                                     |
+| Library (staging)   | `C:\bankai\library\`                                                                               |
+| Approved media      | `G:\media\movies` / `G:\media\shows`                                                               |
+| Pending jobs JSON   | `C:\Windows\System32\config\systemprofile\AppData\Local\bankai\web_pending.json`                   |
+| Review state JSON   | same `AppData\Local\bankai\review.json`                                                            |
+| Downloads (local)   | `C:\bankai\downloads\`                                                                             |
+| path_map            | `/downloads` → `C:/bankai/downloads`                                                               |
+| Selector config     | `preferred_resolutions=["1080p","2160p"]`, `min_seeders=15`, `min_size_gib=1.0`, `max_size_gib=25` |
+| max_concurrent_jobs | `1` (string coerced to int by Pydantic)                                                            |
 
 **CRITICAL — never restart the service while a job is running.** nssm's job
 object kills all detached child processes → job fails with empty reason.
 
 ### mediaserver (Linux — qBittorrent + Prowlarr + extraction)
 
-| Property | Value |
-|---|---|
-| Host | `192.168.178.29` |
-| SSH | `ssh malik@192.168.178.29` (`ssh mediaserver` alias NOT configured on dev box) |
-| OS | Ubuntu/Debian |
-| Repo | `/home/malik/bankai` |
-| venv | `/home/malik/bankai/.venv` |
-| Config | `/home/malik/bankai/config.toml` |
-| qBittorrent | `http://localhost:8080` (admin/437581), category=`bankai`, saves to `/downloads/bankai` → `/mnt/media/downloads/bankai` |
-| Prowlarr | `http://localhost:9696`, api_key=`a9f6b9c1fb0949598060ea0724cd79d5`, 7 indexers |
-| Xvfb | `:99`–`:102` (headful Playwright extraction) |
-| Downloads mount | `/mnt/media/downloads` |
+| Property        | Value                                                                                                                   |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Host            | `192.168.178.29`                                                                                                        |
+| SSH             | `ssh malik@192.168.178.29` (`ssh mediaserver` alias NOT configured on dev box)                                          |
+| OS              | Ubuntu/Debian                                                                                                           |
+| Repo            | `/home/malik/bankai`                                                                                                    |
+| venv            | `/home/malik/bankai/.venv`                                                                                              |
+| Config          | `/home/malik/bankai/config.toml`                                                                                        |
+| qBittorrent     | `http://localhost:8080` (admin/437581), category=`bankai`, saves to `/downloads/bankai` → `/mnt/media/downloads/bankai` |
+| Prowlarr        | `http://localhost:9696`, api_key=`a9f6b9c1fb0949598060ea0724cd79d5`, 7 indexers                                         |
+| Xvfb            | `:99`–`:102` (headful Playwright extraction)                                                                            |
+| Downloads mount | `/mnt/media/downloads`                                                                                                  |
 
 ---
 
@@ -170,6 +170,7 @@ ssh keller "Get-Content C:\bankai\logs\web.log -Tail 50"
 ## 5. Key operational gotchas
 
 ### PowerShell remote execution pitfalls
+
 - **Never** use `&&` in ssh commands from local PowerShell — use `;` instead.
 - `$_`, `$var` in double-quoted strings are interpolated by local PowerShell.
   Escape them with a backtick (`` `$var ``) or ship as base64.
@@ -177,19 +178,23 @@ ssh keller "Get-Content C:\bankai\logs\web.log -Tail 50"
   `execution_subagent` for reliable output capture, or use single-line commands.
 
 ### Service restart kills jobs
+
 Restarting `bankai-web` terminates all detached child jobs (nssm job object).
 **Always confirm no job is running before deploying.**
 
 ### Frontend requires a hard-refresh
+
 The SPA bundles are hash-named. After deploy the browser must hard-refresh
 (`Ctrl+Shift+R`) to load the new JS/CSS.
 
 ### Rate-limited Prowlarr indexers
+
 Rapid repeated searches (e.g. 5+ within 2 minutes) trigger Prowlarr's per-indexer
 rate-limit. The indexer's `disabledTill` timestamp shows when it recovers. Wait
 before re-running the torrent step.
 
 ### ffprobe encoding on Windows
+
 All `subprocess.run` calls that invoke `ffprobe`/`ffmpeg`/`mkvmerge` on Windows
 **must** pass `encoding="utf-8", errors="replace"` — otherwise the default cp1252
 codec silently corrupts non-ASCII output (e.g. subtitle titles with 0x8D bytes),
@@ -200,18 +205,18 @@ yielding empty `MediaInfo` with 0 audio tracks. This is already applied in
 
 ## 6. Frontend tech stack
 
-| Thing | Detail |
-|---|---|
-| Framework | React 18 + TypeScript |
-| Build | Vite 6 |
-| CSS | **Tailwind v4** (`@import 'tailwindcss'`) — no `tailwind.config.js` |
-| PostCSS | `@tailwindcss/postcss` (replaces v3's `tailwindcss: {}`) |
-| Component library | shadcn/ui (Radix Primitives) |
-| Theme | Eigenpair mono design system — oklch tokens, `@theme inline`, `@custom-variant dark` |
-| Dark mode | Always on (`<html class="dark">`) |
-| Fonts | Geist Variable (body/UI), Geist Mono Variable (mono), Libre Baskerville (headings) |
-| State | React hooks only (no Redux/Zustand) |
-| API | `src/lib/api.ts` — typed `fetch` wrappers, all endpoints relative to window origin |
+| Thing             | Detail                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| Framework         | React 18 + TypeScript                                                                |
+| Build             | Vite 6                                                                               |
+| CSS               | **Tailwind v4** (`@import 'tailwindcss'`) — no `tailwind.config.js`                  |
+| PostCSS           | `@tailwindcss/postcss` (replaces v3's `tailwindcss: {}`)                             |
+| Component library | shadcn/ui (Radix Primitives)                                                         |
+| Theme             | Eigenpair mono design system — oklch tokens, `@theme inline`, `@custom-variant dark` |
+| Dark mode         | Always on (`<html class="dark">`)                                                    |
+| Fonts             | Geist Variable (body/UI), Geist Mono Variable (mono), Libre Baskerville (headings)   |
+| State             | React hooks only (no Redux/Zustand)                                                  |
+| API               | `src/lib/api.ts` — typed `fetch` wrappers, all endpoints relative to window origin   |
 
 **Embossed button/input styling** uses `data-slot` / `data-variant` HTML attributes
 emitted by `button.tsx`, `input.tsx`, and `select.tsx`. Without those attributes
@@ -227,21 +232,21 @@ linter will suggest `bg-linear-to-b`. The build succeeds either way.
 All endpoints are served by the FastAPI app at `/api/…`. Base URL on keller:
 `http://192.168.178.27:9988`.
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/health` | Liveness check — returns `{"ok":true}` |
-| GET | `/api/titles` | Unified queue+library row list |
-| POST | `/api/queue` | Enqueue a new movie `{title, year, url?, site?}` |
-| DELETE | `/api/queue/{job_id}` | Cancel / delete a queued/running job |
-| GET | `/api/jobs/{job_id}/log` | Last N log lines for a job |
-| GET | `/api/media/info?path=…` | ffprobe result + review state for a library file |
-| GET | `/api/media/waveform?path=…&stream=…&start=…&dur=…&bins=…` | Peak envelope (max 4000 bins) |
-| GET | `/api/media/audioclip?path=…&stream=…&start=…&dur=…` | Short MP3 clip |
-| GET | `/api/media/videoclip?path=…&start=…&dur=…&height=…` | Short H.264 clip |
-| POST | `/api/review/repack` | Remux with delay (+ optional `atempo` drift correction) |
-| POST | `/api/review/approve` | Mark library file approved for transfer |
-| POST | `/api/library/delete` | Delete library file (writes tombstone, shows "Deleted") |
-| GET | `/api/discover` | TVDB trending / search results |
+| Method | Path                                                       | Purpose                                                 |
+| ------ | ---------------------------------------------------------- | ------------------------------------------------------- |
+| GET    | `/api/health`                                              | Liveness check — returns `{"ok":true}`                  |
+| GET    | `/api/titles`                                              | Unified queue+library row list                          |
+| POST   | `/api/queue`                                               | Enqueue a new movie `{title, year, url?, site?}`        |
+| DELETE | `/api/queue/{job_id}`                                      | Cancel / delete a queued/running job                    |
+| GET    | `/api/jobs/{job_id}/log`                                   | Last N log lines for a job                              |
+| GET    | `/api/media/info?path=…`                                   | ffprobe result + review state for a library file        |
+| GET    | `/api/media/waveform?path=…&stream=…&start=…&dur=…&bins=…` | Peak envelope (max 4000 bins)                           |
+| GET    | `/api/media/audioclip?path=…&stream=…&start=…&dur=…`       | Short MP3 clip                                          |
+| GET    | `/api/media/videoclip?path=…&start=…&dur=…&height=…`       | Short H.264 clip                                        |
+| POST   | `/api/review/repack`                                       | Remux with delay (+ optional `atempo` drift correction) |
+| POST   | `/api/review/approve`                                      | Mark library file approved for transfer                 |
+| POST   | `/api/library/delete`                                      | Delete library file (writes tombstone, shows "Deleted") |
+| GET    | `/api/discover`                                            | TVDB trending / search results                          |
 
 **Waveform endpoint hard cap:** `bins` parameter capped at 4000 by the backend
 (`le=4000` Query constraint). Requesting more returns 422 and silently leaves
@@ -285,6 +290,7 @@ vs NTSC 23.976fps), a constant delay alone cannot fix the sync.
 `source_fps`, `reference_fps`, and `drift_ratio` in `review.py`'s `ReviewState`.
 
 **How it's corrected in the web review player:**
+
 - The review studio (`Library.tsx` → `WaveformReview`) shows a **Drift** row
   under the German waveform.
 - If `drift_ratio` was measured by the pipeline, a **Suggest ×factor** button
@@ -305,17 +311,17 @@ Stored in a JSON file at `LOCALAPPDATA\bankai\review.json` (keller) or
 
 Key fields per path entry:
 
-| Field | Meaning |
-|---|---|
-| `stage` | `review` → `approved` → `transferred` → `deleted` (tombstone) |
-| `delay_ms` | Constant audio delay already applied to the file |
-| `needs_sync_review` | True when visual-sync confidence was low |
-| `sync_confidence` | 0..1 confidence from visual alignment |
-| `auto_delay_ms` | Offset the pipeline auto-applied (baseline shown in review) |
-| `source_fps` | German source video fps (captured during pipeline, if available) |
-| `reference_fps` | HQ reference fps (captured during pipeline) |
-| `drift_ratio` | Measured drift slope (source speed / reference speed) |
-| `transfer_status` | `idle` / `transferring` / `done` / `failed` |
+| Field               | Meaning                                                          |
+| ------------------- | ---------------------------------------------------------------- |
+| `stage`             | `review` → `approved` → `transferred` → `deleted` (tombstone)    |
+| `delay_ms`          | Constant audio delay already applied to the file                 |
+| `needs_sync_review` | True when visual-sync confidence was low                         |
+| `sync_confidence`   | 0..1 confidence from visual alignment                            |
+| `auto_delay_ms`     | Offset the pipeline auto-applied (baseline shown in review)      |
+| `source_fps`        | German source video fps (captured during pipeline, if available) |
+| `reference_fps`     | HQ reference fps (captured during pipeline)                      |
+| `drift_ratio`       | Measured drift slope (source speed / reference speed)            |
+| `transfer_status`   | `idle` / `transferring` / `done` / `failed`                      |
 
 `library_delete` writes `stage="deleted"` (tombstone) instead of removing the
 entry — this makes deleted movies show a **Deleted** badge in the queue table even
@@ -328,10 +334,10 @@ after the file is gone. Re-downloading the same title resets the tombstone.
 `media.py → _is_german(lang, title)` decides which audio track is the German dub.
 
 - **Language tag** (`lang`) is matched **exactly** against `{"ger", "deu", "de",
-  "german", "deutsch"}`.
+"german", "deutsch"}`.
 - **Title string** is split into whole words (`re.findall(r"[a-z]+", title.lower())`)
   and each token is checked for membership. This avoids false positives from
-  English track titles like *"Audio Description"* or *"Extended"* that contain
+  English track titles like _"Audio Description"_ or _"Extended"_ that contain
   the substring `"de"`.
 
 ---

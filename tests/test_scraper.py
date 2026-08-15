@@ -392,6 +392,47 @@ async def test_filmpalast_resolve_all_returns_ranked_hosters() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filmpalast_title_details_include_file_mirrors_and_episodes() -> None:
+    html = """
+    <meta property="og:image" content="/covers/show.jpg">
+    <h1>Arcane (2021)</h1>
+    <span id="release_text">Arcane.S01E01.GERMAN.1080p.WEB.H264-GROUP</span>
+    <span>Spielzeit: 42 min</span>
+    <a href="/stream/arcane-s01e01">Episode one</a>
+    <a href="/stream/arcane-s01e02">Episode two</a>
+    <a class="button iconPlay" href="https://streamtape.com/backup">Streamtape</a>
+    <a class="button iconPlay" href="https://voe.sx/primary">VOE</a>
+    """
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, text=html)
+
+    backend = FilmpalastBackend(base_url="http://example.invalid")
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(
+        base_url="http://example.invalid", transport=httpx.MockTransport(handler)
+    )
+    try:
+        details = await backend.title_details("http://example.invalid/stream/arcane")
+    finally:
+        await backend.aclose()
+
+    assert requests == 1
+    assert details.title == "Arcane (2021)"
+    assert details.release_name == "Arcane.S01E01.GERMAN.1080p.WEB.H264-GROUP"
+    assert details.runtime_minutes == 42
+    assert details.poster_url == "http://example.invalid/covers/show.jpg"
+    assert [mirror.url for mirror in details.mirrors] == [
+        "https://voe.sx/primary",
+        "https://streamtape.com/backup",
+    ]
+    assert [(episode.season, episode.episode) for episode in details.episodes] == [(1, 1), (1, 2)]
+
+
+@pytest.mark.asyncio
 async def test_filmpalast_supported_streams_excludes_unreliable_hosters() -> None:
     html = """
     <a class="button iconPlay" href="https://unknown.invalid/file">Unknown</a>

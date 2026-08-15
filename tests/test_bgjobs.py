@@ -35,6 +35,28 @@ def test_failed_job_with_final_path_is_reconciled(
     assert refreshed.final_path == "/library/Zootopia.mkv"
 
 
+def test_source_video_fps_is_recovered_from_job_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    job = bgjobs.BgJob(
+        id="fps12345",
+        kind="movie",
+        title="The Princess and the Frog",
+        args=["run", "The Princess and the Frog 2009"],
+        started_at=time.time(),
+        status="done",
+    )
+    job.save()
+    job.log_path.write_text(
+        "[23:07:03] INFO [visual-sync] source nominal frame rate 23.000fps\n",
+        encoding="utf-8",
+    )
+
+    assert bgjobs.source_video_fps(job) == pytest.approx(23.0)
+
+
 def test_running_job_killed_without_final_path_is_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
