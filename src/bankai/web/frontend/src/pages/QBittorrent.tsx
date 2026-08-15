@@ -60,7 +60,7 @@ function formatAdded(value: number) {
 type StatusStyle = {
   label: string;
   icon: LucideIcon;
-  badge: 'repack' | 'info' | 'success' | 'warning' | 'destructive' | 'muted';
+  badge: 'transfer' | 'info' | 'success' | 'warning' | 'destructive' | 'muted';
   row: string;
   iconColor: string;
   progress: string;
@@ -87,7 +87,7 @@ function torrentStatus(item: QBittorrentItem): StatusStyle {
     return { label: 'Checking', icon: RefreshCw, badge: 'warning', row: 'bg-warning/[0.08] hover:bg-warning/[0.13]', iconColor: 'text-warning', progress: 'bg-warning' };
   }
   if (item.progress >= 1) {
-    return { label: 'Completed', icon: CheckCircle2, badge: 'repack', row: 'bg-repack/[0.08] hover:bg-repack/[0.13]', iconColor: 'text-repack', progress: 'bg-repack' };
+    return { label: 'Completed', icon: CheckCircle2, badge: 'transfer', row: 'bg-transfer/[0.08] hover:bg-transfer/[0.13]', iconColor: 'text-transfer', progress: 'bg-transfer' };
   }
   if (state.includes('paused') || state.includes('stopped')) {
     return { label: 'Paused', icon: CirclePause, badge: 'muted', row: 'bg-muted/20 hover:bg-muted/30', iconColor: 'text-muted-foreground', progress: 'bg-muted-foreground' };
