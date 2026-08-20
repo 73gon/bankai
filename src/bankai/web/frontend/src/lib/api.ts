@@ -424,6 +424,15 @@ export const api = {
     request<FilmpalastDetails>(`/api/filmpalast/detail?url=${encodeURIComponent(url)}`),
   qbittorrentTorrents: () =>
     request<{ items: QBittorrentItem[] }>('/api/qbittorrent/torrents'),
+  qbittorrentStart: (hash: string) =>
+    request<{ ok: boolean }>(`/api/qbittorrent/torrents/${encodeURIComponent(hash)}/start`, { method: 'POST' }),
+  qbittorrentStop: (hash: string) =>
+    request<{ ok: boolean }>(`/api/qbittorrent/torrents/${encodeURIComponent(hash)}/stop`, { method: 'POST' }),
+  qbittorrentRemove: (hash: string, deleteFiles = false) =>
+    request<{ ok: boolean }>(
+      `/api/qbittorrent/torrents/${encodeURIComponent(hash)}?delete_files=${deleteFiles}`,
+      { method: 'DELETE' },
+    ),
   torrentSearch: (q: string, runtimeSeconds?: number | null, options: TorrentSearchOptions = {}) => {
     const params = new URLSearchParams({ q });
     if (runtimeSeconds) params.set('runtime_seconds', String(runtimeSeconds));

@@ -143,10 +143,11 @@ class QBittorrentClient:
 
     async def remove(self, torrent_hash: str, *, delete_files: bool = False) -> None:
         await self._ensure_login()
-        await self._client.post(
+        response = await self._client.post(
             "/api/v2/torrents/delete",
             data={"hashes": torrent_hash, "deleteFiles": str(delete_files).lower()},
         )
+        response.raise_for_status()
 
     async def pause(self, torrent_hash: str) -> None:
         await self._ensure_login()

@@ -2214,6 +2214,59 @@ def create_app() -> Any:
             ]
         }
 
+    def _qbittorrent_hash(raw: str) -> str:
+        torrent_hash = raw.strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", torrent_hash):
+            raise HTTPException(status_code=422, detail="invalid torrent hash")
+        return torrent_hash
+
+    @app.post("/api/qbittorrent/torrents/{torrent_hash}/start")
+    async def qbittorrent_start(torrent_hash: str) -> dict:
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        normalized_hash = _qbittorrent_hash(torrent_hash)
+        try:
+            async with QBittorrentClient() as client:
+                await client.resume(normalized_hash)
+        except Exception as exc:
+            log.warning("qBittorrent start failed for %s: %s", normalized_hash, exc)
+            raise HTTPException(status_code=502, detail="qBittorrent could not start the torrent.") from exc
+        return {"ok": True, "hash": normalized_hash, "action": "start"}
+
+    @app.post("/api/qbittorrent/torrents/{torrent_hash}/stop")
+    async def qbittorrent_stop(torrent_hash: str) -> dict:
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        normalized_hash = _qbittorrent_hash(torrent_hash)
+        try:
+            async with QBittorrentClient() as client:
+                await client.pause(normalized_hash)
+        except Exception as exc:
+            log.warning("qBittorrent stop failed for %s: %s", normalized_hash, exc)
+            raise HTTPException(status_code=502, detail="qBittorrent could not stop the torrent.") from exc
+        return {"ok": True, "hash": normalized_hash, "action": "stop"}
+
+    @app.delete("/api/qbittorrent/torrents/{torrent_hash}")
+    async def qbittorrent_remove(
+        torrent_hash: str,
+        delete_files: bool = Query(False),
+    ) -> dict:
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        normalized_hash = _qbittorrent_hash(torrent_hash)
+        try:
+            async with QBittorrentClient() as client:
+                await client.remove(normalized_hash, delete_files=delete_files)
+        except Exception as exc:
+            log.warning("qBittorrent remove failed for %s: %s", normalized_hash, exc)
+            raise HTTPException(status_code=502, detail="qBittorrent could not remove the torrent.") from exc
+        return {
+            "ok": True,
+            "hash": normalized_hash,
+            "action": "remove",
+            "delete_files": delete_files,
+        }
+
     @app.get("/api/media/info")
     def media_info(path: str = Query(...)) -> dict:
         p = _safe_path(path)

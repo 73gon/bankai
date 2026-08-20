@@ -151,6 +151,52 @@ def test_qbittorrent_torrents_returns_all_dashboard_fields(
     }
 
 
+def test_qbittorrent_torrent_actions(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class FakeQBittorrent:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def resume(self, torrent_hash: str) -> None:
+            calls.append(("start", torrent_hash))
+
+        async def pause(self, torrent_hash: str) -> None:
+            calls.append(("stop", torrent_hash))
+
+        async def remove(self, torrent_hash: str, *, delete_files: bool = False) -> None:
+            calls.append(("remove", torrent_hash, delete_files))
+
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", FakeQBittorrent)
+    torrent_hash = "A" * 40
+
+    started = client.post(f"/api/qbittorrent/torrents/{torrent_hash}/start")
+    stopped = client.post(f"/api/qbittorrent/torrents/{torrent_hash}/stop")
+    removed = client.delete(
+        f"/api/qbittorrent/torrents/{torrent_hash}",
+        params={"delete_files": "true"},
+    )
+
+    assert started.status_code == 200
+    assert stopped.status_code == 200
+    assert removed.status_code == 200
+    normalized = torrent_hash.lower()
+    assert calls == [
+        ("start", normalized),
+        ("stop", normalized),
+        ("remove", normalized, True),
+    ]
+    invalid = client.post("/api/qbittorrent/torrents/not-a-hash/start")
+    assert invalid.status_code == 422
+    assert len(calls) == 3
+
+
 def test_filmpalast_detail_returns_file_mirrors_and_episodes(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
