@@ -25,6 +25,7 @@ log = get_logger(__name__)
 _BASE_URL = "https://api4.thetvdb.com/v4"
 _ARTWORK_BASE = "https://artworks.thetvdb.com"
 _CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
+_PERSON_CACHE: dict[str, tuple[float, list[PersonSuggestion]]] = {}
 _DETAIL_CACHE: dict[str, tuple[float, TitleDetails]] = {}
 _ENGLISH_TITLE_CACHE: dict[tuple[str, int], tuple[float, str | None]] = {}
 _BROWSE_META: dict[str, dict] = {}
@@ -47,6 +48,12 @@ class DiscoverItem:
     is_new: bool = False
     release_date: str | None = None  # ISO date (YYYY-MM-DD) when known
     status: str | None = None  # TVDB status name e.g. "Released", "Announced"
+
+
+@dataclass(frozen=True, slots=True)
+class PersonSuggestion:
+    name: str
+    tvdb_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +116,50 @@ def _cache_get(key: str) -> list[DiscoverItem] | None:
 
 def _cache_put(key: str, items: list[DiscoverItem]) -> None:
     _CACHE[key] = (time.time(), items)
+
+
+async def person_suggestions(query: str, *, limit: int = 8) -> list[PersonSuggestion]:
+    """Return lightweight TVDB person matches for search autocomplete."""
+    clean = " ".join(query.split())
+    if not is_configured() or len(clean) < 2:
+        return []
+    capped_limit = max(1, min(15, int(limit)))
+    cache_key = f"{clean.casefold()}:{capped_limit}"
+    ttl = get_settings().web.cache_ttl_seconds
+    cached = _PERSON_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < ttl:
+        return cached[1]
+
+    suggestions: list[PersonSuggestion] = []
+    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
+        token = await _login(client)
+        if not token:
+            return []
+        data = await _request_data(
+            client,
+            "search",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"query": clean, "type": "person", "limit": capped_limit},
+        )
+        seen: set[str] = set()
+        for record in data if isinstance(data, list) else []:
+            if not isinstance(record, dict):
+                continue
+            name = str(record.get("name") or record.get("title") or "").strip()
+            key = " ".join(name.casefold().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            suggestions.append(
+                PersonSuggestion(
+                    name=name,
+                    tvdb_id=_to_int(record.get("tvdb_id") or record.get("id")),
+                )
+            )
+            if len(suggestions) >= capped_limit:
+                break
+    _PERSON_CACHE[cache_key] = (time.time(), suggestions)
+    return suggestions
 
 
 def _to_int(value: object) -> int | None:

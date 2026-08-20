@@ -15,11 +15,13 @@ def _configured_tvdb(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BANKAI_METADATA__TVDB_API_KEY", "test-key")
     reset_settings_cache()
     discover._CACHE.clear()
+    discover._PERSON_CACHE.clear()
     discover._DETAIL_CACHE.clear()
     discover._ENGLISH_TITLE_CACHE.clear()
     discover._BROWSE_META.clear()
     yield
     discover._CACHE.clear()
+    discover._PERSON_CACHE.clear()
     discover._DETAIL_CACHE.clear()
     discover._ENGLISH_TITLE_CACHE.clear()
     discover._BROWSE_META.clear()
@@ -37,6 +39,38 @@ def _mock_tvdb(
         "AsyncClient",
         lambda **kwargs: async_client(transport=transport, **kwargs),
     )
+
+
+@pytest.mark.asyncio
+async def test_person_suggestions_return_partial_name_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/login":
+            return httpx.Response(200, json={"data": {"token": "token"}})
+        assert request.url.path == "/v4/search"
+        assert request.url.params["query"] == "christo"
+        assert request.url.params["type"] == "person"
+        assert request.url.params["limit"] == "8"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"tvdb_id": "101", "name": "Christopher Nolan"},
+                    {"tvdb_id": "102", "name": "Christopher Walken"},
+                    {"tvdb_id": "101", "name": "Christopher Nolan"},
+                ]
+            },
+        )
+
+    _mock_tvdb(monkeypatch, handler)
+
+    suggestions = await discover.person_suggestions("  christo  ")
+
+    assert [(item.tvdb_id, item.name) for item in suggestions] == [
+        (101, "Christopher Nolan"),
+        (102, "Christopher Walken"),
+    ]
 
 
 @pytest.mark.asyncio

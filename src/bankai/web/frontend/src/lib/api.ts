@@ -156,6 +156,11 @@ export interface AnimeSearchPage {
 
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
 
+export interface PersonSuggestion {
+  name: string;
+  tvdb_id: number | null;
+}
+
 export interface SearchResult {
   site: string;
   title: string;
@@ -405,6 +410,10 @@ export const api = {
   discoverSearch: (q: string, kind: string, by: DiscoverSearchBy = 'title', page = 0, pageSize = 50) =>
     request<PagedDiscover>(
       `/api/discover/search?q=${encodeURIComponent(q)}&kind=${kind}&by=${by}&page=${page}&page_size=${pageSize}`,
+    ),
+  discoverPeopleSuggest: (q: string, limit = 8) =>
+    request<{ configured: boolean; items: PersonSuggestion[] }>(
+      `/api/discover/people/suggest?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
   discoverGerman: (id: number, kind: string) =>
     request<{ tvdb_id: number; kind: string; english: string | null; german: string | null; year: number | null; release_date: string | null }>(

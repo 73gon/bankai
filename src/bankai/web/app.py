@@ -1014,6 +1014,20 @@ def create_app() -> Any:
             "has_next": paged.has_next,
         }
 
+    @app.get("/api/discover/people/suggest")
+    async def discover_people_suggest(
+        q: str = Query(..., min_length=2),
+        limit: int = Query(8, ge=1, le=15),
+    ) -> dict:
+        suggestions = await discover_mod.person_suggestions(q, limit=limit)
+        return {
+            "configured": discover_mod.is_configured(),
+            "items": [
+                {"name": suggestion.name, "tvdb_id": suggestion.tvdb_id}
+                for suggestion in suggestions
+            ],
+        }
+
     @app.get("/api/discover/poster")
     async def discover_poster(url: str = Query(...)) -> Response:
         import httpx

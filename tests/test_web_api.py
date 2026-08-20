@@ -29,7 +29,7 @@ from bankai.web.app import (
     _waveform_envelope,
     create_app,
 )
-from bankai.web.discover import DiscoverItem, DiscoverPage
+from bankai.web.discover import DiscoverItem, DiscoverPage, PersonSuggestion
 
 
 def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
@@ -433,6 +433,36 @@ def test_discover_search_forwards_movie_search_mode(
 
     assert response.status_code == 200
     assert calls == [("Anne Hathaway", "movie", "person")]
+
+
+def test_discover_people_suggest_returns_names(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_suggestions(query: str, *, limit: int = 8) -> list[PersonSuggestion]:
+        assert query == "chris"
+        assert limit == 5
+        return [
+            PersonSuggestion(name="Christopher Nolan", tvdb_id=101),
+            PersonSuggestion(name="Chris Evans", tvdb_id=102),
+        ]
+
+    monkeypatch.setattr("bankai.web.discover.person_suggestions", fake_suggestions)
+    monkeypatch.setattr("bankai.web.discover.is_configured", lambda: True)
+
+    response = client.get(
+        "/api/discover/people/suggest",
+        params={"q": "chris", "limit": 5},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "configured": True,
+        "items": [
+            {"name": "Christopher Nolan", "tvdb_id": 101},
+            {"name": "Chris Evans", "tvdb_id": 102},
+        ],
+    }
 
 
 def test_discover_search_rejects_non_title_show_mode(client: TestClient) -> None:

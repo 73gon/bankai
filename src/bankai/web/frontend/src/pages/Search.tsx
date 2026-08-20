@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
-import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2, Check } from 'lucide-react';
+import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2, Check, UserRound } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type DiscoverItem, type DiscoverSearchBy, type PagedDiscover, type SearchResult, type EpisodeItem } from '@/lib/api';
+import { api, type DiscoverItem, type DiscoverSearchBy, type PagedDiscover, type PersonSuggestion, type SearchResult, type EpisodeItem } from '@/lib/api';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
@@ -149,6 +150,12 @@ export default function Search() {
   const [loading, setLoading] = useState(false);
   const [configured, setConfigured] = useState(true);
   const debounce = useRef<number | undefined>(undefined);
+  const personDebounce = useRef<number | undefined>(undefined);
+  const [personSuggestions, setPersonSuggestions] = useState<PersonSuggestion[]>([]);
+  const [personSuggesting, setPersonSuggesting] = useState(false);
+  const [personSuggestionsOpen, setPersonSuggestionsOpen] = useState(false);
+  const [personSelection, setPersonSelection] = useState<string | null>(null);
+  const [activePersonIndex, setActivePersonIndex] = useState(-1);
 
   // selected TVDB title -> resolve German name -> matching stream sources
   const [selected, setSelected] = useState<DiscoverItem | null>(null);
@@ -241,6 +248,44 @@ export default function Search() {
   }, [q, kind, searchBy, page, pageSize]);
 
   useEffect(() => {
+    window.clearTimeout(personDebounce.current);
+    let cancelled = false;
+    const raw = q.trim();
+    const selected = personSelection?.localeCompare(raw, undefined, { sensitivity: 'base' }) === 0;
+    if (kind !== 'movie' || searchBy !== 'person' || raw.length < 2 || selected) {
+      setPersonSuggestions([]);
+      setPersonSuggesting(false);
+      setPersonSuggestionsOpen(false);
+      setActivePersonIndex(-1);
+      return;
+    }
+    setPersonSuggesting(true);
+    setPersonSuggestionsOpen(true);
+    personDebounce.current = window.setTimeout(() => {
+      api.discoverPeopleSuggest(raw)
+        .then((result) => {
+          if (cancelled) return;
+          setPersonSuggestions(result.items);
+          setPersonSuggestionsOpen(result.items.length > 0);
+          setActivePersonIndex(-1);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setPersonSuggestions([]);
+            setPersonSuggestionsOpen(false);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setPersonSuggesting(false);
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(personDebounce.current);
+    };
+  }, [kind, personSelection, q, searchBy]);
+
+  useEffect(() => {
     try {
       localStorage.setItem(SEARCH_HIDE_LIBRARY_KEY, String(hideLibrary));
     } catch {
@@ -250,6 +295,34 @@ export default function Search() {
 
   const visibleItems = hideLibrary ? items.filter((item) => !item.in_library) : items;
   const totalPages = total == null ? null : Math.max(1, Math.ceil(total / pageSize));
+
+  function selectPerson(suggestion: PersonSuggestion) {
+    setPersonSelection(suggestion.name);
+    setQ(suggestion.name);
+    setPage(0);
+    setPersonSuggestions([]);
+    setPersonSuggestionsOpen(false);
+    setActivePersonIndex(-1);
+  }
+
+  function handlePersonKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (searchBy !== 'person' || personSuggestions.length === 0) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setPersonSuggestionsOpen(true);
+      setActivePersonIndex((current) => Math.min(personSuggestions.length - 1, current + 1));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setPersonSuggestionsOpen(true);
+      setActivePersonIndex((current) => current <= 0 ? personSuggestions.length - 1 : current - 1);
+    } else if (event.key === 'Enter' && personSuggestionsOpen && activePersonIndex >= 0) {
+      event.preventDefault();
+      selectPerson(personSuggestions[activePersonIndex]);
+    } else if (event.key === 'Escape') {
+      setPersonSuggestionsOpen(false);
+      setActivePersonIndex(-1);
+    }
+  }
 
   async function openTitle(item: DiscoverItem) {
     setSelected(item);
@@ -519,6 +592,9 @@ export default function Search() {
               value={searchBy}
               onValueChange={(value) => {
                 setSearchBy(value as DiscoverSearchBy);
+                setPersonSelection(null);
+                setPersonSuggestions([]);
+                setPersonSuggestionsOpen(false);
                 setItems([]);
                 setSelected(null);
                 setPage(0);
@@ -533,27 +609,77 @@ export default function Search() {
             </Tabs>
           </>
         )}
-        <div className='relative flex-1'>
-          <SearchIcon className='absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' />
-          <Input
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setPage(0);
-            }}
-            placeholder={
-              kind === 'show'
-                ? 'Start typing a show…'
-                : searchBy === 'person'
-                  ? 'Type an actor, director, or crew member…'
-                  : searchBy === 'studio'
-                    ? 'Type a studio or production company…'
-                    : 'Start typing a movie…'
-            }
-            className='pl-9'
-            autoFocus
-          />
-        </div>
+        <Popover
+          open={searchBy === 'person' && personSuggestionsOpen}
+          onOpenChange={(open) => {
+            setPersonSuggestionsOpen(open);
+            if (!open) setActivePersonIndex(-1);
+          }}
+        >
+          <PopoverAnchor asChild>
+            <div className='relative flex-1'>
+              <SearchIcon className='absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' />
+              <Input
+                value={q}
+                onChange={(e) => {
+                  setQ(e.target.value);
+                  setPersonSelection(null);
+                  setPage(0);
+                }}
+                onFocus={() => {
+                  if (searchBy === 'person' && personSuggestions.length > 0) setPersonSuggestionsOpen(true);
+                }}
+                onKeyDown={handlePersonKeyDown}
+                role={searchBy === 'person' ? 'combobox' : undefined}
+                aria-autocomplete={searchBy === 'person' ? 'list' : undefined}
+                aria-expanded={searchBy === 'person' ? personSuggestionsOpen : undefined}
+                aria-controls={searchBy === 'person' ? 'person-suggestions' : undefined}
+                aria-activedescendant={activePersonIndex >= 0 ? `person-suggestion-${activePersonIndex}` : undefined}
+                placeholder={
+                  kind === 'show'
+                    ? 'Start typing a show…'
+                    : searchBy === 'person'
+                      ? 'Start typing a person’s name…'
+                      : searchBy === 'studio'
+                        ? 'Type a studio or production company…'
+                        : 'Start typing a movie…'
+                }
+                className='pl-9'
+                autoFocus
+              />
+            </div>
+          </PopoverAnchor>
+          <PopoverContent
+            className='w-[var(--radix-popover-trigger-width)] p-1'
+            align='start'
+            sideOffset={4}
+            onOpenAutoFocus={(event) => event.preventDefault()}
+          >
+            {personSuggesting && personSuggestions.length === 0 ? (
+              <div className='flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground'>
+                <Loader2 className='size-4 animate-spin' aria-hidden='true' /> Finding people…
+              </div>
+            ) : (
+              <div id='person-suggestions' role='listbox' aria-label='Person suggestions' className='flex flex-col gap-1'>
+                {personSuggestions.map((suggestion, index) => (
+                  <Button
+                    key={`${suggestion.tvdb_id ?? 'name'}-${suggestion.name}`}
+                    id={`person-suggestion-${index}`}
+                    role='option'
+                    aria-selected={index === activePersonIndex}
+                    variant={index === activePersonIndex ? 'secondary' : 'ghost'}
+                    className='w-full justify-start'
+                    onMouseEnter={() => setActivePersonIndex(index)}
+                    onClick={() => selectPerson(suggestion)}
+                  >
+                    <UserRound data-icon='inline-start' />
+                    {suggestion.name}
+                  </Button>
+                ))}
+              </div>
+            )}
+          </PopoverContent>
+        </Popover>
         {kind === 'movie' && searchBy === 'studio' && (
           <Select
             value={FAMOUS_STUDIOS.includes(q as (typeof FAMOUS_STUDIOS)[number]) ? q : ''}
@@ -594,7 +720,7 @@ export default function Search() {
         <EmptyState
           icon={SearchIcon}
           title='No results'
-          description={searchBy === 'person' ? 'Try the person’s full name.' : searchBy === 'studio' ? 'Try the company’s full name.' : 'Try a different title.'}
+          description={searchBy === 'person' ? 'Choose a suggested person or keep typing.' : searchBy === 'studio' ? 'Try the company’s full name.' : 'Try a different title.'}
         />
       ) : (
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
