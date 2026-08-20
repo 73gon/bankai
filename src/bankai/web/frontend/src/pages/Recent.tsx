@@ -1,5 +1,5 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react';
-import { CalendarClock, ChevronRight, CirclePlay, Film, Files, Loader2, Plus, Search, Tv, X } from 'lucide-react';
+import { CalendarClock, Check, ChevronRight, CirclePlay, Film, Files, Loader2, Plus, Search, Tv, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type DiscoverItem, type FilmpalastDetails, type FilmpalastFeed, type RecentRelease, type RecentReleasePage } from '@/lib/api';
 import { GermanRelease } from '@/components/GermanRelease';
@@ -10,8 +10,10 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
+const FILMPALAST_HIDE_DOWNLOADED_KEY = 'bankai:filmpalast-hide-downloaded';
 const pageCache = new Map<string, RecentReleasePage>();
 
 function pageCacheKey(feed: FilmpalastFeed, page: number) {
@@ -73,6 +75,13 @@ export default function Recent() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [details, setDetails] = useState<FilmpalastDetails | null>(null);
   const [activeMirror, setActiveMirror] = useState<string | null>(null);
+  const [hideDownloaded, setHideDownloaded] = useState(() => {
+    try {
+      return localStorage.getItem(FILMPALAST_HIDE_DOWNLOADED_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -117,9 +126,21 @@ export default function Recent() {
     };
   }, [feed, page]);
 
-  const visibleItems = useMemo(
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILMPALAST_HIDE_DOWNLOADED_KEY, String(hideDownloaded));
+    } catch {
+      /* ignore */
+    }
+  }, [hideDownloaded]);
+
+  const kindItems = useMemo(
     () => (searchResults ?? data?.items ?? []).filter((item) => kind === 'all' || item.kind === kind),
     [data, kind, searchResults],
+  );
+  const visibleItems = useMemo(
+    () => hideDownloaded ? kindItems.filter((item) => !item.in_library) : kindItems,
+    [hideDownloaded, kindItems],
   );
 
   async function searchFilmpalast(event: FormEvent) {
@@ -138,6 +159,7 @@ export default function Recent() {
         poster_url: item.poster_url ?? null,
         release_name: item.release_name ?? null,
         runtime_minutes: item.runtime_minutes ?? null,
+        in_library: item.in_library ?? false,
       })));
       setPage(0);
       setKind('all');
@@ -307,6 +329,14 @@ export default function Recent() {
             <TabsTrigger value='episode'>Episodes</TabsTrigger>
           </TabsList>
         </Tabs>
+        <label className='flex items-center gap-2 whitespace-nowrap text-sm text-foreground'>
+          <Switch
+            checked={hideDownloaded}
+            onCheckedChange={setHideDownloaded}
+            aria-label='Hide downloaded Filmpalast titles'
+          />
+          Hide downloaded
+        </label>
         {searchResults ? (
           <span className='ml-auto text-xs text-muted-foreground'>{searchResults.length} search results</span>
         ) : data && (
@@ -323,8 +353,8 @@ export default function Recent() {
       ) : visibleItems.length === 0 ? (
         <EmptyState
           icon={searchResults ? Search : CalendarClock}
-          title={searchResults ? 'No Filmpalast matches' : 'No recent releases found'}
-          description={searchResults ? 'Try a shorter title or different spelling.' : 'Try another page or filter.'}
+          title={hideDownloaded && kindItems.length > 0 ? 'All matching titles are downloaded' : searchResults ? 'No Filmpalast matches' : 'No recent releases found'}
+          description={hideDownloaded && kindItems.length > 0 ? 'Turn off “Hide downloaded” to show them.' : searchResults ? 'Try a shorter title or different spelling.' : 'Try another page or filter.'}
         />
       ) : (
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
@@ -338,6 +368,11 @@ export default function Recent() {
                   <Badge variant={item.kind === 'movie' ? 'review' : 'info'}>
                     {item.kind === 'movie' ? 'Movie' : 'Episode'}
                   </Badge>
+                  {item.in_library && (
+                    <Badge variant='success' className='gap-1' title='Already present in the Bankai library or on the media server.'>
+                      <Check className='size-3' aria-hidden='true' /> Downloaded
+                    </Badge>
+                  )}
                   {item.year && <span className='text-xs text-muted-foreground'>{item.year}</span>}
                   {item.runtime_minutes && <span className='text-xs text-muted-foreground'>{item.runtime_minutes} min</span>}
                 </div>

@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from bankai.config import get_settings, reset_settings_cache
 from bankai.queue.models import MediaKind
-from bankai.scraper.base import EpisodeRef, StreamHandle
+from bankai.scraper.base import EpisodeRef, SearchResult, StreamHandle
 from bankai.torrent.prowlarr import TorrentCandidate
 from bankai.torrent.qbittorrent import TorrentStatus
 from bankai.web.app import (
@@ -237,6 +237,61 @@ def test_filmpalast_detail_returns_file_mirrors_and_episodes(
         params={"url": "https://example.com/not-allowed"},
     )
     assert rejected.status_code == 422
+
+
+def test_filmpalast_releases_mark_downloaded_movies_and_episodes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFilmpalast:
+        async def recent(self, page: int, *, feed: str):
+            assert page == 73
+            assert feed == "new"
+            return (
+                [
+                    SearchResult(
+                        site="filmpalast",
+                        title="Downloaded Movie (2024)",
+                        url="https://filmpalast.to/stream/downloaded-movie",
+                        kind=MediaKind.MOVIE,
+                    ),
+                    SearchResult(
+                        site="filmpalast",
+                        title="Arcane S01E01",
+                        url="https://filmpalast.to/stream/arcane-s01e01",
+                        kind=MediaKind.EPISODE,
+                    ),
+                    SearchResult(
+                        site="filmpalast",
+                        title="New Movie",
+                        url="https://filmpalast.to/stream/new-movie",
+                        kind=MediaKind.MOVIE,
+                    ),
+                ],
+                False,
+                220,
+                222,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("bankai.scraper.backends.filmpalast.FilmpalastBackend", FakeFilmpalast)
+    monkeypatch.setattr(
+        "bankai.web.media.scan_server",
+        lambda kind: [SimpleNamespace(name="Downloaded Movie")] if kind == "movie" else [SimpleNamespace(name="Arcane")],
+    )
+    monkeypatch.setattr("bankai.web.media.scan_library", lambda: [])
+
+    response = client.get("/api/releases/recent", params={"page": 73, "feed": "new"})
+
+    assert response.status_code == 200
+    in_library = {item["title"]: item["in_library"] for item in response.json()["items"]}
+    assert in_library == {
+        "Downloaded Movie (2024)": True,
+        "Arcane S01E01": True,
+        "New Movie": False,
+    }
 
 
 def test_discover_backfills_filtered_movies_to_requested_page_size(

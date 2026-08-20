@@ -165,6 +165,7 @@ export interface SearchResult {
   release_name?: string | null;
   poster_url?: string | null;
   runtime_minutes?: number | null;
+  in_library?: boolean;
 }
 
 export interface RecentRelease {
@@ -176,6 +177,7 @@ export interface RecentRelease {
   poster_url: string | null;
   release_name: string | null;
   runtime_minutes: number | null;
+  in_library: boolean;
 }
 
 export interface RecentReleasePage {

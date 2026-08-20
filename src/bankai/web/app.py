@@ -838,6 +838,34 @@ def create_app() -> Any:
         have, _active, staged = _catalog_membership(kind)
         return have | staged
 
+    def _filmpalast_library_keys(title: str, kind: str) -> set[str]:
+        """Membership aliases for a Filmpalast movie or episode title."""
+        keys = _title_membership_keys(title)
+        if kind.strip().casefold() != "movie":
+            series = re.split(
+                r"\b(?:s\d{1,2}\s*e\d{1,3}|staffel\s*\d+|season\s*\d+)\b",
+                title,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip(" ._:-")
+            if series:
+                keys.update(_title_membership_keys(series))
+        return keys
+
+    def _mark_filmpalast_library(items: list[dict]) -> list[dict]:
+        """Return source results annotated against staged/server media."""
+        library = {
+            "movie": _library_titles("movie"),
+            "show": _library_titles("show"),
+        }
+        marked: list[dict] = []
+        for item in items:
+            kind = str(item.get("kind") or "movie")
+            membership = library["movie" if kind == "movie" else "show"]
+            keys = _filmpalast_library_keys(str(item.get("title") or ""), kind)
+            marked.append({**item, "in_library": bool(keys & membership)})
+        return marked
+
     def _filter_discover(items: list, kind: str, membership=None) -> list:
         """Hide upcoming (not-yet-released) titles, anything already on the
         server, and anything already in the queue, so Discover only shows
@@ -1054,23 +1082,25 @@ def create_app() -> Any:
                 await backend.aclose()
             by_url = {result.url: result for result in enriched}
             results = [by_url.get(result.url, result) for result in results]
-        return {
-            "results": [
-                {
-                    "site": r.site,
-                    "title": r.title,
-                    "year": r.year,
-                    "kind": str(r.kind),
-                    "url": r.url,
-                    "release_name": r.release_name,
-                    "poster_url": r.poster_url,
-                    "runtime_minutes": int(r.raw["runtime_minutes"])
-                    if r.raw.get("runtime_minutes", "").isdigit()
-                    else None,
-                }
-                for r in results
-            ]
-        }
+        source_items = [
+            {
+                "site": r.site,
+                "title": r.title,
+                "year": r.year,
+                "kind": str(r.kind),
+                "url": r.url,
+                "release_name": r.release_name,
+                "poster_url": r.poster_url,
+                "runtime_minutes": int(r.raw["runtime_minutes"])
+                if r.raw.get("runtime_minutes", "").isdigit()
+                else None,
+            }
+            for r in results
+        ]
+        import anyio.to_thread
+
+        marked_items = await anyio.to_thread.run_sync(_mark_filmpalast_library, source_items)
+        return {"results": marked_items}
 
     @app.get("/api/filmpalast/detail")
     async def filmpalast_detail(url: str = Query(...)) -> dict:
@@ -1135,7 +1165,13 @@ def create_app() -> Any:
         cache_key = (normalized_feed, page)
         cached = _RECENT_RELEASE_CACHE.get(cache_key)
         if cached is not None and time.monotonic() - cached[0] < 300:
-            return cached[1]
+            import anyio.to_thread
+
+            payload = cached[1]
+            marked_items = await anyio.to_thread.run_sync(
+                _mark_filmpalast_library, payload["items"]
+            )
+            return {**payload, "items": marked_items}
 
         from bankai.scraper.backends.filmpalast import FilmpalastBackend
 
@@ -1176,7 +1212,10 @@ def create_app() -> Any:
             "has_next": has_next,
         }
         _RECENT_RELEASE_CACHE[cache_key] = (time.monotonic(), payload)
-        return payload
+        import anyio.to_thread
+
+        marked_items = await anyio.to_thread.run_sync(_mark_filmpalast_library, payload["items"])
+        return {**payload, "items": marked_items}
 
     @app.get("/api/torrents/search")
     async def torrent_search(
