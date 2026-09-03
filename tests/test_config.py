@@ -74,8 +74,12 @@ def test_metadata_settings_can_be_configured_from_env(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BANKAI_METADATA__TVDB_API_KEY", "secret")
     monkeypatch.setenv("BANKAI_METADATA__TVDB_ENABLED", "true")
+    monkeypatch.setenv("BANKAI_METADATA__TMDB_API_KEY", "tmdb-secret")
+    monkeypatch.setenv("BANKAI_TRANSFER__ANIME_SHOWS_DIR", str(tmp_path / "anime"))
 
     settings = load_settings()
 
     assert settings.metadata.tvdb_enabled is True
     assert settings.metadata.tvdb_api_key == "secret"
+    assert settings.metadata.tmdb_api_key == "tmdb-secret"
+    assert settings.transfer.anime_shows_dir == tmp_path / "anime"

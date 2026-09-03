@@ -45,12 +45,16 @@ tvdb_enabled = true
 tvdb_api_key = ""
 tvdb_pin = ""
 tvdb_languages = ["deu", "eng"]
+# Anime metadata. Accepts either a TMDB v3 API key or API Read Access Token.
+tmdb_enabled = true
+tmdb_api_key = ""
 
 [transfer]
 # Safe moves use: rsync --ignore-existing --remove-source-files
 root = "/mnt/media12"
 movies_dir = "/mnt/media12/movies"
 shows_dir = "/mnt/media12/shows"
+anime_shows_dir = "/mnt/media12/shows_anime"
 rsync_binary = "rsync"
 
 [queue]

@@ -1,8 +1,8 @@
 """Direct Nyaa download path for anime movies and episode packs.
 
 Unlike the dub pipeline, this worker does not extract, sync, transcode, or
-remux.  It downloads the selected Nyaa torrent and copies its video files into
-the normal TVDB/Jellyfin naming layout, marking them approved immediately.
+remux. It downloads the selected Nyaa torrent and copies its video files into
+the TMDB/Jellyfin naming layout, marking them approved immediately.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata.tvdb import TVDBClient, TVDBEpisode
+from bankai.metadata.tmdb import TMDBClient, TMDBEpisode
 from bankai.processor.naming import render_episode_path, render_movie_path
 from bankai.torrent import actions as torrent_actions
 from bankai.torrent.matcher import find_video_files, parse_se, pick_movie_file
@@ -50,7 +50,7 @@ def episode_identity(
     filename: str,
     *,
     release_title: str,
-    tvdb_episodes: list[TVDBEpisode],
+    episode_records: list[TMDBEpisode],
     season_override: int | None = None,
     episode_override: int | None = None,
 ) -> EpisodeIdentity | None:
@@ -59,7 +59,7 @@ def episode_identity(
             matched = next(
                 (
                     item
-                    for item in tvdb_episodes
+                    for item in episode_records
                     if item.season == season_override and item.episode == episode_override
                 ),
                 None,
@@ -70,12 +70,12 @@ def episode_identity(
                 matched.name if matched else None,
             )
         absolute = next(
-            (item for item in tvdb_episodes if item.absolute_number == episode_override),
+            (item for item in episode_records if item.absolute_number == episode_override),
             None,
         )
         if absolute:
             return EpisodeIdentity(absolute.season, absolute.episode, absolute.name)
-        regular = [item for item in tvdb_episodes if item.season > 0]
+        regular = [item for item in episode_records if item.season > 0]
         if 0 < episode_override <= len(regular):
             item = regular[episode_override - 1]
             return EpisodeIdentity(item.season, item.episode, item.name)
@@ -87,7 +87,7 @@ def episode_identity(
         if season_override is not None:
             season = season_override
         matched = next(
-            (item for item in tvdb_episodes if item.season == season and item.episode == episode),
+            (item for item in episode_records if item.season == season and item.episode == episode),
             None,
         )
         return EpisodeIdentity(season, episode, matched.name if matched else None)
@@ -99,7 +99,7 @@ def episode_identity(
         if season_override is not None:
             season = season_override
         matched = next(
-            (item for item in tvdb_episodes if item.season == season and item.episode == episode),
+            (item for item in episode_records if item.season == season and item.episode == episode),
             None,
         )
         return EpisodeIdentity(season, episode, matched.name if matched else None)
@@ -112,29 +112,29 @@ def episode_identity(
     if season_override is not None or season_match:
         season = season_override if season_override is not None else int(season_match.group("season"))
         matched = next(
-            (item for item in tvdb_episodes if item.season == season and item.episode == number),
+            (item for item in episode_records if item.season == season and item.episode == number),
             None,
         )
         if matched:
             return EpisodeIdentity(season, number, matched.name)
         # Many anime keep absolute numbering in season-labelled Nyaa
-        # releases (for example S02 - 29). Prefer a TVDB absolute match when
-        # there is no such season-relative episode.
+        # releases (for example S02 - 29). Prefer the TMDB-derived absolute
+        # ordering when there is no such season-relative episode.
         absolute = next(
-            (item for item in tvdb_episodes if item.absolute_number == number),
+            (item for item in episode_records if item.absolute_number == number),
             None,
         )
         if absolute:
             return EpisodeIdentity(absolute.season, absolute.episode, absolute.name)
         return EpisodeIdentity(season, number)
 
-    absolute = next((item for item in tvdb_episodes if item.absolute_number == number), None)
+    absolute = next((item for item in episode_records if item.absolute_number == number), None)
     if absolute:
         return EpisodeIdentity(absolute.season, absolute.episode, absolute.name)
 
-    # Some TVDB series omit absoluteNumber.  The default-order episode list is
-    # still deterministic, so use its non-special ordinal as a final mapping.
-    regular = [item for item in tvdb_episodes if item.season > 0]
+    # TMDB has no explicit absolute number. The client assigns a deterministic
+    # non-special ordinal across TMDB seasons, so use that as a final mapping.
+    regular = [item for item in episode_records if item.season > 0]
     if 0 < number <= len(regular):
         item = regular[number - 1]
         return EpisodeIdentity(item.season, item.episode, item.name)
@@ -193,17 +193,13 @@ def _atomic_copy2(source: Path, destination: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-async def _tvdb_episode_map(tvdb_id: int) -> list[TVDBEpisode]:
+async def _tmdb_episode_map(tmdb_id: int) -> list[TMDBEpisode]:
     settings = get_settings().metadata
-    if not settings.tvdb_enabled or not settings.tvdb_api_key:
+    if not settings.tmdb_enabled or not settings.tmdb_api_key:
         return []
-    client = TVDBClient(
-        api_key=settings.tvdb_api_key,
-        pin=settings.tvdb_pin,
-        languages=["eng", "jpn"],
-    )
+    client = TMDBClient(api_key=settings.tmdb_api_key)
     try:
-        return await client.series_episodes(tvdb_id)
+        return await client.series_episodes(tmdb_id)
     finally:
         await client.aclose()
 
@@ -244,7 +240,7 @@ async def download_anime(
     magnet_uri: str,
     info_hash: str,
     media_kind: str,
-    tvdb_id: int,
+    tmdb_id: int,
     english_title: str,
     year: int | None,
     season_override: int | None = None,
@@ -291,7 +287,7 @@ async def download_anime(
         if background_id:
             torrent_actions.clear_active_torrent(background_id)
 
-        log.info('BANKAI_STAGE step=2 total=2 key=organize label="Organize with TVDB"')
+        log.info('BANKAI_STAGE step=2 total=2 key=organize label="Organize with TMDB"')
         root = _download_root(status)
         outputs: list[Path] = []
         output = settings.output
@@ -311,7 +307,7 @@ async def download_anime(
             _copy_with_sidecars(source, destination)
             outputs.append(destination)
         else:
-            tvdb_episodes = await _tvdb_episode_map(tvdb_id)
+            episode_records = await _tmdb_episode_map(tmdb_id)
             sources = find_video_files(root)
             if episode_override is not None and len(sources) != 1:
                 raise RuntimeError(
@@ -321,7 +317,7 @@ async def download_anime(
                 identity = episode_identity(
                     source.name,
                     release_title=release_title,
-                    tvdb_episodes=tvdb_episodes,
+                    episode_records=episode_records,
                     season_override=season_override,
                     episode_override=episode_override,
                 )
@@ -339,6 +335,11 @@ async def download_anime(
                     audio_lang="jpn",
                     season_folder_template=output.season_folder_template,
                     file_template=output.series_filename_template,
+                    series_folder_override=(
+                        f"{english_title} ({year}) [tmdbid-{tmdb_id}]"
+                        if year
+                        else f"{english_title} [tmdbid-{tmdb_id}]"
+                    ),
                 ).with_suffix(source.suffix.casefold())
                 _copy_with_sidecars(source, destination)
                 outputs.append(destination)
@@ -356,6 +357,7 @@ async def download_anime(
                 torrent_source_url=detail_url,
                 torrent_source_title=release_title,
             )
+            review.set_metadata(destination, provider="tmdb", metadata_id=tmdb_id)
         log.info('BANKAI_PROGRESS stage=organize pct=100 status="ready"')
 
         if settings.paths.cleanup_after_success and torrent_hash and not existed_before:
@@ -363,7 +365,7 @@ async def download_anime(
         return {
             "final_path": str(outputs[0]),
             "paths": [str(path) for path in outputs],
-            "tvdb_id": tvdb_id,
+            "tmdb_id": tmdb_id,
             "torrent_hash": torrent_hash,
         }
     finally:

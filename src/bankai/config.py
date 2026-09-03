@@ -93,12 +93,18 @@ class MetadataSettings(BaseModel):
     tvdb_api_key: str = ""
     tvdb_pin: str = ""
     tvdb_languages: list[str] = Field(default_factory=lambda: ["deu", "eng"])
+    # Anime uses TMDB so its title IDs and season/episode ordering match the
+    # dedicated Jellyfin anime library. Either a v3 API key or an API Read
+    # Access Token can be supplied; the client detects which form was used.
+    tmdb_enabled: bool = True
+    tmdb_api_key: str = ""
 
 
 class TransferSettings(BaseModel):
     root: Path = Path("/mnt/media12")
     movies_dir: Path = Path("/mnt/media12/movies")
     shows_dir: Path = Path("/mnt/media12/shows")
+    anime_shows_dir: Path = Path("/mnt/media12/shows_anime")
     rsync_binary: str = "rsync"
 
 

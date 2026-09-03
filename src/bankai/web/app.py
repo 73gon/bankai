@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 
 from bankai import __version__
 from bankai.config import SelectorSettings, get_settings, reset_settings_cache
@@ -532,12 +532,19 @@ class AnimeDownloadRequest(BaseModel):
     detail_url: str
     magnet_uri: str
     info_hash: str
-    tvdb_id: int
+    tmdb_id: int
     kind: str
     english_title: str
     year: int | None = None
     season: int | None = None
     episode: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_tvdb_field(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "tmdb_id" not in value and "tvdb_id" in value:
+            value = {**value, "tmdb_id": value["tvdb_id"]}
+        return value
 
 
 class QueuePriorityRequest(BaseModel):
@@ -627,6 +634,8 @@ class SettingRequest(BaseModel):
 
 # Settings keys the web UI is allowed to edit (safe subset).
 SAFE_SETTING_KEYS: set[str] = {
+    "metadata.tmdb_api_key",
+    "metadata.tmdb_enabled",
     "metadata.tvdb_api_key",
     "metadata.tvdb_pin",
     "metadata.tvdb_enabled",
@@ -638,6 +647,7 @@ SAFE_SETTING_KEYS: set[str] = {
     "transfer.root",
     "transfer.movies_dir",
     "transfer.shows_dir",
+    "transfer.anime_shows_dir",
     "scraper.interactive_pick",
     "selector.max_size_gib",
     "selector.min_seeders",
@@ -676,6 +686,18 @@ def _validate_setting_value(key: str, value: Any) -> Any:
 
 def _is_secret_key(key: str) -> bool:
     return any(part in key.casefold() for part in ("password", "api_key", "pin", "webhook"))
+
+
+def _review_transfer_kind(path: Path, state: review_mod.ReviewState) -> str:
+    is_show = any(part.casefold() in {"shows", "series"} for part in path.parts)
+    if not is_show:
+        return "movie"
+    source_url = state.torrent_source_url or ""
+    if state.metadata_provider == "tmdb" or (
+        source_url and anime_mod.is_nyaa_url(source_url)
+    ):
+        return "anime"
+    return "show"
 
 
 def create_app() -> Any:
@@ -962,7 +984,7 @@ def create_app() -> Any:
             membership=membership,
         )
         return {
-            "configured": discover_mod.is_configured(),
+            "configured": anime_mod.is_metadata_configured(),
             "items": items,
             "page": page,
             "page_size": page_size,
@@ -1006,7 +1028,7 @@ def create_app() -> Any:
             result["in_library"] = bool(key and key in in_library)
             results.append(result)
         return {
-            "configured": discover_mod.is_configured(),
+            "configured": anime_mod.is_metadata_configured(),
             "items": results,
             "page": paged.page,
             "page_size": paged.page_size,
@@ -1364,12 +1386,13 @@ def create_app() -> Any:
             "aliases": result.aliases,
         }
 
-    @app.get("/api/anime/tvdb")
-    async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
-        matches = await anime_mod.tvdb_candidates(q, limit=12)
+    @app.get("/api/anime/metadata")
+    @app.get("/api/anime/tvdb", include_in_schema=False)
+    async def anime_metadata(q: str = Query(..., min_length=2)) -> dict:
+        matches = await anime_mod.metadata_candidates(q, limit=12)
         return {
-            "configured": discover_mod.is_configured(),
-            "items": [anime_mod.tvdb_to_dict(item) for item in matches],
+            "configured": anime_mod.is_metadata_configured(),
+            "items": [anime_mod.metadata_to_dict(item) for item in matches],
         }
 
     @app.get("/api/vpn/status")
@@ -1402,8 +1425,8 @@ def create_app() -> Any:
     def anime_download(req: AnimeDownloadRequest) -> dict:
         if not req.release_title.strip() or not req.english_title.strip():
             raise HTTPException(status_code=422, detail="release and English titles are required")
-        if req.tvdb_id <= 0:
-            raise HTTPException(status_code=422, detail="a valid TVDB entry is required")
+        if req.tmdb_id <= 0:
+            raise HTTPException(status_code=422, detail="a valid TMDB entry is required")
         if req.kind not in {"show", "movie"}:
             raise HTTPException(status_code=422, detail="kind must be show or movie")
         if req.season is not None and req.season < 1:
@@ -1436,8 +1459,8 @@ def create_app() -> Any:
             req.info_hash.casefold(),
             "--kind",
             req.kind,
-            "--tvdb-id",
-            str(req.tvdb_id),
+            "--tmdb-id",
+            str(req.tmdb_id),
             "--english-title",
             req.english_title.strip(),
         ]
@@ -2931,7 +2954,7 @@ def create_app() -> Any:
         state = review_mod.get_state(str(p))
         if state.stage not in {"approved", "transferred"}:
             raise HTTPException(status_code=409, detail="file must be approved before transfer")
-        kind = "show" if "Shows" in p.parts else "movie"
+        kind = _review_transfer_kind(p, state)
         args = ["transfer-run", str(p), "--kind", kind]
         job = webjobs.enqueue(kind="transfer", title=f"Transfer {p.name}", args=args)
         review_mod.set_transfer(str(p), "transferring", percent=0.0)
@@ -2962,7 +2985,7 @@ def create_app() -> Any:
             if state.stage not in {"approved", "transferred"}:
                 skipped.append({"path": str(p), "stage": state.stage})
                 continue
-            kind = "show" if "Shows" in p.parts else "movie"
+            kind = _review_transfer_kind(p, state)
             args = ["transfer-run", str(p), "--kind", kind]
             jobs.append(webjobs.enqueue(kind="transfer", title=f"Transfer {p.name}", args=args))
             review_mod.set_transfer(str(p), "transferring", percent=0.0)

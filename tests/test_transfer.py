@@ -19,6 +19,10 @@ def _transfer_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BANKAI_OUTPUT__DIRECTORY", str(tmp_path / "library"))
     monkeypatch.setenv("BANKAI_TRANSFER__MOVIES_DIR", str(tmp_path / "media12" / "movies"))
     monkeypatch.setenv("BANKAI_TRANSFER__SHOWS_DIR", str(tmp_path / "media12" / "shows"))
+    monkeypatch.setenv(
+        "BANKAI_TRANSFER__ANIME_SHOWS_DIR",
+        str(tmp_path / "media12" / "shows_anime"),
+    )
     reset_settings_cache()
 
 
@@ -47,6 +51,55 @@ def test_plan_transfer_detects_show_files(tmp_path: Path) -> None:
         item.destination
         == tmp_path / "media12" / "shows" / "Arcane" / "Season 01" / "Arcane - S01E01.mkv"
     )
+
+
+def test_plan_transfer_routes_anime_to_dedicated_library_with_tmdb_id(
+    tmp_path: Path,
+) -> None:
+    show = (
+        tmp_path
+        / "library"
+        / "Shows"
+        / "Frieren Beyond Journey's End (2023) [tmdbid-209867]"
+        / "Season 02"
+        / "Frieren Beyond Journey's End - S02E01.mkv"
+    )
+    show.parent.mkdir(parents=True)
+    show.write_bytes(b"anime")
+
+    (item,) = plan_transfer([show], kind="anime")
+
+    assert item.kind == "anime"
+    assert item.destination == (
+        tmp_path
+        / "media12"
+        / "shows_anime"
+        / "Frieren Beyond Journey's End (2023) [tmdbid-209867]"
+        / "Season 02"
+        / "Frieren Beyond Journey's End - S02E01.mkv"
+    )
+
+
+def test_plan_transfer_reuses_legacy_anime_folder_without_provider_suffix(
+    tmp_path: Path,
+) -> None:
+    show = (
+        tmp_path
+        / "library"
+        / "Shows"
+        / "Attack on Titan (2013) [tmdbid-1429]"
+        / "Season 04"
+        / "Attack on Titan - S04E01.mkv"
+    )
+    show.parent.mkdir(parents=True)
+    show.write_bytes(b"new")
+    legacy = tmp_path / "media12" / "shows_anime" / "Attack on Titan"
+    (legacy / "Season 01").mkdir(parents=True)
+    (legacy / "Season 01" / "Attack on Titan - S01E01.mkv").write_bytes(b"old")
+
+    (item,) = plan_transfer([show], kind="anime")
+
+    assert item.destination == legacy / "Season 04" / "Attack on Titan - S04E01.mkv"
 
 
 def test_plan_transfer_reuses_existing_show_folder(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Nyaa-only anime catalogue with TVDB enrichment.
+"""Nyaa-only anime catalogue with TMDB enrichment.
 
 Nyaa exposes a stable RSS representation for browse/search results.  We use
 that feed for the cheap list operation and only open individual detail pages
@@ -21,9 +21,8 @@ from selectolax.parser import HTMLParser
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata.tvdb import TitleAlias, TVDBClient
-from bankai.queue.models import MediaKind
-from bankai.web import discover
+from bankai.metadata.tmdb import TMDBClient
+from bankai.metadata.tmdb import is_configured as tmdb_is_configured
 
 log = get_logger(__name__)
 
@@ -31,13 +30,13 @@ _NYAA_BASE = "https://nyaa.si"
 _NYAA_NS = "https://nyaa.si/xmlns/nyaa"
 _RSS_PAGE_SIZE = 75
 _CACHE_TTL = 15 * 60
-_TVDB_CACHE: dict[str, tuple[float, list[AnimeTVDBMatch]]] = {}
+_TMDB_CACHE: dict[str, tuple[float, list[AnimeMetadataMatch]]] = {}
 _DETAIL_CACHE: dict[str, tuple[float, tuple[str, str | None, str | None]]] = {}
 
 
 @dataclass(frozen=True, slots=True)
-class AnimeTVDBMatch:
-    tvdb_id: int
+class AnimeMetadataMatch:
+    tmdb_id: int
     kind: str  # show | movie
     english_title: str
     japanese_title: str | None = None
@@ -70,7 +69,7 @@ class NyaaEntry:
     season: int | None = None
     episode: int | None = None
     description: str = ""
-    tvdb: AnimeTVDBMatch | None = None
+    tmdb: AnimeMetadataMatch | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +93,7 @@ def split_filter_terms(raw: str | None) -> list[str]:
 
 
 def clean_release_title(title: str) -> str:
-    """Reduce a scene-style release name to a TVDB-searchable anime title."""
+    """Reduce a scene-style release name to a metadata-searchable anime title."""
     value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
     value = re.sub(r"\.(?:mkv|mp4|avi|m4v|mov|ts|webm)$", "", value, flags=re.I)
     value = re.sub(r"\s*[|/]\s*.*$", "", value)
@@ -126,7 +125,7 @@ def release_episode_info(title: str) -> tuple[int | None, int | None]:
     Anime releases commonly use either TV notation (``S02E01``), a written
     season plus an episode, or absolute numbering (``Title - 41``).  Absolute
     episode numbers intentionally keep the season unknown: the anime download
-    worker later maps them to TVDB's absolute episode order without guessing a
+    worker later maps them to TMDB's season/episode order without guessing a
     potentially wrong season.
     """
     value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
@@ -281,7 +280,11 @@ def _normalise(value: str) -> str:
     return " ".join(re.findall(r"\w+", value.casefold(), flags=re.UNICODE))
 
 
-def _match_score(query: str, candidate: AnimeTVDBMatch) -> float:
+def is_metadata_configured() -> bool:
+    return tmdb_is_configured()
+
+
+def _match_score(query: str, candidate: AnimeMetadataMatch) -> float:
     clean = _normalise(query)
     names = [candidate.english_title, candidate.japanese_title or "", *candidate.aliases]
 
@@ -298,114 +301,67 @@ def _match_score(query: str, candidate: AnimeTVDBMatch) -> float:
     return max(score(name) for name in names if name)
 
 
-async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]:
+async def metadata_candidates(query: str, *, limit: int = 8) -> list[AnimeMetadataMatch]:
     clean = query.strip()
-    if not clean or not discover.is_configured():
+    if not clean or not tmdb_is_configured():
         return []
     cache_key = _normalise(clean)
-    hit = _TVDB_CACHE.get(cache_key)
+    hit = _TMDB_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < _CACHE_TTL:
         return hit[1][:limit]
     metadata = get_settings().metadata
-    client = TVDBClient(
-        api_key=metadata.tvdb_api_key,
-        pin=metadata.tvdb_pin,
-        languages=["eng", "jpn"],
+    client = TMDBClient(
+        api_key=metadata.tmdb_api_key,
     )
     try:
-        series_eng, series_jpn, movies_eng, movies_jpn = await asyncio.gather(
-            client.search_aliases(
-                clean,
-                kind=MediaKind.EPISODE,
-                limit=3,
-                search_language="eng",
-            ),
-            client.search_aliases(
-                clean,
-                kind=MediaKind.EPISODE,
-                limit=3,
-                search_language="jpn",
-            ),
-            client.search_aliases(
-                clean,
-                kind=MediaKind.MOVIE,
-                limit=3,
-                search_language="eng",
-            ),
-            client.search_aliases(
-                clean,
-                kind=MediaKind.MOVIE,
-                limit=3,
-                search_language="jpn",
-            ),
+        series, movies = await asyncio.gather(
+            client.search_titles(clean, kind="show", limit=6),
+            client.search_titles(clean, kind="movie", limit=6),
         )
-        series = [*series_eng, *series_jpn]
-        movies = [*movies_eng, *movies_jpn]
     except Exception as exc:
-        log.warning("TVDB anime lookup failed for %r: %s", clean, exc)
+        log.warning("TMDB anime lookup failed for %r: %s", clean, exc)
         return []
     finally:
         await client.aclose()
 
-    async def convert(alias: TitleAlias, kind: str) -> AnimeTVDBMatch | None:
-        if alias.tvdb_id is None:
-            return None
-        english = alias.english_title or alias.name or alias.japanese_title
-        if not english:
-            return None
-        poster: str | None = None
-        try:
-            results = await discover.search(english, kind=kind, limit=5)
-            matched = next((item for item in results if item.tvdb_id == alias.tvdb_id), None)
-            poster = matched.poster_url if matched else None
-        except Exception:
-            pass
-        return AnimeTVDBMatch(
-            tvdb_id=alias.tvdb_id,
-            kind=kind,
-            english_title=english,
-            japanese_title=alias.japanese_title or (alias.name if alias.name != english else None),
-            year=alias.year,
-            poster_url=poster,
-            aliases=tuple(
-                dict.fromkeys(
-                    value
-                    for value in (alias.name, *alias.aliases)
-                    if value and value not in {english, alias.japanese_title}
-                )
-            ),
+    converted = [
+        AnimeMetadataMatch(
+            tmdb_id=item.tmdb_id,
+            kind=item.kind,
+            english_title=item.english_title,
+            japanese_title=item.japanese_title,
+            year=item.year,
+            poster_url=item.poster_url,
+            aliases=item.aliases,
         )
-
-    converted = await asyncio.gather(
-        *(convert(alias, "show") for alias in series),
-        *(convert(alias, "movie") for alias in movies),
-    )
-    unique: list[AnimeTVDBMatch] = []
+        for item in [*series, *movies]
+    ]
+    unique: list[AnimeMetadataMatch] = []
     seen: set[tuple[str, int]] = set()
     for item in converted:
-        if item is None or (item.kind, item.tvdb_id) in seen:
+        if (item.kind, item.tmdb_id) in seen:
             continue
-        seen.add((item.kind, item.tvdb_id))
+        seen.add((item.kind, item.tmdb_id))
         unique.append(item)
     unique.sort(key=lambda item: _match_score(clean, item), reverse=True)
-    _TVDB_CACHE[cache_key] = (time.time(), unique)
+    _TMDB_CACHE[cache_key] = (time.time(), unique)
     return unique[:limit]
 
 
-async def _quick_tvdb_candidates(query: str) -> list[AnimeTVDBMatch]:
-    """Resolve a release title with English/Japanese TVDB translations."""
-    return await tvdb_candidates(query, limit=4)
+async def _quick_metadata_candidates(query: str) -> list[AnimeMetadataMatch]:
+    """Resolve a release title with English/Japanese TMDB titles."""
+    return await metadata_candidates(query, limit=4)
 
 
-async def _enrich_tvdb(
-    entries: list[NyaaEntry], query_matches: list[AnimeTVDBMatch]
+async def _enrich_metadata(
+    entries: list[NyaaEntry], query_matches: list[AnimeMetadataMatch]
 ) -> list[NyaaEntry]:
     semaphore = asyncio.Semaphore(4)
-    release_lookups: dict[str, asyncio.Task[list[AnimeTVDBMatch]]] = {}
+    release_lookups: dict[str, asyncio.Task[list[AnimeMetadataMatch]]] = {}
 
-    async def release_candidates(release_query: str) -> list[AnimeTVDBMatch]:
+    async def release_candidates(release_query: str) -> list[AnimeMetadataMatch]:
         async with semaphore:
-            return await _quick_tvdb_candidates(release_query)
+            return await _quick_metadata_candidates(release_query)
 
     async def enrich(entry: NyaaEntry) -> NyaaEntry:
         release_query = clean_release_title(entry.title)
@@ -420,7 +376,7 @@ async def _enrich_tvdb(
         match = max(candidates, key=lambda item: _match_score(release_query, item), default=None)
         if match is not None and _match_score(release_query, match) < 0.28:
             match = None
-        return replace(entry, tvdb=match)
+        return replace(entry, tmdb=match)
 
     return list(await asyncio.gather(*(enrich(entry) for entry in entries)))
 
@@ -464,7 +420,7 @@ async def search(
 ) -> AnimeSearchPage:
     if category not in {"1_0", "1_1", "1_2", "1_3", "1_4"}:
         category = "1_0"
-    query_candidates = await tvdb_candidates(query, limit=8) if query.strip() else []
+    query_candidates = await metadata_candidates(query, limit=8) if query.strip() else []
     query_matches = [
         candidate for candidate in query_candidates[:1] if _match_score(query, candidate) >= 0.75
     ]
@@ -534,11 +490,11 @@ async def search(
     ]
     items.sort(key=lambda entry: (entry.seeders, entry.downloads), reverse=True)
     # Keep every Nyaa row so pagination never skips releases. Blank browsing
-    # gets fast automatic TVDB matches for the leading rows; all other rows
-    # remain downloadable through the explicit TVDB picker.
+    # gets fast automatic TMDB matches for the leading rows; all other rows
+    # remain downloadable through the explicit TMDB picker.
     enrich_count = len(items) if query.strip() else min(20, len(items))
     items = [
-        *(await _enrich_tvdb(items[:enrich_count], query_matches)),
+        *(await _enrich_metadata(items[:enrich_count], query_matches)),
         *items[enrich_count:],
     ]
     has_next = any(len(batch) >= _RSS_PAGE_SIZE for batch in batches)
@@ -549,22 +505,23 @@ def entry_to_dict(entry: NyaaEntry) -> dict:
     return asdict(entry)
 
 
-def tvdb_to_dict(item: AnimeTVDBMatch) -> dict:
+def metadata_to_dict(item: AnimeMetadataMatch) -> dict:
     return asdict(item)
 
 
 __all__ = [
+    "AnimeMetadataMatch",
     "AnimeSearchPage",
-    "AnimeTVDBMatch",
     "NyaaEntry",
     "clean_release_title",
     "detail",
     "entry_to_dict",
+    "is_metadata_configured",
     "is_nyaa_url",
+    "metadata_candidates",
+    "metadata_to_dict",
     "parse_rss",
     "release_episode_info",
     "search",
     "split_filter_terms",
-    "tvdb_candidates",
-    "tvdb_to_dict",
 ]

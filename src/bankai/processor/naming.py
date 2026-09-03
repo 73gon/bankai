@@ -116,6 +116,7 @@ def render_episode_path(
     audio_lang: str = "ger",
     season_folder_template: str,
     file_template: str,
+    series_folder_override: str | None = None,
 ) -> Path:
     """Compute the final ``Shows/.../*.mkv`` path for one episode."""
     parsed_show, parsed_year = _year_from_query(_strip_episode_marker(query))
@@ -130,7 +131,7 @@ def render_episode_path(
         "episode": episode,
         "episode_title": (episode_title or "").strip(),
     }
-    show_folder = sanitise(title)
+    show_folder = sanitise(series_folder_override or title)
     season_folder = sanitise(_render(season_folder_template, fields))
     filename = sanitise(_render(file_template, fields), fallback="episode.mkv")
     if not filename.lower().endswith(".mkv"):

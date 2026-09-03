@@ -79,6 +79,8 @@ class ReviewState:
     german_source_url: str | None = None
     torrent_source_url: str | None = None
     torrent_source_title: str | None = None
+    metadata_provider: str | None = None
+    metadata_id: int | None = None
     # Transfer is tracked per-entry (shown as a column on the library row)
     # instead of as a standalone queue job.
     transfer_status: str = "idle"  # idle | transferring | done | failed
@@ -358,6 +360,22 @@ def set_sources(
             raw["torrent_source_url"] = torrent_source_url
         if torrent_source_title is not None:
             raw["torrent_source_title"] = torrent_source_title
+        raw["updated_at"] = time.time()
+
+    return _update(path, change)
+
+
+def set_metadata(
+    path: str | Path,
+    *,
+    provider: str,
+    metadata_id: int,
+) -> ReviewState:
+    """Persist the provider identity used to organize a media file."""
+
+    def change(raw: dict) -> None:
+        raw["metadata_provider"] = provider.casefold()
+        raw["metadata_id"] = int(metadata_id)
         raw["updated_at"] = time.time()
 
     return _update(path, change)

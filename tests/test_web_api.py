@@ -24,12 +24,14 @@ from bankai.web.app import (
     _ebur128_envelope,
     _laptop_vpn_status,
     _parse_range,
+    _review_transfer_kind,
     _stream_site_from_url,
     _validate_media_title,
     _waveform_envelope,
     create_app,
 )
 from bankai.web.discover import DiscoverItem, DiscoverPage, PersonSuggestion
+from bankai.web.review import ReviewState
 
 
 def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
@@ -47,7 +49,7 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
         "detail_url": "https://nyaa.si/view/123",
         "magnet_uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Frieren",
         "info_hash": "0123456789abcdef0123456789abcdef01234567",
-        "tvdb_id": 424536,
+        "tmdb_id": 209867,
         "kind": "show",
         "english_title": "Frieren: Beyond Journey's End",
         "year": 2023,
@@ -59,7 +61,7 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     assert queued[0]["kind"] == "show"
     assert queued[0]["title"] == "Frieren: Beyond Journey's End E01"
     assert queued[0]["args"][0] == "anime-download"
-    assert "--tvdb-id" in queued[0]["args"]
+    assert "--tmdb-id" in queued[0]["args"]
 
     body["season"] = 3
     body["episode"] = 13
@@ -72,6 +74,18 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     body["detail_url"] = "https://example.com/view/123"
     rejected = client.post("/api/anime/download", json=body)
     assert rejected.status_code == 422
+
+
+def test_tmdb_anime_review_routes_to_anime_transfer_kind() -> None:
+    path = Path("C:/bankai/library/Shows/Frieren/Season 01/Frieren - S01E01.mkv")
+    state = ReviewState(
+        path=str(path),
+        torrent_source_url="https://nyaa.si/view/123",
+        metadata_provider="tmdb",
+        metadata_id=209867,
+    )
+
+    assert _review_transfer_kind(path, state) == "anime"
 
 
 @pytest.fixture()
@@ -1329,6 +1343,9 @@ def test_settings_get_masks_secrets(client: TestClient) -> None:
     rows = {row["key"]: row for row in r.json()["settings"]}
     assert "metadata.tvdb_api_key" in rows
     assert rows["metadata.tvdb_api_key"]["secret"] is True
+    assert "metadata.tmdb_api_key" in rows
+    assert rows["metadata.tmdb_api_key"]["secret"] is True
+    assert "transfer.anime_shows_dir" in rows
 
 
 def test_settings_exposes_hq_torrent_preferences(client: TestClient) -> None:

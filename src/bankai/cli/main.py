@@ -1835,7 +1835,7 @@ def transfer(
             help="Files or folders to move. Defaults to output.directory with --library."
         ),
     ] = None,
-    kind: str = typer.Option("auto", "--kind", help="auto | movie | show"),
+    kind: str = typer.Option("auto", "--kind", help="auto | movie | show | anime"),
     library: bool = typer.Option(
         False, "--library", help="Transfer the configured output directory."
     ),
@@ -1881,7 +1881,7 @@ def _queue_transfer(
 @app.command("transfer-run", hidden=True)
 def transfer_run(
     paths: Annotated[list[Path], typer.Argument(help="Files or folders to move.")],
-    kind: str = typer.Option("auto", "--kind", help="auto | movie | show"),
+    kind: str = typer.Option("auto", "--kind", help="auto | movie | show | anime"),
 ) -> None:
     """Foreground transfer worker used by the background supervisor."""
     from bankai.notify import notify_transfer_summary
@@ -2017,12 +2017,14 @@ def review_replace_torrent(
 
 def _transfer_kind(kind: str) -> TransferKind:
     clean = kind.casefold()
-    if clean in {"auto", "movie", "show"}:
+    if clean in {"auto", "movie", "show", "anime"}:
         return cast(TransferKind, clean)
     if clean in {"movies"}:
         return "movie"
     if clean in {"shows", "series"}:
         return "show"
+    if clean in {"anime-show", "anime-shows", "anime_series"}:
+        return "anime"
     console.print(f"[red]invalid transfer kind:[/red] {kind!r}")
     raise typer.Exit(code=1)
 
@@ -2262,7 +2264,7 @@ def anime_download(
     magnet_uri: str = typer.Option(..., "--magnet-uri"),
     info_hash: str = typer.Option(..., "--info-hash"),
     media_kind: str = typer.Option(..., "--kind", help="show | movie"),
-    tvdb_id: int = typer.Option(..., "--tvdb-id"),
+    tmdb_id: int = typer.Option(..., "--tmdb-id", "--tvdb-id"),
     english_title: str = typer.Option(..., "--english-title"),
     year: int | None = typer.Option(None, "--year"),
     season: int | None = typer.Option(None, "--season"),
@@ -2285,7 +2287,7 @@ def anime_download(
                 magnet_uri=magnet_uri,
                 info_hash=info_hash,
                 media_kind=media_kind,
-                tvdb_id=tvdb_id,
+                tmdb_id=tmdb_id,
                 english_title=english_title,
                 year=year,
                 season_override=season,

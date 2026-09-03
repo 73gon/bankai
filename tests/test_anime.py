@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from bankai.metadata.tvdb import TVDBEpisode
+from bankai.metadata.tmdb import TMDBEpisode
 from bankai.processor.anime import _atomic_copy2, episode_identity
 from bankai.web import anime
 from bankai.web.anime import (
@@ -137,7 +137,7 @@ def test_release_episode_info_extracts_common_nyaa_notation(
     assert release_episode_info(title) == expected
 
 
-def test_release_title_is_cleaned_for_tvdb_lookup() -> None:
+def test_release_title_is_cleaned_for_tmdb_lookup() -> None:
     assert clean_release_title("[SubsPlease] Sousou no Frieren - 27 (1080p) [ABC].mkv") == (
         "Sousou no Frieren"
     )
@@ -148,20 +148,20 @@ def test_release_title_is_cleaned_for_tvdb_lookup() -> None:
 
 
 def test_short_anime_query_does_not_match_a_word_inside_an_unrelated_title() -> None:
-    correct = anime.AnimeTVDBMatch(
-        tvdb_id=424536,
+    correct = anime.AnimeMetadataMatch(
+        tmdb_id=424536,
         kind="show",
         english_title="Frieren: Beyond Journey's End",
         aliases=("Sousou no Frieren",),
     )
-    unrelated = anime.AnimeTVDBMatch(
-        tvdb_id=256256,
+    unrelated = anime.AnimeMetadataMatch(
+        tmdb_id=256256,
         kind="movie",
         english_title="Young Ones Are Even Cold in the Summer",
         japanese_title="Kleine frieren auch im Sommer",
     )
-    spelling_lookalike = anime.AnimeTVDBMatch(
-        tvdb_id=391612,
+    spelling_lookalike = anime.AnimeMetadataMatch(
+        tmdb_id=391612,
         kind="show",
         english_title="Labyrinth of Peace",
         japanese_title="Frieden",
@@ -173,32 +173,32 @@ def test_short_anime_query_does_not_match_a_word_inside_an_unrelated_title() -> 
     assert anime._match_score("Frieren", spelling_lookalike) < 0.75
 
 
-def test_episode_identity_maps_absolute_anime_number_to_tvdb() -> None:
+def test_episode_identity_maps_absolute_anime_number_to_tmdb() -> None:
     episodes = [
-        TVDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
-        TVDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
+        TMDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
+        TMDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
     ]
 
     identity = episode_identity(
         "[Group] Frieren - 29 [1080p].mkv",
         release_title="[Group] Frieren Season 2",
-        tvdb_episodes=episodes,
+        episode_records=episodes,
     )
 
     assert identity is not None
     assert (identity.season, identity.episode, identity.title) == (2, 1, "A New Journey")
 
 
-def test_episode_identity_uses_tvdb_absolute_order_without_season_hint() -> None:
+def test_episode_identity_uses_tmdb_absolute_order_without_season_hint() -> None:
     episodes = [
-        TVDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
-        TVDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
+        TMDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
+        TMDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
     ]
 
     identity = episode_identity(
         "[Group] Frieren - 29 [1080p].mkv",
         release_title="[Group] Frieren",
-        tvdb_episodes=episodes,
+        episode_records=episodes,
     )
 
     assert identity is not None
@@ -207,13 +207,13 @@ def test_episode_identity_uses_tvdb_absolute_order_without_season_hint() -> None
 
 def test_episode_identity_honors_manual_season_and_episode() -> None:
     episodes = [
-        TVDBEpisode(season=3, episode=13, absolute_number=41, name="The Calamity"),
+        TMDBEpisode(season=3, episode=13, absolute_number=41, name="The Calamity"),
     ]
 
     identity = episode_identity(
         "unknown-release-name.mkv",
         release_title="Bleach",
-        tvdb_episodes=episodes,
+        episode_records=episodes,
         season_override=3,
         episode_override=13,
     )
@@ -248,13 +248,13 @@ def test_nyaa_page_keeps_every_release_when_only_leading_rows_are_enriched(
         return rows
 
     async def fake_enrich(
-        entries: list[anime.NyaaEntry], matches: list[anime.AnimeTVDBMatch]
+        entries: list[anime.NyaaEntry], matches: list[anime.AnimeMetadataMatch]
     ) -> list[anime.NyaaEntry]:
         assert len(entries) == 20
         return entries
 
     monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
-    monkeypatch.setattr(anime, "_enrich_tvdb", fake_enrich)
+    monkeypatch.setattr(anime, "_enrich_metadata", fake_enrich)
 
     page = asyncio.run(anime.search(""))
 
@@ -276,21 +276,21 @@ def test_nonempty_anime_search_enriches_every_visible_release(
     )[0]
     rows = [replace(sample, id=index, info_hash=f"{index:040x}") for index in range(1, 36)]
 
-    async def fake_tvdb(*args: object, **kwargs: object) -> list[anime.AnimeTVDBMatch]:
+    async def fake_metadata(*args: object, **kwargs: object) -> list[anime.AnimeMetadataMatch]:
         return []
 
     async def fake_fetch(*args: object, **kwargs: object) -> list[anime.NyaaEntry]:
         return rows
 
     async def fake_enrich(
-        entries: list[anime.NyaaEntry], matches: list[anime.AnimeTVDBMatch]
+        entries: list[anime.NyaaEntry], matches: list[anime.AnimeMetadataMatch]
     ) -> list[anime.NyaaEntry]:
         assert len(entries) == len(rows)
         return entries
 
-    monkeypatch.setattr(anime, "tvdb_candidates", fake_tvdb)
+    monkeypatch.setattr(anime, "metadata_candidates", fake_metadata)
     monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
-    monkeypatch.setattr(anime, "_enrich_tvdb", fake_enrich)
+    monkeypatch.setattr(anime, "_enrich_metadata", fake_enrich)
 
     page = asyncio.run(anime.search("Bleach"))
 

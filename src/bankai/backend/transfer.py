@@ -15,7 +15,7 @@ from typing import Literal
 
 from bankai.config import get_settings
 
-TransferKind = Literal["movie", "show", "auto"]
+TransferKind = Literal["movie", "show", "anime", "auto"]
 ProgressCallback = Callable[[str], None]
 
 _VIDEO_EXTENSIONS = {
@@ -44,7 +44,7 @@ class TransferError(Exception):
 class TransferItem:
     source: Path
     destination: Path
-    kind: Literal["movie", "show"]
+    kind: Literal["movie", "show", "anime"]
 
 
 @dataclass(slots=True)
@@ -174,11 +174,13 @@ def _iter_transfer_files(path: Path) -> list[tuple[Path, Path]]:
     return [(child, path) for child in sorted(files)]
 
 
-def _resolve_kind(source: Path, kind: TransferKind) -> Literal["movie", "show"]:
+def _resolve_kind(source: Path, kind: TransferKind) -> Literal["movie", "show", "anime"]:
     if kind == "movie":
         return "movie"
     if kind == "show":
         return "show"
+    if kind == "anime":
+        return "anime"
     settings = get_settings()
     for folder in ("Series", "Shows", "shows"):
         try:
@@ -195,7 +197,7 @@ def _destination_for(
     source: Path,
     *,
     root: Path,
-    kind: Literal["movie", "show"],
+    kind: Literal["movie", "show", "anime"],
     show_folders: dict[str, Path | None],
 ) -> Path:
     settings = get_settings()
@@ -211,38 +213,61 @@ def _destination_for(
             relative = source.relative_to(series_root)
         except ValueError:
             continue
+        destination_root = Path(
+            settings.transfer.anime_shows_dir
+            if kind == "anime"
+            else settings.transfer.shows_dir
+        )
         if relative.parts:
-            existing = _existing_show_folder(relative.parts[0], cache=show_folders)
+            existing = _existing_show_folder(
+                relative.parts[0],
+                cache=show_folders,
+                roots=[destination_root] if kind == "anime" else None,
+            )
             if existing is not None:
                 return existing.joinpath(*relative.parts[1:])
-        return Path(settings.transfer.shows_dir) / relative
-    base = Path(settings.transfer.shows_dir if kind == "show" else settings.transfer.movies_dir)
+        return destination_root / relative
+    base = Path(
+        settings.transfer.anime_shows_dir
+        if kind == "anime"
+        else settings.transfer.shows_dir
+        if kind == "show"
+        else settings.transfer.movies_dir
+    )
     try:
         return base / source.relative_to(root)
     except ValueError:
         return base / source.name
 
 
-def _existing_show_folder(show_name: str, *, cache: dict[str, Path | None]) -> Path | None:
+def _existing_show_folder(
+    show_name: str,
+    *,
+    cache: dict[str, Path | None],
+    roots: list[Path] | None = None,
+) -> Path | None:
     """Find the established media-server folder for ``show_name``.
 
     More than one configured disk may contain the same series. Prefer the
     folder with the most video files so a nearly empty accidental duplicate
     does not win over the actual library. Configured root order breaks ties.
     """
-    key = show_name.casefold()
+    settings = get_settings()
+    selected_roots = roots or [Path(path) for path in settings.web.server_show_dirs]
+    key = "|".join([*(str(root).casefold() for root in selected_roots), show_name.casefold()])
     if key in cache:
         return cache[key]
 
-    settings = get_settings()
-    roots = [Path(path) for path in settings.web.server_show_dirs]
-    default_root = Path(settings.transfer.shows_dir)
-    known_roots = {os.path.normcase(os.path.abspath(str(path))) for path in roots}
-    if os.path.normcase(os.path.abspath(str(default_root))) not in known_roots:
-        roots.append(default_root)
+    if roots is None:
+        default_root = Path(settings.transfer.shows_dir)
+        known_roots = {
+            os.path.normcase(str(path.resolve())) for path in selected_roots
+        }
+        if os.path.normcase(str(default_root.resolve())) not in known_roots:
+            selected_roots.append(default_root)
 
     matches: list[tuple[int, int, Path]] = []
-    for order, root in enumerate(roots):
+    for order, root in enumerate(selected_roots):
         match = _matching_child_directory(root, show_name)
         if match is not None:
             matches.append((_video_count(match), -order, match))
@@ -257,16 +282,25 @@ def _matching_child_directory(root: Path, name: str) -> Path | None:
     if direct.is_dir():
         return direct
     try:
+        wanted = _series_identity(name)
         return next(
             (
                 child
                 for child in root.iterdir()
-                if child.is_dir() and child.name.casefold() == name.casefold()
+                if child.is_dir() and _series_identity(child.name) == wanted
             ),
             None,
         )
     except OSError:
         return None
+
+
+def _series_identity(name: str) -> str:
+    """Compare legacy show folders with year/provider-tagged Jellyfin names."""
+
+    value = re.sub(r"\s*\[[a-z]+id-[^]]+]\s*$", "", name, flags=re.I)
+    value = re.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", value)
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
 def _video_count(folder: Path) -> int:
