@@ -49,7 +49,7 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
         "detail_url": "https://nyaa.si/view/123",
         "magnet_uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Frieren",
         "info_hash": "0123456789abcdef0123456789abcdef01234567",
-        "tmdb_id": 209867,
+        "tvdb_id": 424536,
         "kind": "show",
         "english_title": "Frieren: Beyond Journey's End",
         "year": 2023,
@@ -61,7 +61,7 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     assert queued[0]["kind"] == "show"
     assert queued[0]["title"] == "Frieren: Beyond Journey's End E01"
     assert queued[0]["args"][0] == "anime-download"
-    assert "--tmdb-id" in queued[0]["args"]
+    assert "--tvdb-id" in queued[0]["args"]
 
     body["season"] = 3
     body["episode"] = 13
@@ -76,17 +76,19 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     assert rejected.status_code == 422
 
 
-def test_tmdb_anime_review_routes_to_anime_transfer_kind() -> None:
+def test_nyaa_anime_review_routes_to_anime_transfer_kind() -> None:
     path = Path("C:/bankai/library/Shows/Frieren/Season 01/Frieren - S01E01.mkv")
     state = ReviewState(
         path=str(path),
         torrent_source_url="https://nyaa.si/view/123",
-        metadata_provider="tmdb",
-        metadata_id=209867,
     )
 
     assert _review_transfer_kind(path, state) == "anime"
-
+    assert _review_transfer_kind(
+        path,
+        ReviewState(path=str(path), torrent_source_url="https://example.com/show"),
+    ) == "show"
+    assert _review_transfer_kind(Path("C:/bankai/library/Movies/Frieren.mkv"), state) == "movie"
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
@@ -1343,8 +1345,6 @@ def test_settings_get_masks_secrets(client: TestClient) -> None:
     rows = {row["key"]: row for row in r.json()["settings"]}
     assert "metadata.tvdb_api_key" in rows
     assert rows["metadata.tvdb_api_key"]["secret"] is True
-    assert "metadata.tmdb_api_key" in rows
-    assert rows["metadata.tmdb_api_key"]["secret"] is True
     assert "transfer.anime_shows_dir" in rows
 
 

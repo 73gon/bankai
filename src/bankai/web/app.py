@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, ValidationError
 
 from bankai import __version__
 from bankai.config import SelectorSettings, get_settings, reset_settings_cache
@@ -532,19 +532,12 @@ class AnimeDownloadRequest(BaseModel):
     detail_url: str
     magnet_uri: str
     info_hash: str
-    tmdb_id: int
+    tvdb_id: int
     kind: str
     english_title: str
     year: int | None = None
     season: int | None = None
     episode: int | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_tvdb_field(cls, value: Any) -> Any:
-        if isinstance(value, dict) and "tmdb_id" not in value and "tvdb_id" in value:
-            value = {**value, "tmdb_id": value["tvdb_id"]}
-        return value
 
 
 class QueuePriorityRequest(BaseModel):
@@ -634,8 +627,6 @@ class SettingRequest(BaseModel):
 
 # Settings keys the web UI is allowed to edit (safe subset).
 SAFE_SETTING_KEYS: set[str] = {
-    "metadata.tmdb_api_key",
-    "metadata.tmdb_enabled",
     "metadata.tvdb_api_key",
     "metadata.tvdb_pin",
     "metadata.tvdb_enabled",
@@ -689,16 +680,14 @@ def _is_secret_key(key: str) -> bool:
 
 
 def _review_transfer_kind(path: Path, state: review_mod.ReviewState) -> str:
+    """Route direct Nyaa shows to the dedicated anime library."""
+
     is_show = any(part.casefold() in {"shows", "series"} for part in path.parts)
     if not is_show:
         return "movie"
-    source_url = state.torrent_source_url or ""
-    if state.metadata_provider == "tmdb" or (
-        source_url and anime_mod.is_nyaa_url(source_url)
-    ):
+    if anime_mod.is_nyaa_url(state.torrent_source_url or ""):
         return "anime"
     return "show"
-
 
 def create_app() -> Any:
     from contextlib import asynccontextmanager
@@ -984,7 +973,7 @@ def create_app() -> Any:
             membership=membership,
         )
         return {
-            "configured": anime_mod.is_metadata_configured(),
+            "configured": discover_mod.is_configured(),
             "items": items,
             "page": page,
             "page_size": page_size,
@@ -1028,7 +1017,7 @@ def create_app() -> Any:
             result["in_library"] = bool(key and key in in_library)
             results.append(result)
         return {
-            "configured": anime_mod.is_metadata_configured(),
+            "configured": discover_mod.is_configured(),
             "items": results,
             "page": paged.page,
             "page_size": paged.page_size,
@@ -1386,13 +1375,12 @@ def create_app() -> Any:
             "aliases": result.aliases,
         }
 
-    @app.get("/api/anime/metadata")
-    @app.get("/api/anime/tvdb", include_in_schema=False)
-    async def anime_metadata(q: str = Query(..., min_length=2)) -> dict:
-        matches = await anime_mod.metadata_candidates(q, limit=12)
+    @app.get("/api/anime/tvdb")
+    async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
+        matches = await anime_mod.tvdb_candidates(q, limit=12)
         return {
-            "configured": anime_mod.is_metadata_configured(),
-            "items": [anime_mod.metadata_to_dict(item) for item in matches],
+            "configured": discover_mod.is_configured(),
+            "items": [anime_mod.tvdb_to_dict(item) for item in matches],
         }
 
     @app.get("/api/vpn/status")
@@ -1425,8 +1413,8 @@ def create_app() -> Any:
     def anime_download(req: AnimeDownloadRequest) -> dict:
         if not req.release_title.strip() or not req.english_title.strip():
             raise HTTPException(status_code=422, detail="release and English titles are required")
-        if req.tmdb_id <= 0:
-            raise HTTPException(status_code=422, detail="a valid TMDB entry is required")
+        if req.tvdb_id <= 0:
+            raise HTTPException(status_code=422, detail="a valid TVDB entry is required")
         if req.kind not in {"show", "movie"}:
             raise HTTPException(status_code=422, detail="kind must be show or movie")
         if req.season is not None and req.season < 1:
@@ -1459,8 +1447,8 @@ def create_app() -> Any:
             req.info_hash.casefold(),
             "--kind",
             req.kind,
-            "--tmdb-id",
-            str(req.tmdb_id),
+            "--tvdb-id",
+            str(req.tvdb_id),
             "--english-title",
             req.english_title.strip(),
         ]

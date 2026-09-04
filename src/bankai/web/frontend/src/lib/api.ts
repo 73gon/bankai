@@ -100,8 +100,8 @@ export interface TorrentPolicy {
   max_size_gib: number;
 }
 
-export interface AnimeMetadataMatch {
-  tmdb_id: number;
+export interface AnimeTVDBMatch {
+  tvdb_id: number;
   kind: 'show' | 'movie';
   english_title: string;
   japanese_title: string | null;
@@ -133,7 +133,7 @@ export interface AnimeEntry {
   season: number | null;
   episode: number | null;
   description: string;
-  tmdb: AnimeMetadataMatch | null;
+  tvdb: AnimeTVDBMatch | null;
 }
 
 export interface AnimeSearchOptions {
@@ -473,17 +473,15 @@ export const api = {
     if (options.minSeeders != null) params.set('min_seeders', String(options.minSeeders));
     return request<AnimeSearchPage>(`/api/anime?${params.toString()}`);
   },
-  animeMetadata: (q: string) =>
-    request<{ configured: boolean; items: AnimeMetadataMatch[] }>(
-      `/api/anime/metadata?q=${encodeURIComponent(q)}`,
-    ),
+  animeTvdb: (q: string) =>
+    request<{ configured: boolean; items: AnimeTVDBMatch[] }>(`/api/anime/tvdb?q=${encodeURIComponent(q)}`),
   animeDetail: (url: string) =>
     request<{ description: string; magnet_uri: string | null; publisher: string | null }>(
       `/api/anime/detail?url=${encodeURIComponent(url)}`,
     ),
   animeDownload: (
     entry: AnimeEntry,
-    match: AnimeMetadataMatch,
+    match: AnimeTVDBMatch,
     overrides: { season?: number | null; episode?: number | null } = {},
   ) =>
     request<Job>('/api/anime/download', {
@@ -494,7 +492,7 @@ export const api = {
         detail_url: entry.detail_url,
         magnet_uri: entry.magnet_uri,
         info_hash: entry.info_hash,
-        tmdb_id: match.tmdb_id,
+        tvdb_id: match.tvdb_id,
         kind: match.kind,
         english_title: match.english_title,
         year: match.year,

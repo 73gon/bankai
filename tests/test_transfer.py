@@ -53,14 +53,14 @@ def test_plan_transfer_detects_show_files(tmp_path: Path) -> None:
     )
 
 
-def test_plan_transfer_routes_anime_to_dedicated_library_with_tmdb_id(
+def test_plan_transfer_routes_anime_to_dedicated_library_with_tvdb_id(
     tmp_path: Path,
 ) -> None:
     show = (
         tmp_path
         / "library"
         / "Shows"
-        / "Frieren Beyond Journey's End (2023) [tmdbid-209867]"
+        / "Frieren Beyond Journey's End (2023) [tvdbid-424536]"
         / "Season 02"
         / "Frieren Beyond Journey's End - S02E01.mkv"
     )
@@ -74,7 +74,7 @@ def test_plan_transfer_routes_anime_to_dedicated_library_with_tmdb_id(
         tmp_path
         / "media12"
         / "shows_anime"
-        / "Frieren Beyond Journey's End (2023) [tmdbid-209867]"
+        / "Frieren Beyond Journey's End (2023) [tvdbid-424536]"
         / "Season 02"
         / "Frieren Beyond Journey's End - S02E01.mkv"
     )
@@ -87,7 +87,7 @@ def test_plan_transfer_reuses_legacy_anime_folder_without_provider_suffix(
         tmp_path
         / "library"
         / "Shows"
-        / "Attack on Titan (2013) [tmdbid-1429]"
+        / "Attack on Titan (2013) [tvdbid-267440]"
         / "Season 04"
         / "Attack on Titan - S04E01.mkv"
     )

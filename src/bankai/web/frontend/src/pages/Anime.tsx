@@ -20,7 +20,7 @@ import {
   type AnimeEntry,
   type AnimeSearchOptions,
   type AnimeSearchPage,
-  type AnimeMetadataMatch,
+  type AnimeTVDBMatch,
 } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -92,7 +92,7 @@ function searchOptions(page: number, filters: Filters): AnimeSearchOptions {
   };
 }
 
-function Poster({ match }: { match: AnimeMetadataMatch | null }) {
+function Poster({ match }: { match: AnimeTVDBMatch | null }) {
   const [failed, setFailed] = useState(false);
   return (
     <div className='flex aspect-[2/3] w-20 shrink-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black/30 sm:w-24'>
@@ -140,15 +140,15 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
   return (
     <Card>
       <CardContent className='flex flex-col gap-4 p-4 sm:flex-row sm:items-stretch'>
-        <Poster match={entry.tmdb} />
+        <Poster match={entry.tvdb} />
         <div className='flex min-w-0 flex-1 flex-col gap-3'>
           <div className='flex flex-col gap-1'>
             <div className='flex flex-wrap items-center gap-2'>
               <h2 className='text-base font-semibold text-foreground'>
-                {entry.tmdb?.english_title ?? 'TMDB match needed'} — Season {entry.season ?? 'N/A'} · Episode {entry.episode ?? 'N/A'}
+                {entry.tvdb?.english_title ?? 'TVDB match needed'} — Season {entry.season ?? 'N/A'} · Episode {entry.episode ?? 'N/A'}
               </h2>
-              {entry.tmdb?.year && <span className='text-sm text-muted-foreground'>{entry.tmdb.year}</span>}
-              {entry.tmdb && <Badge variant='info'>{entry.tmdb.kind === 'movie' ? 'Movie' : 'Show'}</Badge>}
+              {entry.tvdb?.year && <span className='text-sm text-muted-foreground'>{entry.tvdb.year}</span>}
+              {entry.tvdb && <Badge variant='info'>{entry.tvdb.kind === 'movie' ? 'Movie' : 'Show'}</Badge>}
               {entry.trusted && (
                 <Badge variant='success'>
                   <ShieldCheck data-icon='inline-start' /> Trusted
@@ -165,8 +165,8 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
                 </Tooltip>
               )}
             </div>
-            {entry.tmdb?.japanese_title && (
-              <p className='text-sm text-muted-foreground'>{entry.tmdb.japanese_title}</p>
+            {entry.tvdb?.japanese_title && (
+              <p className='text-sm text-muted-foreground'>{entry.tvdb.japanese_title}</p>
             )}
           </div>
 
@@ -242,10 +242,10 @@ export default function Anime() {
   const [result, setResult] = useState<AnimeSearchPage | null>(initial ?? null);
   const [loading, setLoading] = useState(!initial);
   const [selectedEntry, setSelectedEntry] = useState<AnimeEntry | null>(null);
-  const [selectedMatch, setSelectedMatch] = useState<AnimeMetadataMatch | null>(null);
-  const [tmdbQuery, setTmdbQuery] = useState('');
-  const [tmdbResults, setTmdbResults] = useState<AnimeMetadataMatch[]>([]);
-  const [tmdbLoading, setTmdbLoading] = useState(false);
+  const [selectedMatch, setSelectedMatch] = useState<AnimeTVDBMatch | null>(null);
+  const [tvdbQuery, setTvdbQuery] = useState('');
+  const [tvdbResults, setTvdbResults] = useState<AnimeTVDBMatch[]>([]);
+  const [tvdbLoading, setTvdbLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [manualSeason, setManualSeason] = useState('');
   const [manualEpisode, setManualEpisode] = useState('');
@@ -304,29 +304,25 @@ export default function Anime() {
 
   function openDownload(entry: AnimeEntry) {
     setSelectedEntry(entry);
-    setSelectedMatch(entry.tmdb);
-    setTmdbResults(entry.tmdb ? [entry.tmdb] : []);
-    setTmdbQuery(entry.tmdb?.english_title ?? '');
+    setSelectedMatch(entry.tvdb);
+    setTvdbResults(entry.tvdb ? [entry.tvdb] : []);
+    setTvdbQuery(entry.tvdb?.english_title ?? '');
     setManualSeason(entry.season == null ? '' : String(entry.season));
     setManualEpisode(entry.episode == null ? '' : String(entry.episode));
   }
 
-  async function findTmdb() {
-    const clean = tmdbQuery.trim();
+  async function findTvdb() {
+    const clean = tvdbQuery.trim();
     if (clean.length < 2) return;
-    setTmdbLoading(true);
+    setTvdbLoading(true);
     try {
-      const response = await api.animeMetadata(clean);
-      setTmdbResults(response.items);
-      if (!response.configured) {
-        toast.error('Set metadata.tmdb_api_key in Settings before searching TMDB.');
-      } else if (response.items.length === 0) {
-        toast.info('No TMDB entries matched that title.');
-      }
+      const response = await api.animeTvdb(clean);
+      setTvdbResults(response.items);
+      if (response.items.length === 0) toast.info('No TVDB entries matched that title.');
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setTmdbLoading(false);
+      setTvdbLoading(false);
     }
   }
 
@@ -354,8 +350,7 @@ export default function Anime() {
     <div className='flex h-full min-h-0 flex-col gap-4 overflow-hidden'>
       <div className='flex flex-wrap items-baseline gap-2'>
         <h1 className='font-serif text-2xl font-semibold tracking-tight'>Anime</h1>
-        <span className='text-sm text-muted-foreground'>— Browse Nyaa and download TMDB-organized anime directly.</span>
-        {result && !result.configured && <Badge variant='warning'>TMDB key required</Badge>}
+        <span className='text-sm text-muted-foreground'>— Browse Nyaa and download TVDB-organized anime directly.</span>
       </div>
 
       <Card className='shrink-0'>
@@ -475,9 +470,9 @@ export default function Anime() {
       <Dialog open={selectedEntry !== null} onOpenChange={(open) => !open && setSelectedEntry(null)}>
         <DialogContent className='max-h-[90vh] max-w-4xl overflow-y-auto'>
           <DialogHeader>
-            <DialogTitle>Choose the TMDB anime</DialogTitle>
+            <DialogTitle>Choose the TVDB anime</DialogTitle>
             <DialogDescription>
-              The selected Nyaa torrent is downloaded directly. Shows are renamed into TMDB seasons and episodes; movies are copied as one file. Audio sync and remuxing are skipped.
+              The selected Nyaa torrent is downloaded directly. Shows are renamed into TVDB seasons and episodes; movies are copied as one file. Audio sync and remuxing are skipped.
             </DialogDescription>
           </DialogHeader>
 
@@ -485,25 +480,25 @@ export default function Anime() {
 
           <div className='flex flex-col gap-2 sm:flex-row'>
             <Input
-              value={tmdbQuery}
-              onChange={(event) => setTmdbQuery(event.target.value)}
-              onKeyDown={(event) => event.key === 'Enter' && void findTmdb()}
-              placeholder='Correct English or Japanese TMDB title'
-              aria-label='TMDB anime title'
+              value={tvdbQuery}
+              onChange={(event) => setTvdbQuery(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && void findTvdb()}
+              placeholder='Correct English or Japanese TVDB title'
+              aria-label='TVDB anime title'
               className='flex-1'
             />
-            <Button variant='secondary' onClick={() => void findTmdb()} disabled={tmdbLoading || tmdbQuery.trim().length < 2}>
-              {tmdbLoading ? <Spinner /> : <Search data-icon='inline-start' />} Find TMDB entry
+            <Button variant='secondary' onClick={() => void findTvdb()} disabled={tvdbLoading || tvdbQuery.trim().length < 2}>
+              {tvdbLoading ? <Spinner /> : <Search data-icon='inline-start' />} Find TVDB entry
             </Button>
           </div>
 
           <div className='grid gap-3 sm:grid-cols-2'>
-            {tmdbResults.map((match) => {
-              const active = selectedMatch?.tmdb_id === match.tmdb_id && selectedMatch.kind === match.kind;
+            {tvdbResults.map((match) => {
+              const active = selectedMatch?.tvdb_id === match.tvdb_id && selectedMatch.kind === match.kind;
               return (
                 <button
                   type='button'
-                  key={`${match.kind}:${match.tmdb_id}`}
+                  key={`${match.kind}:${match.tvdb_id}`}
                   onClick={() => setSelectedMatch(match)}
                   className={`flex cursor-pointer gap-3 rounded-lg border p-3 text-left transition-colors ${active ? 'border-primary bg-primary/10' : 'border-white/10 bg-black/20 hover:border-white/25'}`}
                 >
@@ -515,7 +510,7 @@ export default function Anime() {
                       {match.kind === 'movie' ? <Film /> : <Tv />}
                       {match.kind === 'movie' ? 'Movie' : 'Show'}
                       {match.year && ` · ${match.year}`}
-                      <span>TMDB {match.tmdb_id}</span>
+                      <span>TVDB {match.tvdb_id}</span>
                     </span>
                   </span>
                 </button>
@@ -546,13 +541,13 @@ export default function Anime() {
                 />
               </label>
               <p className='text-xs text-muted-foreground sm:col-span-2'>
-                Leave either field empty to use the release filename and TMDB numbering. A manual episode applies only when the torrent contains one video file.
+                Leave either field empty to use the release filename and TVDB numbering. A manual episode applies only when the torrent contains one video file.
               </p>
             </div>
           )}
 
-          {tmdbResults.length === 0 && !tmdbLoading && (
-            <EmptyState icon={Users} title='Select a TMDB entry first' description='Search for the anime so its English title, poster, seasons, and episode numbers can be used.' className='py-10' />
+          {tvdbResults.length === 0 && !tvdbLoading && (
+            <EmptyState icon={Users} title='Select a TVDB entry first' description='Search for the anime so its English title, poster, seasons, and episode numbers can be used.' className='py-10' />
           )}
 
           <DialogFooter>
