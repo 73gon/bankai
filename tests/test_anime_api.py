@@ -260,3 +260,14 @@ def test_missing_episode_search_reverses_anidb_part_offset(monkeypatch):
     assert any(part_name in query and "- 01" in query for query in searched)
     assert len(result["items"]) == 1
     assert (result["items"][0]["season"], result["items"][0]["episode"]) == (17, 14)
+
+
+def test_retry_held_endpoint_returns_scheduled_count(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "bankai.web.erai.retry_held", lambda: {"requested": 14, "retry_pending": 14}
+    )
+    response = client.post("/api/anime/automation/retry-held")
+    assert response.status_code == 200
+    assert response.json() == {"requested": 14, "retry_pending": 14}

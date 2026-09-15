@@ -1415,6 +1415,10 @@ def create_app() -> Any:
     async def anime_automation_run() -> dict:
         return erai_mod.trigger_cycle()
 
+    @app.post("/api/anime/automation/retry-held")
+    async def anime_automation_retry_held() -> dict:
+        return erai_mod.retry_held()
+
     @app.post("/api/anime/mapping")
     async def anime_mapping_select(req: dict) -> dict:
         title = str(req.get("release_title", "")).strip()

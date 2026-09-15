@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Database, Play, Save, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Database, Play, RefreshCw, Save, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AnimeAutomationStatus, type SettingRow } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -82,6 +82,19 @@ export default function AnimeSettings() {
     }
   }
 
+  async function retryHeld() {
+    setBusy(true);
+    try {
+      const result = await api.retryHeldAnime();
+      setStatus(result);
+      toast.success(result.requested + ' held releases scheduled for fresh checks');
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function value(row: SettingRow) {
     return row.key in edits ? edits[row.key] : row.value;
   }
@@ -94,7 +107,10 @@ export default function AnimeSettings() {
           <h1 className='font-serif text-3xl font-semibold'>Settings</h1>
           <p className='text-sm text-muted-foreground'>Autonomous Erai-raws policy, storage guard, and backfill progress.</p>
         </div>
-        <div className='flex gap-2'>
+        <div className='flex flex-wrap gap-2'>
+          <Button variant='secondary' onClick={() => void retryHeld()} disabled={busy || !status?.counts.held}>
+            <RefreshCw data-icon='inline-start' /> {status?.retry_pending ? 'Retry pending (' + status.retry_pending + ')' : 'Retry held releases'}
+          </Button>
           <Button variant='secondary' onClick={() => void runNow()} disabled={busy || !status?.enabled}>
             <Play data-icon='inline-start' /> Run now
           </Button>

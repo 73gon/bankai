@@ -54,6 +54,74 @@ def _state_path() -> Path:
     return bgjobs.jobs_root().parent / "erai_automation.json"
 
 
+def _load_retry_requests() -> dict[str, dict]:
+    with _STATE_LOCK:
+        try:
+            result = json.loads(
+                _state_path().with_name("erai_retry_requests.json").read_text(encoding="utf-8")
+            )
+            return result if isinstance(result, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+
+def _save_retry_requests(requests: dict[str, dict]) -> None:
+    with _STATE_LOCK:
+        path = _state_path().with_name("erai_retry_requests.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(requests, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+
+
+def _prune_holds(state: dict[str, Any]) -> None:
+    state["held"] = [
+        item
+        for item in state.get("held", [])
+        if state["releases"].get(item.get("info_hash"), {}).get("status") == "held"
+    ]
+
+
+def _catalog_entries(state: dict[str, Any]) -> dict[str, dict]:
+    result = {}
+    for index in [state["backfill"], *state.get("series_catalogs", {}).values()]:
+        for name in ("catalog_1080", "catalog_720"):
+            for row in index.get(name, {}).values():
+                result[row["info_hash"]] = row
+    return result
+
+
+async def _retry_candidates(state: dict[str, Any], client: httpx.AsyncClient) -> list:
+    candidates = []
+    catalog = _catalog_entries(state)
+    for info_hash, request in _load_retry_requests().items():
+        if state["releases"].get(info_hash, {}).get("status") != "held":
+            continue
+        row = request.get("entry") or catalog.get(info_hash)
+        if row:
+            candidates.append(_entry_from_dict(row))
+            continue
+        # Legacy holds did not preserve the original trusted/remake flags.
+        # Recover the exact hash from Nyaa rather than inventing those flags.
+        try:
+            response = await client.get(
+                f"{_NYAA_BASE}/",
+                params={"u": "Erai-raws", "c": "1_2", "q": request["title"]},
+            )
+            response.raise_for_status()
+            candidates.extend(
+                item for item in parse_listing(response.text) if item.info_hash == info_hash
+            )
+        except Exception as exc:
+            log.warning("Held release recovery failed for %s: %s", info_hash, exc)
+        await asyncio.sleep(get_settings().anime.backfill_request_delay_seconds)
+    if candidates:
+        anime_mod._TVDB_CACHE.clear()
+    for item in candidates:
+        anime_mod._DETAIL_CACHE.pop(item.detail_url, None)
+    return sorted(candidates, key=_episode_order)
+
+
 def _mapping_key(release_title: str) -> str:
     structured = anime_mod.deconstruct_release(release_title)
     query = structured[0] if structured else anime_mod.clean_release_title(release_title)
@@ -107,6 +175,8 @@ def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> b
         return True
     if previous.get("status") != "held":
         return False
+    if entry.info_hash in _load_retry_requests():
+        return True
     reason = str(previous.get("reason", ""))
     if "TVDB" not in reason and "German subtitles" not in reason:
         return False
@@ -325,6 +395,7 @@ def _hold(state: dict[str, Any], entry: anime_mod.NyaaEntry, reason: str) -> Non
         "reason": reason,
         "title": entry.title,
         "retry_after": time.time() + 86400,
+        "entry": _entry_dict(entry),
     }
     held = [item for item in state["held"] if item.get("info_hash") != entry.info_hash]
     held.insert(
@@ -945,13 +1016,14 @@ async def _ordered_candidates(
     return sorted(by_hash.values(), key=order)
 
 
-async def run_cycle(*, prefill: bool = False) -> dict[str, Any]:
+async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dict[str, Any]:
     """Run one RSS poll/backfill slice. Safe to call from the API or scheduler."""
 
     async with _CYCLE_LOCK:
         settings = get_settings()
         policy = settings.anime
         state = _load_state()
+        _prune_holds(state)
         state["last_poll"] = time.time()
         state["last_enqueued"] = 0
         if not policy.enabled:
@@ -1000,13 +1072,15 @@ async def run_cycle(*, prefill: bool = False) -> dict[str, Any]:
             async with httpx.AsyncClient(
                 headers=headers, timeout=30, follow_redirects=True
             ) as client:
-                rss = await _fetch_rss(client)
-                try:
-                    await _crawl_backfill(state, client)
-                    state["backfill"]["error"] = None
-                except Exception as exc:
-                    state["backfill"]["error"] = f"{type(exc).__name__}: {exc}"
-                    log.warning("Erai backfill paused; RSS ingestion continues: %s", exc)
+                retries = await _retry_candidates(state, client)
+                rss = [] if retries_only else await _fetch_rss(client)
+                if not retries_only:
+                    try:
+                        await _crawl_backfill(state, client)
+                        state["backfill"]["error"] = None
+                    except Exception as exc:
+                        state["backfill"]["error"] = f"{type(exc).__name__}: {exc}"
+                        log.warning("Erai backfill paused; RSS ingestion continues: %s", exc)
                 fresh: dict[str, anime_mod.NyaaEntry] = {}
                 cutoff = time.time() - policy.settle_minutes * 60
                 for entry in rss:
@@ -1020,7 +1094,8 @@ async def run_cycle(*, prefill: bool = False) -> dict[str, Any]:
                     current = fresh.get(key)
                     if current is None or _rank(entry) > _rank(current):
                         fresh[key] = entry
-                candidates = await _ordered_candidates(state, fresh, client)
+                normal = [] if retries_only else await _ordered_candidates(state, fresh, client)
+                candidates = list({item.info_hash: item for item in [*retries, *normal]}.values())
                 inspected = 0
                 for entry in candidates:
                     if enqueued >= policy.max_enqueues_per_cycle or inspected >= max(
@@ -1034,8 +1109,18 @@ async def run_cycle(*, prefill: bool = False) -> dict[str, Any]:
                     inspected += 1
                     if free_space_gib() is None or free_space_gib() <= policy.min_free_space_gib:
                         break
+                    previous = dict(state["releases"].get(entry.info_hash, {}))
                     if await _consider(state, entry, client):
                         enqueued += 1
+                    _prune_holds(state)
+                    current = state["releases"].get(entry.info_hash, {})
+                    if current != previous and entry.info_hash in _load_retry_requests():
+                        # Commit the result before consuming its durable retry request.
+                        _save_state(state)
+                        with _STATE_LOCK:
+                            requests = _load_retry_requests()
+                            requests.pop(entry.info_hash, None)
+                            _save_retry_requests(requests)
                     await asyncio.sleep(policy.backfill_request_delay_seconds)
                     if inspected % 10 == 0:
                         _save_state(state)
@@ -1056,6 +1141,7 @@ async def run_cycle(*, prefill: bool = False) -> dict[str, Any]:
 
 def status(*, state: dict[str, Any] | None = None, running: bool | None = None) -> dict[str, Any]:
     state = state or _load_state()
+    _prune_holds(state)
     policy = get_settings().anime
     free = free_space_gib()
     if not policy.enabled:
@@ -1101,6 +1187,9 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
         "last_enqueued": state.get("last_enqueued", 0),
         "counts": counts,
         "held": state.get("held", [])[:100],
+        "retry_pending": sum(
+            state["releases"].get(key, {}).get("status") == "held" for key in _load_retry_requests()
+        ),
         "backfill": {
             "enabled": policy.backfill_enabled,
             "phase": backfill.get("phase", "2160"),
@@ -1117,6 +1206,33 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
 
 
 _MANUAL_TASK: asyncio.Task | None = None
+_RETRY_TASK: asyncio.Task | None = None
+
+
+def retry_held() -> dict:
+    """Persist one fresh attempt for every held release and return immediately."""
+    global _RETRY_TASK
+    with _STATE_LOCK:
+        state = _load_state()
+        catalog = _catalog_entries(state)
+        held = {item["info_hash"]: item for item in state.get("held", [])}
+        requests = _load_retry_requests()
+        requested = 0
+        for info_hash, release in state["releases"].items():
+            if release.get("status") != "held":
+                continue
+            requests[info_hash] = {
+                "title": release["title"],
+                "entry": release.get("entry") or catalog.get(info_hash),
+            }
+            detail_url = held.get(info_hash, {}).get("detail_url")
+            if detail_url:
+                anime_mod._DETAIL_CACHE.pop(detail_url, None)
+            requested += 1
+        _save_retry_requests(requests)
+    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
+        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    return {**status(), "requested": requested}
 
 
 def trigger_cycle() -> dict:
@@ -1144,10 +1260,11 @@ async def scheduler() -> None:
 
 async def shutdown() -> None:
     _STOP.set()
-    if _MANUAL_TASK is not None and not _MANUAL_TASK.done():
-        _MANUAL_TASK.cancel()
-        with suppress(asyncio.CancelledError):
-            await _MANUAL_TASK
+    for task in (_MANUAL_TASK, _RETRY_TASK):
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 __all__ = [

@@ -812,3 +812,106 @@ def test_backlog_submission_reserves_space_before_qbit_add(monkeypatch):
 
     asyncio.run(run())
     assert not state["canonical"]
+
+
+def test_retry_request_targets_all_holds_without_overwriting_cycle_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
+    monkeypatch.setattr(erai, "free_space_gib", lambda: 1000.0)
+    state = erai._default_state()
+    held = entry()
+    erai._hold(state, held, "Release is not a trusted, original Nyaa upload")
+    state["releases"]["running"] = {"status": "running", "title": "Active"}
+    state["canonical"]["active"] = {"job_id": "running"}
+    erai._save_state(state)
+    before = erai._state_path().read_bytes()
+
+    async def run() -> None:
+        async def waiting(**kwargs: object) -> dict:
+            await asyncio.Event().wait()
+            return {}
+
+        monkeypatch.setattr(erai, "run_cycle", waiting)
+        monkeypatch.setattr(erai, "_RETRY_TASK", None)
+        result = erai.retry_held()
+        assert result["requested"] == result["retry_pending"] == 1
+        assert erai._state_path().read_bytes() == before
+        assert set(erai._load_retry_requests()) == {held.info_hash}
+        assert erai._needs_consideration(state, held)
+        # An active cycle's later save must not erase the button request.
+        state["last_enqueued"] = 9
+        erai._save_state(state)
+        assert held.info_hash in erai._load_retry_requests()
+        await erai.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("result_status", ["existing", "held"])
+def test_retry_checks_old_catalog_release_and_consumes_one_attempt(
+    result_status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
+    settings = Settings(
+        anime={"enabled": True, "backfill_request_delay_seconds": 1},
+        metadata={"tvdb_api_key": "test"},
+    )
+    monkeypatch.setattr(erai, "get_settings", lambda: settings)
+    monkeypatch.setattr(erai, "free_space_gib", lambda: 1000.0)
+    held = entry()
+    state = erai._default_state()
+    erai._hold(state, held, "TVDB match is ambiguous")
+    # Simulate a legacy hold whose original entry only exists in its catalogue.
+    state["releases"][held.info_hash].pop("entry")
+    state["backfill"]["catalog_1080"]["show|1"] = erai._entry_dict(held)
+    erai._save_state(state)
+    erai._save_retry_requests({held.info_hash: {"title": held.title}})
+    checked = []
+
+    async def forbidden(*args: object, **kwargs: object) -> list:
+        pytest.fail("Retry-only checks must not require the current RSS or global crawl")
+
+    async def consider(current: dict, candidate: NyaaEntry, _client: object) -> bool:
+        assert erai._needs_consideration(current, candidate)
+        checked.append(candidate.info_hash)
+        if result_status == "held":
+            erai._hold(current, candidate, "German subtitles are still absent")
+        else:
+            current["releases"][candidate.info_hash] = {"status": "existing"}
+        return False
+
+    monkeypatch.setattr(erai, "_fetch_rss", forbidden)
+    monkeypatch.setattr(erai, "_crawl_backfill", forbidden)
+    monkeypatch.setattr(erai, "_consider", consider)
+    result = asyncio.run(erai.run_cycle(retries_only=True))
+    assert checked == [held.info_hash]
+    assert result["retry_pending"] == 0
+    assert bool(result["held"]) == (result_status == "held")
+    assert not erai._needs_consideration(erai._load_state(), held)
+
+
+def test_retry_recovery_requires_exact_hash_and_preserves_trust_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
+    monkeypatch.setattr(
+        erai, "get_settings", lambda: Settings(anime={"backfill_request_delay_seconds": 1})
+    )
+    held = replace(entry(), trusted=False)
+    other = entry(number=2)
+    state = erai._default_state()
+    erai._hold(state, held, "Untrusted release")
+    state["releases"][held.info_hash].pop("entry")
+    erai._save_retry_requests({held.info_hash: {"title": held.title}})
+    html_text = listing(held).replace('class="success"', 'class=""') + listing(other)
+
+    async def run() -> list:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, text=html_text))
+        ) as client:
+            return await erai._retry_candidates(state, client)
+
+    found = asyncio.run(run())
+    assert [item.info_hash for item in found] == [held.info_hash]
+    assert not found[0].trusted

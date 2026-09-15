@@ -155,6 +155,7 @@ export interface AnimeSearchPage {
 }
 
 export interface AnimeAutomationStatus {
+  retry_pending: number;
   rss_url: string;
   feed_source: string;
   series_indexes: Array<{ title: string; complete: boolean; phase: string; error: string | null }>;
@@ -612,6 +613,7 @@ export const api = {
   animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
   animeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation'),
   runAnimeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation/run', { method: 'POST' }),
+  retryHeldAnime: () => request<AnimeAutomationStatus & { requested: number }>('/api/anime/automation/retry-held', { method: 'POST' }),
   queueMovie: (body: { title: string; german?: string; url?: string; site?: string; year?: number }) =>
     request('/api/queue/movie', { method: 'POST', body: JSON.stringify(body) }),
   queueShow: (body: {
