@@ -676,3 +676,139 @@ def test_punctuation_mismatch_rebuilds_even_when_latest_episode_already_started(
     )
     assert [row.id for row in result] == [1, 12]
     assert state["series_catalogs"]["tvdb:1"]["title_queries"] == ["Test Show"]
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Subtitles Info:<br>**German** (CR) | ASS<br>English | ASS",
+        "Subtitles Info:\n0: [German](https://example.com) (CR) | ASS",
+        "Subtitles Info:\nTrack 3: Deutsch | SRT",
+    ],
+)
+def test_german_subtitle_html_links_and_numbered_rows(description):
+    assert erai.has_explicit_german_subtitles(description)
+
+
+def test_german_aac_audio_row_is_not_subtitle_evidence():
+    assert not erai.has_explicit_german_subtitles(
+        "Audio Info:\nGerman | AAC\nSubtitles Info:\nEnglish | ASS"
+    )
+
+
+def test_part_two_uses_verified_split_cour_boundary(monkeypatch):
+    from datetime import date, timedelta
+
+    match = AnimeTVDBMatch(464693, "show", "Yoroi-Shinden Samurai Troopers")
+    rows = [
+        TVDBEpisode(
+            1,
+            n,
+            n,
+            f"Episode {n}",
+            aired=(
+                date(2026, 1, 6) + timedelta(days=(n - 1) * 7 + (90 if n > 12 else 0))
+            ).isoformat(),
+        )
+        for n in range(1, 25)
+    ]
+
+    async def candidates(*args, **kwargs):
+        return [match]
+
+    async def mapping(*args):
+        return None, False
+
+    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
+    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapping)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    selected, identity, error = asyncio.run(
+        erai._resolve(
+            entry("[Erai-raws] Yoroi-Shinden Samurai Troopers Part 2 - 11 [1080p][MultiSub]"),
+            episodes=rows,
+        )
+    )
+    assert selected == match and error is None
+    assert (identity.season, identity.episode) == (1, 23)
+
+
+def test_part_two_without_boundary_is_held(monkeypatch):
+    match = AnimeTVDBMatch(1, "show", "Test Show")
+
+    async def candidates(*args, **kwargs):
+        return [match]
+
+    async def mapping(*args):
+        return None, False
+
+    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
+    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapping)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    selected, identity, error = asyncio.run(
+        erai._resolve(
+            entry("[Erai-raws] Test Show Part 2 - 11 [1080p]"),
+            episodes=[TVDBEpisode(1, n) for n in range(1, 25)],
+        )
+    )
+    assert selected is None and identity is None and "continuation boundary" in error
+
+
+def test_saved_one_piece_selection_bypasses_ambiguous_search(monkeypatch, tmp_path):
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai_automation.json")
+    erai.save_mapping(
+        "[Erai-raws] One Piece - 1173 [1080p][MultiSub]",
+        AnimeTVDBMatch(81797, "show", "One Piece", year=1999),
+    )
+
+    async def ambiguous(*args, **kwargs):
+        raise AssertionError("A saved source identity must bypass fuzzy/provider selection")
+
+    async def no_mapping(*args):
+        return None, False
+
+    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", ambiguous)
+    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", no_mapping)
+    selected, identity, error = asyncio.run(
+        erai._resolve(
+            entry("[Erai-raws] One Piece - 1174 [1080p][MultiSub]"),
+            episodes=[TVDBEpisode(22, 90, 1174), TVDBEpisode(1, 1, 1)],
+        )
+    )
+    assert selected.tvdb_id == 81797 and error is None
+    assert (identity.season, identity.episode) == (22, 90)
+    assert (
+        erai._mapping_key("[Erai-raws] One Piece Film Red - 01 [1080p]")
+        not in erai._load_mappings()
+    )
+
+
+def test_backlog_submission_reserves_space_before_qbit_add(monkeypatch):
+    state = erai._default_state()
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+
+    async def detail(*args):
+        return "German | ASS", None, "Erai-raws"
+
+    async def resolve(*args):
+        return AnimeTVDBMatch(1, "show", "Test Show"), processor.EpisodeIdentity(1, 1), None
+
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+    monkeypatch.setattr(erai, "_resolve", resolve)
+    monkeypatch.setattr(
+        "bankai.backend.transfer._existing_show_folder", lambda *args, **kwargs: None
+    )
+
+    class Qbit:
+        async def add(self, **kwargs):
+            raise AssertionError("Insufficient reserved space must prevent submission")
+
+    async def run():
+        token = erai._ADMISSION.set({"qbit": Qbit(), "remaining": 100})
+        try:
+            async with httpx.AsyncClient() as client:
+                assert not await erai._consider(state, entry(), client)
+        finally:
+            erai._ADMISSION.reset(token)
+
+    asyncio.run(run())
+    assert not state["canonical"]

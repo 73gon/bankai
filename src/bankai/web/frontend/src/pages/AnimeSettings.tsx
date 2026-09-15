@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
+import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
 
 const LABELS: Record<string, { label: string; description: string; suffix?: string }> = {
   'transfer.anime_shows_dir': { label: 'Anime library folder', description: 'Dedicated Jellyfin Anime destination, using TVDB ordering.' },
@@ -17,7 +18,7 @@ const LABELS: Record<string, { label: string; description: string; suffix?: stri
   'anime.min_free_space_gib': { label: 'Free-space reserve', description: 'Pause new automatic downloads at or below this amount.', suffix: 'GiB' },
   'anime.poll_interval_seconds': { label: 'Nyaa RSS polling interval', description: 'How often the configured Nyaa uploader RSS URL is checked.', suffix: 'seconds' },
   'anime.settle_minutes': { label: 'Quality settling window', description: 'Wait for alternate encodes before choosing the best release.', suffix: 'minutes' },
-  'anime.max_enqueues_per_cycle': { label: 'Downloads per cycle', description: 'Limits how quickly automatic jobs enter the queue.' },
+  'anime.max_enqueues_per_cycle': { label: 'Verified episodes per cycle', description: 'Build a large ordered backlog; qBittorrent controls how many torrents download at once.' },
   'anime.backfill_request_delay_seconds': { label: 'Backfill request delay', description: 'Delay between historical Nyaa catalogue pages.', suffix: 'seconds' },
 };
 
@@ -31,6 +32,7 @@ export default function AnimeSettings() {
   const [edits, setEdits] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [mappingTitle, setMappingTitle] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -72,7 +74,7 @@ export default function AnimeSettings() {
     setBusy(true);
     try {
       setStatus(await api.runAnimeAutomation());
-      toast.success('Erai-raws check completed');
+      toast.success('Erai-raws check started');
     } catch (error: any) {
       toast.error(error.message);
     } finally {
@@ -189,15 +191,16 @@ export default function AnimeSettings() {
         <Card>
           <CardHeader><CardTitle>Held for review</CardTitle><CardDescription>These releases were not downloaded because a safety condition could not be proven.</CardDescription></CardHeader>
           <CardContent className='flex flex-col gap-2'>
-            {status.held.slice(0, 20).map((item) => (
-              <a key={item.info_hash} href={item.detail_url} target='_blank' rel='noreferrer' className='flex flex-col gap-1 rounded-md border border-border/70 p-3 transition-colors hover:bg-white/[0.03]'>
+            {Array.from(new Map(status.held.map((item) => [item.title.replace(/\s+-\s+\d+(?:v\d+)?\s*(?:\[[^\]]*\]\s*)*$/, ""), item])).values()).map((item) => (
+              <div key={item.info_hash} className='flex flex-col gap-2 rounded-md border border-border/70 p-3'><a href={item.detail_url} target='_blank' rel='noreferrer' className='flex flex-col gap-1'>
                 <span className='text-sm font-medium'>{item.title}</span>
                 <span className='text-xs text-warning'>{item.reason}</span>
-              </a>
+              </a>{item.reason.includes('TVDB') && <Button size='sm' variant='secondary' className='self-start' onClick={() => setMappingTitle(item.title)}>Choose TVDB show</Button>}</div>
             ))}
           </CardContent>
         </Card>
       )}
+      <AnimeMappingDialog title={mappingTitle} onClose={() => setMappingTitle(null)} onSaved={() => void load()} />
     </div>
   );
 }

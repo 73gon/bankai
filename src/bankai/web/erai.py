@@ -16,9 +16,11 @@ import shutil
 import threading
 import time
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urljoin
@@ -40,6 +42,8 @@ _STATE_LOCK = threading.RLock()
 _CYCLE_LOCK = asyncio.Lock()
 _STOP = asyncio.Event()
 _GIB = 1024**3
+_ROSTERS: ContextVar[dict | None] = ContextVar("erai_rosters", default=None)
+_ADMISSION: ContextVar[dict | None] = ContextVar("erai_admission", default=None)
 _GERMAN_LINE = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:german|deutsch)(?:\s*\([^\n)]*\))?\s*(?:[|:]|$)"
 )
@@ -51,7 +55,8 @@ def _state_path() -> Path:
 
 
 def _mapping_key(release_title: str) -> str:
-    query = anime_mod.clean_release_title(release_title)
+    structured = anime_mod.deconstruct_release(release_title)
+    query = structured[0] if structured else anime_mod.clean_release_title(release_title)
     return " ".join(re.findall(r"\w+", query.casefold(), re.UNICODE))
 
 
@@ -65,14 +70,30 @@ def _load_mappings() -> dict[str, dict[str, Any]]:
             return {}
 
 
-def save_mapping(release_title: str, match: anime_mod.AnimeTVDBMatch) -> None:
+def save_mapping(
+    release_title: str,
+    match: anime_mod.AnimeTVDBMatch,
+    *,
+    season: int | None = None,
+    episode_offset: int = 0,
+    clear_episode_mapping: bool = False,
+) -> None:
     """Remember an explicit user TVDB selection for future Erai episodes."""
 
     if match.kind != "show" or match.tvdb_id <= 0:
         return
     with _STATE_LOCK:
         mappings = _load_mappings()
-        mappings[_mapping_key(release_title)] = asdict(match)
+        key = _mapping_key(release_title)
+        previous = mappings.get(key, {})
+        episode_mapping = (
+            {field: previous[field] for field in ("season", "episode_offset") if field in previous}
+            if previous.get("tvdb_id") == match.tvdb_id and not clear_episode_mapping
+            else {}
+        )
+        if season is not None:
+            episode_mapping = {"season": season, "episode_offset": episode_offset}
+        mappings[key] = {**asdict(match), **episode_mapping}
         path = _state_path().with_name("erai_mappings.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
@@ -87,7 +108,7 @@ def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> b
     if previous.get("status") != "held":
         return False
     reason = str(previous.get("reason", ""))
-    if "TVDB" not in reason:
+    if "TVDB" not in reason and "German subtitles" not in reason:
         return False
     return _mapping_key(entry.title) in _load_mappings() or time.time() >= float(
         previous.get("retry_after", 0)
@@ -96,7 +117,7 @@ def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> b
 
 def _default_state() -> dict[str, Any]:
     return {
-        "version": 3,
+        "version": 4,
         "series": {},
         "series_catalogs": {},
         "last_poll": None,
@@ -141,7 +162,11 @@ def _load_state() -> dict[str, Any]:
         for index in [state["backfill"], *state.get("series_catalogs", {}).values()]:
             if index.get("complete"):
                 index.update({"phase": "ready", "frontier": []})
-        state["version"] = 3
+        if state.get("version", 1) < 4:
+            for item in state["releases"].values():
+                if item.get("status") == "held":
+                    item["retry_after"] = 0
+        state["version"] = 4
         return state
 
 
@@ -155,21 +180,25 @@ def _save_state(state: dict[str, Any]) -> None:
 
 
 def has_explicit_german_subtitles(description: str) -> bool:
-    """Require an explicit German subtitle row, never merely ``MultiSub``."""
-
+    """Require explicit positive subtitle evidence in Markdown or HTML."""
     if not description:
         return False
-    section = description
-    marker = re.search(r"(?i)subtitles?\s+info\s*:?", description)
-    if marker:
-        section = description[marker.start() : marker.start() + 5000]
+    description = html.unescape(description)
+    description = re.sub(r"(?i)<br\s*/?>", "\n", description)
+    description = re.sub(r"\[([^]]+)\]\([^)]*\)", r"\1", description)
+    description = re.sub(r"<[^>]+>", "", description)
+    marker = re.search(r"(?i)subtitles?(?:\s+info)?\s*:?", description)
+    section = description[marker.start() : marker.start() + 5000] if marker else description
     for line in section.splitlines():
-        line = line.strip().strip("|").strip().replace("**", "").replace("__", "")
+        line = line.strip().strip("|").strip().replace("**", "").replace("__", "").replace("`", "")
         if re.search(r"(?i)\b(?:not|no|none|unavailable|missing|removed)\b", line):
             continue
-        if _GERMAN_LINE.search(line):
+        format_present = re.search(r"(?i)\b(?:ASS|SSA|SRT|VTT)\b", line)
+        if _GERMAN_LINE.search(line) and (marker or format_present):
             return True
-        if _CR_GERMAN.search(line) and re.search(r"(?i)\b(?:ASS|SSA|SRT|VTT)\b", line):
+        if marker and re.search(r"(?i)\b(?:German|Deutsch|ger|deu)\b", line) and format_present:
+            return True
+        if _CR_GERMAN.search(line) and format_present:
             return True
     return False
 
@@ -183,7 +212,8 @@ def _release_key(entry: anime_mod.NyaaEntry) -> str | None:
     season, episode = anime_mod.release_episode_info(entry.title)
     if episode is None:
         return None
-    title = anime_mod.clean_release_title(entry.title)
+    structured = anime_mod.deconstruct_release(entry.title)
+    title = structured[0] if structured else anime_mod.clean_release_title(entry.title)
     normalized = " ".join(re.findall(r"\w+", title.casefold(), re.UNICODE))
     return f"{normalized}|{season or 0}|{episode}"
 
@@ -325,11 +355,18 @@ def _published_timestamp(entry: anime_mod.NyaaEntry) -> float:
 
 async def _resolve(
     entry: anime_mod.NyaaEntry,
+    episodes: list | None = None,
 ) -> tuple[anime_mod.AnimeTVDBMatch | None, Any | None, str | None]:
     query = anime_mod.clean_release_title(entry.title)
     saved = _load_mappings().get(_mapping_key(entry.title))
     if saved:
-        match = anime_mod.AnimeTVDBMatch(**saved)
+        match = anime_mod.AnimeTVDBMatch(
+            **{
+                key: value
+                for key, value in saved.items()
+                if key in anime_mod.AnimeTVDBMatch.__dataclass_fields__
+            }
+        )
     else:
         candidates = await anime_mod.tvdb_candidates(query, limit=6)
         scored = sorted(
@@ -350,14 +387,66 @@ async def _resolve(
         return None, None, "Automatic ingestion currently requires a TVDB show match"
     from bankai.processor.anime import _tvdb_episode_map
 
-    episodes = await _tvdb_episode_map(match.tvdb_id)
+    if episodes is None:
+        cache = _ROSTERS.get()
+        if cache is not None and match.tvdb_id in cache:
+            episodes = cache[match.tvdb_id]
+        else:
+            episodes = await _tvdb_episode_map(match.tvdb_id)
+            if cache is not None:
+                cache[match.tvdb_id] = episodes
     season, episode = anime_mod.release_episode_info(entry.title)
     if episode is None:
         return None, None, "TVDB episode number was not found in the release title"
     regular = [item for item in episodes if item.season > 0]
     seasons = {item.season for item in regular}
     target = None
-    if season is not None:
+    _, part = anime_mod.release_part(entry.title)
+    structured = anime_mod.deconstruct_release(entry.title)
+    scene_title = structured[0] if structured else query
+    if saved and saved.get("season") is not None:
+        target_number = episode + int(saved.get("episode_offset", 0))
+        target = next(
+            (
+                item
+                for item in regular
+                if (item.season, item.episode) == (int(saved["season"]), target_number)
+            ),
+            None,
+        )
+    elif part and part > 1:
+        mapped, known = await anime_mapping.mapped_episode(
+            scene_title, episode, match.tvdb_id, episodes
+        )
+        if known:
+            target = next((item for item in regular if (item.season, item.episode) == mapped), None)
+        elif len(seasons) == 1:
+            # An explicit Part N plus TVDB's split-cour air-date boundary.
+            from datetime import date
+
+            ordered = sorted(regular, key=lambda item: item.episode)
+            starts = [ordered[0].episode] if ordered else []
+            for before, after in pairwise(ordered):
+                if before.aired and after.aired:
+                    try:
+                        gap = (
+                            date.fromisoformat(after.aired[:10])
+                            - date.fromisoformat(before.aired[:10])
+                        ).days
+                    except ValueError:
+                        continue
+                    if gap >= 28 and after.episode == before.episode + 1:
+                        starts.append(after.episode)
+            if len(starts) == part:
+                target_number = starts[part - 1] + episode - 1
+                target = next((item for item in regular if item.episode == target_number), None)
+        if target is None:
+            return (
+                None,
+                None,
+                "TVDB continuation boundary is not verified; select a season and episode offset manually",
+            )
+    elif season is not None:
         target = next(
             (item for item in regular if (item.season, item.episode) == (season, episode)), None
         )
@@ -482,6 +571,22 @@ async def _consider(
         return False
     from bankai.web import jobs as webjobs
 
+    admission = _ADMISSION.get()
+    if admission is not None:
+        # Reserve the eventual library size of all submitted torrents, so a
+        # large qBittorrent backlog cannot consume the 100 GiB floor later.
+        required = max(entry.size_bytes, _GIB // 2)
+        if required > admission["remaining"]:
+            return False
+        await admission["qbit"].add(
+            magnet=entry.magnet_uri or None,
+            torrent_url=None if entry.magnet_uri else entry.download_url,
+            category=get_settings().qbittorrent.category,
+            save_path=Path(get_settings().qbittorrent.save_path)
+            if get_settings().qbittorrent.save_path
+            else None,
+        )
+        admission["remaining"] -= required
     title = f"{match.english_title} S{identity.season:02d}E{identity.episode:02d}"
     result = webjobs.enqueue(kind="show", title=title, args=_anime_args(entry, match, identity))
     if result.get("status") not in {"running", "queued", "duplicate"}:
@@ -493,6 +598,7 @@ async def _consider(
         "canonical": canonical,
         "job_id": result.get("id"),
         "resolution": resolution,
+        "size_bytes": entry.size_bytes,
     }
     state["held"] = [item for item in state["held"] if item.get("info_hash") != entry.info_hash]
     state["canonical"][canonical] = {
@@ -658,7 +764,14 @@ async def _crawl_backfill(state: dict[str, Any], client: httpx.AsyncClient) -> N
 
 def _episode_order(entry: anime_mod.NyaaEntry) -> tuple:
     season, episode = anime_mod.release_episode_info(entry.title)
-    return (_mapping_key(entry.title), season or 0, episode or 0, -_resolution(entry), entry.id)
+    _, part = anime_mod.release_part(entry.title)
+    return (
+        _mapping_key(entry.title),
+        season or part or 0,
+        episode or 0,
+        -_resolution(entry),
+        entry.id,
+    )
 
 
 async def _ordered_candidates(
@@ -670,7 +783,15 @@ async def _ordered_candidates(
     # its latest episode. Persist work when a long series needs query shards.
     groups: dict[str, anime_mod.NyaaEntry] = {}
     family_ids = {}
-    for entry in sorted(fresh.values(), key=lambda item: item.id, reverse=True):
+    discovered = {
+        **state["backfill"].get("catalog_1080", {}),
+        **{key: _entry_dict(value) for key, value in fresh.items()},
+    }
+    for entry in sorted(
+        (_entry_from_dict(row) for row in discovered.values()),
+        key=lambda item: item.id,
+        reverse=True,
+    ):
         parts = await anime_mapping.anidb_parts(anime_mod.clean_release_title(entry.title))
         ids = {part.tvdb_id for part in parts}
         parent = next(iter(ids)) if len(ids) == 1 else None
@@ -687,8 +808,13 @@ async def _ordered_candidates(
         )
         if _needs_consideration(state, entry) or needs_old:
             groups.setdefault(key, entry)
-    candidates = []
-    if state["backfill"].get("complete"):
+    candidates = [
+        _entry_from_dict(row)
+        for index in state["series_catalogs"].values()
+        if index.get("complete")
+        for row in index["catalog_1080"].values()
+    ]
+    if state["backfill"].get("complete") or state["backfill"].get("phase") == "720":
         candidates.extend(
             _entry_from_dict(item)
             for item in [
@@ -696,7 +822,7 @@ async def _ordered_candidates(
                 *state["backfill"]["catalog_720"].values(),
             ]
         )
-    for key, entry in list(groups.items())[:2]:
+    for key, entry in list(groups.items())[:4]:
         parent = family_ids[key]
         if key not in state["series_catalogs"]:
             titles = await anime_mapping.related_titles(parent) if parent else []
@@ -776,11 +902,14 @@ async def _ordered_candidates(
         ]:
             if parent:
                 parts = await anime_mapping.anidb_parts(
-                    anime_mod.clean_release_title(release.title)
+                    (
+                        anime_mod.deconstruct_release(release.title)
+                        or (anime_mod.clean_release_title(release.title), 0)
+                    )[0]
                 )
                 if {part.tvdb_id for part in parts} == {parent}:
                     candidates.append(release)
-            elif _mapping_key(release.title) == key:
+            elif anime_mod.clean_release_title(release.title) == source_title:
                 candidates.append(release)
     cutoff = time.time() - get_settings().anime.settle_minutes * 60
     by_hash = {
@@ -805,12 +934,18 @@ async def _ordered_candidates(
         if key in part_keys:
             parent, mapped_season, offset = part_keys[key]
             return (f"tvdb:{parent:010d}", mapped_season, episode + offset, quality, release_id)
-        return key, season, episode, quality, release_id
+        return (
+            anime_mod.clean_release_title(entry.title).casefold(),
+            season,
+            episode,
+            quality,
+            release_id,
+        )
 
     return sorted(by_hash.values(), key=order)
 
 
-async def run_cycle() -> dict[str, Any]:
+async def run_cycle(*, prefill: bool = False) -> dict[str, Any]:
     """Run one RSS poll/backfill slice. Safe to call from the API or scheduler."""
 
     async with _CYCLE_LOCK:
@@ -837,7 +972,31 @@ async def run_cycle() -> dict[str, Any]:
             return status(state=state, running=False)
         headers = {"User-Agent": settings.scraper.user_agent}
         enqueued = 0
+        qbit = None
+        roster_token = _ROSTERS.set({})
+        admission_token = _ADMISSION.set(None)
         try:
+            if prefill:
+                from bankai.torrent.qbittorrent import QBittorrentClient
+
+                qbit = QBittorrentClient()
+                await qbit.login()
+                torrents = await qbit.list_torrents(category=settings.qbittorrent.category)
+                reserved = sum(
+                    max(
+                        item.size_bytes,
+                        int(state["releases"].get(item.hash, {}).get("size_bytes", 0)),
+                    )
+                    for item in torrents
+                )
+                _ADMISSION.set(
+                    {
+                        "qbit": qbit,
+                        "remaining": max(
+                            0, int((free - policy.min_free_space_gib) * _GIB) - reserved
+                        ),
+                    }
+                )
             async with httpx.AsyncClient(
                 headers=headers, timeout=30, follow_redirects=True
             ) as client:
@@ -864,19 +1023,33 @@ async def run_cycle() -> dict[str, Any]:
                 candidates = await _ordered_candidates(state, fresh, client)
                 inspected = 0
                 for entry in candidates:
-                    if enqueued >= policy.max_enqueues_per_cycle or inspected >= 12:
+                    if enqueued >= policy.max_enqueues_per_cycle or inspected >= max(
+                        100, policy.max_enqueues_per_cycle * 3
+                    ):
                         break
                     if not _needs_consideration(state, entry):
                         continue
+                    if not get_settings().anime.enabled:
+                        break
                     inspected += 1
+                    if free_space_gib() is None or free_space_gib() <= policy.min_free_space_gib:
+                        break
                     if await _consider(state, entry, client):
                         enqueued += 1
+                    await asyncio.sleep(policy.backfill_request_delay_seconds)
+                    if inspected % 10 == 0:
+                        _save_state(state)
             state["last_success"] = time.time()
             state["last_error"] = None
             state["last_enqueued"] = enqueued
         except Exception as exc:
             state["last_error"] = f"{type(exc).__name__}: {exc}"
             log.warning("Erai automation cycle failed: %s", exc)
+        finally:
+            _ROSTERS.reset(roster_token)
+            _ADMISSION.reset(admission_token)
+            if qbit is not None:
+                await qbit.aclose()
         _save_state(state)
         return status(state=state, running=False)
 
@@ -943,12 +1116,23 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
     }
 
 
+_MANUAL_TASK: asyncio.Task | None = None
+
+
+def trigger_cycle() -> dict:
+    """Start a potentially long backlog check without keeping an HTTP request open."""
+    global _MANUAL_TASK
+    if not _CYCLE_LOCK.locked() and (_MANUAL_TASK is None or _MANUAL_TASK.done()):
+        _MANUAL_TASK = asyncio.create_task(run_cycle(prefill=True))
+    return status(running=True)
+
+
 async def scheduler() -> None:
     global _STOP
     _STOP = asyncio.Event()
     while not _STOP.is_set():
         try:
-            await run_cycle()
+            await run_cycle(prefill=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -960,6 +1144,10 @@ async def scheduler() -> None:
 
 async def shutdown() -> None:
     _STOP.set()
+    if _MANUAL_TASK is not None and not _MANUAL_TASK.done():
+        _MANUAL_TASK.cancel()
+        with suppress(asyncio.CancelledError):
+            await _MANUAL_TASK
 
 
 __all__ = [

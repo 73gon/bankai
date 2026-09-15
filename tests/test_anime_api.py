@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -139,3 +140,123 @@ def test_queue_cover_uses_canonical_tvdb_id(
     monkeypatch.setattr(anime_library, "show_metadata", metadata)
     row = client.get("/api/anime/queue").json()["jobs"][0]
     assert row["poster_url"] == "https://example.com/bleach.jpg" and row["series_title"] == "Bleach"
+
+
+@pytest.mark.parametrize(
+    "downloaded,future,ended,expected,finished",
+    [
+        (0, False, False, "empty", False),
+        (1, False, False, "partial", False),
+        (1, True, False, "upcoming", False),
+        (2, False, False, "complete", False),
+        (2, False, True, "complete", True),
+    ],
+)
+def test_show_completion_uses_full_tvdb_roster(downloaded, future, ended, expected, finished):
+    from bankai.metadata.tvdb import TVDBEpisode
+    from bankai.web.anime_library import merge_episodes
+
+    files = [
+        {"path": str(n), "season_number": 1, "episode": n, "name": str(n), "staged": False}
+        for n in range(1, downloaded + 1)
+    ]
+    roster = [
+        TVDBEpisode(1, 1, aired="2020-01-01"),
+        TVDBEpisode(1, 2, aired="2099-01-01" if future else "2020-01-08"),
+    ]
+    result = merge_episodes(files, roster, ended=ended)
+    assert result["completion_state"] == expected and result["finished"] == finished
+    assert result["downloaded_count"] == downloaded and result["total_count"] == 2
+    assert len(result["episodes"]) == 2
+    assert sum(row.get("missing", False) for row in result["episodes"]) == 2 - downloaded
+
+
+def test_staged_and_duplicate_files_do_not_inflate_download_count():
+    from bankai.metadata.tvdb import TVDBEpisode
+    from bankai.web.anime_library import merge_episodes
+
+    files = [
+        {"path": "final", "season_number": 1, "episode": 1, "name": "final", "staged": False},
+        {"path": "staged", "season_number": 1, "episode": 1, "name": "staged", "staged": True},
+        {"path": "waiting", "season_number": 1, "episode": 2, "name": "waiting", "staged": True},
+    ]
+    result = merge_episodes(
+        files,
+        [TVDBEpisode(1, 1, aired="2020-01-01"), TVDBEpisode(1, 2, aired="2020-01-08")],
+        ended=True,
+    )
+    assert result["downloaded_count"] == 1 and result["completion_state"] == "partial"
+    assert result["episodes"][0]["path"] == "final"
+
+
+def test_missing_episode_search_reverses_anidb_part_offset(monkeypatch):
+    from dataclasses import replace
+    from xml.etree import ElementTree as ET
+
+    from bankai.metadata import anime_mapping
+    from bankai.metadata.tvdb import TVDBEpisode
+    from bankai.web import anime, anime_library, erai
+
+    part_name = "Bleach Sennen Kessen Hen Ketsubetsu Tan"
+    part = anime_mapping.Part(
+        74796, 17765, ET.fromstring('<anime defaulttvdbseason="17" episodeoffset="13"/>')
+    )
+    roster = [TVDBEpisode(17, 14, 380), TVDBEpisode(17, 15, 381), TVDBEpisode(1, 1, 1)]
+    match = anime.AnimeTVDBMatch(74796, "show", "Bleach", aliases=(part_name,))
+    sample = anime.NyaaEntry(
+        1,
+        f"[Erai-raws] {part_name} - 01 [1080p][MultiSub]",
+        "https://nyaa.si/download/1.torrent",
+        "https://nyaa.si/view/1",
+        "magnet:?xt=urn:btih:" + "1" * 40,
+        "1" * 40,
+        "1_2",
+        "Anime",
+        "1 GiB",
+        1024**3,
+        10,
+        0,
+        100,
+        0,
+        True,
+        False,
+        None,
+        "Erai-raws",
+        "1080p",
+    )
+    searched = []
+
+    async def metadata(*args):
+        return match
+
+    async def episodes(*args):
+        return roster
+
+    async def titles(*args):
+        return [part_name]
+
+    async def parts(*args):
+        return [part]
+
+    async def candidates(*args, **kwargs):
+        return [match]
+
+    async def fetch(client, query, *args):
+        searched.append(query)
+        return [
+            sample,
+            replace(sample, id=2, info_hash="2" * 40, title=sample.title.replace(" - 01", " - 02")),
+        ]
+
+    monkeypatch.setattr(anime, "series_metadata", metadata)
+    monkeypatch.setattr(anime_library, "episode_roster", episodes)
+    monkeypatch.setattr(anime_mapping, "related_titles", titles)
+    monkeypatch.setattr(anime_mapping, "anidb_parts", parts)
+    monkeypatch.setattr(anime, "tvdb_candidates", candidates)
+    monkeypatch.setattr(anime, "_fetch_rss", fetch)
+    monkeypatch.setattr(erai, "_load_state", erai._default_state)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    result = asyncio.run(anime_library.search_episode(74796, 17, 14))
+    assert any(part_name in query and "- 01" in query for query in searched)
+    assert len(result["items"]) == 1
+    assert (result["items"][0]["season"], result["items"][0]["episode"]) == (17, 14)

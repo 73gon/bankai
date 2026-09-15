@@ -20,6 +20,7 @@ import time
 import uuid
 from array import array
 from contextlib import contextmanager, suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -1412,7 +1413,38 @@ def create_app() -> Any:
 
     @app.post("/api/anime/automation/run")
     async def anime_automation_run() -> dict:
-        return await erai_mod.run_cycle()
+        return erai_mod.trigger_cycle()
+
+    @app.post("/api/anime/mapping")
+    async def anime_mapping_select(req: dict) -> dict:
+        title = str(req.get("release_title", "")).strip()
+        try:
+            tvdb_id = int(req.get("tvdb_id", 0))
+            if not title or tvdb_id <= 0:
+                raise ValueError("A release title and TVDB show are required")
+            match = await anime_mod.series_metadata(tvdb_id)
+            season = req.get("season")
+            offset = int(req.get("episode_offset") or 0)
+            if season is not None:
+                season = int(season)
+                from bankai.web.anime_library import episode_roster
+                roster = await episode_roster(tvdb_id)
+                if season < 1 or not any(row.season == season for row in roster):
+                    raise ValueError("Season does not exist in TVDB")
+            erai_mod.save_mapping(title, match, season=season, episode_offset=offset, clear_episode_mapping=season is None)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ok": True, "match": asdict(match)}
+
+    @app.get("/api/anime/episode/search")
+    async def anime_episode_search(tvdb_id: int = Query(..., gt=0), season: int = Query(..., gt=0), episode: int = Query(..., gt=0), q: str | None = None) -> dict:
+        from bankai.web.anime_library import search_episode
+        try:
+            return await search_episode(tvdb_id, season, episode, q)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Episode search failed: {exc}") from exc
 
     @app.get("/api/anime/queue")
     async def anime_queue() -> dict:

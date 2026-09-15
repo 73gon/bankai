@@ -207,11 +207,20 @@ export interface AnimeLibraryEntry {
 }
 
 export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
+  missing?: boolean;
+  tba?: boolean;
+  aired?: string | null;
+  episode_title?: string | null;
   season_number: number | null;
   episode: number | null;
 }
 
 export interface AnimeLibraryShow {
+  downloaded_count: number;
+  total_count: number;
+  completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
+  finished: boolean;
+  metadata_available: boolean;
   key: string;
   title: string;
   tvdb_id: number | null;
@@ -593,6 +602,13 @@ export const api = {
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
   animeQueue: () => request<{ jobs: Job[] }>('/api/anime/queue'),
+  animeEpisodeSearch: (tvdbId: number, season: number, episode: number, q?: string) => {
+    const params = new URLSearchParams({ tvdb_id: String(tvdbId), season: String(season), episode: String(episode) });
+    if (q) params.set('q', q);
+    return request<{ items: AnimeEntry[]; queries: string[]; match: AnimeTVDBMatch }>(`/api/anime/episode/search?${params}`);
+  },
+  saveAnimeMapping: (releaseTitle: string, tvdbId: number, season?: number, episodeOffset = 0) =>
+    request('/api/anime/mapping', { method: 'POST', body: JSON.stringify({ release_title: releaseTitle, tvdb_id: tvdbId, season, episode_offset: episodeOffset }) }),
   animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
   animeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation'),
   runAnimeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation/run', { method: 'POST' }),

@@ -46,6 +46,8 @@ class TVDBEpisode:
     episode: int
     absolute_number: int | None = None
     name: str | None = None
+    aired: str | None = None
+    overview: str | None = None
 
 
 class TVDBClient:
@@ -154,6 +156,7 @@ class TVDBClient:
             "japanese_title": translations.get("jpn"),
             "year": _optional_int(str(data.get("firstAired") or "")[:4]),
             "poster_url": data.get("image"),
+            "status": (data.get("status") or {}).get("name"),
             "aliases": tuple(
                 alias.get("name") if isinstance(alias, dict) else alias
                 for alias in data.get("aliases", []) if alias
@@ -187,6 +190,8 @@ class TVDBClient:
                         episode=episode,
                         absolute_number=_optional_int(row.get("absoluteNumber")),
                         name=_first_text(row, "name", "title"),
+                        aired=_first_text(row, "aired"),
+                        overview=_first_text(row, "overview"),
                     )
                 )
             links = _as_dict(payload.get("links")) or _as_dict(data.get("links"))

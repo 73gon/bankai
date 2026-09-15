@@ -393,6 +393,7 @@ async def download_anime(
                     episode_title=identity.title,
                     year_override=str(year) if year else None,
                     audio_lang="jpn",
+                    include_year=True,
                     season_folder_template=output.season_folder_template,
                     file_template=output.series_filename_template,
                 ).with_suffix(source.suffix.casefold())

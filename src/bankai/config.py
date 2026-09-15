@@ -111,7 +111,7 @@ class AnimeAutomationSettings(BaseModel):
     poll_interval_seconds: int = Field(default=900, ge=60)
     settle_minutes: int = Field(default=30, ge=0)
     min_free_space_gib: float = Field(default=100.0, ge=0)
-    max_enqueues_per_cycle: int = Field(default=2, ge=1, le=20)
+    max_enqueues_per_cycle: int = Field(default=500, ge=1, le=10000)
     backfill_enabled: bool = True
     backfill_request_delay_seconds: float = Field(default=2.0, ge=1.0)
 

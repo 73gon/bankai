@@ -45,6 +45,7 @@ class AnimeTVDBMatch:
     year: int | None = None
     poster_url: str | None = None
     aliases: tuple[str, ...] = ()
+    status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,14 @@ def deconstruct_release(title: str) -> tuple[str, int] | None:
     return None
 
 
+def release_part(title: str) -> tuple[str, int | None]:
+    """Keep a terminal Part N separate from the title used to find TVDB."""
+    structured = deconstruct_release(title)
+    name = structured[0] if structured else title
+    match = re.fullmatch(r"(.+?)\s+Part\s+(\d+)\s*", name, re.I)
+    return (match[1].strip(), int(match[2])) if match else (name, None)
+
+
 def clean_release_title(title: str) -> str:
     """Reduce a scene-style release name to a TVDB-searchable anime title."""
     value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
@@ -114,7 +123,7 @@ def clean_release_title(title: str) -> str:
     value = re.sub(r"\s*[|/]\s*.*$", "", value)
     structured = deconstruct_release(title)
     if structured:
-        value = structured[0]
+        value = release_part(title)[0]
     else:
         value = re.sub(r"\b(?:season\s*)?S\d{1,2}\s*[-_. ]+\s*\d{1,4}\b.*$", "", value, flags=re.I)
         value = re.sub(r"\bS\d{1,2}E\d{1,4}\b.*$", "", value, flags=re.I)
