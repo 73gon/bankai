@@ -273,9 +273,11 @@ above VPN checks **origin/main** for new commits every five minutes. It lights u
 as **Update available** when the installed checkout is behind; clicking it
 requests the update.
 
-New web jobs stay queued while active pipelines, anime jobs, transfers, and
-worker processes finish. Bankai then applies the commit with a fast-forward
-merge, installs the package dependencies, restarts the service, and checks
+New web jobs stay queued briefly during updates; the queue does not need to empty.
+Windows workers launch outside the service process tree and keep running across
+web-service restarts. Legacy service-owned workers are checkpointed and automatically
+continued with the same job IDs, logs, and existing torrents. Bankai applies the
+commit with a fast-forward merge, installs dependencies, restarts the service, and checks
 **/api/health**. The browser refreshes after the update succeeds. Configuration
 and library files remain in place. Tracked local edits or a diverged branch
 block automatic updates and show an explanation in the control's tooltip.

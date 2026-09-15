@@ -291,3 +291,63 @@ def test_windows_liveness_never_sends_a_signal(monkeypatch: pytest.MonkeyPatch) 
         process.terminate()
         process.wait(timeout=10)
     assert not bgjobs._pid_alive(process.pid)
+
+
+def test_windows_launch_preserves_environment_outside_service_tree(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("BANKAI_TEST_SECRET", "not-on-command-line")
+    monkeypatch.setattr(bgjobs.sys, "platform", "win32")
+    calls = []
+
+    def launch(command, cwd):
+        calls.append(command)
+        payload = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+        assert payload["env"]["BANKAI_TEST_SECRET"] == "not-on-command-line"
+        assert payload["args"] == ["run", "Movie"]
+        assert "not-on-command-line" not in " ".join(command)
+        assert bgjobs._load_job(payload["id"]).restart_safe
+        return 12345
+
+    monkeypatch.setattr(bgjobs, "launch_windows_detached", launch)
+    job = bgjobs.spawn(kind="movie", title="Movie", args=["run", "Movie"])
+    assert job.pid == 12345
+    assert job.restart_safe
+    assert "--launch-job" in calls[0]
+    assert bgjobs._load_job(job.id).pid == 12345
+
+
+def test_windows_launch_failure_is_not_a_phantom_running_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(bgjobs.sys, "platform", "win32")
+
+    def fail(*args):
+        raise RuntimeError("WMI unavailable")
+
+    monkeypatch.setattr(bgjobs, "launch_windows_detached", fail)
+    with pytest.raises(RuntimeError, match="WMI unavailable"):
+        bgjobs.spawn(kind="movie", title="Movie", args=["run", "Movie"])
+    assert bgjobs.list_jobs()[0].status == "failed"
+    assert not list(bgjobs.jobs_root().glob("*/launch.json"))
+
+
+def test_wmi_launch_is_hidden_and_requests_job_breakaway(monkeypatch, tmp_path):
+    import base64
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(bgjobs.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout="4321", stderr="")
+
+    monkeypatch.setattr(bgjobs.subprocess, "run", run)
+    assert bgjobs.launch_windows_detached(["python", "name with spaces"], tmp_path) == 4321
+    command, options = calls[0]
+    script = base64.b64decode(command[-1]).decode("utf-16-le")
+    assert "Win32_Process" in script
+    assert "ShowWindow=[uint16]0" in script
+    assert "CreateFlags=[uint32]16777216" in script
+    assert options["creationflags"] == 0x08000000

@@ -83,7 +83,7 @@ def test_dead_update_helper_releases_queue(state: Path, monkeypatch: pytest.Monk
     assert updates.status()["phase"] == "failed"
 
 
-def test_update_worker_waits_for_existing_jobs(
+def test_update_worker_waits_only_for_restart_safety(
     state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = "a" * 40
@@ -91,6 +91,8 @@ def test_update_worker_waits_for_existing_jobs(
     polls = iter([(False, 2), (False, 1), (True, 0)])
     sleeps = []
     applied = []
+    monkeypatch.setattr(updates, "_prepare_restart", lambda: None)
+    monkeypatch.setattr(updates, "_resume_interrupted", lambda: None)
     monkeypatch.setattr(updates, "_idle", lambda: next(polls))
     monkeypatch.setattr(updates.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(updates, "_apply", lambda commit: applied.append(commit))
@@ -142,3 +144,92 @@ def test_only_one_update_worker_can_start(state: Path, monkeypatch: pytest.Monke
     assert updates.start()["phase"] == "waiting"
     assert updates.start()["phase"] == "waiting"
     assert launches == [1]
+
+
+def test_independent_workers_do_not_block_deployment(state, monkeypatch):
+    import json
+
+    worker = SimpleNamespace(status="running", pid=100, restart_safe=True)
+    monkeypatch.setattr(updates.bgjobs, "list_jobs", lambda: [worker])
+    processes = [
+        {
+            "ProcessId": 100,
+            "ParentProcessId": 90,
+            "CommandLine": "python -m bankai.cli.bgjobs --launch-job",
+        },
+        {"ProcessId": 101, "ParentProcessId": 100, "CommandLine": "python wrapper"},
+        {"ProcessId": 102, "ParentProcessId": 101, "CommandLine": "python anime-download"},
+    ]
+    monkeypatch.setattr(updates, "_run", lambda *args, **kwargs: json.dumps(processes))
+    monkeypatch.setattr(
+        updates.httpx,
+        "get",
+        lambda *a, **k: SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"running": False},
+        ),
+    )
+    assert updates._idle() == (True, 1)
+    processes.append(
+        {"ProcessId": 200, "ParentProcessId": 199, "CommandLine": "python anime-download"}
+    )
+    assert updates._idle() == (False, 1)
+
+
+def test_stopped_rows_do_not_block_deployment(state, monkeypatch):
+    monkeypatch.setattr(
+        updates.bgjobs,
+        "list_jobs",
+        lambda: [
+            SimpleNamespace(status="stopped", pid=100, restart_safe=False),
+        ],
+    )
+    monkeypatch.setattr(updates, "_run", lambda *a, **k: "[]")
+    monkeypatch.setattr(
+        updates.httpx,
+        "get",
+        lambda *a, **k: SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"running": False},
+        ),
+    )
+    assert updates._idle() == (True, 0)
+
+
+def test_legacy_workers_are_checkpointed_and_resumed_once(state, monkeypatch):
+    legacy = SimpleNamespace(id="legacy", status="running", restart_safe=False)
+    safe = SimpleNamespace(id="safe", status="running", restart_safe=True)
+    calls = []
+
+    def stop():
+        assert updates._read()["interrupted_jobs"] == ["legacy"]
+        calls.append("stop")
+        legacy.status = "stopped"
+        return True
+
+    legacy.stop = stop
+    monkeypatch.setattr(updates.bgjobs, "list_jobs", lambda: [legacy, safe])
+    monkeypatch.setattr(updates.bgjobs, "_load_job", lambda job_id: legacy)
+
+    def resume(job):
+        calls.append("resume")
+        job.status = "running"
+
+    monkeypatch.setattr(updates.bgjobs, "resume", resume)
+    updates._prepare_restart()
+    updates._resume_interrupted()
+    updates._resume_interrupted()
+    assert calls == ["stop", "resume"]
+    assert updates._read()["interrupted_jobs"] == []
+
+
+def test_worker_applies_without_waiting_for_independent_jobs(state, monkeypatch):
+    target = "a" * 40
+    updates._patch(phase="waiting", target_commit=target)
+    monkeypatch.setattr(updates, "_prepare_restart", lambda: None)
+    monkeypatch.setattr(updates, "_idle", lambda: (True, 250))
+    monkeypatch.setattr(updates.time, "sleep", lambda n: pytest.fail("Must not wait for queue"))
+    applied = []
+    monkeypatch.setattr(updates, "_apply", lambda commit: applied.append(commit))
+    updates.run_worker()
+    assert applied == [target]

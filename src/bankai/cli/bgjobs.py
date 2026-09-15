@@ -14,6 +14,7 @@ this module is a *display* layer for the user-friendly queue UI.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -72,6 +73,7 @@ class BgJob:
     german_source_url: str | None = None
     torrent_source_url: str | None = None
     torrent_source_title: str | None = None
+    restart_safe: bool = False
 
     @property
     def dir(self) -> Path:
@@ -88,7 +90,9 @@ class BgJob:
     def save(self) -> None:
         self.updated_at = time.time()
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.meta_path.write_text(json.dumps(asdict(self), indent=2))
+        tmp = self.meta_path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        tmp.replace(self.meta_path)
 
     def refresh(self) -> BgJob:
         # Older releases classified finished jobs by scanning logs. If a
@@ -599,6 +603,35 @@ def set_provenance(
     return True
 
 
+def launch_windows_detached(command: list[str], cwd: Path) -> int:
+    """Launch via WMI, outside the web service job object; never show a window."""
+    quoted = subprocess.list2cmdline(command).replace("'", "''")
+    directory = str(cwd).replace("'", "''")
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly "
+        "-Property @{ShowWindow=[uint16]0;CreateFlags=[uint32]16777216};"
+        "$result=Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+        f"-Arguments @{{CommandLine='{quoted}';CurrentDirectory='{directory}';"
+        "ProcessStartupInformation=$startup};"
+        "if($result.ReturnValue -ne 0){throw ('Worker launch failed: '+$result.ReturnValue)};"
+        "$result.ProcessId"
+    )
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "Worker launch failed").strip())
+    return int(result.stdout.strip())
+
+
 def _launch(job: BgJob) -> BgJob:
     job.dir.mkdir(parents=True, exist_ok=True)
     job.save()
@@ -614,15 +647,26 @@ def _launch(job: BgJob) -> BgJob:
     env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("BANKAI_BG_JOB_ID", job.id)
     if sys.platform == "win32":
-        DETACHED = 0x00000008
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            env=env,
-            creationflags=DETACHED,
+        # WMI does not inherit the service environment. Restore it from an
+        # owner-scoped temporary file, not a command line containing secrets.
+        payload = job.dir / "launch.json"
+        payload.write_text(
+            json.dumps({"env": env, "id": job.id, "args": job.args}), encoding="utf-8"
         )
+        job.restart_safe = True
+        job.save()
+        try:
+            job.pid = launch_windows_detached(
+                [sys.executable, "-m", "bankai.cli.bgjobs", "--launch-job", str(payload)],
+                Path.cwd(),
+            )
+        except Exception:
+            payload.unlink(missing_ok=True)
+            job.status = "failed"
+            job.save()
+            raise
+        job.save()
+        return job
     else:
         proc = subprocess.Popen(
             cmd,
@@ -783,6 +827,19 @@ def watch(job: BgJob) -> None:
 
 def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 2 and args[0] == "--launch-job":
+        payload_path = Path(args[1])
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        os.environ.update(payload["env"])
+        payload_path.unlink(missing_ok=True)
+        # Wait for the WMI PID to be persisted before writing child/result fields.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            job = _load_job(payload["id"])
+            if job is not None and job.pid is not None:
+                return _supervise(job.id, payload["args"])
+            time.sleep(0.05)
+        return 2
     if len(args) >= 2 and args[0] == "--supervise":
         return _supervise(args[1], args[2:])
     print("usage: python -m bankai.cli.bgjobs --supervise JOB_ID [bankai args...]", file=sys.stderr)

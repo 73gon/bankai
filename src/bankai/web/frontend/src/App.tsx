@@ -92,7 +92,7 @@ function UpdateSidebarStatus({ collapsed }: { collapsed: boolean }) {
     try {
       if (status?.available || (status?.phase === 'failed' && status.supported)) {
         accept(await api.applyUpdate());
-        toast.success('Update requested. Active jobs will finish first.');
+        toast.success('Update requested. Running work will be preserved.');
       } else {
         const next = await api.checkUpdate();
         accept(next);
@@ -108,12 +108,12 @@ function UpdateSidebarStatus({ collapsed }: { collapsed: boolean }) {
   }
 
   const label = updating
-    ? status?.phase === 'waiting' ? 'Waiting for jobs' : 'Updating…'
+    ? status?.phase === 'waiting' ? 'Preparing update' : 'Updating…'
     : status?.available ? 'Update available'
     : status?.phase === 'failed' ? 'Retry update'
     : status?.checking ? 'Checking updates…' : 'Check for updates';
   const detail = status?.error || status?.unavailable_reason || (status?.available
-    ? status.commits_behind + ' new commits. Click to update after active jobs finish.'
+    ? status.commits_behind + ' new commits. Click to update without interrupting independent workers.'
     : status?.detail || 'Check for new Bankai commits');
   const icon = busy || updating || status?.checking
     ? <Loader2 data-icon='inline-start' className='animate-spin' />

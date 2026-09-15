@@ -1,14 +1,13 @@
 """Commit-based updates for the Windows bankai-web service.
 
 The update worker is created through WMI, outside nssm's job object.
-Its persisted maintenance flag stops all new web jobs while existing work drains.
+Its persisted maintenance flag stops all new web jobs while independent workers continue.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import os
 import subprocess
@@ -171,7 +170,7 @@ def status() -> dict:
 
 
 def _launch_worker() -> int:
-    command = subprocess.list2cmdline(
+    return bgjobs.launch_windows_detached(
         [
             sys.executable,
             "-m",
@@ -183,21 +182,8 @@ def _launch_worker() -> int:
             str(_repo()),
             "--config",
             os.environ.get("BANKAI_CONFIG", str(_repo() / "config.toml")),
-        ]
-    )
-    quoted = command.replace("'", "''")
-    cwd = str(_repo()).replace("'", "''")
-    script = (
-        "$ErrorActionPreference='Stop';"
-        "$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0};"
-        "$result=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{"
-        f"CommandLine='{quoted}';CurrentDirectory='{cwd}';ProcessStartupInformation=$startup"
-        "};if($result.ReturnValue -ne 0){throw ('Update worker launch failed: '+$result.ReturnValue)};"
-        "$result.ProcessId"
-    )
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return int(
-        _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded])
+        ],
+        _repo(),
     )
 
 
@@ -221,7 +207,7 @@ def start() -> dict:
             error=None,
             pid=None,
             target_commit=result["latest_commit"],
-            detail="Waiting for active jobs to finish.",
+            detail="Preparing update; running work will be preserved.",
         )
         try:
             pid = _launch_worker()
@@ -232,22 +218,64 @@ def start() -> dict:
     return status()
 
 
-def _worker_count() -> int:
-    script = (
-        "@(Get-CimInstance Win32_Process | Where-Object {"
-        "$_.Name -match '^python' -and $_.CommandLine -match 'anime-download|bankai.cli.bgjobs'"
-        "}).Count"
-    )
-    return int(_run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]))
+def _prepare_restart() -> None:
+    """Only legacy service-owned workers need checkpoint/continue."""
+    for job in bgjobs.list_jobs():
+        if job.status != "running" or job.restart_safe:
+            continue
+        interrupted = list(_read().get("interrupted_jobs", []))
+        if job.id not in interrupted:
+            interrupted.append(job.id)
+            _patch(interrupted_jobs=interrupted)
+        # Do not pause/remove qBittorrent: the rerun reuses its existing hash.
+        if not job.stop():
+            raise RuntimeError(f"Could not safely stop legacy job {job.id}.")
+
+
+def _resume_interrupted() -> None:
+    for job_id in list(_read().get("interrupted_jobs", [])):
+        job = bgjobs._load_job(job_id)
+        if job is None:
+            raise RuntimeError(f"Interrupted job {job_id} could not be recovered.")
+        if job.status == "stopped":
+            bgjobs.resume(job)
+        elif job.status not in {"running", "done"}:
+            raise RuntimeError(f"Interrupted job {job_id} is not resumable.")
+        remaining = [item for item in _read().get("interrupted_jobs", []) if item != job_id]
+        _patch(interrupted_jobs=remaining)
 
 
 def _idle() -> tuple[bool, int]:
-    active = sum(job.status in {"running", "stopped"} for job in bgjobs.list_jobs())
-    workers = _worker_count()
+    """Ready means no service-owned work, not an empty never-ending queue."""
+    jobs = bgjobs.list_jobs()
+    active = [job for job in jobs if job.status == "running"]
+    script = (
+        "ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | "
+        "Where-Object {$_.Name -match '^(python|bankai)'} | "
+        "Select-Object ProcessId,ParentProcessId,CommandLine)"
+    )
+    processes = json.loads(
+        _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]) or "[]"
+    )
+    owned = {job.pid for job in active if job.restart_safe and job.pid}
+    # Account for venv wrappers and all worker descendants, not just child_pid.
+    changed = True
+    while changed:
+        before = len(owned)
+        owned.update(row["ProcessId"] for row in processes if row["ParentProcessId"] in owned)
+        changed = len(owned) != before
+    unsafe = any(
+        row["ProcessId"] not in owned
+        and any(
+            token in (row.get("CommandLine") or "")
+            for token in ("anime-download", "bankai.cli.bgjobs")
+        )
+        for row in processes
+    ) or any(not job.restart_safe for job in active)
     response = httpx.get("http://localhost:9988/api/anime/automation", timeout=15)
     response.raise_for_status()
     checking = response.json().get("running", False)
-    return active == 0 and workers == 0 and not checking, active
+    return not unsafe and not checking, len(active)
 
 
 def _apply(target: str) -> None:
@@ -276,6 +304,7 @@ def _apply(target: str) -> None:
         try:
             response = httpx.get("http://localhost:9988/api/health", timeout=5)
             if response.status_code == 200:
+                _resume_interrupted()
                 _patch(
                     phase="done",
                     available=False,
@@ -301,23 +330,28 @@ def run_worker() -> None:
             or any(c not in "0123456789abcdef" for c in target)
         ):
             raise RuntimeError("Invalid update commit.")
-        deadline = time.time() + 6 * 3600
+        _prepare_restart()
+        deadline = time.time() + 120
         while time.time() < deadline:
             idle, active = _idle()
             _patch(
                 active_jobs=active,
-                detail=f"Waiting for {active} active jobs."
-                if active
-                else "Waiting for active work to finish.",
+                detail=f"{active} independent workers will continue during the update.",
             )
             if idle:
                 break
             time.sleep(15)
         else:
-            raise RuntimeError("Update timed out waiting for active jobs. Queued work has resumed.")
+            raise RuntimeError(
+                "Could not establish restart safety within two minutes. Queued work has resumed."
+            )
         _patch(phase="applying", detail="Applying the new commit.")
         _apply(target)
     except Exception as exc:
+        try:
+            _resume_interrupted()
+        except Exception as recovery:
+            exc = RuntimeError(f"{exc} Recovery pending: {recovery}")
         _patch(phase="failed", error=str(exc), detail="Update failed. Queued work has resumed.")
 
 
