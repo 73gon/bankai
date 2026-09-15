@@ -308,7 +308,7 @@ def run_worker() -> None:
                 active_jobs=active,
                 detail=f"Waiting for {active} active jobs."
                 if active
-                else "Waiting for the anime check to finish.",
+                else "Waiting for active work to finish.",
             )
             if idle:
                 break

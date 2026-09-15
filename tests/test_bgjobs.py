@@ -264,5 +264,30 @@ def test_pid_access_denied_still_means_process_exists(
         raise PermissionError("access denied")
 
     monkeypatch.setattr(bgjobs.os, "kill", denied)
+    monkeypatch.setattr(bgjobs, "_windows_pid_alive", lambda pid: denied(pid, 0))
 
     assert bgjobs._pid_alive(1234) is True
+
+
+def test_windows_liveness_never_sends_a_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+    import sys
+
+    if bgjobs.os.name != "nt":
+        pytest.skip("Windows process query")
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        monkeypatch.setattr(
+            bgjobs.os,
+            "kill",
+            lambda *args: pytest.fail("Liveness must not send signals on Windows"),
+        )
+        assert bgjobs._pid_alive(process.pid)
+        assert process.poll() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+    assert not bgjobs._pid_alive(process.pid)
