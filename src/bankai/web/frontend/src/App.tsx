@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { api, type VpnStatus } from '@/lib/api';
+import { api, type UpdateStatus, type VpnStatus } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Discover from '@/pages/Discover';
@@ -61,6 +61,77 @@ function useSidebarState() {
 
 function BrandMark() {
   return <span className='font-mono text-[0.95rem] font-semibold tracking-[0.02em] text-foreground'>bankai</span>;
+}
+
+function UpdateSidebarStatus({ collapsed }: { collapsed: boolean }) {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const wasUpdating = useRef(false);
+  const updating = status != null && ['waiting', 'applying', 'restarting'].includes(status.phase);
+
+  function accept(next: UpdateStatus) {
+    const active = ['waiting', 'applying', 'restarting'].includes(next.phase);
+    if (wasUpdating.current && next.phase === 'done') {
+      window.location.reload();
+      return;
+    }
+    wasUpdating.current = active;
+    setStatus(next);
+  }
+
+  useEffect(() => {
+    void api.updateStatus().then(accept).catch(() => {});
+    const timer = window.setInterval(() => {
+      void api.updateStatus().then(accept).catch(() => {});
+    }, updating ? 5000 : 60000);
+    return () => window.clearInterval(timer);
+  }, [updating]);
+
+  async function click() {
+    setBusy(true);
+    try {
+      if (status?.available || (status?.phase === 'failed' && status.supported)) {
+        accept(await api.applyUpdate());
+        toast.success('Update requested. Active jobs will finish first.');
+      } else {
+        const next = await api.checkUpdate();
+        accept(next);
+        if (next.error) toast.error(next.error);
+        else if (next.available) toast.success(next.commits_behind + ' new commits available');
+        else toast.success('Bankai is up to date');
+      }
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const label = updating
+    ? status?.phase === 'waiting' ? 'Waiting for jobs' : 'Updating…'
+    : status?.available ? 'Update available'
+    : status?.phase === 'failed' ? 'Retry update'
+    : status?.checking ? 'Checking updates…' : 'Check for updates';
+  const detail = status?.error || status?.unavailable_reason || (status?.available
+    ? status.commits_behind + ' new commits. Click to update after active jobs finish.'
+    : status?.detail || 'Check for new Bankai commits');
+  const icon = busy || updating || status?.checking
+    ? <Loader2 data-icon='inline-start' className='animate-spin' />
+    : status?.available ? <ArrowUpCircle data-icon='inline-start' className='text-success' />
+    : status?.phase === 'failed' ? <AlertCircle data-icon='inline-start' className='text-warning' />
+    : <RefreshCw data-icon='inline-start' />;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant='secondary' size={collapsed ? 'icon' : 'default'} className={cn(!collapsed && 'w-full justify-start')}
+          style={status?.available ? { borderColor: 'var(--success)' } : undefined}
+          onClick={() => void click()} disabled={busy || updating || status?.checking} aria-label={label}>
+          {icon}{!collapsed && <span className={status?.available ? 'text-success' : undefined}>{label}</span>}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side='right' className='max-w-72'>{detail}</TooltipContent>
+    </Tooltip>
+  );
 }
 
 function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
@@ -235,7 +306,8 @@ export default function App() {
             ))}
           </nav>
 
-          <div className={cn('hidden md:flex md:shrink-0', collapsed && 'md:justify-center')}>
+          <div className={cn('hidden md:flex md:shrink-0 md:flex-col md:gap-2', collapsed && 'md:items-center')}>
+            <UpdateSidebarStatus collapsed={collapsed} />
             <VpnSidebarStatus collapsed={collapsed} />
           </div>
         </aside>

@@ -1,5 +1,20 @@
 // Thin typed API client for the bankai backend.
 
+export interface UpdateStatus {
+  phase: 'idle' | 'waiting' | 'applying' | 'restarting' | 'done' | 'failed';
+  available: boolean;
+  supported: boolean;
+  checking: boolean;
+  current_commit: string | null;
+  latest_commit: string | null;
+  commits_behind: number;
+  checked_at: number | null;
+  active_jobs: number;
+  detail: string | null;
+  error: string | null;
+  unavailable_reason: string | null;
+}
+
 export interface ApiError {
   detail: string;
 }
@@ -726,6 +741,10 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify({ kind, path }),
     }),
+
+  updateStatus: () => request<UpdateStatus>('/api/update/status'),
+  checkUpdate: () => request<UpdateStatus>('/api/update/check', { method: 'POST' }),
+  applyUpdate: () => request<UpdateStatus>('/api/update/apply', { method: 'POST' }),
 
   settings: () => request<{ settings: SettingRow[] }>('/api/settings'),
   setSetting: (key: string, value: any) => request('/api/settings', { method: 'POST', body: JSON.stringify({ key, value }) }),

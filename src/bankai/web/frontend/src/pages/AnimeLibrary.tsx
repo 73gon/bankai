@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { api, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -120,22 +120,23 @@ export default function AnimeLibrary() {
       ) : (
         <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
           {visible.map((show) => (
-            <Card key={show.key} className={'overflow-hidden border-2 ' + ({ complete: 'border-success', upcoming: 'border-transfer', partial: 'border-warning', empty: 'border-destructive', unknown: 'border-border' }[show.completion_state])}>
-              <button onClick={() => setSelected(show.key)} aria-label={'View ' + show.title} className='relative block w-full rounded-md focus-visible:outline-2 focus-visible:outline-ring'>
+            <button key={show.key} type='button' onClick={() => setSelected(show.key)} aria-label={'View ' + show.title} className='block w-full rounded-lg text-left focus-visible:outline-2 focus-visible:outline-ring'>
+              <Card className='h-full overflow-hidden' style={{ borderBottomWidth: 6, borderBottomColor: 'var(--' + ({ complete: 'success', upcoming: 'transfer', partial: 'warning', empty: 'destructive', unknown: 'border' }[show.completion_state]) + ')' }}>
+              <div className='relative block w-full'>
                 <AnimePoster url={show.poster_url} title={show.title} />
                 <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/80 to-transparent px-3 pb-3 pt-12 text-left text-sm font-semibold text-white'>{show.title}{show.year ? ' (' + show.year + ')' : ''}</span>
                 {show.finished && <span className='absolute right-2 top-2 rounded-full bg-background/90 p-1.5 text-success' aria-label='Finished show, all episodes downloaded'><Check className='size-5' /></span>}
-              </button>
+              </div>
               <CardHeader>
-                <CardDescription>{show.year || 'TVDB Anime'} · {show.season_count} season{show.season_count === 1 ? '' : 's'}</CardDescription>
+                <CardDescription>{show.season_count} season{show.season_count === 1 ? '' : 's'}</CardDescription>
               </CardHeader>
               <CardContent className='flex flex-wrap gap-2'>
                 <span className='w-full text-sm'>{show.downloaded_count} out of {show.total_count} episodes downloaded</span>
                 {show.staged_count > 0 && <Badge variant='warning'>{show.staged_count} staged</Badge>}
                 <span className='text-xs text-muted-foreground'>{formatSize(show.size)}</span>
               </CardContent>
-              <CardFooter><Button variant='secondary' size='sm' className='w-full' onClick={() => setSelected(show.key)}>View details</Button></CardFooter>
-            </Card>
+              </Card>
+            </button>
           ))}
         </div>
       )}
