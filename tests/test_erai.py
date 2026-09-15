@@ -600,3 +600,79 @@ def test_named_parts_wait_for_parent_catalogue_then_follow_tvdb_order(
     assert asyncio.run(erai._ordered_candidates(state, fresh, Client())) == []
     result = asyncio.run(erai._ordered_candidates(state, fresh, Client()))
     assert [row.id for row in result] == [earlier.id, latest.id]
+
+
+def test_finished_index_stays_ready_when_phase_advancer_is_called_again() -> None:
+    index = erai._default_state()["backfill"]
+    index.update({"phase": "1080", "high_only": True, "frontier": []})
+    erai._advance_backfill_phase(index)
+    assert index["complete"] and index["phase"] == "ready"
+    erai._advance_backfill_phase(index)
+    assert index["phase"] == "ready" and not index["frontier"]
+
+
+def test_empty_series_search_cannot_jump_to_latest_rss_episode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = erai._default_state()
+    newest = entry("[Erai-raws] Example - 12 [1080p]", 12)
+
+    class Client:
+        async def get(self, url):
+            return SimpleNamespace(text="", raise_for_status=lambda: None)
+
+    async def no_parts(title):
+        return []
+
+    async def no_wait(seconds):
+        pass
+
+    monkeypatch.setattr(erai.anime_mapping, "anidb_parts", no_parts)
+    monkeypatch.setattr(erai.asyncio, "sleep", no_wait)
+    result = asyncio.run(
+        erai._ordered_candidates(state, {erai._release_key(newest): newest}, Client())
+    )
+    assert result == []
+    index = state["series_catalogs"]["example"]
+    assert not index["complete"] and "latest episode is blocked" in index["error"]
+
+
+def test_punctuation_mismatch_rebuilds_even_when_latest_episode_already_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xml.etree import ElementTree as ET
+
+    state = erai._default_state()
+    latest = entry("[Erai-raws] Test Show - 12 [1080p]", 12)
+    first = entry("[Erai-raws] Test Show - 01 [1080p]", 1)
+    state["releases"][latest.info_hash] = {"status": "running"}
+    state["series_catalogs"]["tvdb:1"] = {
+        **erai._default_state()["backfill"],
+        "complete": True,
+        "high_only": True,
+        "parent_tvdb_id": 1,
+        "title_queries": ["Test Show."],
+        "title_query": "Test Show.",
+        "title_query_index": 0,
+        "frontier": [],
+    }
+
+    async def parts(title):
+        return [erai.anime_mapping.Part(1, 1, ET.fromstring('<anime defaulttvdbseason="1"/>'))]
+
+    class Client:
+        async def get(self, url):
+            assert "Show." not in url
+            html = listing(first) + listing(latest) if "1080p" in url else ""
+            return SimpleNamespace(text=html, raise_for_status=lambda: None)
+
+    async def no_wait(seconds):
+        pass
+
+    monkeypatch.setattr(erai.anime_mapping, "anidb_parts", parts)
+    monkeypatch.setattr(erai.asyncio, "sleep", no_wait)
+    result = asyncio.run(
+        erai._ordered_candidates(state, {erai._release_key(latest): latest}, Client())
+    )
+    assert [row.id for row in result] == [1, 12]
+    assert state["series_catalogs"]["tvdb:1"]["title_queries"] == ["Test Show"]

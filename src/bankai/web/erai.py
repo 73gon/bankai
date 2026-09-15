@@ -96,7 +96,7 @@ def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> b
 
 def _default_state() -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "series": {},
         "series_catalogs": {},
         "last_poll": None,
@@ -138,6 +138,10 @@ def _load_state() -> dict[str, Any]:
                 if item.get("status") == "held" and "TVDB" in item.get("reason", ""):
                     item["retry_after"] = 0
             state["version"] = 2
+        for index in [state["backfill"], *state.get("series_catalogs", {}).values()]:
+            if index.get("complete"):
+                index.update({"phase": "ready", "frontier": []})
+        state["version"] = 3
         return state
 
 
@@ -526,7 +530,7 @@ def _split_search_word(rows: list[anime_mod.NyaaEntry], node: dict[str, Any]) ->
 
 
 def _advance_backfill_phase(backfill: dict[str, Any]) -> None:
-    if backfill.get("frontier"):
+    if backfill.get("complete") or backfill.get("frontier"):
         return
     phase = backfill.get("phase", "2160")
     if phase == "1080" and backfill.get("high_only"):
@@ -675,6 +679,7 @@ async def _ordered_candidates(
         index = state["series_catalogs"].get(key)
         needs_old = index and (
             not index.get("complete")
+            or _release_key(entry) not in index["catalog_1080"]
             or any(
                 _needs_consideration(state, _entry_from_dict(row))
                 for row in index["catalog_1080"].values()
@@ -705,6 +710,32 @@ async def _ordered_candidates(
                 "high_only": True,
             }
         index = state["series_catalogs"][key]
+        source_title = anime_mod.clean_release_title(entry.title)
+        queries = []
+        for title in index["title_queries"]:
+            # Nyaa's quoted phrases distinguish punctuation even when AniDB's
+            # title identity does not. Prefer the observed Erai spelling.
+            observed = (
+                source_title
+                if anime_mapping.normalise(title) == anime_mapping.normalise(source_title)
+                else title
+            )
+            for variant in (observed, observed.replace(".", "")):
+                if variant not in queries:
+                    queries.append(variant)
+        if source_title not in queries:
+            queries.append(source_title)
+        if queries != index["title_queries"]:
+            index.update(
+                {
+                    "title_queries": queries,
+                    "title_query": queries[0],
+                    "title_query_index": 0,
+                    "phase": "2160",
+                    "complete": False,
+                    "frontier": [{"include": [], "exclude": [], "page": 1}],
+                }
+            )
         newest = max((row["id"] for row in index["catalog_1080"].values()), default=0)
         if index.get("complete") and entry.id > newest:
             index.update(
@@ -724,6 +755,20 @@ async def _ordered_candidates(
             log.warning("Erai series indexing paused for %s: %s", key, exc)
             continue
         if not index.get("complete"):
+            continue
+        if _release_key(entry) not in index["catalog_1080"]:
+            # The feed proves a release exists. If indexing did not find it,
+            # the query is incomplete, not proof that no older episodes exist.
+            index.update(
+                {
+                    "error": "Known RSS release was not found in the catalogue; latest episode is blocked",
+                    "complete": False,
+                    "phase": "2160",
+                    "title_query_index": 0,
+                    "title_query": queries[0],
+                    "frontier": [{"include": [], "exclude": [], "page": 1}],
+                }
+            )
             continue
         for release in [
             *(_entry_from_dict(row) for row in index["catalog_1080"].values()),
