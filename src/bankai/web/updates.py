@@ -281,13 +281,20 @@ def _idle() -> tuple[bool, int]:
 def _apply(target: str) -> None:
     _validate_checkout()
     _git("fetch", "--quiet", "origin", "main")
+    dependencies_changed = bool(
+        _read().get("dependencies_required") or _git("diff", "HEAD", target, "--", "pyproject.toml")
+    )
+    if dependencies_changed:
+        _patch(dependencies_required=True)
     _git("merge", "--ff-only", target)
     if _git("rev-parse", "HEAD") != target:
         raise RuntimeError("The requested commit could not be applied.")
     if not (_repo() / "src/bankai/web/static/index.html").is_file():
         raise RuntimeError("This update does not include the built web interface.")
     _patch(phase="applying", detail="Installing the update.")
-    _run([sys.executable, "-m", "pip", "install", "-e", ".[web]"], timeout=900, cwd=_repo())
+    if dependencies_changed:
+        _run([sys.executable, "-m", "pip", "install", "-e", ".[web]"], timeout=900, cwd=_repo())
+        _patch(dependencies_required=False)
     _patch(phase="restarting", detail="Restarting Bankai.")
     _run(
         [

@@ -730,7 +730,12 @@ def _supervise(job_id: str, args: list[str]) -> int:
     job = _load_job(job_id)
     if job is None:
         return 2
-    cmd = [_bankai_cmd(), *args]
+    # Avoid holding bankai.exe open on Windows while the package is updated.
+    cmd = (
+        [sys.executable, "-m", "bankai.cli.main", *args]
+        if sys.platform == "win32"
+        else [_bankai_cmd(), *args]
+    )
     env = os.environ.copy()
     env.pop("NO_COLOR", None)
     env.setdefault("FORCE_COLOR", "1")

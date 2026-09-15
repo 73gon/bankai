@@ -118,6 +118,7 @@ def test_restart_requires_exact_commit_and_reports_health(
     )
     updates._apply(target)
     assert any("Restart-Service bankai-web" in args for args in calls)
+    assert not any("pip" in args for args in calls)
     assert updates.status()["phase"] == "done"
     assert updates.status()["current_commit"] == target
     assert not updates.maintenance_active()
@@ -233,3 +234,37 @@ def test_worker_applies_without_waiting_for_independent_jobs(state, monkeypatch)
     monkeypatch.setattr(updates, "_apply", lambda commit: applied.append(commit))
     updates.run_worker()
     assert applied == [target]
+
+
+def test_failed_update_still_recovers_checkpointed_jobs(state, monkeypatch):
+    updates._patch(phase="waiting", target_commit="a" * 40)
+    monkeypatch.setattr(updates, "_prepare_restart", lambda: None)
+    monkeypatch.setattr(updates, "_idle", lambda: (True, 3))
+    recovered = []
+    monkeypatch.setattr(updates, "_resume_interrupted", lambda: recovered.append(True))
+
+    def fail(target):
+        raise RuntimeError("Dependency install failed")
+
+    monkeypatch.setattr(updates, "_apply", fail)
+    updates.run_worker()
+    assert recovered == [True]
+    assert updates.status()["phase"] == "failed"
+    assert not updates.maintenance_active()
+
+
+def test_repair_retries_required_dependencies_even_if_commit_already_applied(state, monkeypatch):
+    target = "a" * 40
+    repo = state.parent
+    (repo / "src/bankai/web/static").mkdir(parents=True)
+    (repo / "src/bankai/web/static/index.html").write_text("<html></html>")
+    updates._patch(dependencies_required=True)
+    monkeypatch.setattr(updates, "_repo", lambda: repo)
+    monkeypatch.setattr(updates, "_validate_checkout", lambda: None)
+    monkeypatch.setattr(updates, "_git", lambda *args: target if args[0] == "rev-parse" else "")
+    calls = []
+    monkeypatch.setattr(updates, "_run", lambda args, **kwargs: calls.append(args) or "")
+    monkeypatch.setattr(updates.httpx, "get", lambda *a, **k: SimpleNamespace(status_code=200))
+    updates._apply(target)
+    assert any("pip" in args for args in calls)
+    assert not updates._read()["dependencies_required"]

@@ -351,3 +351,50 @@ def test_wmi_launch_is_hidden_and_requests_job_breakaway(monkeypatch, tmp_path):
     assert "ShowWindow=[uint16]0" in script
     assert "CreateFlags=[uint32]16777216" in script
     assert options["creationflags"] == 0x08000000
+
+
+def test_wmi_payload_restores_service_environment_before_supervision(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("BANKAI_TEST_ENV", "old")
+    job = bgjobs.BgJob(
+        id="payload1", kind="show", title="Show", args=["anime-download"], started_at=1, pid=123
+    )
+    job.save()
+    payload = job.dir / "launch.json"
+    payload.write_text(
+        json.dumps({"env": {"BANKAI_TEST_ENV": "restored"}, "id": job.id, "args": job.args}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def supervise(job_id, args):
+        calls.append((job_id, args, bgjobs.os.environ["BANKAI_TEST_ENV"]))
+        assert not payload.exists()
+        return 0
+
+    monkeypatch.setattr(bgjobs, "_supervise", supervise)
+    assert bgjobs._main(["--launch-job", str(payload)]) == 0
+    assert calls == [("payload1", ["anime-download"], "restored")]
+
+
+def test_windows_supervisor_uses_python_module_not_locked_cli_executable(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(bgjobs.sys, "platform", "win32")
+    job = bgjobs.BgJob(
+        id="module01", kind="movie", title="Movie", args=["run", "Movie"], started_at=1, pid=123
+    )
+    job.save()
+    calls = []
+
+    def popen(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(pid=456, wait=lambda: 0)
+
+    monkeypatch.setattr(bgjobs.subprocess, "Popen", popen)
+    assert bgjobs._supervise(job.id, job.args) == 0
+    assert calls == [[bgjobs.sys.executable, "-m", "bankai.cli.main", "run", "Movie"]]
+    assert bgjobs._load_job(job.id).status == "done"
