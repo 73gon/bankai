@@ -266,6 +266,20 @@ Open `http://<host>:9988`. Pages:
 Configure defaults under the `[web]` section of `config.toml` (port, host,
 `max_concurrent_jobs`, `transcode_fallback`, server scan dirs, cache TTL).
 
+## Updating from the web interface
+
+On Windows installations running the **bankai-web** service, the sidebar control
+above VPN checks **origin/main** for new commits every five minutes. It lights up
+as **Update available** when the installed checkout is behind; clicking it
+requests the update.
+
+New web jobs stay queued while active pipelines, anime jobs, transfers, and
+worker processes finish. Bankai then applies the commit with a fast-forward
+merge, installs the package dependencies, restarts the service, and checks
+**/api/health**. The browser refreshes after the update succeeds. Configuration
+and library files remain in place. Tracked local edits or a diverged branch
+block automatic updates and show an explanation in the control's tooltip.
+
 ## Architecture
 
 - **`bankai.cli`** \u2014 Typer command tree, interactive menu, REPL.
