@@ -54,6 +54,24 @@ shows_dir = "/mnt/media12/shows"
 anime_shows_dir = "/mnt/media12/shows_anime"
 rsync_binary = "rsync"
 
+[anime]
+# Autonomous Erai-raws ingestion is opt-in. Every release must be trusted,
+# explicitly list German subtitles on its Nyaa detail page, and resolve to an
+# unambiguous TVDB series/episode before it can enter the Anime queue.
+enabled = false
+poll_interval_seconds = 900
+# Wait briefly so competing encodes can appear before selecting the best one.
+settle_minutes = 30
+# Stop adding automatic downloads once the anime destination has this much
+# free space left. Existing downloads are not interrupted.
+min_free_space_gib = 100
+max_enqueues_per_cycle = 2
+# Historical backfill completes 2160p and 1080p catalogue passes before considering
+# 720p for episodes with no higher-resolution Erai-raws release. Capped searches
+# are split into complementary queries; incomplete indexing never permits 720p.
+backfill_enabled = true
+backfill_request_delay_seconds = 2
+
 [queue]
 # Per-stage worker concurrency.
 search_workers = 2

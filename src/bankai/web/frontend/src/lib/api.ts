@@ -154,6 +154,55 @@ export interface AnimeSearchPage {
   aliases: string[];
 }
 
+export interface AnimeAutomationStatus {
+  enabled: boolean;
+  running: boolean;
+  paused: boolean;
+  pause_reason: string | null;
+  free_space_gib: number | null;
+  min_free_space_gib: number;
+  poll_interval_seconds: number;
+  settle_minutes: number;
+  last_poll: number | null;
+  last_success: number | null;
+  last_error: string | null;
+  last_enqueued: number;
+  counts: Record<string, number>;
+  held: Array<{
+    info_hash: string;
+    title: string;
+    detail_url: string;
+    quality: string | null;
+    reason: string;
+    updated_at: number;
+  }>;
+  backfill: {
+    enabled: boolean;
+    phase: string;
+    page: number;
+    complete: boolean;
+    found_1080: number;
+    fallback_720: number;
+    queries_completed: number;
+    queries_split: number;
+    queries_pending: number;
+    error: string | null;
+  };
+}
+
+export interface AnimeLibraryEntry {
+  path: string;
+  rel_path: string;
+  name: string;
+  series: string;
+  season: string | null;
+  size: number;
+  mtime: number;
+  staged: boolean;
+  stage: string;
+  transfer_status: string;
+}
+
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
 
 export interface PersonSuggestion {
@@ -254,6 +303,8 @@ export interface Job {
   overall_percent: number | null;
   pending: boolean;
   action_required: boolean;
+  reason?: string | null;
+  reason_detail?: string | null;
   queue_position: number | null;
   queue_total: number | null;
 }
@@ -517,6 +568,10 @@ export const api = {
     ),
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
+  animeQueue: () => request<{ jobs: Job[] }>('/api/anime/queue'),
+  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[] }>('/api/anime/library'),
+  animeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation'),
+  runAnimeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation/run', { method: 'POST' }),
   queueMovie: (body: { title: string; german?: string; url?: string; site?: string; year?: number }) =>
     request('/api/queue/movie', { method: 'POST', body: JSON.stringify(body) }),
   queueShow: (body: {

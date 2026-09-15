@@ -12,20 +12,33 @@ import Library from '@/pages/Library';
 import Server from '@/pages/Server';
 import Settings from '@/pages/Settings';
 import Anime from '@/pages/Anime';
+import AnimeQueue from '@/pages/AnimeQueue';
+import AnimeLibrary from '@/pages/AnimeLibrary';
+import AnimeSettings from '@/pages/AnimeSettings';
 import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
 
-const NAV = [
+const MAIN_NAV = [
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/search', label: 'Search', icon: SearchIcon },
   { to: '/filmpalast', label: 'Filmpalast', icon: CalendarClock },
-  { to: '/anime', label: 'Anime', icon: Sparkles },
   { to: '/qbittorrent', label: 'qBittorrent', icon: Download },
   { to: '/queue', label: 'Queue', icon: ListVideo },
   { to: '/library', label: 'Library', icon: HardDrive },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
+const ANIME_NAV = [
+  { to: '/anime/discover', label: 'Discover', icon: Sparkles },
+  { to: '/anime/queue', label: 'Queue', icon: ListVideo },
+  { to: '/anime/library', label: 'Library', icon: HardDrive },
+  { to: '/anime/settings', label: 'Settings', icon: SettingsIcon },
+];
+
+const NAV_GROUPS = [
+  { label: 'Bankai', items: MAIN_NAV },
+  { label: 'Anime', items: ANIME_NAV },
+];
 const SIDEBAR_KEY = 'bankai:sidebar-collapsed';
 
 function useSidebarState() {
@@ -178,34 +191,48 @@ export default function App() {
           <div className='hidden md:my-3 md:block md:h-px md:bg-border/70' />
 
           <nav className={cn('flex flex-1 flex-row gap-1 overflow-x-auto md:mt-0 md:flex-col md:overflow-visible', collapsed && 'md:items-center')}>
-            {NAV.map(({ to, label, icon: Icon }) => {
-              const link = (
-                <NavLink
-                  key={to}
-                  to={to}
-                  className={({ isActive }) =>
-                    cn(
-                      'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all duration-200',
-                      collapsed && 'md:mx-0 md:h-10 md:w-10 md:shrink-0 md:justify-center md:gap-0 md:p-0',
-                      isActive
-                        ? 'border border-white/10 bg-gradient-to-b from-white/[0.09] to-white/[0.03] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.08)]'
-                        : 'border border-transparent text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
-                    )
-                  }
-                >
-                  <Icon className='h-[18px] w-[18px] shrink-0' />
-                  <span className={cn('md:inline', collapsed && 'md:hidden')}>{label}</span>
-                </NavLink>
-              );
-              return collapsed ? (
-                <Tooltip key={to}>
-                  <TooltipTrigger asChild>{link}</TooltipTrigger>
-                  <TooltipContent side='right'>{label}</TooltipContent>
-                </Tooltip>
-              ) : (
-                link
-              );
-            })}
+            {NAV_GROUPS.map((group, groupIndex) => (
+              <div
+                key={group.label}
+                className={cn(
+                  'contents md:flex md:flex-col md:gap-1',
+                  groupIndex > 0 && 'md:mt-4 md:border-t md:border-border/70 md:pt-4',
+                  collapsed && 'md:items-center',
+                )}
+              >
+                {!collapsed && (
+                  <p className='hidden px-3 pb-1 text-[0.65rem] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70 md:block'>
+                    {group.label}
+                  </p>
+                )}
+                {group.items.map(({ to, label, icon: Icon }) => {
+                  const link = (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      className={({ isActive }) =>
+                        cn(
+                          'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all duration-200',
+                          collapsed && 'md:mx-0 md:h-10 md:w-10 md:shrink-0 md:justify-center md:gap-0 md:p-0',
+                          isActive
+                            ? 'border border-white/10 bg-gradient-to-b from-white/[0.09] to-white/[0.03] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.08)]'
+                            : 'border border-transparent text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
+                        )
+                      }
+                    >
+                      <Icon className='h-[18px] w-[18px] shrink-0' />
+                      <span className={cn('md:inline', collapsed && 'md:hidden')}>{label}</span>
+                    </NavLink>
+                  );
+                  return collapsed ? (
+                    <Tooltip key={to}>
+                      <TooltipTrigger asChild>{link}</TooltipTrigger>
+                      <TooltipContent side='right'>{group.label}: {label}</TooltipContent>
+                    </Tooltip>
+                  ) : link;
+                })}
+              </div>
+            ))}
           </nav>
 
           <div className={cn('hidden md:flex md:shrink-0', collapsed && 'md:justify-center')}>
@@ -221,7 +248,11 @@ export default function App() {
               <Route path='/search' element={<Search />} />
               <Route path='/filmpalast' element={<Recent />} />
               <Route path='/recent' element={<Navigate to='/filmpalast' replace />} />
-              <Route path='/anime' element={<Anime />} />
+              <Route path='/anime' element={<Navigate to='/anime/discover' replace />} />
+              <Route path='/anime/discover' element={<Anime />} />
+              <Route path='/anime/queue' element={<AnimeQueue />} />
+              <Route path='/anime/library' element={<AnimeLibrary />} />
+              <Route path='/anime/settings' element={<AnimeSettings />} />
               <Route path='/qbittorrent' element={<QBittorrent />} />
               <Route path='/queue' element={<Library />} />
               <Route path='/library' element={<Server />} />

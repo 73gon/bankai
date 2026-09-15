@@ -44,6 +44,19 @@ def _is_operation(kind: str | None, args: list[str] | None = None) -> bool:
     return bool(kind in _OPERATION_KINDS or (args and args[0] in _OPERATION_COMMANDS))
 
 
+def _is_anime_job(args: list[str] | None) -> bool:
+    return bool(args and args[0] == "anime-download")
+
+
+def _anime_storage_ready(args: list[str] | None) -> bool:
+    if not _is_anime_job(args) or "--require-german-subtitles" not in (args or []):
+        return True
+    from bankai.web.erai import free_space_gib
+
+    free = free_space_gib()
+    return free is not None and free > get_settings().anime.min_free_space_gib
+
+
 def _pending_path() -> Path:
     return bgjobs.jobs_root().parent / "web_pending.json"
 
@@ -190,7 +203,7 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
         if kind in _OPERATION_KINDS:
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
-        if _running_count() < limit:
+        if _running_count() < limit and _anime_storage_ready(args):
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
         item = PendingJob(id=uuid.uuid4().hex[:8], kind=kind, title=title, args=args)
@@ -243,15 +256,20 @@ def reconcile() -> int:
         # deliberate canary and operations above are never held back.
         cooldown_until = _call_with_jobs(_stream_failure_cooldown_until, jobs)
         if pending and cooldown_until is not None:
-            log.warning(
-                "stream extraction circuit open; pending pipelines paused for %.0f seconds",
-                max(0.0, cooldown_until - time.time()),
-            )
-            _save_pending(pending)
-            return started
+            log.warning("stream source circuit open; non-Anime pipelines are paused")
 
         while pending and running_count < limit:
-            item = pending.pop(0)
+            index = next(
+                (
+                    i for i, item in enumerate(pending)
+                    if (cooldown_until is None or _is_anime_job(item.args))
+                    and _anime_storage_ready(item.args)
+                ),
+                None,
+            )
+            if index is None:
+                break
+            item = pending.pop(index)
             nt = _norm_job_title(item.title)
             if nt and nt in running_titles:
                 continue  # already running -> drop the duplicate instead of colliding
@@ -300,6 +318,8 @@ def force_start_pending(job_id: str) -> bgjobs.BgJob | None:
         if index is None:
             return None
         item = pending[index]
+        if not _anime_storage_ready(item.args):
+            raise RuntimeError("Anime free-space reserve reached; download remains queued")
         nt = _norm_job_title(item.title)
         if nt and nt in _running_titles():
             raise RuntimeError("a job for this title is already running")
@@ -498,7 +518,7 @@ def _display_row(job) -> dict:
     return row
 
 
-def snapshot() -> list[dict]:
+def snapshot(*, anime_only: bool = False) -> list[dict]:
     """Unified list of running/finished jobs + pending, newest first.
 
     Transfer jobs are intentionally excluded — they are surfaced as a column
@@ -511,7 +531,7 @@ def snapshot() -> list[dict]:
     jobs = context_jobs if context_jobs is not None else bgjobs.list_jobs()
     out: list[dict] = []
     for j in jobs:
-        if _is_operation(j.kind, getattr(j, "args", None)):
+        if _is_operation(j.kind, getattr(j, "args", None)) or _is_anime_job(getattr(j, "args", None)) != anime_only:
             continue
         from bankai.torrent import actions as torrent_actions
 
@@ -524,6 +544,7 @@ def snapshot() -> list[dict]:
         item
         for item in (pending if pending is not None else _load_pending())
         if not _is_operation(item.kind, item.args)
+        and _is_anime_job(item.args) == anime_only
     ]
     queue_total = len(visible_pending)
     stream_cooldown = _call_with_jobs(_stream_failure_cooldown_until, jobs)
@@ -544,8 +565,10 @@ def snapshot() -> list[dict]:
                 "step": None,
                 "total_steps": None,
                 "step_label": (
-                    "Waiting for stream source recovery"
-                    if stream_cooldown is not None
+                    "Waiting for Anime storage reserve"
+                    if not _anime_storage_ready(item.args)
+                    else "Waiting for stream source recovery"
+                    if stream_cooldown is not None and not _is_anime_job(item.args)
                     else "Waiting for a free slot"
                 ),
                 "overall_percent": 0.0,
@@ -560,6 +583,12 @@ def snapshot() -> list[dict]:
         )
     out.sort(key=lambda r: r["started_at"], reverse=True)
     return out
+
+
+def anime_snapshot() -> list[dict]:
+    """Queue rows belonging exclusively to direct Anime downloads."""
+
+    return snapshot(anime_only=True)
 
 
 def catalog_titles() -> set[str]:

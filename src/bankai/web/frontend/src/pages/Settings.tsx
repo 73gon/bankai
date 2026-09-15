@@ -92,7 +92,7 @@ export default function Settings() {
     setLoading(true);
     try {
       const r = await api.settings();
-      setRows(r.settings);
+      setRows(r.settings.filter((row) => !row.key.startsWith('anime.') && row.key !== 'transfer.anime_shows_dir'));
     } catch (e: any) {
       toast.error(e.message);
     } finally {

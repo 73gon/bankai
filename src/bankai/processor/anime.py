@@ -8,9 +8,11 @@ the normal TVDB/Jellyfin naming layout, marking them approved immediately.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -175,6 +177,54 @@ def _copy_with_sidecars(source: Path, destination: Path) -> None:
             _atomic_copy2(sidecar, sidecar_target)
 
 
+def _has_german_subtitles(source: Path) -> bool:
+    """Verify an embedded or adjacent German subtitle track after download."""
+
+    for sidecar in source.parent.glob(f"{source.stem}.*"):
+        if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
+            continue
+        qualifier = sidecar.name[len(source.stem) :]
+        words = set(re.findall(r"[a-z]+", qualifier.casefold()))
+        if words & {"de", "deu", "ger", "german", "deutsch"}:
+            return True
+    from bankai.web.media import ffprobe_bin
+
+    binary = ffprobe_bin()
+    if binary is None:
+        raise RuntimeError("ffprobe is required to verify German subtitles")
+    result = subprocess.run(
+        [binary, "-v", "error", "-show_streams", "-of", "json", str(source)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"could not inspect subtitles in {source.name}: {result.stderr.strip()}")
+    try:
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe returned invalid subtitle metadata for {source.name}") from exc
+    german = {"de", "deu", "ger", "german", "deutsch"}
+    for stream in streams:
+        if stream.get("codec_type") != "subtitle":
+            continue
+        tags = stream.get("tags") or {}
+        language = str(tags.get("language") or "").casefold()
+        title_words = set(re.findall(r"[a-z]+", str(tags.get("title") or "").casefold()))
+        if language in german or title_words & german:
+            return True
+    return False
+
+
+def _require_german_subtitles(source: Path) -> None:
+    if not _has_german_subtitles(source):
+        raise RuntimeError(
+            f"German subtitle verification failed for {source.name}; file was not added to the library"
+        )
+
+
 def _atomic_copy2(source: Path, destination: Path) -> None:
     """Publish a completed anime file atomically.
 
@@ -249,6 +299,7 @@ async def download_anime(
     year: int | None,
     season_override: int | None = None,
     episode_override: int | None = None,
+    require_german_subtitles: bool = False,
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -267,7 +318,8 @@ async def download_anime(
     # Reuse the configured category. qBittorrent rejects or silently drops an
     # unknown category, and Nyaa provenance is tracked on the bankai job/file.
     category = settings.qbittorrent.category
-    log.info('BANKAI_STAGE step=1 total=2 key=torrent label="Download from Nyaa"')
+    total_steps = 3 if require_german_subtitles else 2
+    log.info('BANKAI_STAGE step=1 total=%d key=torrent label="Download from Nyaa"', total_steps)
     qbit = QBittorrentClient()
     torrent_hash: str | None = None
     existed_before = False
@@ -291,7 +343,7 @@ async def download_anime(
         if background_id:
             torrent_actions.clear_active_torrent(background_id)
 
-        log.info('BANKAI_STAGE step=2 total=2 key=organize label="Organize with TVDB"')
+        log.info('BANKAI_STAGE step=2 total=%d key=organize label="Organize with TVDB"', total_steps)
         root = _download_root(status)
         outputs: list[Path] = []
         output = settings.output
@@ -299,6 +351,8 @@ async def download_anime(
             source = pick_movie_file(root)
             if source is None:
                 raise RuntimeError(f"the Nyaa torrent contains no movie file under {root}")
+            if require_german_subtitles:
+                _require_german_subtitles(source)
             destination = render_movie_path(
                 library=output.directory,
                 query=english_title,
@@ -318,6 +372,8 @@ async def download_anime(
                     "a manual episode override requires a torrent containing exactly one video file"
                 )
             for source in sources:
+                if require_german_subtitles:
+                    _require_german_subtitles(source)
                 identity = episode_identity(
                     source.name,
                     release_title=release_title,
@@ -357,6 +413,45 @@ async def download_anime(
                 torrent_source_title=release_title,
             )
         log.info('BANKAI_PROGRESS stage=organize pct=100 status="ready"')
+
+        if require_german_subtitles:
+            from bankai.backend.transfer import plan_transfer, transfer_with_rsync
+
+            log.info('BANKAI_STAGE step=3 total=3 key=transfer label="Transfer to Anime library"')
+            # Publish external subtitles first: a failed subtitle copy must
+            # never leave a newly published video without its verified track.
+            items = await asyncio.to_thread(plan_transfer, outputs, kind="anime")
+            for item in items:
+                for sidecar in item.source.parent.glob(f"{item.source.stem}.*"):
+                    if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
+                        continue
+                    qualifier = sidecar.name[len(item.source.stem) :]
+                    target = item.destination.parent / f"{item.destination.stem}{qualifier}"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    _atomic_copy2(sidecar, target)
+            result = await asyncio.to_thread(
+                transfer_with_rsync,
+                outputs,
+                kind="anime",
+                progress=log.info,
+            )
+            if result.failed:
+                raise RuntimeError("Anime transfer failed: " + "; ".join(error for _, error in result.failed))
+            for item in [*result.transferred, *result.skipped]:
+                # Keep separately downloaded German subtitle sidecars with
+                # their video. The normal video transfer only plans videos.
+                for sidecar in item.source.parent.glob(f"{item.source.stem}.*"):
+                    if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
+                        continue
+                    qualifier = sidecar.name[len(item.source.stem) :]
+                    target = item.destination.parent / f"{item.destination.stem}{qualifier}"
+                    if not target.exists():
+                        _atomic_copy2(sidecar, target)
+                    if target.exists() and target.stat().st_size == sidecar.stat().st_size:
+                        sidecar.unlink()
+                review.set_stage(item.source, "transferred")
+                review.set_transfer(item.source, "done", percent=100)
+            outputs = [item.destination for item in [*result.transferred, *result.skipped]]
 
         if settings.paths.cleanup_after_success and torrent_hash and not existed_before:
             await qbit.remove(torrent_hash, delete_files=True)

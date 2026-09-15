@@ -28,12 +28,18 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 
 from bankai import __version__
-from bankai.config import SelectorSettings, get_settings, reset_settings_cache
+from bankai.config import (
+    AnimeAutomationSettings,
+    SelectorSettings,
+    get_settings,
+    reset_settings_cache,
+)
 from bankai.logging import get_logger
 from bankai.processor.extractor import normalize_stream_url
 from bankai.queue.models import MediaKind
 from bankai.web import anime as anime_mod
 from bankai.web import discover as discover_mod
+from bankai.web import erai as erai_mod
 from bankai.web import jobs as webjobs
 from bankai.web import media as media_mod
 from bankai.web import posters as posters_mod
@@ -639,6 +645,13 @@ SAFE_SETTING_KEYS: set[str] = {
     "transfer.movies_dir",
     "transfer.shows_dir",
     "transfer.anime_shows_dir",
+    "anime.enabled",
+    "anime.poll_interval_seconds",
+    "anime.settle_minutes",
+    "anime.min_free_space_gib",
+    "anime.max_enqueues_per_cycle",
+    "anime.backfill_enabled",
+    "anime.backfill_request_delay_seconds",
     "scraper.interactive_pick",
     "selector.max_size_gib",
     "selector.min_seeders",
@@ -653,6 +666,16 @@ SAFE_SETTING_KEYS: set[str] = {
 
 def _validate_setting_value(key: str, value: Any) -> Any:
     """Coerce and validate a web setting before it reaches config.toml."""
+    if key.startswith("anime."):
+        field = key.removeprefix("anime.")
+        data = get_settings().anime.model_dump()
+        data[field] = value
+        try:
+            validated = AnimeAutomationSettings.model_validate(data)
+        except ValidationError as exc:
+            message = exc.errors()[0].get("msg", "invalid value") if exc.errors() else "invalid value"
+            raise ValueError(str(message)) from exc
+        return getattr(validated, field)
     if not key.startswith("selector."):
         return value
 
@@ -708,6 +731,7 @@ def create_app() -> Any:
         # anyio threadpool. Give it headroom so a burst of review clips or many
         # open tabs can't starve lightweight endpoints like /api/health.
         migration_task: asyncio.Task | None = None
+        erai_task: asyncio.Task | None = None
         try:
             import anyio.to_thread
 
@@ -715,6 +739,7 @@ def create_app() -> Any:
             migration_task = asyncio.create_task(
                 anyio.to_thread.run_sync(_backfill_review_metadata)
             )
+            erai_task = asyncio.create_task(erai_mod.scheduler())
         except Exception:
             pass
         try:
@@ -726,6 +751,11 @@ def create_app() -> Any:
                 with suppress(Exception):
                     await migration_task
             await availability_mod.shutdown()
+            await erai_mod.shutdown()
+            if erai_task is not None:
+                erai_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await erai_task
 
     app = FastAPI(
         title="bankai",
@@ -1375,6 +1405,67 @@ def create_app() -> Any:
             "aliases": result.aliases,
         }
 
+    @app.get("/api/anime/automation")
+    def anime_automation_status() -> dict:
+        return erai_mod.status()
+
+    @app.post("/api/anime/automation/run")
+    async def anime_automation_run() -> dict:
+        return await erai_mod.run_cycle()
+
+    @app.get("/api/anime/queue")
+    def anime_queue() -> dict:
+        return {"jobs": webjobs.anime_snapshot()}
+
+    @app.get("/api/anime/library")
+    def anime_library() -> dict:
+        root = Path(get_settings().transfer.anime_shows_dir)
+        entries: list[dict] = []
+        if root.exists():
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.casefold() not in {".mkv", ".mp4", ".m4v", ".avi", ".webm"}:
+                    continue
+                try:
+                    stat = path.stat()
+                    relative = str(path.relative_to(root))
+                except OSError:
+                    continue
+                parts = Path(relative).parts
+                entries.append(
+                    {
+                        "path": str(path),
+                        "rel_path": relative,
+                        "name": path.name,
+                        "series": parts[0] if len(parts) > 1 else path.stem,
+                        "season": parts[1] if len(parts) > 2 else None,
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                        "staged": False,
+                        "stage": "transferred",
+                        "transfer_status": "done",
+                    }
+                )
+        for entry in media_mod.scan_library():
+            state = review_mod.get_state(entry.path)
+            if state.stage == "deleted" or not anime_mod.is_nyaa_url(state.torrent_source_url or ""):
+                continue
+            entries.append(
+                {
+                    "path": entry.path,
+                    "rel_path": entry.rel_path,
+                    "name": Path(entry.path).name,
+                    "series": entry.series or entry.name,
+                    "season": f"Season {entry.season:02d}" if entry.season is not None else None,
+                    "size": entry.size,
+                    "mtime": entry.mtime,
+                    "staged": True,
+                    "stage": state.stage,
+                    "transfer_status": state.transfer_status,
+                }
+            )
+        entries.sort(key=lambda item: (item["series"].casefold(), item["rel_path"].casefold()))
+        return {"root": str(root), "entries": entries}
+
     @app.get("/api/anime/tvdb")
     async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
         matches = await anime_mod.tvdb_candidates(q, limit=12)
@@ -1433,6 +1524,15 @@ def create_app() -> Any:
             f"magnet:?xt=urn:btih:{req.info_hash.casefold()}"
         ):
             raise HTTPException(status_code=422, detail="magnet does not match the Nyaa torrent")
+        erai_mod.save_mapping(
+            req.release_title,
+            anime_mod.AnimeTVDBMatch(
+                tvdb_id=req.tvdb_id,
+                kind=req.kind,
+                english_title=req.english_title.strip(),
+                year=req.year,
+            ),
+        )
         args = [
             "anime-download",
             "--release-title",
@@ -1789,6 +1889,8 @@ def create_app() -> Any:
         out = []
         for e in entries:
             state = review_mod.get_state(e.path)
+            if anime_mod.is_nyaa_url(state.torrent_source_url or ""):
+                continue
             if state.stage == "repacking" and state.repack_status in {"done", "failed"}:
                 state = review_mod.set_repack(
                     e.path,
@@ -1934,6 +2036,8 @@ def create_app() -> Any:
             except OSError:
                 rp = e.path
             state = review_states.get(rp, review_mod.ReviewState(path=e.path))
+            if anime_mod.is_nyaa_url(state.torrent_source_url or ""):
+                continue
             if state.stage == "repacking" and state.repack_status in {"done", "failed"}:
                 state = review_mod.set_repack(
                     e.path,

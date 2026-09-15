@@ -103,6 +103,18 @@ class TransferSettings(BaseModel):
     rsync_binary: str = "rsync"
 
 
+class AnimeAutomationSettings(BaseModel):
+    """Safety and scheduling policy for autonomous Erai-raws ingestion."""
+
+    enabled: bool = False
+    poll_interval_seconds: int = Field(default=900, ge=60)
+    settle_minutes: int = Field(default=30, ge=0)
+    min_free_space_gib: float = Field(default=100.0, ge=0)
+    max_enqueues_per_cycle: int = Field(default=2, ge=1, le=20)
+    backfill_enabled: bool = True
+    backfill_request_delay_seconds: float = Field(default=2.0, ge=1.0)
+
+
 class QueueSettings(BaseModel):
     search_workers: int = 2
     extract_workers: int = 3
@@ -205,6 +217,7 @@ class Settings(BaseSettings):
     queue: QueueSettings = Field(default_factory=QueueSettings)
     metadata: MetadataSettings = Field(default_factory=MetadataSettings)
     transfer: TransferSettings = Field(default_factory=TransferSettings)
+    anime: AnimeAutomationSettings = Field(default_factory=AnimeAutomationSettings)
     paths: PathsSettings = Field(default_factory=PathsSettings)
     prowlarr: ProwlarrSettings = Field(default_factory=ProwlarrSettings)
     qbittorrent: QBittorrentSettings = Field(default_factory=QBittorrentSettings)
