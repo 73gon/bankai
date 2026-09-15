@@ -1518,6 +1518,28 @@ def create_app() -> Any:
             "items": [anime_mod.tvdb_to_dict(item) for item in matches],
         }
 
+    @app.get("/api/update/status")
+    async def update_status() -> dict:
+        from bankai.web import updates
+
+        updates.trigger_check()
+        return updates.status()
+
+    @app.post("/api/update/check")
+    async def update_check() -> dict:
+        from bankai.web import updates
+
+        return await asyncio.to_thread(updates.check)
+
+    @app.post("/api/update/apply")
+    async def update_apply() -> dict:
+        from bankai.web import updates
+
+        try:
+            return await asyncio.to_thread(updates.start)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/api/vpn/status")
     def vpn_status() -> dict:
         return _laptop_vpn_status()

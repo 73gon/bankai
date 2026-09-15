@@ -34,6 +34,7 @@ from bankai.logging import get_logger
 from bankai.metadata import anime_mapping
 from bankai.processor.anime import EpisodeIdentity
 from bankai.web import anime as anime_mod
+from bankai.web import updates
 
 log = get_logger(__name__)
 _NYAA_BASE = "https://nyaa.si"
@@ -1026,7 +1027,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
         _prune_holds(state)
         state["last_poll"] = time.time()
         state["last_enqueued"] = 0
-        if not policy.enabled:
+        if not policy.enabled or updates.maintenance_active():
             _save_state(state)
             return status(state=state, running=False)
         if not settings.metadata.tvdb_enabled or not settings.metadata.tvdb_api_key:
@@ -1104,7 +1105,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                         break
                     if not _needs_consideration(state, entry):
                         continue
-                    if not get_settings().anime.enabled:
+                    if not get_settings().anime.enabled or updates.maintenance_active():
                         break
                     inspected += 1
                     if free_space_gib() is None or free_space_gib() <= policy.min_free_space_gib:

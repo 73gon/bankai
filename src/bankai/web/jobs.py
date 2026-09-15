@@ -22,7 +22,7 @@ from pathlib import Path
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.web import reasons
+from bankai.web import reasons, updates
 
 log = get_logger(__name__)
 _LOCK = threading.RLock()
@@ -200,10 +200,11 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
         pending = _load_pending()
         if nt and (nt in _running_titles() or any(_norm_job_title(p.title) == nt for p in pending)):
             return {"status": "duplicate", "title": title}
-        if kind in _OPERATION_KINDS:
+        paused = updates.maintenance_active()
+        if not paused and kind in _OPERATION_KINDS:
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
-        if _running_count() < limit and _anime_storage_ready(args):
+        if not paused and _running_count() < limit and _anime_storage_ready(args):
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
         item = PendingJob(id=uuid.uuid4().hex[:8], kind=kind, title=title, args=args)
@@ -215,6 +216,8 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
 def reconcile() -> int:
     """Promote pending jobs, bypassing pipeline slots for transfers."""
     with _LOCK:
+        if updates.maintenance_active():
+            return 0
         pending = _load_pending()
         if not pending:
             return 0
@@ -261,7 +264,8 @@ def reconcile() -> int:
         while pending and running_count < limit:
             index = next(
                 (
-                    i for i, item in enumerate(pending)
+                    i
+                    for i, item in enumerate(pending)
                     if (cooldown_until is None or _is_anime_job(item.args))
                     and _anime_storage_ready(item.args)
                 ),
@@ -306,6 +310,8 @@ def cancel_pending(job_id: str) -> bool:
 def force_start_pending(job_id: str) -> bgjobs.BgJob | None:
     """Start a queued pipeline immediately, deliberately bypassing the limit."""
     with _LOCK:
+        if updates.maintenance_active():
+            raise RuntimeError("Bankai is updating; new jobs remain queued")
         pending = _load_pending()
         index = next(
             (
@@ -531,7 +537,10 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
     jobs = context_jobs if context_jobs is not None else bgjobs.list_jobs()
     out: list[dict] = []
     for j in jobs:
-        if _is_operation(j.kind, getattr(j, "args", None)) or _is_anime_job(getattr(j, "args", None)) != anime_only:
+        if (
+            _is_operation(j.kind, getattr(j, "args", None))
+            or _is_anime_job(getattr(j, "args", None)) != anime_only
+        ):
             continue
         from bankai.torrent import actions as torrent_actions
 
@@ -545,8 +554,7 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
     visible_pending = [
         item
         for item in (pending if pending is not None else _load_pending())
-        if not _is_operation(item.kind, item.args)
-        and _is_anime_job(item.args) == anime_only
+        if not _is_operation(item.kind, item.args) and _is_anime_job(item.args) == anime_only
     ]
     queue_total = len(visible_pending)
     stream_cooldown = _call_with_jobs(_stream_failure_cooldown_until, jobs)
@@ -617,7 +625,7 @@ def catalog_titles() -> set[str]:
         and job.status in {"running", "stopped", "done"}
     }
     pending = _context_pending()
-    for item in (pending if pending is not None else _load_pending()):
+    for item in pending if pending is not None else _load_pending():
         if not _is_operation(item.kind, item.args):
             titles.add(item.title)
     return titles
@@ -680,7 +688,7 @@ def transfer_states() -> dict[str, dict]:
         }
     # Include pending transfers (waiting for a slot) as queued transfers.
     pending = _context_pending()
-    for item in (pending if pending is not None else _load_pending()):
+    for item in pending if pending is not None else _load_pending():
         if item.kind != "transfer":
             continue
         target = _transfer_target(item.args)
