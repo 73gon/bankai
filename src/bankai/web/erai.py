@@ -29,7 +29,8 @@ from selectolax.parser import HTMLParser
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.processor.anime import episode_identity
+from bankai.metadata import anime_mapping
+from bankai.processor.anime import EpisodeIdentity
 from bankai.web import anime as anime_mod
 
 log = get_logger(__name__)
@@ -95,7 +96,9 @@ def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> b
 
 def _default_state() -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
+        "series": {},
+        "series_catalogs": {},
         "last_poll": None,
         "last_success": None,
         "last_error": None,
@@ -130,6 +133,11 @@ def _load_state() -> dict[str, Any]:
         state.update(raw if isinstance(raw, dict) else {})
         backfill.update(raw.get("backfill", {}) if isinstance(raw, dict) else {})
         state["backfill"] = backfill
+        if state.get("version", 1) < 2:
+            for item in state["releases"].values():
+                if item.get("status") == "held" and "TVDB" in item.get("reason", ""):
+                    item["retry_after"] = 0
+            state["version"] = 2
         return state
 
 
@@ -340,17 +348,39 @@ async def _resolve(
 
     episodes = await _tvdb_episode_map(match.tvdb_id)
     season, episode = anime_mod.release_episode_info(entry.title)
-    identity = episode_identity(
-        entry.title,
-        release_title=entry.title,
-        tvdb_episodes=episodes,
-        season_override=season,
-        episode_override=episode,
-    )
-    if identity is None or not any(
-        item.season == identity.season and item.episode == identity.episode for item in episodes
-    ):
-        return None, None, "Episode could not be verified against TVDB ordering"
+    if episode is None:
+        return None, None, "TVDB episode number was not found in the release title"
+    regular = [item for item in episodes if item.season > 0]
+    seasons = {item.season for item in regular}
+    target = None
+    if season is not None:
+        target = next(
+            (item for item in regular if (item.season, item.episode) == (season, episode)), None
+        )
+    elif len(seasons) == 1:
+        target = next((item for item in regular if item.episode == episode), None)
+    else:
+        mapped, known_part = await anime_mapping.mapped_episode(
+            query, episode, match.tvdb_id, episodes
+        )
+        if known_part:
+            if mapped is None:
+                return None, None, "TVDB/AniDB/TheXEM part mapping does not verify this episode"
+            target = next((item for item in regular if (item.season, item.episode) == mapped), None)
+        elif anime_mapping.normalise(query) in {
+            anime_mapping.normalise(match.english_title),
+            anime_mapping.normalise(match.japanese_title or ""),
+        }:
+            absolute = [item for item in regular if item.absolute_number == episode]
+            if len(absolute) == 1:
+                target = absolute[0]
+    if target is None:
+        return (
+            None,
+            None,
+            "TVDB ordering needs an AniDB/TheXEM episode mapping; no season was guessed",
+        )
+    identity = EpisodeIdentity(target.season, target.episode, target.name)
     return match, identity, None
 
 
@@ -416,6 +446,7 @@ async def _consider(
     if error or match is None or identity is None:
         _hold(state, entry, error or "TVDB resolution failed")
         return False
+    state["series"][str(match.tvdb_id)] = asdict(match)
     canonical = f"{match.tvdb_id}|{identity.season}|{identity.episode}"
     previous = state["canonical"].get(canonical)
     resolution = _resolution(entry)
@@ -469,7 +500,7 @@ async def _consider(
 
 
 async def _fetch_rss(client: httpx.AsyncClient) -> list[anime_mod.NyaaEntry]:
-    response = await client.get(_RSS_URL)
+    response = await client.get(get_settings().anime.rss_url)
     response.raise_for_status()
     return anime_mod.parse_rss(response.text)
 
@@ -498,7 +529,21 @@ def _advance_backfill_phase(backfill: dict[str, Any]) -> None:
     if backfill.get("frontier"):
         return
     phase = backfill.get("phase", "2160")
-    if phase == "720":
+    if phase == "1080" and backfill.get("high_only"):
+        queries = backfill.get("title_queries", [])
+        next_query = int(backfill.get("title_query_index", 0)) + 1
+        if next_query < len(queries):
+            backfill.update(
+                {
+                    "title_query_index": next_query,
+                    "title_query": queries[next_query],
+                    "phase": "2160",
+                    "page": 1,
+                    "frontier": [{"include": [], "exclude": [], "page": 1}],
+                }
+            )
+            return
+    if phase == "720" or (phase == "1080" and backfill.get("high_only")):
         backfill.update({"phase": "ready", "complete": True})
         return
     backfill.update(
@@ -513,7 +558,9 @@ def _advance_backfill_phase(backfill: dict[str, Any]) -> None:
 async def _crawl_backfill(state: dict[str, Any], client: httpx.AsyncClient) -> None:
     settings = get_settings().anime
     backfill = state["backfill"]
-    if not settings.backfill_enabled or backfill.get("complete"):
+    if (not settings.backfill_enabled and not backfill.get("title_query")) or backfill.get(
+        "complete"
+    ):
         return
     # Broad Nyaa searches silently stop at 1,000 results. Complementary
     # positive/negative term shards cover the complete catalogue without an
@@ -526,6 +573,8 @@ async def _crawl_backfill(state: dict[str, Any], client: httpx.AsyncClient) -> N
         phase = str(backfill.get("phase", "2160"))
         node = backfill["frontier"][0]
         terms = [f"{phase}p"]
+        if backfill.get("title_query"):
+            terms.append('"' + backfill["title_query"].replace('"', "") + '"')
         terms.extend(f'"{word}"' for word in node["include"])
         terms.extend(f'-"{word}"' for word in node["exclude"])
         query = " ".join(terms)
@@ -603,6 +652,119 @@ async def _crawl_backfill(state: dict[str, Any], client: httpx.AsyncClient) -> N
     _advance_backfill_phase(backfill)
 
 
+def _episode_order(entry: anime_mod.NyaaEntry) -> tuple:
+    season, episode = anime_mod.release_episode_info(entry.title)
+    return (_mapping_key(entry.title), season or 0, episode or 0, -_resolution(entry), entry.id)
+
+
+async def _ordered_candidates(
+    state: dict[str, Any],
+    fresh: dict[str, anime_mod.NyaaEntry],
+    client: httpx.AsyncClient,
+) -> list[anime_mod.NyaaEntry]:
+    # Index each RSS show's full high-quality release set before starting with
+    # its latest episode. Persist work when a long series needs query shards.
+    groups: dict[str, anime_mod.NyaaEntry] = {}
+    family_ids = {}
+    for entry in sorted(fresh.values(), key=lambda item: item.id, reverse=True):
+        parts = await anime_mapping.anidb_parts(anime_mod.clean_release_title(entry.title))
+        ids = {part.tvdb_id for part in parts}
+        parent = next(iter(ids)) if len(ids) == 1 else None
+        key = f"tvdb:{parent}" if parent else _mapping_key(entry.title)
+        family_ids[key] = parent
+        index = state["series_catalogs"].get(key)
+        needs_old = index and (
+            not index.get("complete")
+            or any(
+                _needs_consideration(state, _entry_from_dict(row))
+                for row in index["catalog_1080"].values()
+            )
+        )
+        if _needs_consideration(state, entry) or needs_old:
+            groups.setdefault(key, entry)
+    candidates = []
+    if state["backfill"].get("complete"):
+        candidates.extend(
+            _entry_from_dict(item)
+            for item in [
+                *state["backfill"]["catalog_1080"].values(),
+                *state["backfill"]["catalog_720"].values(),
+            ]
+        )
+    for key, entry in list(groups.items())[:2]:
+        parent = family_ids[key]
+        if key not in state["series_catalogs"]:
+            titles = await anime_mapping.related_titles(parent) if parent else []
+            titles = titles or [anime_mod.clean_release_title(entry.title)]
+            state["series_catalogs"][key] = {
+                **_default_state()["backfill"],
+                "title_query": titles[0],
+                "title_queries": titles,
+                "title_query_index": 0,
+                "parent_tvdb_id": parent,
+                "high_only": True,
+            }
+        index = state["series_catalogs"][key]
+        newest = max((row["id"] for row in index["catalog_1080"].values()), default=0)
+        if index.get("complete") and entry.id > newest:
+            index.update(
+                {
+                    "phase": "2160",
+                    "complete": False,
+                    "title_query_index": 0,
+                    "title_query": index["title_queries"][0],
+                    "frontier": [{"include": [], "exclude": [], "page": 1}],
+                }
+            )
+        try:
+            await _crawl_backfill({"backfill": index}, client)
+            index["error"] = None
+        except Exception as exc:
+            index["error"] = f"{type(exc).__name__}: {exc}"
+            log.warning("Erai series indexing paused for %s: %s", key, exc)
+            continue
+        if not index.get("complete"):
+            continue
+        for release in [
+            *(_entry_from_dict(row) for row in index["catalog_1080"].values()),
+            *fresh.values(),
+        ]:
+            if parent:
+                parts = await anime_mapping.anidb_parts(
+                    anime_mod.clean_release_title(release.title)
+                )
+                if {part.tvdb_id for part in parts} == {parent}:
+                    candidates.append(release)
+            elif _mapping_key(release.title) == key:
+                candidates.append(release)
+    cutoff = time.time() - get_settings().anime.settle_minutes * 60
+    by_hash = {
+        entry.info_hash: entry for entry in candidates if _published_timestamp(entry) <= cutoff
+    }
+    # Named AniDB parts share one TVDB parent. Order by published season and
+    # offset rather than alphabetically sorting "Kashin" before "Ketsubetsu".
+    part_keys = {}
+    for title in {_mapping_key(entry.title) for entry in by_hash.values()}:
+        sample = next(entry for entry in by_hash.values() if _mapping_key(entry.title) == title)
+        parts = await anime_mapping.anidb_parts(anime_mod.clean_release_title(sample.title))
+        if len(parts) == 1 and (parts[0].record.get("defaulttvdbseason") or "").isdigit():
+            part = parts[0]
+            part_keys[title] = (
+                part.tvdb_id,
+                int(part.record.get("defaulttvdbseason")),
+                int(part.record.get("episodeoffset") or 0),
+            )
+
+    def order(entry: anime_mod.NyaaEntry) -> tuple:
+        key, season, episode, quality, release_id = _episode_order(entry)
+        if key in part_keys:
+            parent, mapped_season, offset = part_keys[key]
+            return (f"tvdb:{parent:010d}", mapped_season, episode + offset, quality, release_id)
+        return key, season, episode, quality, release_id
+
+    return sorted(by_hash.values(), key=order)
+
+
 async def run_cycle() -> dict[str, Any]:
     """Run one RSS poll/backfill slice. Safe to call from the API or scheduler."""
 
@@ -654,16 +816,7 @@ async def run_cycle() -> dict[str, Any]:
                     current = fresh.get(key)
                     if current is None or _rank(entry) > _rank(current):
                         fresh[key] = entry
-                candidates = sorted(fresh.values(), key=lambda item: item.id, reverse=True)
-                if state["backfill"].get("complete"):
-                    historical = [
-                        _entry_from_dict(item)
-                        for item in [
-                            *state["backfill"]["catalog_1080"].values(),
-                            *state["backfill"]["catalog_720"].values(),
-                        ]
-                    ]
-                    candidates.extend(sorted(historical, key=lambda item: item.id, reverse=True))
+                candidates = await _ordered_candidates(state, fresh, client)
                 inspected = 0
                 for entry in candidates:
                     if enqueued >= policy.max_enqueues_per_cycle or inspected >= 12:
@@ -712,6 +865,17 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
         "free_space_gib": round(free, 1) if free is not None else None,
         "min_free_space_gib": policy.min_free_space_gib,
         "poll_interval_seconds": policy.poll_interval_seconds,
+        "rss_url": policy.rss_url,
+        "feed_source": "Nyaa / Erai-raws",
+        "series_indexes": [
+            {
+                "title": index["title_query"],
+                "complete": index.get("complete", False),
+                "phase": index.get("phase"),
+                "error": index.get("error"),
+            }
+            for index in state.get("series_catalogs", {}).values()
+        ],
         "settle_minutes": policy.settle_minutes,
         "last_poll": state.get("last_poll"),
         "last_success": state.get("last_success"),

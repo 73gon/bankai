@@ -155,6 +155,9 @@ export interface AnimeSearchPage {
 }
 
 export interface AnimeAutomationStatus {
+  rss_url: string;
+  feed_source: string;
+  series_indexes: Array<{ title: string; complete: boolean; phase: string; error: string | null }>;
   enabled: boolean;
   running: boolean;
   paused: boolean;
@@ -201,6 +204,24 @@ export interface AnimeLibraryEntry {
   staged: boolean;
   stage: string;
   transfer_status: string;
+}
+
+export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
+  season_number: number | null;
+  episode: number | null;
+}
+
+export interface AnimeLibraryShow {
+  key: string;
+  title: string;
+  tvdb_id: number | null;
+  year: number | null;
+  poster_url: string | null;
+  episode_count: number;
+  season_count: number;
+  size: number;
+  staged_count: number;
+  episodes: AnimeLibraryEpisode[];
 }
 
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
@@ -288,6 +309,9 @@ export interface EpisodeItem {
 }
 
 export interface Job {
+  tvdb_id?: number | string | null;
+  poster_url?: string | null;
+  series_title?: string | null;
   id: string;
   kind: string;
   title: string;
@@ -569,7 +593,7 @@ export const api = {
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
   animeQueue: () => request<{ jobs: Job[] }>('/api/anime/queue'),
-  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[] }>('/api/anime/library'),
+  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
   animeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation'),
   runAnimeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation/run', { method: 'POST' }),
   queueMovie: (body: { title: string; german?: string; url?: string; site?: string; year?: number }) =>

@@ -11,10 +11,11 @@ import { Switch } from '@/components/ui/switch';
 
 const LABELS: Record<string, { label: string; description: string; suffix?: string }> = {
   'transfer.anime_shows_dir': { label: 'Anime library folder', description: 'Dedicated Jellyfin Anime destination, using TVDB ordering.' },
-  'anime.enabled': { label: 'Automatic downloads', description: 'Follow Erai-raws RSS and process the historical catalogue.' },
+  'anime.rss_url': { label: 'Nyaa Erai-raws RSS URL', description: 'The actual uploader feed. Only HTTPS Nyaa RSS for Erai-raws is accepted; this is not Erai-raws website RSS.' },
+  'anime.enabled': { label: 'Automatic downloads', description: 'Follow the Nyaa Erai-raws uploader RSS and process its historical catalogue.' },
   'anime.backfill_enabled': { label: 'Historical backfill', description: 'Index all 2160p and 1080p releases first, then use 720p only for missing old episodes.' },
   'anime.min_free_space_gib': { label: 'Free-space reserve', description: 'Pause new automatic downloads at or below this amount.', suffix: 'GiB' },
-  'anime.poll_interval_seconds': { label: 'RSS polling interval', description: 'How often the Erai feed is checked.', suffix: 'seconds' },
+  'anime.poll_interval_seconds': { label: 'Nyaa RSS polling interval', description: 'How often the configured Nyaa uploader RSS URL is checked.', suffix: 'seconds' },
   'anime.settle_minutes': { label: 'Quality settling window', description: 'Wait for alternate encodes before choosing the best release.', suffix: 'minutes' },
   'anime.max_enqueues_per_cycle': { label: 'Downloads per cycle', description: 'Limits how quickly automatic jobs enter the queue.' },
   'anime.backfill_request_delay_seconds': { label: 'Backfill request delay', description: 'Delay between historical Nyaa catalogue pages.', suffix: 'seconds' },
@@ -120,6 +121,7 @@ export default function AnimeSettings() {
             <div><p className='text-xs text-muted-foreground'>Reserve</p><p className='font-mono text-lg'>{status.min_free_space_gib} GiB</p></div>
             <div><p className='text-xs text-muted-foreground'>Last successful check</p><p className='text-sm'>{formatDate(status.last_success)}</p></div>
             <div><p className='text-xs text-muted-foreground'>Last cycle</p><p className='font-mono text-lg'>{status.last_enqueued} queued</p></div>
+            <div className='sm:col-span-2 lg:col-span-4'><p className='text-xs text-muted-foreground'>Active feed: {status.feed_source}</p><a href={status.rss_url} target='_blank' rel='noreferrer' className='break-all font-mono text-xs underline underline-offset-4'>{status.rss_url}</a></div>
           </CardContent>
         </Card>
       )}
@@ -164,6 +166,21 @@ export default function AnimeSettings() {
             <div><p className='text-xs text-muted-foreground'>Search branches completed</p><p className='font-mono text-xl'>{status.backfill.queries_completed}</p></div>
             <div><p className='text-xs text-muted-foreground'>1080p+ episodes</p><p className='font-mono text-xl'>{status.backfill.found_1080}</p></div>
             <div><p className='text-xs text-muted-foreground'>720p fallbacks</p><p className='font-mono text-xl'>{status.backfill.fallback_720}</p></div>
+          </CardContent>
+        </Card>
+      )}
+
+      {status && status.series_indexes.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Episode-order indexing</CardTitle><CardDescription>Before downloading a newly discovered show, its high-quality releases and related AniDB parts are indexed so earlier episodes can be selected first.</CardDescription></CardHeader>
+          <CardContent className='flex flex-col gap-3'>
+            {status.series_indexes.map((index) => (
+              <div key={index.title} className='flex flex-wrap items-center justify-between gap-2'>
+                <span className='text-sm'>{index.title}</span>
+                <Badge variant={index.complete ? 'success' : index.error ? 'warning' : 'info'}>{index.complete ? 'Ready' : index.error ? 'Paused' : 'Indexing ' + index.phase + 'p'}</Badge>
+                {index.error && <p className='w-full text-xs text-warning'>{index.error}</p>}
+              </div>
+            ))}
           </CardContent>
         </Card>
       )}

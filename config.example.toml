@@ -59,6 +59,8 @@ rsync_binary = "rsync"
 # explicitly list German subtitles on its Nyaa detail page, and resolve to an
 # unambiguous TVDB series/episode before it can enter the Anime queue.
 enabled = false
+# Nyaa uploader RSS, not a feed from Erai-raws' website.
+rss_url = "https://nyaa.si/?page=rss&u=Erai-raws&c=1_2"
 poll_interval_seconds = 900
 # Wait briefly so competing encodes can appear before selecting the best one.
 settle_minutes = 30

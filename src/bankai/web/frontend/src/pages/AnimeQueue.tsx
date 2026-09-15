@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState, Spinner } from '@/components/ui/empty';
+import { AnimePoster } from '@/components/AnimePoster';
 
 function formatTime(value: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : '—';
@@ -94,8 +95,13 @@ export default function AnimeQueue() {
                 {jobs.map((job) => (
                   <tr key={job.id} className='border-b border-border/60 align-top last:border-0'>
                     <td className='px-3 py-4'>
-                      <p className='font-medium text-foreground'>{job.title}</p>
-                      <p className='mt-1 max-w-xl text-xs text-muted-foreground'>{job.reason || job.step_label || job.kind}</p>
+                      <div className='flex items-start gap-3'>
+                        <AnimePoster url={job.poster_url} title={job.series_title || job.title} className='w-12 shrink-0' />
+                        <div className='flex flex-col gap-1'>
+                          <p className='font-medium text-foreground'>{job.title}</p>
+                          <p className='max-w-xl text-xs text-muted-foreground'>{job.reason || job.step_label || job.kind}</p>
+                        </div>
+                      </div>
                     </td>
                     <td className='px-3 py-4'><Badge variant={statusVariant(job.status)}>{job.status}</Badge></td>
                     <td className='px-3 py-4'>

@@ -81,3 +81,61 @@ def test_anime_library_includes_final_and_staged_nyaa_files_only(
     assert [entry["name"] for entry in main] == [normal.stem]
     titles = client.get("/api/titles").json()["rows"]
     assert str(staged) not in {row["path"] for row in titles}
+
+
+def test_library_groups_episodes_into_one_show_with_sorted_seasons(
+    client: TestClient, tmp_path: Path
+) -> None:
+    for season, episode in [(2, 3), (1, 2), (1, 1)]:
+        path = (
+            tmp_path
+            / "shows_anime"
+            / "Example Anime"
+            / f"Season {season:02d}"
+            / f"Example - S{season:02d}E{episode:02d}.mkv"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    body = client.get("/api/anime/library").json()
+    assert len(body["shows"]) == 1
+    show = body["shows"][0]
+    assert show["episode_count"] == 3 and show["season_count"] == 2
+    assert [(row["season_number"], row["episode"]) for row in show["episodes"]] == [
+        (1, 1),
+        (1, 2),
+        (2, 3),
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/?page=rss&u=Erai-raws",
+        "https://nyaa.si/?page=rss&u=Somebody",
+        "http://nyaa.si/?page=rss&u=Erai-raws",
+        "https://nyaa.si/?page=rss&u=Erai-raws&c=1_4",
+    ],
+)
+def test_rss_setting_rejects_non_erai_nyaa_feeds(client: TestClient, url: str) -> None:
+    response = client.post("/api/settings", json={"key": "anime.rss_url", "value": url})
+    assert response.status_code == 422
+
+
+def test_queue_cover_uses_canonical_tvdb_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bankai.web import anime_library
+
+    anime_library._CACHE.clear()
+
+    async def metadata(title, tvdb_id):
+        assert tvdb_id == 74796
+        return {"english_title": "Bleach", "poster_url": "https://example.com/bleach.jpg"}
+
+    monkeypatch.setattr(
+        "bankai.web.jobs.anime_snapshot",
+        lambda: [{"id": "anime", "title": "Bleach S17E14", "tvdb_id": "74796"}],
+    )
+    monkeypatch.setattr(anime_library, "show_metadata", metadata)
+    row = client.get("/api/anime/queue").json()["jobs"][0]
+    assert row["poster_url"] == "https://example.com/bleach.jpg" and row["series_title"] == "Bleach"

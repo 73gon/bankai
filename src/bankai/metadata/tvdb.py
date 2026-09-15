@@ -37,6 +37,7 @@ class TitleAlias:
     year: int | None = None
     tvdb_id: int | None = None
     kind: MediaKind | None = None
+    poster_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,7 @@ class TVDBClient:
         kind: MediaKind,
         limit: int = 5,
         search_language: str | None = None,
+        anime_only: bool = False,
     ) -> list[TitleAlias]:
         clean = query.strip()
         if not clean:
@@ -106,6 +108,20 @@ class TVDBClient:
                 continue
             record_type = _record_type(item, fallback=tvdb_type)
             tvdb_id = _record_id(item)
+            extended = {}
+            if anime_only:
+                entity = "movies" if record_type == "movie" else "series"
+                details = await self._client.get(
+                    f"{entity}/{tvdb_id}/extended", headers={"Authorization": f"Bearer {token}"},
+                )
+                details.raise_for_status()
+                extended = details.json().get("data") or {}
+                genres = {
+                    str(genre.get("name", "")).casefold()
+                    for genre in extended.get("genres", []) if isinstance(genre, dict)
+                }
+                if "anime" not in genres:
+                    continue
             base = _alias_from_record(item, kind=kind)
             translations = await self._fetch_translations(record_type, tvdb_id, token)
             worldwide_date = await self._fetch_worldwide_release(record_type, tvdb_id, token)
@@ -118,10 +134,31 @@ class TVDBClient:
                 year=int(worldwide_date[:4]) if worldwide_date else base.year,
                 tvdb_id=tvdb_id,
                 kind=base.kind,
+                poster_url=extended.get("image") or item.get("image_url"),
             )
             if alias.name or alias.english_title or alias.german_title:
                 aliases.append(alias)
         return aliases
+
+    async def series_info(self, tvdb_id: int) -> dict[str, Any]:
+        token = await self._ensure_token()
+        response = await self._client.get(
+            f"series/{tvdb_id}/extended", headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        data = response.json().get("data") or {}
+        translations = await self._fetch_translations("series", tvdb_id, token)
+        return {
+            "tvdb_id": tvdb_id,
+            "english_title": translations.get("eng") or data.get("name"),
+            "japanese_title": translations.get("jpn"),
+            "year": _optional_int(str(data.get("firstAired") or "")[:4]),
+            "poster_url": data.get("image"),
+            "aliases": tuple(
+                alias.get("name") if isinstance(alias, dict) else alias
+                for alias in data.get("aliases", []) if alias
+            ),
+        }
 
     async def series_episodes(self, tvdb_id: int) -> list[TVDBEpisode]:
         """Return TVDB's default-order episode map for one series."""

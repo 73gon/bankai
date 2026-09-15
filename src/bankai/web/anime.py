@@ -21,6 +21,7 @@ from selectolax.parser import HTMLParser
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
+from bankai.metadata import anime_mapping
 from bankai.metadata.tvdb import TitleAlias, TVDBClient
 from bankai.queue.models import MediaKind
 from bankai.web import discover
@@ -93,14 +94,31 @@ def split_filter_terms(raw: str | None) -> list[str]:
     return [term.strip().casefold() for term in re.split(r"[,;\n]+", raw) if term.strip()]
 
 
+def deconstruct_release(title: str) -> tuple[str, int] | None:
+    """Split the final ' - episode [tags]' suffix, retaining numeric title parts."""
+    value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
+    value = re.sub(r"\.(?:mkv|mp4|avi|m4v|mov|ts|webm)$", "", value, flags=re.I)
+    match = re.fullmatch(
+        r"(?P<name>.+)\s+-\s+(?P<episode>\d{1,4})(?:v\d+)?\s*(?:\[[^]]*\]\s*)*",
+        value,
+    )
+    if match:
+        return match.group("name").strip(), int(match.group("episode"))
+    return None
+
+
 def clean_release_title(title: str) -> str:
     """Reduce a scene-style release name to a TVDB-searchable anime title."""
     value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
     value = re.sub(r"\.(?:mkv|mp4|avi|m4v|mov|ts|webm)$", "", value, flags=re.I)
     value = re.sub(r"\s*[|/]\s*.*$", "", value)
-    value = re.sub(r"\b(?:season\s*)?S\d{1,2}\s*[-_. ]+\s*\d{1,4}\b.*$", "", value, flags=re.I)
-    value = re.sub(r"\bS\d{1,2}E\d{1,4}\b.*$", "", value, flags=re.I)
-    value = re.sub(r"\s+-\s+\d{1,4}(?:v\d+)?\b.*$", "", value, flags=re.I)
+    structured = deconstruct_release(title)
+    if structured:
+        value = structured[0]
+    else:
+        value = re.sub(r"\b(?:season\s*)?S\d{1,2}\s*[-_. ]+\s*\d{1,4}\b.*$", "", value, flags=re.I)
+        value = re.sub(r"\bS\d{1,2}E\d{1,4}\b.*$", "", value, flags=re.I)
+        value = re.sub(r"\s+-\s+\d{1,4}(?:v\d+)?\b.*$", "", value, flags=re.I)
     value = re.sub(r"\s*\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\).*$", "", value)
     value = re.sub(r"\s+(?:season\s+)?\d+\s+(?:complete|batch)\b.*$", "", value, flags=re.I)
     value = re.sub(
@@ -139,6 +157,10 @@ def release_episode_info(title: str) -> tuple[int | None, int | None]:
         or re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\s+season\b", value, re.I)
         or re.search(r"\bS(\d{1,2})\b", value, re.I)
     )
+    structured = deconstruct_release(title)
+    if structured:
+        return int(season_match.group(1)) if season_match else None, structured[1]
+
     episode_match = (
         re.search(r"\b(?:episode|ep|e)\s*0*(\d{1,4})(?:v\d+)?\b", value, re.I)
         or re.search(r"\s+-\s+0*(\d{1,4})(?:v\d+)?(?:\b|\s)", value, re.I)
@@ -298,6 +320,27 @@ def _match_score(query: str, candidate: AnimeTVDBMatch) -> float:
     return max(score(name) for name in names if name)
 
 
+async def series_metadata(tvdb_id: int) -> AnimeTVDBMatch:
+    key = f"id:{tvdb_id}"
+    hit = _TVDB_CACHE.get(key)
+    if hit and time.time() - hit[0] < _CACHE_TTL:
+        return hit[1][0]
+    metadata = get_settings().metadata
+    client = TVDBClient(
+        api_key=metadata.tvdb_api_key, pin=metadata.tvdb_pin, languages=["eng", "jpn"],
+    )
+    try:
+        info = await client.series_info(tvdb_id)
+    finally:
+        await client.aclose()
+    if not info.get("english_title"):
+        raise ValueError("TVDB series has no usable title")
+    info["poster_url"] = discover._abs_image(info.get("poster_url"))
+    item = AnimeTVDBMatch(kind="show", **info)
+    _TVDB_CACHE[key] = (time.time(), [item])
+    return item
+
+
 async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]:
     clean = query.strip()
     if not clean or not discover.is_configured():
@@ -306,6 +349,17 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
     hit = _TVDB_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < _CACHE_TTL:
         return hit[1][:limit]
+    mapped_ids = await anime_mapping.mapped_series_ids(clean)
+    mapped = []
+    for tvdb_id in mapped_ids:
+        try:
+            item = await series_metadata(tvdb_id)
+            mapped.append(replace(item, aliases=tuple(dict.fromkeys((*item.aliases, clean)))))
+        except Exception as exc:
+            log.debug("Mapped TVDB identity unavailable for %s: %s", tvdb_id, exc)
+    if mapped:
+        _TVDB_CACHE[cache_key] = (time.time(), mapped)
+        return mapped[:limit]
     metadata = get_settings().metadata
     client = TVDBClient(
         api_key=metadata.tvdb_api_key,
@@ -317,25 +371,29 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
             client.search_aliases(
                 clean,
                 kind=MediaKind.EPISODE,
-                limit=3,
+                limit=8,
+                anime_only=True,
                 search_language="eng",
             ),
             client.search_aliases(
                 clean,
                 kind=MediaKind.EPISODE,
-                limit=3,
+                limit=8,
+                anime_only=True,
                 search_language="jpn",
             ),
             client.search_aliases(
                 clean,
                 kind=MediaKind.MOVIE,
-                limit=3,
+                limit=8,
+                anime_only=True,
                 search_language="eng",
             ),
             client.search_aliases(
                 clean,
                 kind=MediaKind.MOVIE,
-                limit=3,
+                limit=8,
+                anime_only=True,
                 search_language="jpn",
             ),
         )
@@ -353,11 +411,11 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
         english = alias.english_title or alias.name or alias.japanese_title
         if not english:
             return None
-        poster: str | None = None
+        poster: str | None = alias.poster_url
         try:
             results = await discover.search(english, kind=kind, limit=5)
             matched = next((item for item in results if item.tvdb_id == alias.tvdb_id), None)
-            poster = matched.poster_url if matched else None
+            poster = poster or (matched.poster_url if matched else None)
         except Exception:
             pass
         return AnimeTVDBMatch(
@@ -366,7 +424,7 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
             english_title=english,
             japanese_title=alias.japanese_title or (alias.name if alias.name != english else None),
             year=alias.year,
-            poster_url=poster,
+            poster_url=discover._abs_image(poster),
             aliases=tuple(
                 dict.fromkeys(
                     value
@@ -387,6 +445,21 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
             continue
         seen.add((item.kind, item.tvdb_id))
         unique.append(item)
+    # AniDB part names often do not exist as aliases on TVDB's parent show.
+    for tvdb_id in mapped_ids:
+        if ("show", tvdb_id) in seen:
+            unique = [
+                replace(item, aliases=tuple(dict.fromkeys((*item.aliases, clean))))
+                if item.kind == "show" and item.tvdb_id == tvdb_id else item
+                for item in unique
+            ]
+            continue
+        try:
+            info = await series_metadata(tvdb_id)
+            unique.insert(0, replace(info, aliases=tuple(dict.fromkeys((*info.aliases, clean)))))
+            seen.add(("show", tvdb_id))
+        except Exception as exc:
+            log.debug("Mapped TVDB metadata unavailable for %s: %s", tvdb_id, exc)
     unique.sort(key=lambda item: _match_score(clean, item), reverse=True)
     _TVDB_CACHE[cache_key] = (time.time(), unique)
     return unique[:limit]

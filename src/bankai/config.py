@@ -107,12 +107,31 @@ class AnimeAutomationSettings(BaseModel):
     """Safety and scheduling policy for autonomous Erai-raws ingestion."""
 
     enabled: bool = False
+    rss_url: str = "https://nyaa.si/?page=rss&u=Erai-raws&c=1_2"
     poll_interval_seconds: int = Field(default=900, ge=60)
     settle_minutes: int = Field(default=30, ge=0)
     min_free_space_gib: float = Field(default=100.0, ge=0)
     max_enqueues_per_cycle: int = Field(default=2, ge=1, le=20)
     backfill_enabled: bool = True
     backfill_request_delay_seconds: float = Field(default=2.0, ge=1.0)
+
+
+    @model_validator(mode="after")
+    def validate_rss_source(self) -> AnimeAutomationSettings:
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(self.rss_url)
+        query = parse_qs(parsed.query)
+        if (
+            parsed.scheme != "https" or parsed.hostname != "nyaa.si"
+            or parsed.username or parsed.password or parsed.port not in (None, 443)
+            or parsed.path not in ("", "/") or parsed.fragment
+            or query.get("page") != ["rss"]
+            or query.get("u") != ["Erai-raws"]
+            or query.get("c", ["1_2"]) != ["1_2"]
+        ):
+            raise ValueError("Use the HTTPS Nyaa RSS feed for Erai-raws in category 1_2")
+        return self
 
 
 class QueueSettings(BaseModel):

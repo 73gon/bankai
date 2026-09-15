@@ -458,3 +458,145 @@ def test_backfill_follows_actual_nyaa_next_page_markup(
     assert state["backfill"]["frontier"][0]["page"] == 4
     assert not state["backfill"]["complete"]
     assert len(queries) == 3
+
+
+def test_one_season_resolution_does_not_need_xem(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def candidates(*args, **kwargs):
+        return [AnimeTVDBMatch(1, "show", "Test Show")]
+
+    async def episodes(_id):
+        return [TVDBEpisode(1, 1), TVDBEpisode(1, 2)]
+
+    async def forbidden(*args):
+        raise AssertionError("one-season shows do not need mapping")
+
+    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
+    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", forbidden)
+    match, identity, error = asyncio.run(erai._resolve(entry()))
+    assert match is not None and not error and (identity.season, identity.episode) == (1, 1)
+
+
+def test_named_bleach_part_uses_published_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    title = "Bleach: Sennen Kessen Hen - Ketsubetsu Tan"
+
+    async def candidates(*args, **kwargs):
+        return [AnimeTVDBMatch(74796, "show", "Bleach", aliases=(title,))]
+
+    async def episodes(_id):
+        return [TVDBEpisode(1, 1), TVDBEpisode(17, 14)]
+
+    async def mapped(*args):
+        return (17, 14), True
+
+    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
+    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapped)
+    match, identity, error = asyncio.run(
+        erai._resolve(entry("[Erai-raws] " + title + " - 01 [1080p]"))
+    )
+    assert match is not None and not error and (identity.season, identity.episode) == (17, 14)
+
+
+def test_named_multiseason_alias_without_mapping_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def candidates(*args, **kwargs):
+        return [AnimeTVDBMatch(74796, "show", "Bleach", aliases=("Bleach Calamity",))]
+
+    async def episodes(_id):
+        return [TVDBEpisode(1, 1, 1), TVDBEpisode(17, 41, 407)]
+
+    async def mapped(*args):
+        return None, False
+
+    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
+    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapped)
+    match, identity, error = asyncio.run(
+        erai._resolve(entry("[Erai-raws] Bleach Calamity - 01 [1080p]"))
+    )
+    assert match is None and identity is None and "no season was guessed" in error
+
+
+def test_rss_reads_configured_nyaa_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = Settings(anime={"rss_url": "https://nyaa.si/?u=Erai-raws&page=rss&c=1_2"})
+    seen = []
+
+    class Client:
+        async def get(self, url):
+            seen.append(url)
+            return SimpleNamespace(text="<rss><channel /></rss>", raise_for_status=lambda: None)
+
+    monkeypatch.setattr(erai, "get_settings", lambda: policy)
+    assert asyncio.run(erai._fetch_rss(Client())) == []
+    assert seen == [policy.anime.rss_url]
+
+
+def test_series_ordering_indexes_older_episodes_even_without_global_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(anime={"backfill_enabled": False, "backfill_request_delay_seconds": 1})
+    state = erai._default_state()
+    newest = entry("[Erai-raws] Test Show - 12 [1080p]", 12)
+    first = entry("[Erai-raws] Test Show - 01 [1080p]", 1)
+
+    class Client:
+        async def get(self, url):
+            html = listing(first) + listing(newest) if "1080p" in url else ""
+            return SimpleNamespace(text=html, raise_for_status=lambda: None)
+
+    async def no_wait(seconds):
+        pass
+
+    async def no_parts(title):
+        return []
+
+    monkeypatch.setattr(erai, "get_settings", lambda: settings)
+    monkeypatch.setattr(erai.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(erai.anime_mapping, "anidb_parts", no_parts)
+    result = asyncio.run(
+        erai._ordered_candidates(state, {erai._release_key(newest): newest}, Client())
+    )
+    assert [erai.anime_mod.release_episode_info(row.title)[1] for row in result] == [1, 12]
+
+
+def test_named_parts_wait_for_parent_catalogue_then_follow_tvdb_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xml.etree import ElementTree as ET
+
+    settings = Settings(anime={"backfill_enabled": False, "backfill_request_delay_seconds": 1})
+    state = erai._default_state()
+    earlier = entry("[Erai-raws] Bleach Ketsubetsu - 01 [1080p]", 1)
+    latest = entry("[Erai-raws] Bleach Kashin - 01 [1080p]", 2)
+
+    async def parts(title):
+        if title not in {"Bleach Ketsubetsu", "Bleach Kashin"}:
+            return []
+        offset = 13 if title == "Bleach Ketsubetsu" else 40
+        record = ET.fromstring(f'<anime defaulttvdbseason="17" episodeoffset="{offset}" />')
+        return [erai.anime_mapping.Part(74796, offset, record)]
+
+    async def titles(tvdb_id):
+        return ["Bleach Ketsubetsu", "Bleach Kashin"]
+
+    class Client:
+        async def get(self, url):
+            html = ""
+            if "1080p" in url:
+                html = listing(earlier if "Ketsubetsu" in url else latest)
+            return SimpleNamespace(text=html, raise_for_status=lambda: None)
+
+    async def no_wait(seconds):
+        pass
+
+    monkeypatch.setattr(erai, "get_settings", lambda: settings)
+    monkeypatch.setattr(erai.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(erai.anime_mapping, "anidb_parts", parts)
+    monkeypatch.setattr(erai.anime_mapping, "related_titles", titles)
+    fresh = {erai._release_key(latest): latest}
+    assert asyncio.run(erai._ordered_candidates(state, fresh, Client())) == []
+    result = asyncio.run(erai._ordered_candidates(state, fresh, Client()))
+    assert [row.id for row in result] == [earlier.id, latest.id]

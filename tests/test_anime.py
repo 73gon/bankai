@@ -295,3 +295,10 @@ def test_nonempty_anime_search_enriches_every_visible_release(
     page = asyncio.run(anime.search("Bleach"))
 
     assert len(page.items) == len(rows)
+
+
+def test_erai_suffix_deconstruction_keeps_numbers_inside_the_title() -> None:
+    title = "[Erai-raws] Anime Name - 2 - 01v2 [1080p][MultiSub][ABCDEF12].mkv"
+    assert anime.deconstruct_release(title) == ("Anime Name - 2", 1)
+    assert anime.clean_release_title(title) == "Anime Name - 2"
+    assert anime.release_episode_info(title) == (None, 1)

@@ -646,6 +646,7 @@ SAFE_SETTING_KEYS: set[str] = {
     "transfer.shows_dir",
     "transfer.anime_shows_dir",
     "anime.enabled",
+    "anime.rss_url",
     "anime.poll_interval_seconds",
     "anime.settle_minutes",
     "anime.min_free_space_gib",
@@ -1414,57 +1415,64 @@ def create_app() -> Any:
         return await erai_mod.run_cycle()
 
     @app.get("/api/anime/queue")
-    def anime_queue() -> dict:
-        return {"jobs": webjobs.anime_snapshot()}
+    async def anime_queue() -> dict:
+        from bankai.web.anime_library import queue_covers
+        rows = await asyncio.to_thread(webjobs.anime_snapshot)
+        return {"jobs": await queue_covers(rows)}
 
     @app.get("/api/anime/library")
-    def anime_library() -> dict:
-        root = Path(get_settings().transfer.anime_shows_dir)
-        entries: list[dict] = []
-        if root.exists():
-            for path in root.rglob("*"):
-                if not path.is_file() or path.suffix.casefold() not in {".mkv", ".mp4", ".m4v", ".avi", ".webm"}:
+    async def anime_library() -> dict:
+        def scan() -> tuple[Path, list[dict]]:
+            root = Path(get_settings().transfer.anime_shows_dir)
+            entries: list[dict] = []
+            if root.exists():
+                for path in root.rglob("*"):
+                    if not path.is_file() or path.suffix.casefold() not in {".mkv", ".mp4", ".m4v", ".avi", ".webm"}:
+                        continue
+                    try:
+                        stat = path.stat()
+                        relative = str(path.relative_to(root))
+                    except OSError:
+                        continue
+                    parts = Path(relative).parts
+                    entries.append(
+                        {
+                            "path": str(path),
+                            "rel_path": relative,
+                            "name": path.name,
+                            "series": parts[0] if len(parts) > 1 else path.stem,
+                            "season": parts[1] if len(parts) > 2 else None,
+                            "size": stat.st_size,
+                            "mtime": stat.st_mtime,
+                            "staged": False,
+                            "stage": "transferred",
+                            "transfer_status": "done",
+                        }
+                    )
+            for entry in media_mod.scan_library():
+                state = review_mod.get_state(entry.path)
+                if state.stage == "deleted" or not anime_mod.is_nyaa_url(state.torrent_source_url or ""):
                     continue
-                try:
-                    stat = path.stat()
-                    relative = str(path.relative_to(root))
-                except OSError:
-                    continue
-                parts = Path(relative).parts
                 entries.append(
                     {
-                        "path": str(path),
-                        "rel_path": relative,
-                        "name": path.name,
-                        "series": parts[0] if len(parts) > 1 else path.stem,
-                        "season": parts[1] if len(parts) > 2 else None,
-                        "size": stat.st_size,
-                        "mtime": stat.st_mtime,
-                        "staged": False,
-                        "stage": "transferred",
-                        "transfer_status": "done",
+                        "path": entry.path,
+                        "rel_path": entry.rel_path,
+                        "name": Path(entry.path).name,
+                        "series": entry.series or entry.name,
+                        "season": f"Season {entry.season:02d}" if entry.season is not None else None,
+                        "size": entry.size,
+                        "mtime": entry.mtime,
+                        "staged": True,
+                        "stage": state.stage,
+                        "transfer_status": state.transfer_status,
                     }
                 )
-        for entry in media_mod.scan_library():
-            state = review_mod.get_state(entry.path)
-            if state.stage == "deleted" or not anime_mod.is_nyaa_url(state.torrent_source_url or ""):
-                continue
-            entries.append(
-                {
-                    "path": entry.path,
-                    "rel_path": entry.rel_path,
-                    "name": Path(entry.path).name,
-                    "series": entry.series or entry.name,
-                    "season": f"Season {entry.season:02d}" if entry.season is not None else None,
-                    "size": entry.size,
-                    "mtime": entry.mtime,
-                    "staged": True,
-                    "stage": state.stage,
-                    "transfer_status": state.transfer_status,
-                }
-            )
-        entries.sort(key=lambda item: (item["series"].casefold(), item["rel_path"].casefold()))
-        return {"root": str(root), "entries": entries}
+            entries.sort(key=lambda item: (item["series"].casefold(), item["rel_path"].casefold()))
+            return root, entries
+
+        root, entries = await asyncio.to_thread(scan)
+        from bankai.web.anime_library import group_shows
+        return {"root": str(root), "entries": entries, "shows": await group_shows(entries, root)}
 
     @app.get("/api/anime/tvdb")
     async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
