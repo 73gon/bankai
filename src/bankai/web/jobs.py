@@ -37,6 +37,10 @@ _ROW_CACHE_LOCK = threading.Lock()
 # metadata + log revision so the queue does not re-read hundreds of historical
 # logs on every poll.  Running jobs naturally miss whenever their log grows.
 _ROW_CACHE: dict[str, tuple[tuple[object, ...], dict]] = {}
+_ANIME_STORAGE_CACHE_SECONDS = 10.0
+_ANIME_CACHE_LOCK = threading.Lock()
+_QBIT_COMPLETED_CACHE: tuple[float, frozenset[str]] = (0.0, frozenset())
+_ANIME_RESERVE_CACHE: tuple[float, bool] = (0.0, False)
 
 
 def _is_operation(kind: str | None, args: list[str] | None = None) -> bool:
@@ -48,17 +52,75 @@ def _is_anime_job(args: list[str] | None) -> bool:
     return bool(args and args[0] == "anime-download")
 
 
-def _anime_storage_ready(args: list[str] | None) -> bool:
-    if not _is_anime_job(args) or "--require-german-subtitles" not in (args or []):
-        return True
+def _completed_anime_hashes() -> frozenset[str]:
+    """Return completed qBittorrent hashes without polling once per queue row."""
+
+    global _QBIT_COMPLETED_CACHE
+    now = time.monotonic()
+    with _ANIME_CACHE_LOCK:
+        if now - _QBIT_COMPLETED_CACHE[0] < _ANIME_STORAGE_CACHE_SECONDS:
+            return _QBIT_COMPLETED_CACHE[1]
+    hashes: frozenset[str] = frozenset()
+    try:
+        import httpx
+
+        settings = get_settings().qbittorrent
+        with httpx.Client(
+            base_url=settings.url.rstrip("/"), timeout=10.0, follow_redirects=True
+        ) as client:
+            login = client.post(
+                "/api/v2/auth/login",
+                data={"username": settings.username, "password": settings.password},
+                headers={"Referer": settings.url},
+            )
+            if login.status_code != 200 or login.text.strip() != "Ok.":
+                raise RuntimeError(f"qBittorrent login failed ({login.status_code})")
+            response = client.get(
+                "/api/v2/torrents/info",
+                params={"category": settings.category, "filter": "completed"},
+            )
+            response.raise_for_status()
+            hashes = frozenset(
+                str(row.get("hash", "")).casefold()
+                for row in response.json()
+                if row.get("hash") and float(row.get("progress", 0)) >= 1.0
+            )
+    except Exception as exc:
+        log.warning("could not inspect completed Anime torrents: %s", exc)
+    with _ANIME_CACHE_LOCK:
+        _QBIT_COMPLETED_CACHE = (now, hashes)
+    return hashes
+
+
+def _anime_reserve_available() -> bool:
+    global _ANIME_RESERVE_CACHE
+    now = time.monotonic()
+    with _ANIME_CACHE_LOCK:
+        if now - _ANIME_RESERVE_CACHE[0] < _ANIME_STORAGE_CACHE_SECONDS:
+            return _ANIME_RESERVE_CACHE[1]
     from bankai.web.erai import download_free_space_gib, free_space_gib
 
     free = free_space_gib()
     download_free = download_free_space_gib()
     reserve = get_settings().anime.min_free_space_gib
-    return (
-        free is not None and free > reserve and (download_free is None or download_free > reserve)
+    ready = free is not None and free > reserve and (
+        download_free is None or download_free > reserve
     )
+    with _ANIME_CACHE_LOCK:
+        _ANIME_RESERVE_CACHE = (now, ready)
+    return ready
+
+
+def _anime_storage_ready(args: list[str] | None) -> bool:
+    if not _is_anime_job(args) or "--require-german-subtitles" not in (args or []):
+        return True
+    info_hash = (bgjobs.argument_value(args, "--info-hash") or "").casefold()
+    # A finished torrent needs no additional download space. Let its worker
+    # organize and transfer it even while new/incomplete downloads remain held
+    # behind the configured reserve.
+    if info_hash and info_hash in _completed_anime_hashes():
+        return True
+    return _anime_reserve_available()
 
 
 def _pending_path() -> Path:

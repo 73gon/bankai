@@ -46,6 +46,41 @@ def test_running_count_excludes_transfers(monkeypatch: pytest.MonkeyPatch) -> No
     assert webjobs._running_count() == 2
 
 
+def test_completed_anime_bypasses_full_download_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info_hash = "a" * 40
+    args = [
+        "anime-download",
+        "--info-hash",
+        info_hash,
+        "--require-german-subtitles",
+    ]
+    monkeypatch.setattr(webjobs, "_completed_anime_hashes", lambda: frozenset({info_hash}))
+    monkeypatch.setattr(
+        webjobs,
+        "_anime_reserve_available",
+        lambda: (_ for _ in ()).throw(AssertionError("reserve should not be checked")),
+    )
+
+    assert webjobs._anime_storage_ready(args) is True
+
+
+def test_incomplete_anime_still_obeys_download_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = [
+        "anime-download",
+        "--info-hash",
+        "b" * 40,
+        "--require-german-subtitles",
+    ]
+    monkeypatch.setattr(webjobs, "_completed_anime_hashes", lambda: frozenset())
+    monkeypatch.setattr(webjobs, "_anime_reserve_available", lambda: False)
+
+    assert webjobs._anime_storage_ready(args) is False
+
+
 def test_snapshot_hides_detached_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(webjobs, "reconcile", lambda: 0)
     monkeypatch.setattr(webjobs, "_load_pending", lambda: [])
