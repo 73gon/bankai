@@ -92,7 +92,7 @@ def test_anime_library_includes_final_and_staged_nyaa_files_only(
     normal = tmp_path / "staging" / "Shows" / "Normal" / "Season 01" / "Normal - S01E01.mkv"
     normal.parent.mkdir(parents=True)
     normal.write_bytes(b"normal")
-    entries = client.get("/api/anime/library").json()["entries"]
+    entries = client.get("/api/anime/library", params={"include_entries": True}).json()["entries"]
     assert {entry["name"] for entry in entries} == {final.name, staged.name}
     assert {entry["staged"] for entry in entries} == {True, False}
     main = client.get("/api/library").json()["entries"]

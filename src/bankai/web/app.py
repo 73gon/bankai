@@ -1510,7 +1510,7 @@ def create_app() -> Any:
         }
 
     @app.get("/api/anime/library")
-    async def anime_library(show: str | None = None) -> dict:
+    async def anime_library(show: str | None = None, include_entries: bool = False) -> dict:
         def scan() -> tuple[Path, list[dict]]:
             root = Path(get_settings().transfer.anime_shows_dir)
             entries: list[dict] = []
@@ -1578,7 +1578,13 @@ def create_app() -> Any:
             include_episodes=show is not None,
             only_key=show,
         )
-        visible_entries = entries if show is None else [row for row in entries if row["series"] == show]
+        visible_entries = (
+            entries
+            if include_entries and show is None
+            else [row for row in entries if row["series"] == show]
+            if include_entries
+            else []
+        )
         return {"root": str(root), "entries": visible_entries, "shows": shows}
 
     @app.get("/api/anime/tvdb")
