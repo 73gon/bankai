@@ -149,7 +149,7 @@ export default function AnimeLibrary() {
                 <CardDescription>{show.season_count} season{show.season_count === 1 ? '' : 's'}</CardDescription>
               </CardHeader>
               <CardContent className='flex flex-wrap gap-2'>
-                <span className='w-full text-sm'>{show.downloaded_count} out of {show.total_count} episodes downloaded</span>
+                <span className='w-full text-sm'>{show.downloaded_count}/{show.total_count} episodes downloaded</span>
                 {show.staged_count > 0 && <Badge variant='warning'>{show.staged_count} staged</Badge>}
                 <span className='text-xs text-muted-foreground'>{formatSize(show.size)}</span>
               </CardContent>
@@ -169,7 +169,7 @@ export default function AnimeLibrary() {
                   <AnimePoster url={active.poster_url} title={active.title} className='w-28 shrink-0' />
                   <div className='flex flex-col gap-3'>
                     <DialogTitle>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DialogTitle>
-                    <DialogDescription>{active.downloaded_count} out of {active.total_count} episodes downloaded · {active.season_count} seasons · {formatSize(active.size)} · TVDB ordering</DialogDescription>
+                    <DialogDescription>{active.downloaded_count}/{active.total_count} episodes downloaded · {active.season_count} seasons · {formatSize(active.size)} · TVDB ordering</DialogDescription>
                     {active.tvdb_id && <Button asChild variant='outline' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
                   </div>
                 </div>
