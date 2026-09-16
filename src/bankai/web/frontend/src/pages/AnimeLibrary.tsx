@@ -21,6 +21,8 @@ export default function AnimeLibrary() {
   const [root, setRoot] = useState('');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedShow, setSelectedShow] = useState<AnimeLibraryShow | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [transferring, setTransferring] = useState<string | null>(null);
   const [searchTarget, setSearchTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
@@ -49,10 +51,26 @@ export default function AnimeLibrary() {
       await api.transfer(entry.path);
       toast.success('Anime transfer started');
       await load();
+      if (selected) await openShow(selected);
     } catch (error: any) {
       toast.error(error.message);
     } finally {
       setTransferring(null);
+    }
+  }
+
+  async function openShow(key: string) {
+    setSelected(key);
+    setSelectedShow(null);
+    setDetailLoading(true);
+    try {
+      const result = await api.animeLibraryShow(key);
+      setSelectedShow(result.shows[0] || null);
+      if (!result.shows.length) toast.error('This Anime is no longer in the library index.');
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setDetailLoading(false);
     }
   }
 
@@ -92,7 +110,7 @@ export default function AnimeLibrary() {
   const visible = useMemo(() => shows.filter((show) => show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [shows, query]);
   const totalSize = useMemo(() => shows.reduce((sum, show) => sum + show.size, 0), [shows]);
   const episodeCount = useMemo(() => shows.reduce((sum, show) => sum + show.episode_count, 0), [shows]);
-  const active = shows.find((show) => show.key === selected);
+  const active = selectedShow;
   const seasons = active ? Array.from(new Set(active.episodes.map((episode) => episode.season_number))).sort((a, b) => (a ?? -1) - (b ?? -1)) : [];
 
   return (
@@ -120,7 +138,7 @@ export default function AnimeLibrary() {
       ) : (
         <div className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
           {visible.map((show) => (
-            <button key={show.key} type='button' onClick={() => setSelected(show.key)} aria-label={'View ' + show.title} className='block w-full rounded-lg text-left focus-visible:outline-2 focus-visible:outline-ring'>
+            <button key={show.key} type='button' onClick={() => void openShow(show.key)} aria-label={'View ' + show.title} className='block w-full rounded-lg text-left focus-visible:outline-2 focus-visible:outline-ring'>
               <Card className='h-full overflow-hidden' style={{ borderBottomWidth: 6, borderBottomColor: 'var(--' + ({ complete: 'success', upcoming: 'transfer', partial: 'warning', empty: 'destructive', unknown: 'border' }[show.completion_state]) + ')' }}>
               <div className='relative block w-full'>
                 <AnimePoster url={show.poster_url} title={show.title} />
@@ -141,8 +159,9 @@ export default function AnimeLibrary() {
         </div>
       )}
 
-      <Dialog open={Boolean(active)} onOpenChange={(open) => { if (!open) setSelected(null); }}>
+      <Dialog open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); } }}>
         <DialogContent className='flex h-[94dvh] w-[96vw] max-w-none flex-col overflow-hidden'>
+          {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner /></div>}
           {active && (
             <>
               <DialogHeader className='shrink-0'>

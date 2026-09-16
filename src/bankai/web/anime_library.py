@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import threading
 import time
 from collections import defaultdict
 from contextlib import suppress
@@ -13,11 +15,59 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from bankai.cli import bgjobs
+from bankai.metadata.tvdb import TVDBEpisode
 from bankai.processor.anime import _tvdb_episode_map
 from bankai.torrent.matcher import parse_se
 from bankai.web import anime, discover, erai
 
 _CACHE: dict[str, tuple[float, dict]] = {}
+_PERSISTENT_CACHE: dict | None = None
+_PERSISTENT_DIRTY = False
+_PERSISTENT_LOCK = threading.RLock()
+_PERSISTENT_TTL_SECONDS = 24 * 60 * 60
+
+
+def _persistent_path() -> Path:
+    return erai._state_path().with_name("anime_tvdb_cache.json")
+
+
+def _persistent_data() -> dict:
+    global _PERSISTENT_CACHE
+    with _PERSISTENT_LOCK:
+        if _PERSISTENT_CACHE is None:
+            try:
+                value = json.loads(_persistent_path().read_text(encoding="utf-8"))
+                _PERSISTENT_CACHE = value if isinstance(value, dict) else {}
+            except (OSError, ValueError, TypeError):
+                _PERSISTENT_CACHE = {}
+        return _PERSISTENT_CACHE
+
+
+def _persistent_get(key: str):
+    hit = _persistent_data().get(key)
+    if not isinstance(hit, dict) or time.time() - float(hit.get("saved_at", 0)) >= _PERSISTENT_TTL_SECONDS:
+        return None
+    return hit.get("value")
+
+
+def _persistent_put(key: str, value) -> None:
+    global _PERSISTENT_DIRTY
+    with _PERSISTENT_LOCK:
+        _persistent_data()[key] = {"saved_at": time.time(), "value": value}
+        _PERSISTENT_DIRTY = True
+
+
+def flush_persistent_cache() -> None:
+    global _PERSISTENT_DIRTY
+    with _PERSISTENT_LOCK:
+        if not _PERSISTENT_DIRTY:
+            return
+        path = _persistent_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_persistent_data(), ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        _PERSISTENT_DIRTY = False
 
 
 def _name(value: str) -> str:
@@ -29,6 +79,10 @@ async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < 900:
         return hit[1]
+    persisted = _persistent_get(f"metadata:{key}")
+    if isinstance(persisted, dict):
+        _CACHE[key] = (time.time(), persisted)
+        return persisted
     metadata = {}
     if discover.is_configured():
         try:
@@ -52,6 +106,7 @@ async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
         except Exception:
             pass  # Library browsing remains available during provider outages.
     _CACHE[key] = (time.time(), metadata)
+    _persistent_put(f"metadata:{key}", metadata)
     return metadata
 
 
@@ -91,8 +146,14 @@ async def episode_roster(tvdb_id: int) -> list:
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < 900:
         return hit[1]
+    persisted = _persistent_get(key)
+    if isinstance(persisted, list):
+        rows = [TVDBEpisode(**row) for row in persisted if isinstance(row, dict)]
+        _CACHE[key] = (time.time(), rows)
+        return rows
     rows = await _tvdb_episode_map(tvdb_id)
     _CACHE[key] = (time.time(), rows)
+    _persistent_put(key, [asdict(row) for row in rows])
     return rows
 
 
@@ -257,9 +318,17 @@ async def search_episode(tvdb_id: int, season: int, episode: int, query: str | N
     }
 
 
-async def group_shows(entries: list[dict], root: Path) -> list[dict]:
+async def group_shows(
+    entries: list[dict],
+    root: Path,
+    *,
+    include_episodes: bool = True,
+    only_key: str | None = None,
+) -> list[dict]:
     groups = defaultdict(list)
     for entry in entries:
+        if only_key is not None and entry["series"] != only_key:
+            continue
         identity = parse_se(entry["name"])
         groups[entry["series"]].append(
             {
@@ -273,6 +342,8 @@ async def group_shows(entries: list[dict], root: Path) -> list[dict]:
     names = {_name(title) for title in groups}
     for record in tracked.values():
         title = record.get("english_title")
+        if only_key is not None and title != only_key:
+            continue
         if title and _name(title) not in names:
             groups[title] = []
             names.add(_name(title))
@@ -290,7 +361,7 @@ async def group_shows(entries: list[dict], root: Path) -> list[dict]:
         merged = merge_episodes(
             files, roster, ended=str(metadata.get("status", "")).casefold() == "ended"
         )
-        return {
+        result = {
             "key": title,
             "title": metadata.get("english_title") or title,
             "tvdb_id": tvdb_id,
@@ -308,24 +379,40 @@ async def group_shows(entries: list[dict], root: Path) -> list[dict]:
             "staged_count": sum(row["staged"] for row in files),
             **merged,
         }
+        if not include_episodes:
+            result["episodes"] = []
+        return result
 
     shows = await asyncio.gather(*(build(title, episodes) for title, episodes in groups.items()))
+    await asyncio.to_thread(flush_persistent_cache)
     return sorted(shows, key=lambda row: row["title"].casefold())
 
 
 async def queue_covers(rows: list[dict]) -> list[dict]:
     slots = asyncio.Semaphore(6)
 
-    async def enrich(row: dict) -> None:
-        raw = str(row.get("tvdb_id") or "")
-        if not raw.isdigit():
-            return
+    async def metadata_for(raw: str, title: str) -> tuple[str, dict]:
         async with slots:
-            metadata = await show_metadata(row["title"], int(raw))
-        row["poster_url"] = metadata.get("poster_url")
-        row["series_title"] = metadata.get("english_title")
+            metadata = await show_metadata(title, int(raw))
+        return raw, metadata
 
-    await asyncio.gather(*(enrich(row) for row in rows))
+    # Hundreds of episode jobs commonly share one TVDB series. Fetch each
+    # series once, then fan the result out to its rows instead of racing the
+    # same provider/cache key many times.
+    examples: dict[str, str] = {}
+    for row in rows:
+        raw = str(row.get("tvdb_id") or "")
+        if raw.isdigit():
+            examples.setdefault(raw, row["title"])
+    metadata = dict(
+        await asyncio.gather(*(metadata_for(raw, title) for raw, title in examples.items()))
+    )
+    for row in rows:
+        item = metadata.get(str(row.get("tvdb_id") or ""))
+        if item is None:
+            continue
+        row["poster_url"] = item.get("poster_url")
+        row["series_title"] = item.get("english_title")
     return rows
 
 

@@ -219,6 +219,36 @@ def test_pending_anime_and_normal_queues_are_separate(monkeypatch: pytest.Monkey
     assert separate[0]["queue_total"] == 1
 
 
+def test_anime_snapshot_checks_shared_storage_reserve_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = [
+        webjobs.PendingJob(
+            str(index),
+            "show",
+            f"Anime {index}",
+            ["anime-download", "--require-german-subtitles"],
+            created_at=index,
+        )
+        for index in range(50)
+    ]
+    checks = 0
+
+    def storage_ready(_args: list[str] | None) -> bool:
+        nonlocal checks
+        checks += 1
+        return False
+
+    monkeypatch.setattr(webjobs, "reconcile", lambda: 0)
+    monkeypatch.setattr(webjobs, "_load_pending", lambda: pending)
+    monkeypatch.setattr(webjobs.bgjobs, "list_jobs", lambda: [])
+    monkeypatch.setattr(webjobs, "_anime_storage_ready", storage_ready)
+    rows = webjobs.anime_snapshot()
+    assert len(rows) == 50
+    assert checks == 1
+    assert {row["step_label"] for row in rows} == {"Waiting for Anime storage reserve"}
+
+
 def test_reserve_keeps_auto_anime_pending_without_blocking_movies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { CircleStop, Play, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { ChevronLeft, ChevronRight, CircleStop, Play, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type Job } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -21,25 +21,38 @@ function statusVariant(status: string) {
 
 export default function AnimeQueue() {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const pageSize = 100;
 
-  async function load(silent = false) {
+  const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      setJobs((await api.animeQueue()).jobs);
+      const result = await api.animeQueue(page, pageSize);
+      setJobs(result.jobs);
+      setTotal(result.total);
     } catch (error: any) {
       if (!silent) toast.error(error.message);
     } finally {
       if (!silent) setLoading(false);
     }
-  }
+  }, [page]);
 
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(true), 2500);
-    return () => window.clearInterval(timer);
-  }, []);
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async (first = false) => {
+      await load(!first);
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 5000);
+    };
+    void poll(true);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [load]);
 
   async function act(job: Job, action: 'stop' | 'continue' | 'retry' | 'delete') {
     setBusy(job.id);
@@ -73,7 +86,7 @@ export default function AnimeQueue() {
       <Card>
         <CardHeader>
           <CardTitle>Anime downloads</CardTitle>
-          <CardDescription>{jobs.length} job{jobs.length === 1 ? '' : 's'} in Anime history</CardDescription>
+          <CardDescription>{total} job{total === 1 ? '' : 's'} in Anime history</CardDescription>
         </CardHeader>
         <CardContent className='overflow-x-auto'>
           {loading && jobs.length === 0 ? (
@@ -133,6 +146,15 @@ export default function AnimeQueue() {
             </table>
           )}
         </CardContent>
+        {total > pageSize && (
+          <div className='flex items-center justify-between border-t border-border/60 px-6 py-4'>
+            <span className='text-xs text-muted-foreground'>Page {page + 1} of {Math.ceil(total / pageSize)}</span>
+            <div className='flex gap-2'>
+              <Button size='sm' variant='secondary' disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}><ChevronLeft data-icon='inline-start' /> Previous</Button>
+              <Button size='sm' variant='secondary' disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight data-icon='inline-end' /></Button>
+            </div>
+          </div>
+        )}
       </Card>
     </div>
   );

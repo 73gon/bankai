@@ -562,6 +562,12 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
     ]
     queue_total = len(visible_pending)
     stream_cooldown = _call_with_jobs(_stream_failure_cooldown_until, jobs)
+    # Every pending Anime row shares the same two filesystem reserve checks.
+    # Calling this per row re-read the multi-megabyte Erai state file more than
+    # a thousand times on large backlogs and made /api/anime/queue take minutes.
+    anime_storage_ready = (
+        _anime_storage_ready(visible_pending[0].args) if anime_only and visible_pending else True
+    )
     for queue_position, item in enumerate(visible_pending, start=1):
         if _is_operation(item.kind, item.args):
             continue
@@ -580,7 +586,9 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
                 "total_steps": None,
                 "step_label": (
                     "Waiting for Anime storage reserve"
-                    if not _anime_storage_ready(item.args)
+                    if anime_only and not anime_storage_ready
+                    else "Waiting for Anime storage reserve"
+                    if not anime_only and not _anime_storage_ready(item.args)
                     else "Waiting for stream source recovery"
                     if stream_cooldown is not None and not _is_anime_job(item.args)
                     else "Waiting for a free slot"

@@ -634,7 +634,10 @@ export const api = {
     ),
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
-  animeQueue: () => request<{ jobs: Job[] }>('/api/anime/queue'),
+  animeQueue: (page = 0, pageSize = 100) =>
+    request<{ jobs: Job[]; total: number; page: number; page_size: number }>(
+      `/api/anime/queue?page=${page}&page_size=${pageSize}`,
+    ),
   animeEpisodeSearch: (tvdbId: number, season: number, episode: number, q?: string) => {
     const params = new URLSearchParams({ tvdb_id: String(tvdbId), season: String(season), episode: String(episode) });
     if (q) params.set('q', q);
@@ -651,7 +654,12 @@ export const api = {
   removeAnimeBlacklist: (key: string) =>
     request<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', {
       method: 'POST', body: JSON.stringify({ key }),
-    }),  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
+    }),
+  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
+  animeLibraryShow: (key: string) =>
+    request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>(
+      `/api/anime/library?show=${encodeURIComponent(key)}`,
+    ),
   animeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation'),
   runAnimeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation/run', { method: 'POST' }),
   retryHeldAnime: () => request<AnimeAutomationStatus & { requested: number }>('/api/anime/automation/retry-held', { method: 'POST' }),

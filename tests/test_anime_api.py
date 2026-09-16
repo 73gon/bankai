@@ -47,7 +47,24 @@ def test_anime_queue_uses_separate_snapshot(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("bankai.web.jobs.anime_snapshot", lambda: [{"id": "anime"}])
-    assert client.get("/api/anime/queue").json() == {"jobs": [{"id": "anime"}]}
+    assert client.get("/api/anime/queue").json() == {
+        "jobs": [{"id": "anime"}],
+        "total": 1,
+        "page": 0,
+        "page_size": 100,
+    }
+
+
+def test_anime_queue_is_server_paginated(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "bankai.web.jobs.anime_snapshot",
+        lambda: [{"id": str(index)} for index in range(205)],
+    )
+    body = client.get("/api/anime/queue", params={"page": 2, "page_size": 100}).json()
+    assert body["total"] == 205
+    assert [row["id"] for row in body["jobs"]] == [str(index) for index in range(200, 205)]
 
 
 def test_anime_settings_are_validated(client: TestClient) -> None:
@@ -101,7 +118,9 @@ def test_library_groups_episodes_into_one_show_with_sorted_seasons(
     assert len(body["shows"]) == 1
     show = body["shows"][0]
     assert show["episode_count"] == 3 and show["season_count"] == 2
-    assert [(row["season_number"], row["episode"]) for row in show["episodes"]] == [
+    assert show["episodes"] == []
+    detail = client.get("/api/anime/library", params={"show": "Example Anime"}).json()["shows"][0]
+    assert [(row["season_number"], row["episode"]) for row in detail["episodes"]] == [
         (1, 1),
         (1, 2),
         (2, 3),

@@ -1494,14 +1494,23 @@ def create_app() -> Any:
             raise HTTPException(status_code=502, detail=f"Episode search failed: {exc}") from exc
 
     @app.get("/api/anime/queue")
-    async def anime_queue() -> dict:
+    async def anime_queue(
+        page: int = Query(0, ge=0), page_size: int = Query(100, ge=20, le=200)
+    ) -> dict:
         from bankai.web.anime_library import queue_covers
 
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
-        return {"jobs": await queue_covers(rows)}
+        start = page * page_size
+        visible = rows[start : start + page_size]
+        return {
+            "jobs": await queue_covers(visible),
+            "total": len(rows),
+            "page": page,
+            "page_size": page_size,
+        }
 
     @app.get("/api/anime/library")
-    async def anime_library() -> dict:
+    async def anime_library(show: str | None = None) -> dict:
         def scan() -> tuple[Path, list[dict]]:
             root = Path(get_settings().transfer.anime_shows_dir)
             entries: list[dict] = []
@@ -1563,7 +1572,14 @@ def create_app() -> Any:
         root, entries = await asyncio.to_thread(scan)
         from bankai.web.anime_library import group_shows
 
-        return {"root": str(root), "entries": entries, "shows": await group_shows(entries, root)}
+        shows = await group_shows(
+            entries,
+            root,
+            include_episodes=show is not None,
+            only_key=show,
+        )
+        visible_entries = entries if show is None else [row for row in entries if row["series"] == show]
+        return {"root": str(root), "entries": visible_entries, "shows": shows}
 
     @app.get("/api/anime/tvdb")
     async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
