@@ -302,6 +302,7 @@ async def download_anime(
     season_override: int | None = None,
     episode_override: int | None = None,
     require_german_subtitles: bool = False,
+    cleanup_torrent: bool = False,
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -475,8 +476,17 @@ async def download_anime(
                 review.set_transfer(item.source, "done", percent=100)
             outputs = [item.destination for item in [*result.transferred, *result.skipped]]
 
-        if settings.paths.cleanup_after_success and torrent_hash and not existed_before:
-            await qbit.remove(torrent_hash, delete_files=True)
+        owned_by_bankai = cleanup_torrent or require_german_subtitles or not existed_before
+        if settings.paths.cleanup_after_success and torrent_hash and owned_by_bankai:
+            # Autonomous Erai releases are deliberately prefilled, so they
+            # already exist when their worker starts. Delete their qBittorrent
+            # copy only after the final library publication above succeeded.
+            # A manually pre-existing torrent remains user-owned.
+            try:
+                await qbit.remove(torrent_hash, delete_files=True)
+                log.info("[anime] removed torrent %s + files", torrent_hash[:8])
+            except Exception as exc:
+                log.warning("[anime] could not remove torrent %s: %s", torrent_hash[:8], exc)
         return {
             "final_path": str(outputs[0]),
             "paths": [str(path) for path in outputs],

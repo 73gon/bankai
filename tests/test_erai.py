@@ -391,6 +391,142 @@ def test_autonomous_anime_transfers_video_and_german_sidecar_without_approval(
     assert target.with_suffix(".de.ass").read_text() == "German subtitles"
 
 
+@pytest.mark.parametrize(("cleanup_torrent", "should_remove"), [(True, True), (False, False)])
+def test_prefilled_anime_torrent_cleanup_respects_automation_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_torrent: bool,
+    should_remove: bool,
+) -> None:
+    """Discovery adds the torrent long before the job runs.
+
+    Cleanup used to be skipped for any torrent already present in
+    qBittorrent, which is every prefilled release, so finished downloads
+    piled up until the download volume hit the reserve and discovery
+    stopped admitting work.
+    """
+    download = tmp_path / "downloads"
+    download.mkdir()
+    source = download / "Test Show - 01.mkv"
+    source.write_bytes(b"video")
+    target = tmp_path / "shows_anime" / "Test Show" / "Season 01" / "Test Show - S01E01.mkv"
+    settings = Settings(
+        output={"directory": tmp_path / "staging"},
+        paths={"cleanup_after_success": True},
+        transfer={"anime_shows_dir": target.parent.parent.parent},
+    )
+    monkeypatch.setattr(processor, "get_settings", lambda: settings)
+    monkeypatch.delenv("BANKAI_BG_JOB_ID", raising=False)
+    removed: list[tuple[str, bool]] = []
+
+    async def episodes(_id: int) -> list[TVDBEpisode]:
+        return [TVDBEpisode(1, 1, 1, "First")]
+
+    async def locate(*_args: object, **_kwargs: object) -> str:
+        return entry().info_hash
+
+    class Qbit:
+        async def login(self) -> None:
+            pass
+
+        async def list_torrents(self, **_kwargs: object) -> list:
+            # The discovery prefill already queued this exact release.
+            return [SimpleNamespace(hash=entry().info_hash, progress=1.0, size_bytes=1)]
+
+        async def add(self, **_kwargs: object) -> None:
+            pass
+
+        async def top_priority(self, _hash: str) -> None:
+            pass
+
+        async def resume(self, _hash: str) -> None:
+            pass
+
+        async def force_start(self, _hash: str, *, enabled: bool) -> None:
+            pass
+
+        async def remove(self, torrent_hash: str, *, delete_files: bool = False) -> None:
+            removed.append((torrent_hash, delete_files))
+
+        async def aclose(self) -> None:
+            pass
+
+        async def wait_until_complete(self, _hash: str, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                content_path=str(source), save_path=str(download), name=source.name
+            )
+
+    monkeypatch.setattr(processor, "QBittorrentClient", Qbit)
+    monkeypatch.setattr(processor, "_locate_torrent", locate)
+    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
+    monkeypatch.setattr(processor.review, "set_stage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(processor.review, "set_sources", lambda *args, **kwargs: None)
+
+    asyncio.run(
+        processor.download_anime(
+            release_title=entry().title,
+            torrent_url=entry().download_url,
+            detail_url=entry().detail_url,
+            magnet_uri=entry().magnet_uri,
+            info_hash=entry().info_hash,
+            media_kind="show",
+            tvdb_id=123,
+            english_title="Test Show",
+            year=2024,
+            season_override=1,
+            episode_override=1,
+            cleanup_torrent=cleanup_torrent,
+        )
+    )
+    assert removed == ([(entry().info_hash, True)] if should_remove else [])
+
+
+def test_cleanup_sweep_removes_only_verified_completed_automation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published = tmp_path / "published.mkv"
+    published.write_bytes(b"published")
+    hashes = {
+        "verified": f"{1:040x}",
+        "manual": f"{2:040x}",
+        "missing": f"{3:040x}",
+        "failed": f"{4:040x}",
+        "incomplete": f"{5:040x}",
+    }
+
+    def job(name: str, *, marker: bool = True, status: str = "done", final: Path = published):
+        args = ["anime-download", "--info-hash", hashes[name]]
+        if marker:
+            args.append("--require-german-subtitles")
+        return SimpleNamespace(status=status, args=args, final_path=str(final))
+
+    monkeypatch.setattr(
+        erai.bgjobs,
+        "list_jobs",
+        lambda: [
+            job("verified"),
+            job("manual", marker=False),
+            job("missing", final=tmp_path / "missing.mkv"),
+            job("failed", status="failed"),
+            job("incomplete"),
+        ],
+    )
+    torrents = [
+        SimpleNamespace(hash=value, name=name, progress=0.5 if name == "incomplete" else 1.0)
+        for name, value in hashes.items()
+    ]
+    removed: list[tuple[str, bool]] = []
+
+    class Qbit:
+        async def remove(self, info_hash: str, *, delete_files: bool) -> None:
+            removed.append((info_hash, delete_files))
+
+    count = asyncio.run(erai._cleanup_verified_torrents(Qbit(), torrents))
+    assert count == 1
+    assert removed == [(hashes["verified"], True)]
+
+
 def test_capped_search_splits_complementary_branches_without_claiming_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

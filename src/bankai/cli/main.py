@@ -2270,6 +2270,7 @@ def anime_download(
     season: int | None = typer.Option(None, "--season"),
     episode: int | None = typer.Option(None, "--episode"),
     require_german_subtitles: bool = typer.Option(False, "--require-german-subtitles"),
+    cleanup_torrent: bool = typer.Option(False, "--cleanup-torrent"),
 ) -> None:
     """Download a selected Nyaa release and organize it without syncing."""
     from bankai.processor.anime import download_anime
@@ -2294,6 +2295,7 @@ def anime_download(
                 season_override=season,
                 episode_override=episode,
                 require_german_subtitles=require_german_subtitles,
+                cleanup_torrent=cleanup_torrent,
             )
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"

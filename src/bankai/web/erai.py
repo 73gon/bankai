@@ -288,6 +288,51 @@ def _reserved_torrent_bytes(state: dict[str, Any], torrents: list[Any]) -> int:
     return total
 
 
+def _verified_automation_hashes() -> set[str]:
+    """Hashes whose autonomous Erai output is durably present in the library."""
+
+    verified: set[str] = set()
+    for job in bgjobs.list_jobs():
+        args = job.args or []
+        if (
+            job.status != "done"
+            or not args
+            or args[0] != "anime-download"
+            or not ({"--cleanup-torrent", "--require-german-subtitles"} & set(args))
+            or not job.final_path
+            or not Path(job.final_path).is_file()
+        ):
+            continue
+        info_hash = bgjobs.argument_value(args, "--info-hash")
+        if info_hash and re.fullmatch(r"[0-9a-fA-F]{40}", info_hash):
+            verified.add(info_hash.casefold())
+    return verified
+
+
+async def _cleanup_verified_torrents(qbit: Any, torrents: list[Any]) -> int:
+    """Remove only completed Erai downloads with a verified final publication."""
+
+    verified = await asyncio.to_thread(_verified_automation_hashes)
+    removed = 0
+    for torrent in torrents:
+        info_hash = str(torrent.hash).casefold()
+        if float(torrent.progress) < 1.0 or info_hash not in verified:
+            continue
+        try:
+            await qbit.remove(info_hash, delete_files=True)
+            removed += 1
+            log.info(
+                "[anime] reclaimed completed Erai torrent %s + files: %s",
+                info_hash[:8],
+                torrent.name,
+            )
+        except Exception as exc:
+            # Keep the cycle useful when one qBittorrent row is transiently
+            # locked; the next scheduled cycle will retry the same verified row.
+            log.warning("[anime] could not reclaim torrent %s: %s", info_hash[:8], exc)
+    return removed
+
+
 async def _retry_candidates(state: dict[str, Any], client: httpx.AsyncClient) -> list:
     candidates = []
     catalog = _catalog_entries(state)
@@ -792,6 +837,7 @@ def _anime_args(
         "--episode",
         str(identity.episode),
         "--require-german-subtitles",
+        "--cleanup-torrent",
     ]
     if match.year is not None:
         args.extend(["--year", str(match.year)])
@@ -1275,6 +1321,14 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                 qbit = QBittorrentClient()
                 await qbit.login()
                 torrents = await qbit.list_torrents(category=settings.qbittorrent.category)
+                cleaned = 0
+                if settings.paths.cleanup_after_success:
+                    cleaned = await _cleanup_verified_torrents(qbit, torrents)
+                    if cleaned:
+                        torrents = await qbit.list_torrents(
+                            category=settings.qbittorrent.category
+                        )
+                state["last_cleanup_count"] = cleaned
                 download_free_bytes = await qbit.free_space_bytes()
                 state["download_free_space_gib"] = (
                     round(download_free_bytes / _GIB, 1)
