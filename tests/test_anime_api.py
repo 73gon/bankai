@@ -67,6 +67,26 @@ def test_anime_queue_is_server_paginated(
     assert [row["id"] for row in body["jobs"]] == [str(index) for index in range(200, 205)]
 
 
+def test_anime_queue_hides_done_by_default(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "bankai.web.jobs.anime_snapshot",
+        lambda: [
+            {"id": "done", "status": "done"},
+            {"id": "running", "status": "running"},
+            {"id": "failed", "status": "failed"},
+        ],
+    )
+    hidden = client.get("/api/anime/queue").json()
+    assert hidden["total"] == 2
+    assert [row["id"] for row in hidden["jobs"]] == ["running", "failed"]
+
+    shown = client.get("/api/anime/queue", params={"include_done": True}).json()
+    assert shown["total"] == 3
+    assert [row["id"] for row in shown["jobs"]] == ["done", "running", "failed"]
+
+
 def test_anime_settings_are_validated(client: TestClient) -> None:
     rows = {row["key"]: row for row in client.get("/api/settings").json()["settings"]}
     assert rows["anime.min_free_space_gib"]["value"] == 100

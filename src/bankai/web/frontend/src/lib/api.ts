@@ -634,9 +634,9 @@ export const api = {
     ),
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
-  animeQueue: (page = 0, pageSize = 100) =>
+  animeQueue: (page = 0, pageSize = 100, includeDone = false) =>
     request<{ jobs: Job[]; total: number; page: number; page_size: number }>(
-      `/api/anime/queue?page=${page}&page_size=${pageSize}`,
+      `/api/anime/queue?page=${page}&page_size=${pageSize}&include_done=${includeDone}`,
     ),
   animeEpisodeSearch: (tvdbId: number, season: number, episode: number, q?: string) => {
     const params = new URLSearchParams({ tvdb_id: String(tvdbId), season: String(season), episode: String(episode) });

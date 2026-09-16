@@ -1495,11 +1495,15 @@ def create_app() -> Any:
 
     @app.get("/api/anime/queue")
     async def anime_queue(
-        page: int = Query(0, ge=0), page_size: int = Query(100, ge=20, le=200)
+        page: int = Query(0, ge=0),
+        page_size: int = Query(100, ge=20, le=200),
+        include_done: bool = False,
     ) -> dict:
         from bankai.web.anime_library import queue_covers
 
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
+        if not include_done:
+            rows = [row for row in rows if row.get("status") != "done"]
         start = page * page_size
         visible = rows[start : start + page_size]
         return {

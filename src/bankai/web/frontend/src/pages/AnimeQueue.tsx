@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState, Spinner } from '@/components/ui/empty';
+import { Switch } from '@/components/ui/switch';
 import { AnimePoster } from '@/components/AnimePoster';
 
 function formatTime(value: number | null) {
@@ -23,6 +24,7 @@ export default function AnimeQueue() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
+  const [showCompleted, setShowCompleted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const pageSize = 100;
@@ -30,7 +32,7 @@ export default function AnimeQueue() {
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const result = await api.animeQueue(page, pageSize);
+      const result = await api.animeQueue(page, pageSize, showCompleted);
       setJobs(result.jobs);
       setTotal(result.total);
     } catch (error: any) {
@@ -38,7 +40,7 @@ export default function AnimeQueue() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [page]);
+  }, [page, showCompleted]);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,22 +79,40 @@ export default function AnimeQueue() {
           <h1 className='font-serif text-3xl font-semibold'>Queue</h1>
           <p className='text-sm text-muted-foreground'>Only Erai-raws and manually selected Anime downloads appear here.</p>
         </div>
-        <Button variant='secondary' onClick={() => void load()} disabled={loading}>
-          <RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </Button>
+        <div className='flex items-center gap-3'>
+          <label className='flex items-center gap-2 whitespace-nowrap text-sm text-foreground'>
+            <Switch
+              checked={showCompleted}
+              onCheckedChange={(checked) => {
+                setPage(0);
+                setShowCompleted(checked);
+              }}
+              aria-label='Show completed Anime downloads'
+            />
+            Show completed
+          </label>
+          <Button variant='secondary' onClick={() => void load()} disabled={loading}>
+            <RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle>Anime downloads</CardTitle>
-          <CardDescription>{total} job{total === 1 ? '' : 's'} in Anime history</CardDescription>
+          <CardDescription>
+            {total} {showCompleted ? 'historical' : 'unfinished'} job{total === 1 ? '' : 's'}
+          </CardDescription>
         </CardHeader>
         <CardContent className='overflow-x-auto'>
           {loading && jobs.length === 0 ? (
             <div className='flex min-h-40 items-center justify-center'><Spinner /></div>
           ) : jobs.length === 0 ? (
-            <EmptyState title='Anime queue is empty' description='Automatic and manual Erai downloads will appear here.' />
+            <EmptyState
+              title={showCompleted ? 'Anime queue is empty' : 'No unfinished Anime downloads'}
+              description={showCompleted ? 'Automatic and manual Erai downloads will appear here.' : 'Completed downloads are hidden by default.'}
+            />
           ) : (
             <table className='w-full min-w-[820px] border-collapse text-sm'>
               <thead>
