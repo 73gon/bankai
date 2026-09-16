@@ -82,7 +82,9 @@ def test_selector_accepts_i_robot_release_with_short_title_word() -> None:
     assert chosen is not None
 
 
-def test_active_torrent_state_survives_a_stopped_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_active_torrent_state_survives_a_stopped_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     torrent_actions.set_active_torrent("job123", "abc123")
@@ -351,3 +353,55 @@ def test_qbittorrent_poll_retries_transient_read_error(
 
     assert result is complete
     assert calls == 2
+
+
+def test_qbittorrent_active_worker_can_bypass_prefill_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = QBittorrentClient()
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    async def logged_in() -> None:
+        return None
+
+    async def post(url: str, *, data: dict[str, str]) -> SimpleNamespace:
+        calls.append((url, data))
+        return SimpleNamespace(raise_for_status=lambda: None)
+
+    monkeypatch.setattr(client, "_ensure_login", logged_in)
+    monkeypatch.setattr(client._client, "post", post)
+    try:
+        asyncio.run(client.top_priority("abc"))
+        asyncio.run(client.force_start("abc", enabled=True))
+        asyncio.run(client.force_start("abc", enabled=False))
+    finally:
+        asyncio.run(client.aclose())
+
+    assert calls == [
+        ("/api/v2/torrents/topPrio", {"hashes": "abc"}),
+        ("/api/v2/torrents/setForceStart", {"hashes": "abc", "value": "true"}),
+        ("/api/v2/torrents/setForceStart", {"hashes": "abc", "value": "false"}),
+    ]
+
+
+def test_qbittorrent_reports_download_disk_free_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = QBittorrentClient()
+
+    async def logged_in() -> None:
+        return None
+
+    async def get(url: str) -> SimpleNamespace:
+        assert url == "/api/v2/sync/maindata"
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"server_state": {"free_space_on_disk": 12345}},
+        )
+
+    monkeypatch.setattr(client, "_ensure_login", logged_in)
+    monkeypatch.setattr(client._client, "get", get)
+    try:
+        assert asyncio.run(client.free_space_bytes()) == 12345
+    finally:
+        asyncio.run(client.aclose())

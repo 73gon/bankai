@@ -75,6 +75,184 @@ def _save_retry_requests(requests: dict[str, dict]) -> None:
         tmp.replace(path)
 
 
+def _policy_path() -> Path:
+    return _state_path().with_name("erai_series_policies.json")
+
+
+def _load_policies() -> dict[str, dict[str, Any]]:
+    with _STATE_LOCK:
+        try:
+            rows = json.loads(_policy_path().read_text(encoding="utf-8"))
+            return rows if isinstance(rows, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+
+def _save_policies(rows: dict[str, dict[str, Any]]) -> None:
+    with _STATE_LOCK:
+        path = _policy_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+
+def _series_policy(release_title: str) -> dict[str, Any] | None:
+    return _load_policies().get(_mapping_key(release_title))
+
+
+def review_items() -> list[dict[str, Any]]:
+    """Group held releases by stable Erai source-show identity."""
+    state = _load_state()
+    groups: dict[str, dict[str, Any]] = {}
+    policies = _load_policies()
+    recent = {item.get("info_hash"): item for item in state.get("held", [])}
+    for info_hash, release in state.get("releases", {}).items():
+        if release.get("status") != "held" or not release.get("title"):
+            continue
+        saved_entry = release.get("entry") or {}
+        item = {
+            **saved_entry,
+            **recent.get(info_hash, {}),
+            "info_hash": info_hash,
+            "title": release["title"],
+            "reason": release.get("reason", "Held for review"),
+        }
+        key = _mapping_key(item["title"])
+        policy = policies.get(key)
+        reason = str(item.get("reason", ""))
+        if policy and policy.get("mode") == "blacklisted":
+            continue
+        if policy and policy.get("mode") == "german_allowed" and "German subtitles" in reason:
+            continue
+        row = groups.setdefault(
+            key,
+            {
+                **item,
+                "release_title": item["title"],
+                "key": key,
+                "source_title": anime_mod.clean_release_title(item["title"]),
+                "release_count": 0,
+                "reasons": [],
+            },
+        )
+        row["release_count"] += 1
+        if reason and reason not in row["reasons"]:
+            row["reasons"].append(reason)
+    return sorted(groups.values(), key=lambda row: row["source_title"].casefold())
+
+
+def blacklist_items() -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {"key": key, **value}
+            for key, value in _load_policies().items()
+            if value.get("mode") == "blacklisted"
+        ),
+        key=lambda row: str(row.get("source_title", "")).casefold(),
+    )
+
+
+def _request_series_retries(state: dict[str, Any], key: str) -> int:
+    requests = _load_retry_requests()
+    catalog = _catalog_entries(state)
+    requested = 0
+    for info_hash, release in state.get("releases", {}).items():
+        if release.get("status") != "held" or _mapping_key(release.get("title", "")) != key:
+            continue
+        requests[info_hash] = {
+            "title": release["title"],
+            "entry": release.get("entry") or catalog.get(info_hash),
+        }
+        requested += 1
+    _save_retry_requests(requests)
+    return requested
+
+
+def review_action(info_hash: str, action: str) -> dict[str, Any]:
+    """Persist a series decision and schedule the affected releases immediately."""
+    global _RETRY_TASK
+    with _STATE_LOCK:
+        state = _load_state()
+        release = state.get("releases", {}).get(info_hash)
+        if not release or not release.get("title"):
+            raise ValueError("Held release was not found")
+        title = release["title"]
+        key = _mapping_key(title)
+        policies = _load_policies()
+        requested = 0
+        if action == "recheck":
+            requested = _request_series_retries(state, key)
+        elif action == "allow_german":
+            policies[key] = {
+                "mode": "german_allowed",
+                "source_title": anime_mod.clean_release_title(title),
+                "updated_at": time.time(),
+            }
+            _save_policies(policies)
+            requested = _request_series_retries(state, key)
+        elif action == "blacklist":
+            policies[key] = {
+                "mode": "blacklisted",
+                "source_title": anime_mod.clean_release_title(title),
+                "updated_at": time.time(),
+            }
+            _save_policies(policies)
+            requests = _load_retry_requests()
+            for release_hash, row in state.get("releases", {}).items():
+                if _mapping_key(row.get("title", "")) == key:
+                    row.update(status="blacklisted", reason="Series blacklisted by user")
+                    requests.pop(release_hash, None)
+            state["held"] = [
+                row for row in state.get("held", []) if _mapping_key(row["title"]) != key
+            ]
+            _save_retry_requests(requests)
+            _save_state(state)
+        else:
+            raise ValueError("Unknown review action")
+    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
+        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    return {"ok": True, "requested": requested}
+
+
+def remove_blacklist(key: str) -> dict[str, Any]:
+    global _RETRY_TASK
+    with _STATE_LOCK:
+        policies = _load_policies()
+        row = policies.get(key)
+        if not row or row.get("mode") != "blacklisted":
+            raise ValueError("Blacklisted series was not found")
+        policies.pop(key)
+        _save_policies(policies)
+        state = _load_state()
+        for release in state.get("releases", {}).values():
+            if (
+                release.get("status") == "blacklisted"
+                and _mapping_key(release.get("title", "")) == key
+            ):
+                release["status"] = "held"
+                release["reason"] = "Blacklist removed; release is ready for a fresh check"
+                release["retry_after"] = 0
+                saved_entry = release.get("entry")
+                if saved_entry:
+                    _hold(state, _entry_from_dict(saved_entry), release["reason"])
+        requested = _request_series_retries(state, key)
+        _save_state(state)
+    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
+        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    return {"ok": True, "requested": requested}
+
+
+def retry_series(release_title: str) -> int:
+    global _RETRY_TASK
+    with _STATE_LOCK:
+        state = _load_state()
+        requested = _request_series_retries(state, _mapping_key(release_title))
+    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
+        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    return requested
+
+
 def _prune_holds(state: dict[str, Any]) -> None:
     state["held"] = [
         item
@@ -90,6 +268,24 @@ def _catalog_entries(state: dict[str, Any]) -> dict[str, dict]:
             for row in index.get(name, {}).values():
                 result[row["info_hash"]] = row
     return result
+
+
+def _reserved_torrent_bytes(state: dict[str, Any], torrents: list[Any]) -> int:
+    """Estimate only bytes qBittorrent has not downloaded yet.
+
+    Completed torrents are already reflected in the filesystem free-space
+    reading. Counting their full size again eventually made discovery think
+    the 100 GiB reserve was exhausted even while terabytes remained free.
+    """
+    total = 0
+    for item in torrents:
+        progress = max(0.0, min(1.0, float(item.progress)))
+        if progress >= 1.0:
+            continue
+        release_size = int(state["releases"].get(item.hash, {}).get("size_bytes", 0))
+        size = max(int(item.size_bytes), release_size)
+        total += int(size * (1.0 - progress))
+    return total
 
 
 async def _retry_candidates(state: dict[str, Any], client: httpx.AsyncClient) -> list:
@@ -125,7 +321,11 @@ async def _retry_candidates(state: dict[str, Any], client: httpx.AsyncClient) ->
 
 def _mapping_key(release_title: str) -> str:
     structured = anime_mod.deconstruct_release(release_title)
-    query = structured[0] if structured else anime_mod.clean_release_title(release_title)
+    query = (
+        anime_mod.release_part(release_title)[0]
+        if structured
+        else anime_mod.clean_release_title(release_title)
+    )
     return " ".join(re.findall(r"\w+", query.casefold(), re.UNICODE))
 
 
@@ -171,6 +371,9 @@ def save_mapping(
 
 
 def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> bool:
+    policy = _series_policy(entry.title)
+    if policy and policy.get("mode") == "blacklisted":
+        return False
     previous = state["releases"].get(entry.info_hash)
     if previous is None:
         return True
@@ -390,6 +593,14 @@ def free_space_gib() -> float | None:
         return None
 
 
+def download_free_space_gib(state: dict[str, Any] | None = None) -> float | None:
+    value = (state or _load_state()).get("download_free_space_gib")
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _hold(state: dict[str, Any], entry: anime_mod.NyaaEntry, reason: str) -> None:
     state["releases"][entry.info_hash] = {
         "status": "held",
@@ -509,8 +720,14 @@ async def _resolve(
                         continue
                     if gap >= 28 and after.episode == before.episode + 1:
                         starts.append(after.episode)
-            if len(starts) == part:
+            if len(starts) >= part:
                 target_number = starts[part - 1] + episode - 1
+                target = next((item for item in regular if item.episode == target_number), None)
+            elif regular and len(regular) % part == 0:
+                # TVDB sometimes schedules a split cour without an air-date gap.
+                # A terminal "Part N" is continuation metadata, never title text.
+                segment = len(regular) // part
+                target_number = (part - 1) * segment + episode
                 target = next((item for item in regular if item.episode == target_number), None)
         if target is None:
             return (
@@ -602,7 +819,10 @@ async def _consider(
     if (uploader or "").casefold() != "erai-raws":
         _hold(state, entry, "Detail-page uploader is not Erai-raws")
         return False
-    if not has_explicit_german_subtitles(description):
+    policy = _series_policy(entry.title)
+    if not has_explicit_german_subtitles(description) and not (
+        policy and policy.get("mode") == "german_allowed"
+    ):
         _hold(state, entry, "Nyaa description does not explicitly list German subtitles")
         return False
     if magnet:
@@ -1055,18 +1275,28 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                 qbit = QBittorrentClient()
                 await qbit.login()
                 torrents = await qbit.list_torrents(category=settings.qbittorrent.category)
-                reserved = sum(
-                    max(
-                        item.size_bytes,
-                        int(state["releases"].get(item.hash, {}).get("size_bytes", 0)),
-                    )
-                    for item in torrents
+                download_free_bytes = await qbit.free_space_bytes()
+                state["download_free_space_gib"] = (
+                    round(download_free_bytes / _GIB, 1)
+                    if download_free_bytes is not None
+                    else None
+                )
+                reserved = _reserved_torrent_bytes(state, torrents)
+                download_budget = (
+                    max(0, download_free_bytes - int(policy.min_free_space_gib * _GIB))
+                    if download_free_bytes is not None
+                    else int((free - policy.min_free_space_gib) * _GIB)
                 )
                 _ADMISSION.set(
                     {
                         "qbit": qbit,
                         "remaining": max(
-                            0, int((free - policy.min_free_space_gib) * _GIB) - reserved
+                            0,
+                            min(
+                                int((free - policy.min_free_space_gib) * _GIB),
+                                download_budget,
+                            )
+                            - reserved,
                         ),
                     }
                 )
@@ -1107,6 +1337,9 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                         continue
                     if not get_settings().anime.enabled or updates.maintenance_active():
                         break
+                    admission = _ADMISSION.get()
+                    if admission is not None and admission["remaining"] <= 0:
+                        break
                     inspected += 1
                     if free_space_gib() is None or free_space_gib() <= policy.min_free_space_gib:
                         break
@@ -1145,6 +1378,7 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
     _prune_holds(state)
     policy = get_settings().anime
     free = free_space_gib()
+    download_free = download_free_space_gib(state)
     if not policy.enabled:
         pause_reason = "Automation is disabled"
     elif not get_settings().metadata.tvdb_enabled or not get_settings().metadata.tvdb_api_key:
@@ -1153,6 +1387,10 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
         pause_reason = "Anime destination is unavailable"
     elif free <= policy.min_free_space_gib:
         pause_reason = f"{policy.min_free_space_gib:g} GiB reserve reached ({free:.1f} GiB free)"
+    elif download_free is not None and download_free <= policy.min_free_space_gib:
+        pause_reason = (
+            f"Download staging reserve reached ({download_free:.1f} GiB free on qBittorrent)"
+        )
     elif state.get("last_error"):
         pause_reason = state["last_error"]
     else:
@@ -1168,6 +1406,7 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
         "paused": pause_reason is not None,
         "pause_reason": pause_reason,
         "free_space_gib": round(free, 1) if free is not None else None,
+        "download_free_space_gib": download_free,
         "min_free_space_gib": policy.min_free_space_gib,
         "poll_interval_seconds": policy.poll_interval_seconds,
         "rss_url": policy.rss_url,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api, type UpdateStatus, type VpnStatus } from '@/lib/api';
@@ -15,6 +15,7 @@ import Anime from '@/pages/Anime';
 import AnimeQueue from '@/pages/AnimeQueue';
 import AnimeLibrary from '@/pages/AnimeLibrary';
 import AnimeSettings from '@/pages/AnimeSettings';
+import AnimeReview from '@/pages/AnimeReview';
 import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
 
@@ -32,6 +33,8 @@ const ANIME_NAV = [
   { to: '/anime/discover', label: 'Discover', icon: Sparkles },
   { to: '/anime/queue', label: 'Queue', icon: ListVideo },
   { to: '/anime/library', label: 'Library', icon: HardDrive },
+  { to: '/anime/review', label: 'Review', icon: ShieldAlert },
+  { to: '/anime/blacklist', label: 'Blacklist', icon: Ban },
   { to: '/anime/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -324,6 +327,8 @@ export default function App() {
               <Route path='/anime/discover' element={<Anime />} />
               <Route path='/anime/queue' element={<AnimeQueue />} />
               <Route path='/anime/library' element={<AnimeLibrary />} />
+              <Route path='/anime/review' element={<AnimeReview />} />
+              <Route path='/anime/blacklist' element={<AnimeReview blacklist />} />
               <Route path='/anime/settings' element={<AnimeSettings />} />
               <Route path='/qbittorrent' element={<QBittorrent />} />
               <Route path='/queue' element={<Library />} />

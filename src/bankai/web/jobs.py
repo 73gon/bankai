@@ -51,10 +51,14 @@ def _is_anime_job(args: list[str] | None) -> bool:
 def _anime_storage_ready(args: list[str] | None) -> bool:
     if not _is_anime_job(args) or "--require-german-subtitles" not in (args or []):
         return True
-    from bankai.web.erai import free_space_gib
+    from bankai.web.erai import download_free_space_gib, free_space_gib
 
     free = free_space_gib()
-    return free is not None and free > get_settings().anime.min_free_space_gib
+    download_free = download_free_space_gib()
+    reserve = get_settings().anime.min_free_space_gib
+    return (
+        free is not None and free > reserve and (download_free is None or download_free > reserve)
+    )
 
 
 def _pending_path() -> Path:

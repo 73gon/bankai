@@ -112,7 +112,9 @@ def episode_identity(
     number = int(episode_match.group("episode"))
     season_match = _SEASON_HINT.search(release_title)
     if season_override is not None or season_match:
-        season = season_override if season_override is not None else int(season_match.group("season"))
+        season = (
+            season_override if season_override is not None else int(season_match.group("season"))
+        )
         matched = next(
             (item for item in tvdb_episodes if item.season == season and item.episode == number),
             None,
@@ -338,12 +340,29 @@ async def download_anime(
         torrent_hash = await _locate_torrent(qbit, info_hash=info_hash, before_hashes=before_hashes)
         if background_id:
             torrent_actions.set_active_torrent(background_id, torrent_hash)
+        # The discovery prefill deliberately adds a large ordered backlog to
+        # qBittorrent. A worker must promote its own torrent before waiting;
+        # otherwise errored entries at the head of qBittorrent's queue can
+        # occupy every download slot while all Bankai workers wait behind it.
+        await qbit.top_priority(torrent_hash)
         await qbit.resume(torrent_hash)
-        status = await qbit.wait_until_complete(torrent_hash, progress_cb=_progress)
+        await qbit.force_start(torrent_hash, enabled=True)
+        try:
+            status = await qbit.wait_until_complete(torrent_hash, progress_cb=_progress)
+        finally:
+            try:
+                # A completed prefilled torrent may remain for seeding. Return
+                # it to qBittorrent's normal upload limits when this worker no
+                # longer needs an immediate download slot.
+                await qbit.force_start(torrent_hash, enabled=False)
+            except Exception as exc:
+                log.warning("Could not restore qBittorrent queueing for %s: %s", torrent_hash, exc)
         if background_id:
             torrent_actions.clear_active_torrent(background_id)
 
-        log.info('BANKAI_STAGE step=2 total=%d key=organize label="Organize with TVDB"', total_steps)
+        log.info(
+            'BANKAI_STAGE step=2 total=%d key=organize label="Organize with TVDB"', total_steps
+        )
         root = _download_root(status)
         outputs: list[Path] = []
         output = settings.output
@@ -437,7 +456,9 @@ async def download_anime(
                 progress=log.info,
             )
             if result.failed:
-                raise RuntimeError("Anime transfer failed: " + "; ".join(error for _, error in result.failed))
+                raise RuntimeError(
+                    "Anime transfer failed: " + "; ".join(error for _, error in result.failed)
+                )
             for item in [*result.transferred, *result.skipped]:
                 # Keep separately downloaded German subtitle sidecars with
                 # their video. The normal video transfer only plans videos.

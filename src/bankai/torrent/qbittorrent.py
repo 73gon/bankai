@@ -141,6 +141,17 @@ class QBittorrentClient:
         resp.raise_for_status()
         return list(resp.json())
 
+    async def free_space_bytes(self) -> int | None:
+        """Return free bytes for qBittorrent's configured download location."""
+        await self._ensure_login()
+        response = await self._client.get("/api/v2/sync/maindata")
+        response.raise_for_status()
+        value = response.json().get("server_state", {}).get("free_space_on_disk")
+        try:
+            return max(0, int(value)) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     async def remove(self, torrent_hash: str, *, delete_files: bool = False) -> None:
         await self._ensure_login()
         response = await self._client.post(
@@ -153,14 +164,35 @@ class QBittorrentClient:
         await self._ensure_login()
         response = await self._client.post("/api/v2/torrents/stop", data={"hashes": torrent_hash})
         if response.status_code == 404:  # qBittorrent < 5 uses the old verb.
-            response = await self._client.post("/api/v2/torrents/pause", data={"hashes": torrent_hash})
+            response = await self._client.post(
+                "/api/v2/torrents/pause", data={"hashes": torrent_hash}
+            )
         response.raise_for_status()
 
     async def resume(self, torrent_hash: str) -> None:
         await self._ensure_login()
         response = await self._client.post("/api/v2/torrents/start", data={"hashes": torrent_hash})
         if response.status_code == 404:  # qBittorrent < 5 uses the old verb.
-            response = await self._client.post("/api/v2/torrents/resume", data={"hashes": torrent_hash})
+            response = await self._client.post(
+                "/api/v2/torrents/resume", data={"hashes": torrent_hash}
+            )
+        response.raise_for_status()
+
+    async def top_priority(self, torrent_hash: str) -> None:
+        """Move a torrent ahead of the autonomous prefill backlog."""
+        await self._ensure_login()
+        response = await self._client.post(
+            "/api/v2/torrents/topPrio", data={"hashes": torrent_hash}
+        )
+        response.raise_for_status()
+
+    async def force_start(self, torrent_hash: str, *, enabled: bool) -> None:
+        """Let an active Bankai worker bypass blocked qBittorrent queue slots."""
+        await self._ensure_login()
+        response = await self._client.post(
+            "/api/v2/torrents/setForceStart",
+            data={"hashes": torrent_hash, "value": str(enabled).lower()},
+        )
         response.raise_for_status()
 
     # ---- helpers -----------------------------------------------------------

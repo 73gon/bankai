@@ -169,6 +169,22 @@ export interface AnimeSearchPage {
   aliases: string[];
 }
 
+export interface AnimeReviewItem {
+  key: string;
+  info_hash?: string;
+  release_title?: string;
+  source_title: string;
+  title: string;
+  tvdb_id: number | null;
+  year: number | null;
+  poster_url: string | null;
+  detail_url?: string;
+  quality?: string | null;
+  reason?: string;
+  reasons?: string[];
+  release_count?: number;
+  updated_at: number;
+}
 export interface AnimeAutomationStatus {
   retry_pending: number;
   rss_url: string;
@@ -179,6 +195,7 @@ export interface AnimeAutomationStatus {
   paused: boolean;
   pause_reason: string | null;
   free_space_gib: number | null;
+  download_free_space_gib: number | null;
   min_free_space_gib: number;
   poll_interval_seconds: number;
   settle_minutes: number;
@@ -625,7 +642,16 @@ export const api = {
   },
   saveAnimeMapping: (releaseTitle: string, tvdbId: number, season?: number, episodeOffset = 0) =>
     request('/api/anime/mapping', { method: 'POST', body: JSON.stringify({ release_title: releaseTitle, tvdb_id: tvdbId, season, episode_offset: episodeOffset }) }),
-  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
+  animeReview: () => request<{ items: AnimeReviewItem[] }>('/api/anime/review'),
+  animeBlacklist: () => request<{ items: AnimeReviewItem[] }>('/api/anime/blacklist'),
+  reviewAnime: (infoHash: string, action: 'recheck' | 'allow_german' | 'blacklist') =>
+    request<{ ok: boolean; requested: number }>('/api/anime/review/' + infoHash, {
+      method: 'POST', body: JSON.stringify({ action }),
+    }),
+  removeAnimeBlacklist: (key: string) =>
+    request<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', {
+      method: 'POST', body: JSON.stringify({ key }),
+    }),  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
   animeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation'),
   runAnimeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation/run', { method: 'POST' }),
   retryHeldAnime: () => request<AnimeAutomationStatus & { requested: number }>('/api/anime/automation/retry-held', { method: 'POST' }),

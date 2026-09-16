@@ -296,6 +296,9 @@ def test_autonomous_anime_transfers_video_and_german_sidecar_without_approval(
         return entry().info_hash
 
     class Qbit:
+        async def top_priority(self, torrent_hash: str) -> None:
+            assert torrent_hash == entry().info_hash
+
         async def login(self) -> None:
             pass
 
@@ -307,6 +310,9 @@ def test_autonomous_anime_transfers_video_and_german_sidecar_without_approval(
 
         async def resume(self, _hash: str) -> None:
             pass
+
+        async def force_start(self, torrent_hash: str, *, enabled: bool) -> None:
+            assert torrent_hash == entry().info_hash
 
         async def aclose(self) -> None:
             pass
@@ -732,7 +738,8 @@ def test_part_two_uses_verified_split_cour_boundary(monkeypatch):
     assert (identity.season, identity.episode) == (1, 23)
 
 
-def test_part_two_without_boundary_is_held(monkeypatch):
+def test_part_two_uses_equal_tvdb_cour_when_air_dates_have_no_boundary(monkeypatch):
+
     match = AnimeTVDBMatch(1, "show", "Test Show")
 
     async def candidates(*args, **kwargs):
@@ -750,7 +757,8 @@ def test_part_two_without_boundary_is_held(monkeypatch):
             episodes=[TVDBEpisode(1, n) for n in range(1, 25)],
         )
     )
-    assert selected is None and identity is None and "continuation boundary" in error
+    assert selected == match and error is None
+    assert (identity.season, identity.episode) == (1, 23)
 
 
 def test_saved_one_piece_selection_bypasses_ambiguous_search(monkeypatch, tmp_path):
@@ -812,6 +820,31 @@ def test_backlog_submission_reserves_space_before_qbit_add(monkeypatch):
 
     asyncio.run(run())
     assert not state["canonical"]
+
+
+def test_completed_prefill_torrents_are_not_double_counted_against_free_space():
+    state = erai._default_state()
+    state["releases"]["partial"] = {"size_bytes": 1000}
+    torrents = [
+        SimpleNamespace(hash="done", size_bytes=5000, progress=1.0),
+        SimpleNamespace(hash="partial", size_bytes=0, progress=0.25),
+    ]
+
+    assert erai._reserved_torrent_bytes(state, torrents) == 750
+
+
+def test_review_groups_every_held_release_beyond_recent_display_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
+    state = erai._default_state()
+    for number in range(1, 502):
+        item = entry(f"[Erai-raws] Test Show - {number:03d} [1080p][MultiSub]", number)
+        erai._hold(state, item, "No confident TVDB match")
+    erai._save_state(state)
+
+    rows = erai.review_items()
+    assert len(state["held"]) == 500
+    assert len(rows) == 1
+    assert rows[0]["release_count"] == 501
 
 
 def test_retry_request_targets_all_holds_without_overwriting_cycle_state(
@@ -915,3 +948,67 @@ def test_retry_recovery_requires_exact_hash_and_preserves_trust_flags(
     found = asyncio.run(run())
     assert [item.info_hash for item in found] == [held.info_hash]
     assert not found[0].trusted
+
+
+def test_part_suffix_is_not_part_of_series_policy_identity():
+    first = "[Erai-raws] Test Show Part 2 - 01 [1080p]"
+    later = "[Erai-raws] Test Show Part 2 - 11 [1080p]"
+    plain = "[Erai-raws] Test Show - 03 [1080p]"
+    assert erai._mapping_key(first) == erai._mapping_key(later) == erai._mapping_key(plain)
+
+
+def test_blacklisted_series_is_never_considered(tmp_path, monkeypatch):
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
+    item = entry()
+    erai._save_policies(
+        {
+            erai._mapping_key(item.title): {
+                "mode": "blacklisted",
+                "source_title": "Test Show",
+                "updated_at": 1,
+            }
+        }
+    )
+    assert not erai._needs_consideration(erai._default_state(), item)
+
+
+@pytest.mark.asyncio
+async def test_allow_german_is_series_wide_and_schedules_every_held_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
+    state = erai._default_state()
+    one = entry(number=1)
+    two = entry("[Erai-raws] Test Show - 02 [1080p][MultiSub]", 2)
+    erai._hold(state, one, "Nyaa description does not explicitly list German subtitles")
+    erai._hold(state, two, "Nyaa description does not explicitly list German subtitles")
+    erai._save_state(state)
+
+    async def no_cycle(**kwargs):
+        return {}
+
+    monkeypatch.setattr(erai, "run_cycle", no_cycle)
+    result = erai.review_action(one.info_hash, "allow_german")
+    assert result["requested"] == 2
+    assert erai._series_policy(two.title)["mode"] == "german_allowed"
+    assert set(erai._load_retry_requests()) == {one.info_hash, two.info_hash}
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_blacklist_removes_holds_and_can_be_restored(tmp_path, monkeypatch):
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
+    state = erai._default_state()
+    item = entry()
+    erai._hold(state, item, "No confident TVDB match")
+    erai._save_state(state)
+
+    async def no_cycle(**kwargs):
+        return {}
+
+    monkeypatch.setattr(erai, "run_cycle", no_cycle)
+    erai.review_action(item.info_hash, "blacklist")
+    assert erai.review_items() == []
+    assert erai.blacklist_items()[0]["source_title"] == "Test Show"
+    result = erai.remove_blacklist(erai._mapping_key(item.title))
+    assert result["requested"] == 1
+    assert not erai.blacklist_items()
+    await asyncio.sleep(0)

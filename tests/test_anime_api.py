@@ -271,3 +271,39 @@ def test_retry_held_endpoint_returns_scheduled_count(
     response = client.post("/api/anime/automation/retry-held")
     assert response.status_code == 200
     assert response.json() == {"requested": 14, "retry_pending": 14}
+
+
+def test_anime_review_and_blacklist_actions(client, monkeypatch):
+    review = [
+        {
+            "key": "show",
+            "info_hash": "1" * 40,
+            "source_title": "Show",
+            "title": "Show",
+            "poster_url": None,
+            "updated_at": 1,
+        }
+    ]
+    monkeypatch.setattr("bankai.web.erai.review_items", lambda: review)
+    monkeypatch.setattr("bankai.web.erai.blacklist_items", lambda: review)
+    monkeypatch.setattr(
+        "bankai.web.anime_library.enrich_review_rows",
+        lambda rows: asyncio.sleep(0, result=rows),
+    )
+    monkeypatch.setattr(
+        "bankai.web.erai.review_action",
+        lambda info_hash, action: {"ok": True, "requested": 2, "action": action},
+    )
+    monkeypatch.setattr(
+        "bankai.web.erai.remove_blacklist",
+        lambda key: {"ok": True, "requested": 2},
+    )
+    assert client.get("/api/anime/review").json()["items"] == review
+    assert client.get("/api/anime/blacklist").json()["items"] == review
+    assert (
+        client.post("/api/anime/review/" + "1" * 40, json={"action": "allow_german"}).json()[
+            "requested"
+        ]
+        == 2
+    )
+    assert client.post("/api/anime/blacklist/remove", json={"key": "show"}).json()["requested"] == 2

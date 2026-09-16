@@ -327,3 +327,21 @@ async def queue_covers(rows: list[dict]) -> list[dict]:
 
     await asyncio.gather(*(enrich(row) for row in rows))
     return rows
+
+
+async def enrich_review_rows(rows: list[dict]) -> list[dict]:
+    """Attach canonical artwork without making the policy ledger provider-dependent."""
+    mappings = await asyncio.to_thread(erai._load_mappings)
+    slots = asyncio.Semaphore(6)
+
+    async def enrich(row: dict) -> None:
+        saved = mappings.get(row["key"], {})
+        async with slots:
+            metadata = await show_metadata(row["source_title"], saved.get("tvdb_id"))
+        row["title"] = metadata.get("english_title") or row["source_title"]
+        row["tvdb_id"] = metadata.get("tvdb_id") or saved.get("tvdb_id")
+        row["year"] = metadata.get("year")
+        row["poster_url"] = metadata.get("poster_url")
+
+    await asyncio.gather(*(enrich(row) for row in rows))
+    return rows

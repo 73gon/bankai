@@ -249,8 +249,7 @@ def _waveform_envelope(
     smoothed: list[float] = []
     for index in range(len(powers)):
         nearby = powers[
-            max(0, index - smoothing_radius) :
-            min(len(powers), index + smoothing_radius + 1)
+            max(0, index - smoothing_radius) : min(len(powers), index + smoothing_radius + 1)
         ]
         smoothed.append(sum(nearby) / len(nearby))
     floor_db = -72.0
@@ -433,9 +432,7 @@ def _title_membership_keys(title: str) -> set[str]:
     value = re.sub(r"\.[a-z0-9]{2,4}$", "", value)
     value = re.sub(r"\(?\b(?:19|20)\d{2}\b\)?", "", value)
     tokens = re.findall(r"[a-z0-9]+", value)
-    sequel_numbers = {
-        token for token in tokens if token.isdigit() and 1 <= int(token) <= 20
-    }
+    sequel_numbers = {token for token in tokens if token.isdigit() and 1 <= int(token) <= 20}
     words = [token for token in tokens if token not in sequel_numbers]
     if sequel_numbers and len(words) >= 3:
         keys.add("".join(words))
@@ -479,11 +476,14 @@ def _validate_media_title(raw: str) -> str:
     if len(title) > 180:
         raise ValueError("title must be 180 characters or fewer")
     if any(ord(char) < 32 or char in '<>:"/\\|?*' for char in title):
-        raise ValueError('title contains an invalid filename character')
+        raise ValueError("title contains an invalid filename character")
     if title.endswith((".", " ")):
         raise ValueError("title cannot end with a dot or space")
     reserved = {
-        "CON", "PRN", "AUX", "NUL",
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
         *(f"COM{index}" for index in range(1, 10)),
         *(f"LPT{index}" for index in range(1, 10)),
     }
@@ -675,7 +675,9 @@ def _validate_setting_value(key: str, value: Any) -> Any:
         try:
             validated = AnimeAutomationSettings.model_validate(data)
         except ValidationError as exc:
-            message = exc.errors()[0].get("msg", "invalid value") if exc.errors() else "invalid value"
+            message = (
+                exc.errors()[0].get("msg", "invalid value") if exc.errors() else "invalid value"
+            )
             raise ValueError(str(message)) from exc
         return getattr(validated, field)
     if not key.startswith("selector."):
@@ -713,6 +715,7 @@ def _review_transfer_kind(path: Path, state: review_mod.ReviewState) -> str:
     if anime_mod.is_nyaa_url(state.torrent_source_url or ""):
         return "anime"
     return "show"
+
 
 def create_app() -> Any:
     from contextlib import asynccontextmanager
@@ -965,9 +968,7 @@ def create_app() -> Any:
         provider_total: int | None = None
         provider_has_next = True
         while len(visible) < logical_target and provider_has_next:
-            result = await discover_mod.browse_page(
-                kind, page=raw_page, page_size=100
-            )
+            result = await discover_mod.browse_page(kind, page=raw_page, page_size=100)
             if provider_total is None:
                 provider_total = result.total
             filtered = _filter_discover(result.items, kind, membership)
@@ -1419,6 +1420,34 @@ def create_app() -> Any:
     async def anime_automation_retry_held() -> dict:
         return erai_mod.retry_held()
 
+    @app.get("/api/anime/review")
+    async def anime_review() -> dict:
+        from bankai.web.anime_library import enrich_review_rows
+
+        rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.review_items))
+        return {"items": rows}
+
+    @app.post("/api/anime/review/{info_hash}")
+    async def anime_review_action(info_hash: str, req: dict) -> dict:
+        try:
+            return erai_mod.review_action(info_hash, str(req.get("action", "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/anime/blacklist")
+    async def anime_blacklist() -> dict:
+        from bankai.web.anime_library import enrich_review_rows
+
+        rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.blacklist_items))
+        return {"items": rows}
+
+    @app.post("/api/anime/blacklist/remove")
+    async def anime_blacklist_remove(req: dict) -> dict:
+        try:
+            return erai_mod.remove_blacklist(str(req.get("key", "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/api/anime/mapping")
     async def anime_mapping_select(req: dict) -> dict:
         title = str(req.get("release_title", "")).strip()
@@ -1432,17 +1461,31 @@ def create_app() -> Any:
             if season is not None:
                 season = int(season)
                 from bankai.web.anime_library import episode_roster
+
                 roster = await episode_roster(tvdb_id)
                 if season < 1 or not any(row.season == season for row in roster):
                     raise ValueError("Season does not exist in TVDB")
-            erai_mod.save_mapping(title, match, season=season, episode_offset=offset, clear_episode_mapping=season is None)
+            erai_mod.save_mapping(
+                title,
+                match,
+                season=season,
+                episode_offset=offset,
+                clear_episode_mapping=season is None,
+            )
+            requested = erai_mod.retry_series(title)
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"ok": True, "match": asdict(match)}
+        return {"ok": True, "match": asdict(match), "requested": requested}
 
     @app.get("/api/anime/episode/search")
-    async def anime_episode_search(tvdb_id: int = Query(..., gt=0), season: int = Query(..., gt=0), episode: int = Query(..., gt=0), q: str | None = None) -> dict:
+    async def anime_episode_search(
+        tvdb_id: int = Query(..., gt=0),
+        season: int = Query(..., gt=0),
+        episode: int = Query(..., gt=0),
+        q: str | None = None,
+    ) -> dict:
         from bankai.web.anime_library import search_episode
+
         try:
             return await search_episode(tvdb_id, season, episode, q)
         except ValueError as exc:
@@ -1453,6 +1496,7 @@ def create_app() -> Any:
     @app.get("/api/anime/queue")
     async def anime_queue() -> dict:
         from bankai.web.anime_library import queue_covers
+
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
         return {"jobs": await queue_covers(rows)}
 
@@ -1463,7 +1507,13 @@ def create_app() -> Any:
             entries: list[dict] = []
             if root.exists():
                 for path in root.rglob("*"):
-                    if not path.is_file() or path.suffix.casefold() not in {".mkv", ".mp4", ".m4v", ".avi", ".webm"}:
+                    if not path.is_file() or path.suffix.casefold() not in {
+                        ".mkv",
+                        ".mp4",
+                        ".m4v",
+                        ".avi",
+                        ".webm",
+                    }:
                         continue
                     try:
                         stat = path.stat()
@@ -1487,7 +1537,9 @@ def create_app() -> Any:
                     )
             for entry in media_mod.scan_library():
                 state = review_mod.get_state(entry.path)
-                if state.stage == "deleted" or not anime_mod.is_nyaa_url(state.torrent_source_url or ""):
+                if state.stage == "deleted" or not anime_mod.is_nyaa_url(
+                    state.torrent_source_url or ""
+                ):
                     continue
                 entries.append(
                     {
@@ -1495,7 +1547,9 @@ def create_app() -> Any:
                         "rel_path": entry.rel_path,
                         "name": Path(entry.path).name,
                         "series": entry.series or entry.name,
-                        "season": f"Season {entry.season:02d}" if entry.season is not None else None,
+                        "season": f"Season {entry.season:02d}"
+                        if entry.season is not None
+                        else None,
                         "size": entry.size,
                         "mtime": entry.mtime,
                         "staged": True,
@@ -1508,6 +1562,7 @@ def create_app() -> Any:
 
         root, entries = await asyncio.to_thread(scan)
         from bankai.web.anime_library import group_shows
+
         return {"root": str(root), "entries": entries, "shows": await group_shows(entries, root)}
 
     @app.get("/api/anime/tvdb")
@@ -1563,7 +1618,9 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
             log.warning("Nyaa detail lookup failed for %s: %s", url, exc)
-            raise HTTPException(status_code=502, detail="Nyaa description could not be loaded") from exc
+            raise HTTPException(
+                status_code=502, detail="Nyaa description could not be loaded"
+            ) from exc
         return {"description": description, "magnet_uri": magnet, "publisher": publisher}
 
     @app.post("/api/anime/download")
@@ -1579,7 +1636,9 @@ def create_app() -> Any:
         if req.episode is not None and req.episode < 1:
             raise HTTPException(status_code=422, detail="episode must be positive")
         if req.kind == "movie" and (req.season is not None or req.episode is not None):
-            raise HTTPException(status_code=422, detail="movies cannot have season or episode overrides")
+            raise HTTPException(
+                status_code=422, detail="movies cannot have season or episode overrides"
+            )
         if not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url):
             raise HTTPException(
                 status_code=422, detail="anime downloads only accept nyaa.si sources"
@@ -1907,9 +1966,13 @@ def create_app() -> Any:
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         if job.kind != "movie":
-            raise HTTPException(status_code=409, detail="source links can only replace movie sources")
+            raise HTTPException(
+                status_code=409, detail="source links can only replace movie sources"
+            )
         if job.status not in {"failed", "cancelled"}:
-            raise HTTPException(status_code=409, detail="only failed or cancelled movies can be retried")
+            raise HTTPException(
+                status_code=409, detail="only failed or cancelled movies can be retried"
+            )
         source_url = normalize_stream_url(req.url)
         try:
             site = _stream_site_from_url(source_url)
@@ -2278,8 +2341,7 @@ def create_app() -> Any:
                     "id": j["id"],
                     "title": clean,
                     "kind": "episode" if is_ep else "movie",
-                    "year": _extract_year(j.get("title", ""))
-                    or poster_entry.get("year"),
+                    "year": _extract_year(j.get("title", "")) or poster_entry.get("year"),
                     "poster": poster_entry.get("url"),
                     "created_at": j.get("started_at"),
                     "updated_at": j.get("updated_at")
@@ -2464,7 +2526,9 @@ def create_app() -> Any:
                 await client.resume(normalized_hash)
         except Exception as exc:
             log.warning("qBittorrent start failed for %s: %s", normalized_hash, exc)
-            raise HTTPException(status_code=502, detail="qBittorrent could not start the torrent.") from exc
+            raise HTTPException(
+                status_code=502, detail="qBittorrent could not start the torrent."
+            ) from exc
         return {"ok": True, "hash": normalized_hash, "action": "start"}
 
     @app.post("/api/qbittorrent/torrents/{torrent_hash}/stop")
@@ -2477,7 +2541,9 @@ def create_app() -> Any:
                 await client.pause(normalized_hash)
         except Exception as exc:
             log.warning("qBittorrent stop failed for %s: %s", normalized_hash, exc)
-            raise HTTPException(status_code=502, detail="qBittorrent could not stop the torrent.") from exc
+            raise HTTPException(
+                status_code=502, detail="qBittorrent could not stop the torrent."
+            ) from exc
         return {"ok": True, "hash": normalized_hash, "action": "stop"}
 
     @app.delete("/api/qbittorrent/torrents/{torrent_hash}")
@@ -2493,7 +2559,9 @@ def create_app() -> Any:
                 await client.remove(normalized_hash, delete_files=delete_files)
         except Exception as exc:
             log.warning("qBittorrent remove failed for %s: %s", normalized_hash, exc)
-            raise HTTPException(status_code=502, detail="qBittorrent could not remove the torrent.") from exc
+            raise HTTPException(
+                status_code=502, detail="qBittorrent could not remove the torrent."
+            ) from exc
         return {
             "ok": True,
             "hash": normalized_hash,
@@ -2716,11 +2784,7 @@ def create_app() -> Any:
             "-map",
             f"0:{stream}",
             "-vn",
-            *(
-                []
-                if detailed
-                else ["-af", "aformat=channel_layouts=mono,aeval=abs(val(0))"]
-            ),
+            *([] if detailed else ["-af", "aformat=channel_layouts=mono,aeval=abs(val(0))"]),
             "-ac",
             "1",
             "-ar",
@@ -3214,11 +3278,15 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         settings = get_settings()
-        roots = settings.web.server_movie_dirs if req.kind == "movie" else settings.web.server_show_dirs
+        roots = (
+            settings.web.server_movie_dirs if req.kind == "movie" else settings.web.server_show_dirs
+        )
         allowed = [Path(root).resolve() for root in roots]
         target = Path(req.path).resolve()
         if not any(root in target.parents for root in allowed):
-            raise HTTPException(status_code=403, detail="path is outside configured server directories")
+            raise HTTPException(
+                status_code=403, detail="path is outside configured server directories"
+            )
         if not target.exists():
             raise HTTPException(status_code=404, detail="server item not found")
 
@@ -3232,7 +3300,9 @@ def create_app() -> Any:
                     raise HTTPException(status_code=422, detail="episode path is not a file")
                 destination = target.with_name(f"{title}{target.suffix}")
                 if destination.exists() and destination != target:
-                    raise HTTPException(status_code=409, detail="an episode with that title already exists")
+                    raise HTTPException(
+                        status_code=409, detail="an episode with that title already exists"
+                    )
                 if destination != target:
                     target.rename(destination)
                     renamed_pairs.append((target, destination))
@@ -3240,7 +3310,9 @@ def create_app() -> Any:
             elif target.is_file():
                 destination = target.with_name(f"{title}{target.suffix}")
                 if destination.exists() and destination != target:
-                    raise HTTPException(status_code=409, detail="a movie with that title already exists")
+                    raise HTTPException(
+                        status_code=409, detail="a movie with that title already exists"
+                    )
                 if destination != target:
                     target.rename(destination)
                     renamed_pairs.append((target, destination))
@@ -3248,7 +3320,9 @@ def create_app() -> Any:
             else:
                 destination = target.parent / title
                 if destination.exists() and destination != target:
-                    raise HTTPException(status_code=409, detail="a movie folder with that title already exists")
+                    raise HTTPException(
+                        status_code=409, detail="a movie folder with that title already exists"
+                    )
                 # Rename matching video/sidecar basenames before the folder so
                 # the movie directory and its contents stay consistently named.
                 for child in list(target.iterdir()):
@@ -3256,7 +3330,9 @@ def create_app() -> Any:
                         continue
                     renamed = child.with_name(f"{title}{child.suffix}")
                     if renamed.exists() and renamed != child:
-                        raise HTTPException(status_code=409, detail=f"{renamed.name} already exists")
+                        raise HTTPException(
+                            status_code=409, detail=f"{renamed.name} already exists"
+                        )
                     if renamed != child:
                         child.rename(renamed)
                         renamed_pairs.append((child, renamed))
