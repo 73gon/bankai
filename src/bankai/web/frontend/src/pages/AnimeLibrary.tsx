@@ -149,7 +149,7 @@ export default function AnimeLibrary() {
                 <CardDescription>{show.season_count} season{show.season_count === 1 ? '' : 's'}</CardDescription>
               </CardHeader>
               <CardContent className='flex flex-wrap gap-2'>
-                <span className='w-full text-sm'>{show.downloaded_count}/{show.total_count} episodes downloaded</span>
+                <span className='w-full text-sm' title='Episodes downloaded'>{show.downloaded_count}/{show.total_count}</span>
                 {show.staged_count > 0 && <Badge variant='warning'>{show.staged_count} staged</Badge>}
                 <span className='text-xs text-muted-foreground'>{formatSize(show.size)}</span>
               </CardContent>
