@@ -72,21 +72,28 @@ type StatusStyle = {
   progress: string;
 };
 
+const COMPLETED: StatusStyle = { label: 'Completed', icon: CheckCircle2, badge: 'transfer', row: 'bg-transfer/[0.08] hover:bg-transfer/[0.13]', iconColor: 'text-transfer', progress: 'bg-transfer' };
+
 function torrentStatus(item: QBittorrentItem): StatusStyle {
   const state = item.state.toLowerCase();
+  // qBittorrent suffixes its states with DL or UP; the UP variants mean the download already finished.
+  const finished = state.endsWith('up') || item.progress >= 1;
   if (state.includes('error') || state.includes('missing')) {
     return { label: 'Error', icon: TriangleAlert, badge: 'destructive', row: 'bg-destructive/[0.08] hover:bg-destructive/[0.13]', iconColor: 'text-destructive', progress: 'bg-destructive' };
   }
   if (state.includes('queued')) {
+    if (finished) return COMPLETED;
     return { label: 'Queued', icon: Clock3, badge: 'warning', row: 'bg-warning/[0.08] hover:bg-warning/[0.13]', iconColor: 'text-warning', progress: 'bg-warning' };
   }
   if (state.includes('stalledup')) {
     return { label: 'Seeding', icon: ChevronsUp, badge: 'info', row: 'bg-info/[0.08] hover:bg-info/[0.13]', iconColor: 'text-info', progress: 'bg-info' };
   }
   if (state.includes('stalled')) {
+    if (finished) return COMPLETED;
     return { label: 'Stalled', icon: CirclePause, badge: 'success', row: 'bg-success/[0.08] hover:bg-success/[0.13]', iconColor: 'text-success', progress: 'bg-success' };
   }
   if (state.includes('downloading') || state.includes('forceddl') || state.includes('metadl')) {
+    if (finished) return COMPLETED;
     return { label: 'Downloading', icon: ChevronsDown, badge: 'success', row: 'bg-success/[0.08] hover:bg-success/[0.13]', iconColor: 'text-success', progress: 'bg-success' };
   }
   if (state.includes('uploading') || state.includes('forcedup')) {
@@ -95,9 +102,7 @@ function torrentStatus(item: QBittorrentItem): StatusStyle {
   if (state.includes('checking') || state.includes('moving') || state.includes('allocating')) {
     return { label: 'Checking', icon: RefreshCw, badge: 'warning', row: 'bg-warning/[0.08] hover:bg-warning/[0.13]', iconColor: 'text-warning', progress: 'bg-warning' };
   }
-  if (item.progress >= 1) {
-    return { label: 'Completed', icon: CheckCircle2, badge: 'transfer', row: 'bg-transfer/[0.08] hover:bg-transfer/[0.13]', iconColor: 'text-transfer', progress: 'bg-transfer' };
-  }
+  if (finished) return COMPLETED;
   if (state.includes('paused') || state.includes('stopped')) {
     return { label: 'Paused', icon: CirclePause, badge: 'muted', row: 'bg-muted/20 hover:bg-muted/30', iconColor: 'text-muted-foreground', progress: 'bg-muted-foreground' };
   }
