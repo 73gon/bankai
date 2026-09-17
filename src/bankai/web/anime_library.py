@@ -616,6 +616,11 @@ async def group_shows(
             "hevc_count": sum(
                 1 for row in merged["episodes"] if row.get("codec") == "hevc"
             ),
+            # Counted separately from avc_count, which is what the upgrade can
+            # actually offer to replace.
+            "german_dub_count": sum(
+                1 for row in merged["episodes"] if row.get("german_dub")
+            ),
             "tvdb_id": tvdb_id,
             "year": metadata.get("year"),
             "poster_url": metadata.get("poster_url"),

@@ -253,8 +253,10 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 }
 
 export interface AnimeLibraryShow {
+  /** AVC episodes an upgrade could actually replace (dubs are excluded). */
   avc_count?: number;
   hevc_count?: number;
+  german_dub_count?: number;
   downloaded_count: number;
   total_count: number;
   completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
