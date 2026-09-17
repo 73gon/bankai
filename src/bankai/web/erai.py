@@ -1577,6 +1577,55 @@ def retire_download_pendings() -> dict[str, int]:
     return {"retired": retired, "adopted": adopted, "kept": kept}
 
 
+def _rebuilt_args(
+    state: dict[str, Any], info_hash: str, release: dict[str, Any]
+) -> list[str] | None:
+    """Reconstruct publishing arguments for a record written before they were kept.
+
+    Releases tracked by older builds stored no arguments, so the reconciler had
+    nothing to publish with and skipped them forever -- which is how finished
+    downloads sat untouched. The canonical key carries the TVDB identity and
+    the series is already resolved, so the arguments can be rebuilt.
+    """
+    parts = str(release.get("canonical") or "").split("|")
+    if len(parts) != 3 or not all(parts):
+        return None
+    tvdb_id, season, episode = parts
+    series = (state.get("series") or {}).get(tvdb_id) or {}
+    english_title = str(series.get("english_title") or "")
+    if not english_title:
+        return None
+    args = [
+        "anime-download",
+        "--release-title",
+        str(release.get("title") or english_title),
+        # The torrent is already in qBittorrent, so a magnet built from the
+        # info hash re-adds nothing; these URLs only satisfy the nyaa.si check.
+        "--torrent-url",
+        "https://nyaa.si/",
+        "--detail-url",
+        "https://nyaa.si/",
+        "--magnet-uri",
+        f"magnet:?xt=urn:btih:{info_hash}",
+        "--info-hash",
+        info_hash,
+        "--kind",
+        "show",
+        "--tvdb-id",
+        tvdb_id,
+        "--english-title",
+        english_title,
+        "--season",
+        season,
+        "--episode",
+        episode,
+        "--require-german-subtitles",
+    ]
+    if series.get("year"):
+        args.extend(["--year", str(series["year"])])
+    return args
+
+
 async def _readd_torrent(qbit: Any, release: dict[str, Any]) -> bool:
     """Put a tracked release back into qBittorrent from its stored arguments."""
     args = release.get("args")
@@ -1632,6 +1681,11 @@ async def reconcile_releases() -> dict[str, int]:
 
             for info_hash, release in list(state["releases"].items()):
                 status = str(release.get("status") or "")
+                if status == "running":
+                    # Written by the old model for a worker that no longer
+                    # exists. The download is what matters, so re-drive it.
+                    status = "queued"
+                    release["status"] = status
                 if status not in _ACTIVE_RELEASE_STATES:
                     continue
                 torrent = by_hash.get(info_hash.casefold())
@@ -1699,8 +1753,17 @@ async def reconcile_releases() -> dict[str, int]:
                 # Complete: publish it, as soon as the transfer lane has room.
                 args = release.get("args")
                 if not args:
-                    tally("unpublishable")
-                    continue
+                    args = _rebuilt_args(state, info_hash, release)
+                    if args:
+                        release["args"] = args
+                    else:
+                        # Surface it rather than skipping every pass in silence.
+                        release["status"] = "held"
+                        release["reason"] = "Publishing arguments are missing and unrebuildable"
+                        release["retry_after"] = 0
+                        release["updated_at"] = time.time()
+                        tally("unpublishable")
+                        continue
                 if running >= limit:
                     tally("awaiting_transfer_slot")
                     continue

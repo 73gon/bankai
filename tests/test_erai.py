@@ -1605,3 +1605,104 @@ def test_discovery_records_the_release_before_adding_the_torrent(monkeypatch):
     assert record["display_title"] == "Test Show S01E01"
     # The arguments are kept so publishing never re-resolves against TVDB.
     assert record["args"][0] == "anime-download"
+
+
+def _legacy_release(status="queued"):
+    """A record as older builds wrote them: no stored arguments."""
+    return {
+        "status": status,
+        "title": "[Erai-raws] Test Show - 11 [1080p][HEVC]",
+        "canonical": "402642|1|11",
+        "updated_at": 1.0,
+    }
+
+
+def _state_with_series():
+    state = erai._default_state()
+    state["series"] = {
+        "402642": {"tvdb_id": 402642, "english_title": "Test Show", "year": 2024}
+    }
+    return state
+
+
+def test_legacy_record_without_arguments_is_rebuilt_and_published(monkeypatch, tmp_path):
+    """Finished downloads sat untouched because the record carried no arguments."""
+    info_hash = "a" * 40
+    state = _state_with_series()
+    state["releases"] = {info_hash: _legacy_release()}
+
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+    monkeypatch.setattr(
+        erai, "get_settings", lambda: Settings(anime={"enabled": True, "max_concurrent_transfers": 2})
+    )
+    monkeypatch.setattr(erai.updates, "maintenance_active", lambda: False)
+    qbit = _RecordingQbit([_Torrent(info_hash, progress=1.0, state="queuedUP")])
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
+    spawned: list[dict] = []
+    monkeypatch.setattr(
+        "bankai.cli.bgjobs.spawn",
+        lambda **kwargs: spawned.append(kwargs) or SimpleNamespace(id="job1"),
+    )
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda job_id: None)
+
+    asyncio.run(erai.reconcile_releases())
+
+    assert state["releases"][info_hash]["status"] == "transferring"
+    args = spawned[0]["args"]
+    assert args[0] == "anime-download"
+    assert args[args.index("--tvdb-id") + 1] == "402642"
+    assert args[args.index("--season") + 1] == "1"
+    assert args[args.index("--episode") + 1] == "11"
+    assert args[args.index("--english-title") + 1] == "Test Show"
+    assert args[args.index("--year") + 1] == "2024"
+    # The CLI refuses anything that is not a nyaa.si source.
+    from bankai.web.anime import is_nyaa_url
+
+    assert is_nyaa_url(args[args.index("--torrent-url") + 1])
+    assert is_nyaa_url(args[args.index("--detail-url") + 1])
+    assert args[args.index("--magnet-uri") + 1].endswith(info_hash)
+
+
+def test_unrebuildable_record_is_held_instead_of_skipped_forever(monkeypatch, tmp_path):
+    info_hash = "b" * 40
+    state = erai._default_state()  # no series, so nothing to rebuild from
+    state["releases"] = {info_hash: _legacy_release()}
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+    monkeypatch.setattr(
+        erai, "get_settings", lambda: Settings(anime={"enabled": True})
+    )
+    monkeypatch.setattr(erai.updates, "maintenance_active", lambda: False)
+    qbit = _RecordingQbit([_Torrent(info_hash, progress=1.0, state="queuedUP")])
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda job_id: None)
+    monkeypatch.setattr(
+        "bankai.cli.bgjobs.spawn",
+        lambda **kwargs: pytest.fail("must not publish without arguments"),
+    )
+
+    asyncio.run(erai.reconcile_releases())
+    record = state["releases"][info_hash]
+    assert record["status"] == "held"
+    assert "arguments" in record["reason"].lower()
+
+
+def test_legacy_running_status_is_re_driven(monkeypatch, tmp_path):
+    """Those records point at workers from the old model that no longer exist."""
+    info_hash = "c" * 40
+    state = _state_with_series()
+    state["releases"] = {info_hash: _legacy_release(status="running")}
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+    monkeypatch.setattr(
+        erai, "get_settings", lambda: Settings(anime={"enabled": True, "max_concurrent_transfers": 2})
+    )
+    monkeypatch.setattr(erai.updates, "maintenance_active", lambda: False)
+    qbit = _RecordingQbit([_Torrent(info_hash, progress=0.5, state="downloading")])
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda job_id: None)
+    monkeypatch.setattr("bankai.cli.bgjobs.spawn", lambda **kwargs: SimpleNamespace(id="job1"))
+
+    asyncio.run(erai.reconcile_releases())
+    assert state["releases"][info_hash]["status"] == "downloading"
