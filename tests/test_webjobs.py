@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -421,3 +422,72 @@ def test_catalog_titles_does_not_parse_progress_logs(monkeypatch: pytest.MonkeyP
 )
 def test_phase_narrows_running_to_the_announced_stage(status, step_key, expected):
     assert webjobs._phase(status, step_key) == expected
+
+
+# Appended to tests/test_webjobs.py. Lines are held as a list so the wrapped
+# sample stays readable and needs no escape sequences.
+
+# Copied from a stuck job on the live box: Rich wrapped the stage marker at 80
+# columns, so nothing downstream could read it.
+_WRAPPED_LINES = [
+    '[02:44:19] INFO     BANKAI_STAGE step=1 total=3 key=torrent label="Download    ',
+    '                    from Nyaa"                                                 ',
+    "[02:44:20] INFO     BANKAI_PROGRESS stage=torrent pct=100.0 speed=0 eta=8640000",
+    '           INFO     BANKAI_STAGE step=2 total=3 key=organize label="Organize   ',
+    '                    with TVDB"                                                 ',
+]
+
+_FLAT_LINES = [
+    'BANKAI_STAGE step=1 total=3 key=torrent label="Download from Nyaa"',
+    "BANKAI_PROGRESS stage=torrent pct=40.0 speed=1 eta=2",
+]
+
+
+def _snapshot_of(tmp_path, lines):
+    from bankai.cli import bgjobs
+
+    log = tmp_path / "log"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    class Job:
+        id = "j1"
+        kind = "show"
+        title = "Test Show S01E01"
+        args: ClassVar[list[str]] = ["anime-download"]
+        status = "running"
+        log_path = log
+
+        def refresh(self):
+            return self
+
+    return bgjobs.progress_snapshot(Job())
+
+
+def test_wrapped_stage_markers_are_still_parsed(tmp_path):
+    """Every running job read as "Starting" at 100% because of this."""
+    snap = _snapshot_of(tmp_path, _WRAPPED_LINES)
+    assert snap.step_key == "organize"
+    assert snap.step_label == "Organize with TVDB"
+    assert (snap.step, snap.total_steps) == (2, 3)
+    # A finished first stage must not make the whole job look finished.
+    assert snap.overall_percent is not None
+    assert snap.overall_percent < 100.0
+    assert webjobs._phase("running", snap.step_key) == "organizing"
+
+
+def test_unwrapping_leaves_intact_logs_alone(tmp_path):
+    from bankai.cli import bgjobs
+
+    assert bgjobs._unwrap_markers(list(_FLAT_LINES)) == _FLAT_LINES
+    snap = _snapshot_of(tmp_path, _FLAT_LINES)
+    assert snap.step_key == "torrent"
+    assert snap.step_label == "Download from Nyaa"
+
+
+def test_log_console_is_wide_enough_for_markers_when_redirected():
+    """Rich defaults a redirected stream to 80 columns; the markers are longer."""
+    from bankai import logging as bankai_logging
+
+    console = bankai_logging._log_console()
+    assert not console.is_terminal
+    assert console.width >= 200

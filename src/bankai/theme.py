@@ -11,6 +11,8 @@ embedded (see ``cli.bgjobs``); the log viewer re-renders those codes via
 
 from __future__ import annotations
 
+from typing import Any
+
 from rich.console import Console
 from rich.theme import Theme
 
@@ -50,9 +52,9 @@ BANKAI_THEME = Theme(
 )
 
 
-def make_console() -> Console:
+def make_console(**kwargs: Any) -> Console:
     """Create a :class:`rich.console.Console` that uses the bankai theme."""
-    return Console(theme=BANKAI_THEME)
+    return Console(theme=BANKAI_THEME, **kwargs)
 
 
 __all__ = ["BANKAI_THEME", "make_console"]

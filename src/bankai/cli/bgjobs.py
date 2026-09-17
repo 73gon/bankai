@@ -298,9 +298,32 @@ _PROGRESS_RE = re.compile(r"BANKAI_PROGRESS\s+(?P<data>.+)$")
 _RSYNC_PERCENT_RE = re.compile(r"(?P<pct>\d{1,3})%")
 
 
+def _unwrap_markers(lines: list[str]) -> list[str]:
+    """Rejoin markers Rich split across console columns.
+
+    Logs written before the job console was widened wrap mid-value, leaving
+    ``label="Download`` on one line and ``from Nyaa"`` on the next, which no
+    marker regex can match. An odd number of quotes after the marker is the
+    reliable tell that the value is still open.
+    """
+    out: list[str] = []
+    for line in lines:
+        text = line.rstrip()
+        if out and _has_open_quote(out[-1]):
+            out[-1] = f"{out[-1]} {text.strip()}"
+            continue
+        out.append(text)
+    return out
+
+
+def _has_open_quote(line: str) -> bool:
+    start = max(line.find("BANKAI_STAGE"), line.find("BANKAI_PROGRESS"))
+    return start >= 0 and line.count('"', start) % 2 == 1
+
+
 def progress_snapshot(job: BgJob) -> ProgressSnapshot:
     job = job.refresh()
-    lines = _read_log_tail(job.log_path, lines=800)
+    lines = _unwrap_markers(_read_log_tail(job.log_path, lines=800))
     step: int | None = None
     total: int | None = None
     step_key: str | None = None
