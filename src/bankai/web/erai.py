@@ -1491,11 +1491,11 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
 # finished torrents sat unpublished.
 # ---------------------------------------------------------------------------
 
-_ACTIVE_RELEASE_STATES = {"queued", "downloading", "transferring", "deleting"}
+_ACTIVE_RELEASE_STATES = {"queued", "downloading", "complete", "transferring", "deleting"}
 # A release being deleted still has a job, but that job already reads "done"
 # and is hidden from the queue by default, so the release row is what keeps
 # the last step visible.
-_PUBLISHABLE = {"queued", "downloading", "deleting"}
+_PUBLISHABLE = {"queued", "downloading", "complete", "deleting"}
 
 
 def _release_job_running(release: dict[str, Any]) -> bool:
@@ -1750,7 +1750,13 @@ async def reconcile_releases() -> dict[str, int]:
                     tally(phase)
                     continue
 
-                # Complete: publish it, as soon as the transfer lane has room.
+                # The download is finished from here on, whether or not the
+                # transfer lane has room. Saying so is the point: leaving it as
+                # "downloading" while it waits reports something that is simply
+                # not true any more.
+                if release.get("status") != "complete":
+                    release["status"] = "complete"
+                    release["updated_at"] = time.time()
                 args = release.get("args")
                 if not args:
                     args = _rebuilt_args(state, info_hash, release)
@@ -1765,7 +1771,7 @@ async def reconcile_releases() -> dict[str, int]:
                         tally("unpublishable")
                         continue
                 if running >= limit:
-                    tally("awaiting_transfer_slot")
+                    tally("complete")
                     continue
                 job = bgjobs.spawn(
                     kind="show",
@@ -1814,9 +1820,10 @@ def release_queue_rows() -> list[dict[str, Any]]:
                 "step_key": None,
                 "step_label": {
                     "downloading": "Downloading in qBittorrent",
+                    "complete": "Downloaded, waiting to publish",
                     "deleting": "Removing the torrent",
                 }.get(status, "Waiting for qBittorrent"),
-                "overall_percent": 100.0 if status == "deleting" else 0.0,
+                "overall_percent": 100.0 if status in {"complete", "deleting"} else 0.0,
                 "transfer_percent": None,
                 "pending": True,
                 "action_required": False,

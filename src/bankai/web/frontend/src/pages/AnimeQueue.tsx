@@ -22,6 +22,7 @@ function phaseVariant(phase: string) {
   if (phase === 'failed' || phase === 'cancelled') return 'destructive' as const;
   if (phase === 'stopped' || phase === 'queued') return 'warning' as const;
   if (phase === 'downloading') return 'torrent' as const;
+  if (phase === 'complete') return 'starting' as const;
   if (phase === 'organizing') return 'extract' as const;
   if (phase === 'transferring') return 'transfer' as const;
   if (phase === 'deleting') return 'repack' as const;
@@ -68,6 +69,7 @@ function JobProgress({ job }: { job: Job }) {
 const STATUS_ORDER = [
   'queued',
   'downloading',
+  'complete',
   'organizing',
   'transferring',
   'deleting',

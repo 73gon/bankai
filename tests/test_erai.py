@@ -1410,7 +1410,8 @@ def test_completed_download_starts_publishing_within_the_transfer_limit(monkeypa
         monkeypatch, tmp_path, releases, torrents, limit=2
     )
     assert len(spawned) == 2
-    assert counts.get("awaiting_transfer_slot") == 2
+    # The two that missed out are finished downloading, not still downloading.
+    assert counts.get("complete") == 2
     publishing = [r for r in state["releases"].values() if r["status"] == "transferring"]
     assert len(publishing) == 2
     assert all(row["args"][0] == "anime-download" for row in spawned)
@@ -1706,3 +1707,31 @@ def test_legacy_running_status_is_re_driven(monkeypatch, tmp_path):
 
     asyncio.run(erai.reconcile_releases())
     assert state["releases"][info_hash]["status"] == "downloading"
+
+
+def test_finished_download_waiting_for_a_slot_reads_complete(monkeypatch, tmp_path):
+    """It stopped downloading the moment qBittorrent finished, slot or no slot."""
+    hashes = [f"{index}".rjust(40, "0") for index in range(1, 4)]
+    releases = {h: _release(h, status="downloading") for h in hashes}
+    torrents = [_Torrent(h, progress=1.0, state="queuedUP") for h in hashes]
+    state, counts, _qbit, spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, torrents, limit=1
+    )
+    statuses = sorted(row["status"] for row in state["releases"].values())
+    # One got the single slot; the other two are done downloading and waiting.
+    assert statuses == ["complete", "complete", "transferring"]
+    assert len(spawned) == 1
+    assert counts.get("complete") == 2
+    # None of them may still claim to be downloading.
+    assert "downloading" not in statuses
+
+
+def test_complete_releases_are_visible_in_the_queue(monkeypatch):
+    state = erai._default_state()
+    state["releases"] = {"a" * 40: _release("a" * 40, status="complete")}
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    row = erai.release_queue_rows()[0]
+    assert row["phase"] == "complete"
+    assert row["step_label"] == "Downloaded, waiting to publish"
+    assert row["overall_percent"] == 100.0
+
