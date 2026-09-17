@@ -286,7 +286,14 @@ export default function AnimeQueue() {
               action={filtered ? <Button variant='secondary' onClick={clearFilters}>Clear filters</Button> : undefined}
             />
           ) : (
-            <table className='w-full min-w-[820px] border-collapse text-sm'>
+            <table className='w-full min-w-[900px] table-fixed border-collapse text-sm'>
+              <colgroup>
+                <col />
+                <col className='w-28' />
+                <col className='w-52' />
+                <col className='w-32' />
+                <col className='w-20' />
+              </colgroup>
               <thead>
                 <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
                   <th className='px-3 py-2.5 font-medium'>Title</th>

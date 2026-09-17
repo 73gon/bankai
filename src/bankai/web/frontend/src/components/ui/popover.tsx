@@ -14,11 +14,12 @@ const PopoverContent = React.forwardRef<
   <PopoverPrimitive.Portal>
     <PopoverPrimitive.Content
       ref={ref}
+      data-slot='popover-content'
       align={align}
       sideOffset={sideOffset}
       collisionPadding={12}
       className={cn(
-        'z-50 w-80 rounded-lg border border-white/15 bg-popover/95 p-4 text-popover-foreground shadow-[0_16px_48px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+        'z-50 w-80 max-w-[calc(100vw-24px)] p-4 text-popover-foreground outline-none',
         className,
       )}
       {...props}

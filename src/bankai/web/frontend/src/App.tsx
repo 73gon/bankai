@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api, type UpdateStatus, type VpnStatus } from '@/lib/api';
 import { Button } from '@/components/ui/button';
+import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
@@ -63,7 +64,17 @@ function useSidebarState() {
 }
 
 function BrandMark() {
-  return <span className='font-mono text-[0.95rem] font-semibold tracking-[0.02em] text-foreground'>bankai</span>;
+  return (
+    <div className='flex items-center gap-2.5'>
+      <span className='flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-foreground shadow-[var(--control-edge)]' aria-hidden='true'>
+        <Clapperboard className='size-4' strokeWidth={1.7} />
+      </span>
+      <div className='flex flex-col gap-0.5'>
+        <span className='font-mono text-sm font-semibold tracking-tight text-foreground'>bankai</span>
+        <span className='hidden text-[11px] leading-none text-muted-foreground md:block'>Media workspace</span>
+      </div>
+    </div>
+  );
 }
 
 function UpdateSidebarStatus({ collapsed }: { collapsed: boolean }) {
@@ -177,7 +188,7 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
     <span
       aria-hidden='true'
       className={cn(
-        'size-2.5 shrink-0 rounded-full shadow-[0_0_8px_currentColor]',
+        'size-1.5 shrink-0 rounded-full',
         connected ? 'bg-success text-success' : disconnected ? 'bg-destructive text-destructive' : 'bg-muted-foreground text-muted-foreground',
       )}
     />
@@ -201,8 +212,9 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
   }
 
   return (
-    <div className='flex min-h-10 items-center gap-2 rounded-md border border-border/70 px-3 py-2 text-sm text-foreground'>
-      <span className='font-medium'>VPN</span>
+    <div className='flex min-h-8 items-center gap-2 px-2 text-xs text-muted-foreground'>
+      <ShieldCheck className='size-3.5 shrink-0' aria-hidden='true' />
+      <span className='font-medium'>{connected ? 'VPN connected' : 'VPN'}</span>
       <Tooltip>
         <TooltipTrigger asChild>{dot}</TooltipTrigger>
         <TooltipContent side='right'>{status?.detail || statusLabel}</TooltipContent>
@@ -219,40 +231,50 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
 
 export default function App() {
   const [collapsed, setCollapsed] = useSidebarState();
+  useEffect(() => {
+    const pointer = () => { document.documentElement.dataset.inputMethod = 'pointer'; };
+    const keyboard = () => { document.documentElement.dataset.inputMethod = 'keyboard'; };
+    document.addEventListener('pointerdown', pointer, true);
+    document.addEventListener('keydown', keyboard, true);
+    return () => {
+      document.removeEventListener('pointerdown', pointer, true);
+      document.removeEventListener('keydown', keyboard, true);
+    };
+  }, []);
 
   return (
-    <TooltipProvider delayDuration={150}>
+    <TooltipProvider delayDuration={350} skipDelayDuration={400}>
       <div className='flex min-h-screen flex-col md:h-screen md:min-h-0 md:flex-row md:overflow-hidden'>
         {/* Sidebar (desktop) / top bar (mobile) */}
         <aside
           className={cn(
-            'sticky top-0 z-30 flex shrink-0 flex-row items-center gap-1 border-b border-border/70 bg-background/70 px-3 py-2 backdrop-blur-xl',
-            'md:h-screen md:flex-col md:items-stretch md:gap-1 md:border-b-0 md:border-r md:py-4 md:transition-[width] md:duration-200',
-            collapsed ? 'md:w-[4.75rem] md:px-2.5' : 'md:w-60 md:px-3',
+            'sticky top-0 z-30 flex min-w-0 shrink-0 flex-row items-center gap-3 border-b border-sidebar-border bg-sidebar px-3 py-2',
+            'md:h-dvh md:flex-col md:items-stretch md:gap-0 md:border-b-0 md:border-r md:p-0',
+            collapsed ? 'md:w-16' : 'md:w-60',
           )}
         >
           {/* Header row: brand + collapse toggle (desktop) */}
-          <div className={cn('hidden md:flex md:items-center', collapsed ? 'md:justify-center md:px-0' : 'md:justify-between md:px-1')}>
+          <div className={cn('hidden h-16 shrink-0 md:flex md:items-center', collapsed ? 'md:justify-center' : 'md:justify-between md:px-4')}>
             {collapsed ? (
-              <button
-                type='button'
+              <Button
+                variant='ghost'
+                size='icon'
                 onClick={() => setCollapsed(false)}
                 aria-label='Expand sidebar'
-                className='flex h-10 w-10 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-all duration-200 hover:bg-white/[0.04] hover:text-foreground'
               >
-                <PanelLeft className='h-[18px] w-[18px]' />
-              </button>
+                <PanelLeft data-icon='inline-start' />
+              </Button>
             ) : (
               <>
                 <BrandMark />
-                <button
-                  type='button'
+                <Button
+                  variant='ghost'
+                  size='icon'
                   onClick={() => setCollapsed(true)}
                   aria-label='Collapse sidebar'
-                  className='flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-all duration-200 hover:bg-white/[0.04] hover:text-foreground'
                 >
-                  <PanelLeftClose className='h-[18px] w-[18px]' />
-                </button>
+                  <PanelLeftClose data-icon='inline-start' />
+                </Button>
               </>
             )}
           </div>
@@ -262,20 +284,20 @@ export default function App() {
             <BrandMark />
           </div>
 
-          <div className='hidden md:my-3 md:block md:h-px md:bg-border/70' />
+          <Separator className='hidden md:block' />
 
-          <nav className={cn('flex flex-1 flex-row gap-1 overflow-x-auto md:mt-0 md:flex-col md:overflow-visible', collapsed && 'md:items-center')}>
+          <nav aria-label='Main navigation' className={cn('flex min-h-0 min-w-0 flex-1 flex-row gap-1 overflow-x-auto py-1 md:flex-col md:gap-0 md:overflow-y-auto md:overflow-x-hidden md:py-3', collapsed && 'md:items-center')}>
             {NAV_GROUPS.map((group, groupIndex) => (
               <div
                 key={group.label}
                 className={cn(
-                  'contents md:flex md:flex-col md:gap-1',
-                  groupIndex > 0 && 'md:mt-4 md:border-t md:border-border/70 md:pt-4',
-                  collapsed && 'md:items-center',
+                  'contents md:flex md:w-full md:flex-col md:gap-0.5 md:px-3',
+                  collapsed && 'md:items-center md:px-2',
                 )}
               >
+                {groupIndex > 0 && <Separator className='my-3 hidden md:block' />}
                 {!collapsed && (
-                  <p className='hidden px-3 pb-1 text-[0.65rem] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70 md:block'>
+                  <p className='hidden px-2 pb-2 pt-1 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground md:block'>
                     {group.label}
                   </p>
                 )}
@@ -284,17 +306,14 @@ export default function App() {
                     <NavLink
                       key={to}
                       to={to}
-                      className={({ isActive }) =>
+                      className={() =>
                         cn(
-                          'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all duration-200',
-                          collapsed && 'md:mx-0 md:h-10 md:w-10 md:shrink-0 md:justify-center md:gap-0 md:p-0',
-                          isActive
-                            ? 'border border-white/10 bg-gradient-to-b from-white/[0.09] to-white/[0.03] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.08)]'
-                            : 'border border-transparent text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
+                          'sidebar-link group flex min-h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[13px] font-medium',
+                          collapsed && 'md:size-9 md:justify-center md:gap-0 md:p-0',
                         )
                       }
                     >
-                      <Icon className='h-[18px] w-[18px] shrink-0' />
+                      <Icon className='size-4 shrink-0' strokeWidth={1.65} aria-hidden='true' />
                       <span className={cn('md:inline', collapsed && 'md:hidden')}>{label}</span>
                     </NavLink>
                   );
@@ -309,13 +328,14 @@ export default function App() {
             ))}
           </nav>
 
-          <div className={cn('hidden md:flex md:shrink-0 md:flex-col md:gap-2', collapsed && 'md:items-center')}>
+          <Separator className='hidden md:block' />
+          <div className={cn('hidden p-3 md:flex md:shrink-0 md:flex-col md:gap-2', collapsed && 'md:items-center md:px-2')}>
             <UpdateSidebarStatus collapsed={collapsed} />
             <VpnSidebarStatus collapsed={collapsed} />
           </div>
         </aside>
 
-        <main className='min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8'>
+        <main className='min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-6'>
           <div className='h-full w-full animate-fade-in'>
             <Routes>
               <Route path='/' element={<Navigate to='/discover' replace />} />
