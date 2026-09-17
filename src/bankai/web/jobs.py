@@ -10,6 +10,7 @@ unrestricted lane so copying an approved file never waits for a download.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -37,9 +38,14 @@ _ROW_CACHE_LOCK = threading.Lock()
 # metadata + log revision so the queue does not re-read hundreds of historical
 # logs on every poll.  Running jobs naturally miss whenever their log grows.
 _ROW_CACHE: dict[str, tuple[tuple[object, ...], dict]] = {}
-_ANIME_STORAGE_CACHE_SECONDS = 10.0
+_ANIME_STORAGE_CACHE_SECONDS = 15.0
+_ANIME_STORAGE_STALE_SECONDS = 120.0
 _ANIME_CACHE_LOCK = threading.Lock()
 _QBIT_COMPLETED_CACHE: tuple[float, frozenset[str]] = (0.0, frozenset())
+_QBIT_COMPLETED_REFRESHING = False
+_QBIT_COMPLETED_LAST_ATTEMPT = 0.0
+_QBIT_STATUS_CLIENT = None
+_QBIT_STATUS_SIGNATURE: tuple[str, str, str] | None = None
 _ANIME_RESERVE_CACHE: tuple[float, bool] = (0.0, False)
 
 
@@ -53,43 +59,89 @@ def _is_anime_job(args: list[str] | None) -> bool:
 
 
 def _completed_anime_hashes() -> frozenset[str]:
-    """Return completed qBittorrent hashes without polling once per queue row."""
+    """Return cached hashes and refresh qBittorrent outside request/queue locks."""
 
-    global _QBIT_COMPLETED_CACHE
+    global _QBIT_COMPLETED_LAST_ATTEMPT, _QBIT_COMPLETED_REFRESHING
     now = time.monotonic()
     with _ANIME_CACHE_LOCK:
-        if now - _QBIT_COMPLETED_CACHE[0] < _ANIME_STORAGE_CACHE_SECONDS:
-            return _QBIT_COMPLETED_CACHE[1]
-    hashes: frozenset[str] = frozenset()
-    try:
-        import httpx
+        updated_at, hashes = _QBIT_COMPLETED_CACHE
+        if now - updated_at < _ANIME_STORAGE_CACHE_SECONDS:
+            return hashes
+        if (
+            not _QBIT_COMPLETED_REFRESHING
+            and now - _QBIT_COMPLETED_LAST_ATTEMPT >= _ANIME_STORAGE_CACHE_SECONDS
+        ):
+            _QBIT_COMPLETED_REFRESHING = True
+            _QBIT_COMPLETED_LAST_ATTEMPT = now
+            threading.Thread(
+                target=_refresh_completed_anime_hashes,
+                name="bankai-qbit-completed",
+                daemon=True,
+            ).start()
+        return hashes if now - updated_at <= _ANIME_STORAGE_STALE_SECONDS else frozenset()
 
-        settings = get_settings().qbittorrent
-        with httpx.Client(
-            base_url=settings.url.rstrip("/"), timeout=10.0, follow_redirects=True
-        ) as client:
-            login = client.post(
-                "/api/v2/auth/login",
-                data={"username": settings.username, "password": settings.password},
-                headers={"Referer": settings.url},
-            )
-            if login.status_code != 200 or login.text.strip() != "Ok.":
-                raise RuntimeError(f"qBittorrent login failed ({login.status_code})")
-            response = client.get(
-                "/api/v2/torrents/info",
-                params={"category": settings.category, "filter": "completed"},
-            )
-            response.raise_for_status()
-            hashes = frozenset(
-                str(row.get("hash", "")).casefold()
-                for row in response.json()
-                if row.get("hash") and float(row.get("progress", 0)) >= 1.0
-            )
+
+def _fetch_completed_anime_hashes() -> frozenset[str]:
+    """Fetch completed hashes with a reusable authenticated HTTP session."""
+
+    global _QBIT_STATUS_CLIENT, _QBIT_STATUS_SIGNATURE
+    import httpx
+
+    settings = get_settings().qbittorrent
+    signature = (settings.url.rstrip("/"), settings.username, settings.password)
+    if _QBIT_STATUS_CLIENT is None or _QBIT_STATUS_SIGNATURE != signature:
+        if _QBIT_STATUS_CLIENT is not None:
+            with suppress(Exception):
+                _QBIT_STATUS_CLIENT.close()
+        _QBIT_STATUS_CLIENT = httpx.Client(
+            base_url=signature[0],
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            follow_redirects=True,
+        )
+        _QBIT_STATUS_SIGNATURE = signature
+        login = _QBIT_STATUS_CLIENT.post(
+            "/api/v2/auth/login",
+            data={"username": signature[1], "password": signature[2]},
+            headers={"Referer": settings.url},
+        )
+        if login.status_code != 200 or login.text.strip() != "Ok.":
+            raise RuntimeError(f"qBittorrent login failed ({login.status_code})")
+
+    response = _QBIT_STATUS_CLIENT.get(
+        "/api/v2/torrents/info",
+        params={"category": settings.category, "filter": "completed"},
+    )
+    if response.status_code in {401, 403}:
+        login = _QBIT_STATUS_CLIENT.post(
+            "/api/v2/auth/login",
+            data={"username": signature[1], "password": signature[2]},
+            headers={"Referer": settings.url},
+        )
+        if login.status_code != 200 or login.text.strip() != "Ok.":
+            raise RuntimeError(f"qBittorrent login failed ({login.status_code})")
+        response = _QBIT_STATUS_CLIENT.get(
+            "/api/v2/torrents/info",
+            params={"category": settings.category, "filter": "completed"},
+        )
+    response.raise_for_status()
+    return frozenset(
+        str(row.get("hash", "")).casefold()
+        for row in response.json()
+        if row.get("hash") and float(row.get("progress", 0)) >= 1.0
+    )
+
+
+def _refresh_completed_anime_hashes() -> None:
+    global _QBIT_COMPLETED_CACHE, _QBIT_COMPLETED_REFRESHING
+    try:
+        hashes = _fetch_completed_anime_hashes()
+        with _ANIME_CACHE_LOCK:
+            _QBIT_COMPLETED_CACHE = (time.monotonic(), hashes)
     except Exception as exc:
         log.warning("could not inspect completed Anime torrents: %s", exc)
-    with _ANIME_CACHE_LOCK:
-        _QBIT_COMPLETED_CACHE = (now, hashes)
-    return hashes
+    finally:
+        with _ANIME_CACHE_LOCK:
+            _QBIT_COMPLETED_REFRESHING = False
 
 
 def _anime_reserve_available() -> bool:
@@ -357,6 +409,19 @@ def reconcile() -> int:
                 log.warning("failed to start pending job %s: %s", item.id, exc)
         _save_pending(pending)
         return started
+
+
+async def scheduler(*, poll_seconds: float = 2.0) -> None:
+    """Dispatch queued work continuously, independent of an open browser page."""
+
+    while True:
+        try:
+            await asyncio.to_thread(reconcile)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("queue scheduler failed: %s", exc)
+        await asyncio.sleep(poll_seconds)
 
 
 def list_pending() -> list[PendingJob]:

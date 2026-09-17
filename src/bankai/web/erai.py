@@ -1,9 +1,10 @@
 """Autonomous, safety-first Erai-raws anime ingestion.
 
 Fresh releases come from the uploader RSS feed. Historical backfill completes
-2160p and 1080p catalogue passes before allowing 720p for logical episodes
-that never appeared in either high-quality pass. Nothing is queued until the Nyaa detail
-page explicitly lists German subtitles and TVDB resolves without ambiguity.
+2160p and 1080p HEVC catalogue passes before allowing 720p HEVC for logical episodes
+that never appeared in either high-quality pass. Nothing is queued until the release is
+HEVC, the Nyaa detail page explicitly lists German subtitles, and TVDB resolves without
+ambiguity.
 """
 
 from __future__ import annotations
@@ -436,7 +437,7 @@ def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> b
 
 def _default_state() -> dict[str, Any]:
     return {
-        "version": 4,
+        "version": 5,
         "series": {},
         "series_catalogs": {},
         "last_poll": None,
@@ -485,7 +486,26 @@ def _load_state() -> dict[str, Any]:
             for item in state["releases"].values():
                 if item.get("status") == "held":
                     item["retry_after"] = 0
-        state["version"] = 4
+        if state.get("version", 1) < 5:
+            # Older catalogues ranked HEVC above AVC but still admitted AVC.
+            # Rebuild search indexes under the hard HEVC-only policy while
+            # preserving release/job history and already downloaded episodes.
+            state["backfill"] = _default_state()["backfill"]
+            for index in state.get("series_catalogs", {}).values():
+                preserved = {
+                    key: index[key]
+                    for key in (
+                        "title_query",
+                        "title_queries",
+                        "title_query_index",
+                        "parent_tvdb_id",
+                        "high_only",
+                    )
+                    if key in index
+                }
+                index.clear()
+                index.update({**_default_state()["backfill"], **preserved})
+        state["version"] = 5
         return state
 
 
@@ -525,6 +545,11 @@ def has_explicit_german_subtitles(description: str) -> bool:
 def _resolution(entry: anime_mod.NyaaEntry) -> int:
     match = re.search(r"(?<!\d)(2160|1080|720|480)p\b", entry.quality or entry.title, re.I)
     return int(match.group(1)) if match else 0
+
+
+def _is_hevc(entry: anime_mod.NyaaEntry) -> bool:
+    """Accept explicit HEVC/H.265/x265 release markers only."""
+    return re.search(r"(?i)(?:\bhevc\b|\bx265\b|\bh[.\s-]?265\b)", entry.title) is not None
 
 
 def _release_key(entry: anime_mod.NyaaEntry) -> str | None:
@@ -851,6 +876,16 @@ async def _consider(
 ) -> bool:
     if not _needs_consideration(state, entry):
         return False
+    if not _is_hevc(entry):
+        state["releases"][entry.info_hash] = {
+            "status": "filtered",
+            "title": entry.title,
+            "reason": "Release is not HEVC/H.265",
+        }
+        state["held"] = [
+            item for item in state["held"] if item.get("info_hash") != entry.info_hash
+        ]
+        return False
     if (entry.publisher or "").casefold() != "erai-raws":
         _hold(state, entry, "Uploader is not exactly Erai-raws")
         return False
@@ -1020,7 +1055,7 @@ async def _crawl_backfill(state: dict[str, Any], client: httpx.AsyncClient) -> N
             break
         phase = str(backfill.get("phase", "2160"))
         node = backfill["frontier"][0]
-        terms = [f"{phase}p"]
+        terms = [f"{phase}p", "HEVC"]
         if backfill.get("title_query"):
             terms.append('"' + backfill["title_query"].replace('"', "") + '"')
         terms.extend(f'"{word}"' for word in node["include"])
@@ -1078,6 +1113,7 @@ async def _crawl_backfill(state: dict[str, Any], client: httpx.AsyncClient) -> N
                 not entry.trusted
                 or entry.remake
                 or (entry.publisher or "").casefold() != "erai-raws"
+                or not _is_hevc(entry)
             ):
                 continue
             key = _release_key(entry)
@@ -1251,7 +1287,9 @@ async def _ordered_candidates(
                 candidates.append(release)
     cutoff = time.time() - get_settings().anime.settle_minutes * 60
     by_hash = {
-        entry.info_hash: entry for entry in candidates if _published_timestamp(entry) <= cutoff
+        entry.info_hash: entry
+        for entry in candidates
+        if _is_hevc(entry) and _published_timestamp(entry) <= cutoff
     }
     # Named AniDB parts share one TVDB parent. Order by published season and
     # offset rather than alphabetically sorting "Kashin" before "Ketsubetsu".
@@ -1373,6 +1411,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                     if (
                         key is None
                         or _resolution(entry) < 1080
+                        or not _is_hevc(entry)
                         or _published_timestamp(entry) > cutoff
                     ):
                         continue

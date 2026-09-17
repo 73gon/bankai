@@ -105,12 +105,124 @@ def test_quality_key_groups_encodes_but_keeps_episode_identity() -> None:
     assert erai._release_key(entry("[Erai-raws] Test Show - 02 [1080p]")) != erai._release_key(high)
 
 
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("[Erai-raws] Test Show - 01 [1080p][HEVC][MultiSub]", True),
+        ("[Erai-raws] Test Show - 01 [1080p][x265][MultiSub]", True),
+        ("[Erai-raws] Test Show - 01 [1080p][H.265][MultiSub]", True),
+        ("[Erai-raws] Test Show - 01 [1080p][H265][MultiSub]", True),
+        ("[Erai-raws] Test Show - 01 [1080p][h 265][MultiSub]", True),
+        ("[Erai-raws] Test Show - 01 [1080p][MultiSub]", False),
+        ("[Erai-raws] Test Show - 01 [1080p][x264][MultiSub]", False),
+        ("[Erai-raws] Test Show - 01 [1080p][AVC][MultiSub]", False),
+        # Substrings of unrelated words must not read as a codec marker.
+        ("[Erai-raws] Shevchenko - 01 [1080p][MultiSub]", False),
+    ],
+)
+def test_hevc_detection_accepts_only_explicit_codec_markers(title: str, expected: bool) -> None:
+    assert erai._is_hevc(entry(title)) is expected
+
+
+def test_non_hevc_release_is_filtered_before_any_network_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The codec gate must run before the Nyaa detail fetch.
+
+    A detail lookup per rejected release would mean one request for every AVC
+    upload Erai-raws publishes, which is most of the feed.
+    """
+    state = erai._default_state()
+    avc = entry("[Erai-raws] Test Show - 01 [1080p][MultiSub]")
+
+    async def fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a filtered release must not be looked up")
+
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", fail)
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings())
+
+    assert asyncio.run(erai._consider(state, avc, object())) is False
+    record = state["releases"][avc.info_hash]
+    assert record["status"] == "filtered"
+    assert "HEVC" in record["reason"]
+    # A filtered release is a policy decision, not a retryable hold.
+    assert not [item for item in state["held"] if item.get("info_hash") == avc.info_hash]
+
+
+def test_backfill_indexes_hevc_only_and_asks_nyaa_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hevc = entry("[Erai-raws] Test Show - 01 [1080p][HEVC][MultiSub]")
+    avc = entry("[Erai-raws] Other Show - 01 [1080p][MultiSub]", 2)
+    responses = iter(["<table/>", listing(hevc) + listing(avc), "<table/>"])
+
+    class Client:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        async def get(self, url: str) -> httpx.Response:
+            self.urls.append(url)
+            return httpx.Response(200, text=next(responses), request=httpx.Request("GET", url))
+
+    async def no_sleep(_seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings())
+    monkeypatch.setattr(erai.asyncio, "sleep", no_sleep)
+    state = erai._default_state()
+    client = Client()
+    asyncio.run(erai._crawl_backfill(state, client))
+
+    indexed = [row["title"] for row in state["backfill"]["catalog_1080"].values()]
+    assert indexed == [hevc.title]
+    # Narrowing the query itself keeps the crawl from paging through AVC results.
+    assert all("HEVC" in url for url in client.urls)
+
+
+def test_ordered_candidates_drop_non_hevc_releases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The back-catalogue sweep must not resurrect AVC episodes.
+
+    RSS is gated at ingestion, but ordering re-reads the series catalogue,
+    so the codec policy has to hold on that path too.
+    """
+    settings = Settings(anime={"backfill_enabled": False, "backfill_request_delay_seconds": 1})
+    state = erai._default_state()
+    newest = entry("[Erai-raws] Test Show - 12 [1080p][HEVC]", 12)
+    hevc = entry("[Erai-raws] Test Show - 01 [1080p][HEVC]", 1)
+    avc = entry("[Erai-raws] Test Show - 02 [1080p]", 2)
+
+    class Client:
+        async def get(self, url):
+            html = listing(hevc) + listing(avc) + listing(newest) if "1080p" in url else ""
+            return SimpleNamespace(text=html, raise_for_status=lambda: None)
+
+    async def no_wait(seconds):
+        pass
+
+    async def no_parts(title):
+        return []
+
+    monkeypatch.setattr(erai, "get_settings", lambda: settings)
+    monkeypatch.setattr(erai.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(erai.anime_mapping, "anidb_parts", no_parts)
+    result = asyncio.run(
+        erai._ordered_candidates(state, {erai._release_key(newest): newest}, Client())
+    )
+    episodes = [erai.anime_mod.release_episode_info(row.title)[1] for row in result]
+    assert 1 in episodes  # the HEVC back-catalogue episode is swept in
+    assert 2 not in episodes  # the AVC one never is
+
+
 def test_backfill_finishes_all_high_quality_passes_before_720_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    high = entry()
-    low_duplicate = replace(high, id=2, title="[Erai-raws] Test Show - 01 [720p]", quality="720p")
-    fallback = replace(entry(number=3), title="[Erai-raws] Other Show - 01 [720p]", quality="720p")
+    high = entry("[Erai-raws] Test Show - 01 [1080p][HEVC][MultiSub]")
+    low_duplicate = replace(
+        high, id=2, title="[Erai-raws] Test Show - 01 [720p][HEVC]", quality="720p"
+    )
+    fallback = replace(
+        entry(number=3), title="[Erai-raws] Other Show - 01 [720p][HEVC]", quality="720p"
+    )
     responses = iter(["<table/>", listing(high), listing(low_duplicate) + listing(fallback)])
 
     class Client:
@@ -711,8 +823,8 @@ def test_series_ordering_indexes_older_episodes_even_without_global_backfill(
 ) -> None:
     settings = Settings(anime={"backfill_enabled": False, "backfill_request_delay_seconds": 1})
     state = erai._default_state()
-    newest = entry("[Erai-raws] Test Show - 12 [1080p]", 12)
-    first = entry("[Erai-raws] Test Show - 01 [1080p]", 1)
+    newest = entry("[Erai-raws] Test Show - 12 [1080p][HEVC]", 12)
+    first = entry("[Erai-raws] Test Show - 01 [1080p][HEVC]", 1)
 
     class Client:
         async def get(self, url):
@@ -741,8 +853,8 @@ def test_named_parts_wait_for_parent_catalogue_then_follow_tvdb_order(
 
     settings = Settings(anime={"backfill_enabled": False, "backfill_request_delay_seconds": 1})
     state = erai._default_state()
-    earlier = entry("[Erai-raws] Bleach Ketsubetsu - 01 [1080p]", 1)
-    latest = entry("[Erai-raws] Bleach Kashin - 01 [1080p]", 2)
+    earlier = entry("[Erai-raws] Bleach Ketsubetsu - 01 [1080p][HEVC]", 1)
+    latest = entry("[Erai-raws] Bleach Kashin - 01 [1080p][HEVC]", 2)
 
     async def parts(title):
         if title not in {"Bleach Ketsubetsu", "Bleach Kashin"}:
@@ -815,8 +927,8 @@ def test_punctuation_mismatch_rebuilds_even_when_latest_episode_already_started(
     from xml.etree import ElementTree as ET
 
     state = erai._default_state()
-    latest = entry("[Erai-raws] Test Show - 12 [1080p]", 12)
-    first = entry("[Erai-raws] Test Show - 01 [1080p]", 1)
+    latest = entry("[Erai-raws] Test Show - 12 [1080p][HEVC]", 12)
+    first = entry("[Erai-raws] Test Show - 01 [1080p][HEVC]", 1)
     state["releases"][latest.info_hash] = {"status": "running"}
     state["series_catalogs"]["tvdb:1"] = {
         **erai._default_state()["backfill"],

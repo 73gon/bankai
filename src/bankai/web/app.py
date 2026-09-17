@@ -737,6 +737,7 @@ def create_app() -> Any:
         # open tabs can't starve lightweight endpoints like /api/health.
         migration_task: asyncio.Task | None = None
         erai_task: asyncio.Task | None = None
+        queue_task: asyncio.Task | None = None
         try:
             import anyio.to_thread
 
@@ -745,6 +746,7 @@ def create_app() -> Any:
                 anyio.to_thread.run_sync(_backfill_review_metadata)
             )
             erai_task = asyncio.create_task(erai_mod.scheduler())
+            queue_task = asyncio.create_task(webjobs.scheduler())
         except Exception:
             pass
         try:
@@ -757,6 +759,10 @@ def create_app() -> Any:
                     await migration_task
             await availability_mod.shutdown()
             await erai_mod.shutdown()
+            if queue_task is not None:
+                queue_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await queue_task
             if erai_task is not None:
                 erai_task.cancel()
                 with suppress(asyncio.CancelledError):

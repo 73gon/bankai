@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -34,6 +35,7 @@ _VIDEO_EXTENSIONS = {
 _SHOW_RE = re.compile(r"\b[Ss]\d{1,2}[ ._-]?[Ee]\d{1,3}\b")
 _FILE_READY_TIMEOUT_SECONDS = 5 * 60
 _FILE_READY_POLL_SECONDS = 1.0
+_COPY_PROGRESS_INTERVAL_SECONDS = 1.0
 
 
 class TransferError(Exception):
@@ -111,7 +113,13 @@ def transfer_with_rsync(
         progress(f"MOVE {item.source} -> {item.destination}")
         try:
             if use_native:
-                _native_move(item.source, item.destination, progress=progress)
+                _native_move(
+                    item.source,
+                    item.destination,
+                    progress=progress,
+                    completed=completed,
+                    total=len(items),
+                )
             else:
                 cmd = [
                     rsync,
@@ -353,7 +361,14 @@ def _run_rsync(cmd: list[str], *, progress: ProgressCallback) -> None:
         raise TransferError(f"rsync exited with {code}")
 
 
-def _native_move(source: Path, destination: Path, *, progress: ProgressCallback) -> None:
+def _native_move(
+    source: Path,
+    destination: Path,
+    *,
+    progress: ProgressCallback,
+    completed: int = 0,
+    total: int = 1,
+) -> None:
     """Copy ``source`` to ``destination`` (verifying size), then remove the
     source. Used when rsync is unavailable (e.g. a native-Windows host writing
     to a local drive). Writes to a ``.part`` temp first for an atomic finish.
@@ -363,7 +378,13 @@ def _native_move(source: Path, destination: Path, *, progress: ProgressCallback)
         _wait_for_transfer_source(source, progress=progress)
         _unlink_with_retry(tmp)
         progress("BANKAI_PROGRESS stage=transfer pct=0.0 status=copying")
-        _copy_with_retry(source, tmp, progress=progress)
+        _copy_with_retry(
+            source,
+            tmp,
+            progress=progress,
+            start_percent=completed / max(1, total) * 100.0,
+            end_percent=(completed + 1) / max(1, total) * 100.0,
+        )
         src_size = source.stat().st_size
         if tmp.stat().st_size != src_size:
             raise TransferError("size mismatch after copy")
@@ -412,7 +433,69 @@ def _wait_for_transfer_source(source: Path, *, progress: ProgressCallback) -> No
         time.sleep(_FILE_READY_POLL_SECONDS)
 
 
-def _copy_with_retry(source: Path, tmp: Path, *, progress: ProgressCallback) -> None:
+def _copy2_with_progress(
+    source: Path,
+    destination: Path,
+    *,
+    progress: ProgressCallback,
+    stage: str,
+    start_percent: float = 0.0,
+    end_percent: float = 100.0,
+    copier: Callable[[Path, Path], object] | None = None,
+) -> None:
+    """Run copy2 while reporting destination byte growth at a steady cadence."""
+
+    copy = copier or shutil.copy2
+    total_bytes = max(0, source.stat().st_size)
+    started_at = time.monotonic()
+    stopped = threading.Event()
+
+    def emit(copied_bytes: int) -> None:
+        bounded = max(0, min(total_bytes, copied_bytes))
+        fraction = bounded / total_bytes if total_bytes else 1.0
+        percent = start_percent + (end_percent - start_percent) * fraction
+        elapsed = max(0.001, time.monotonic() - started_at)
+        speed = int(bounded / elapsed)
+        remaining = max(0, total_bytes - bounded)
+        eta = int(remaining / speed) if speed > 0 else 0
+        progress(
+            f"BANKAI_PROGRESS stage={stage} pct={percent:.1f} status=copying "
+            f"bytes={bounded} total={total_bytes} speed={speed} eta={eta}"
+        )
+
+    def monitor() -> None:
+        previous = -1
+        while not stopped.wait(_COPY_PROGRESS_INTERVAL_SECONDS):
+            try:
+                copied = destination.stat().st_size
+            except OSError:
+                copied = 0
+            if copied != previous:
+                emit(copied)
+                previous = copied
+
+    emit(0)
+    thread = threading.Thread(target=monitor, name="bankai-copy-progress", daemon=True)
+    thread.start()
+    succeeded = False
+    try:
+        copy(source, destination)
+        succeeded = True
+    finally:
+        stopped.set()
+        thread.join(timeout=max(1.0, _COPY_PROGRESS_INTERVAL_SECONDS * 2))
+    if succeeded:
+        emit(total_bytes)
+
+
+def _copy_with_retry(
+    source: Path,
+    tmp: Path,
+    *,
+    progress: ProgressCallback,
+    start_percent: float = 0.0,
+    end_percent: float = 100.0,
+) -> None:
     """Copy after transient Windows sharing violations instead of failing."""
 
     deadline = time.monotonic() + _FILE_READY_TIMEOUT_SECONDS
@@ -421,7 +504,14 @@ def _copy_with_retry(source: Path, tmp: Path, *, progress: ProgressCallback) -> 
         before = source.stat()
         try:
             _unlink_with_retry(tmp, deadline=deadline)
-            shutil.copy2(source, tmp)
+            _copy2_with_progress(
+                source,
+                tmp,
+                progress=progress,
+                stage="transfer",
+                start_percent=start_percent,
+                end_percent=end_percent,
+            )
             after = source.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise PermissionError("source changed while it was being copied")

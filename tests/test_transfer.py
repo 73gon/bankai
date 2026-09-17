@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -181,3 +183,35 @@ def test_native_move_waits_and_retries_transient_file_lock(
     assert destination.read_bytes() == b"complete episode"
     assert not source.exists()
     assert any("waiting_for_file_lock" in line for line in progress)
+
+
+def test_native_move_reports_byte_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mkv"
+    destination = tmp_path / "media" / "episode.mkv"
+    destination.parent.mkdir()
+    source.write_bytes(b"x" * (2 * 1024 * 1024))
+
+    def slow_copy(src: Path, dst: Path) -> None:
+        with src.open("rb") as reader, dst.open("wb") as writer:
+            writer.write(reader.read(1024 * 1024))
+            writer.flush()
+            time.sleep(0.04)
+            shutil.copyfileobj(reader, writer)
+        shutil.copystat(src, dst)
+
+    progress: list[str] = []
+    monkeypatch.setattr("bankai.backend.transfer._COPY_PROGRESS_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("bankai.backend.transfer.shutil.copy2", slow_copy)
+
+    _native_move(source, destination, progress=progress.append)
+
+    percentages = [
+        float(line.split("pct=", 1)[1].split()[0])
+        for line in progress
+        if "BANKAI_PROGRESS stage=transfer" in line
+    ]
+    assert any(0 < percent < 100 for percent in percentages)
+    assert percentages[-1] == 100

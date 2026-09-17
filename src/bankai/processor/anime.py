@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bankai.backend.transfer import _copy2_with_progress
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
@@ -164,10 +165,23 @@ def _download_root(status: TorrentStatus) -> Path:
     return named if named.exists() else save
 
 
-def _copy_with_sidecars(source: Path, destination: Path) -> None:
+def _copy_with_sidecars(
+    source: Path,
+    destination: Path,
+    *,
+    start_percent: float = 0.0,
+    end_percent: float = 100.0,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists() or not get_settings().output.skip_existing:
-        _atomic_copy2(source, destination)
+        _atomic_copy2(
+            source,
+            destination,
+            progress=log.info,
+            stage="organize",
+            start_percent=start_percent,
+            end_percent=end_percent,
+        )
     for sidecar in source.parent.glob(f"{source.stem}.*"):
         if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
             continue
@@ -227,7 +241,15 @@ def _require_german_subtitles(source: Path) -> None:
         )
 
 
-def _atomic_copy2(source: Path, destination: Path) -> None:
+def _atomic_copy2(
+    source: Path,
+    destination: Path,
+    *,
+    progress=None,
+    stage: str = "organize",
+    start_percent: float = 0.0,
+    end_percent: float = 100.0,
+) -> None:
     """Publish a completed anime file atomically.
 
     A direct ``copy2`` creates the final ``.mkv`` before the copy has
@@ -239,7 +261,18 @@ def _atomic_copy2(source: Path, destination: Path) -> None:
     tmp = destination.with_name(f".{destination.name}.{os.getpid()}.part")
     try:
         tmp.unlink(missing_ok=True)
-        shutil.copy2(source, tmp)
+        if progress is None:
+            shutil.copy2(source, tmp)
+        else:
+            _copy2_with_progress(
+                source,
+                tmp,
+                progress=progress,
+                stage=stage,
+                start_percent=start_percent,
+                end_percent=end_percent,
+                copier=shutil.copy2,
+            )
         tmp.replace(destination)
     finally:
         tmp.unlink(missing_ok=True)
@@ -391,7 +424,8 @@ async def download_anime(
                 raise RuntimeError(
                     "a manual episode override requires a torrent containing exactly one video file"
                 )
-            for source in sources:
+            source_total = max(1, len(sources))
+            for source_index, source in enumerate(sources):
                 if require_german_subtitles:
                     _require_german_subtitles(source)
                 identity = episode_identity(
@@ -417,7 +451,12 @@ async def download_anime(
                     season_folder_template=output.season_folder_template,
                     file_template=output.series_filename_template,
                 ).with_suffix(source.suffix.casefold())
-                _copy_with_sidecars(source, destination)
+                _copy_with_sidecars(
+                    source,
+                    destination,
+                    start_percent=source_index / source_total * 100.0,
+                    end_percent=(source_index + 1) / source_total * 100.0,
+                )
                 outputs.append(destination)
         if not outputs:
             raise RuntimeError("the selected Nyaa release contained no recognizable anime files")

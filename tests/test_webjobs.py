@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -79,6 +80,55 @@ def test_incomplete_anime_still_obeys_download_reserve(
     monkeypatch.setattr(webjobs, "_anime_reserve_available", lambda: False)
 
     assert webjobs._anime_storage_ready(args) is False
+
+
+def test_completed_hash_refresh_is_non_blocking_and_updates_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info_hash = "c" * 40
+    targets: list = []
+
+    class Thread:
+        def __init__(self, *, target, **_kwargs) -> None:
+            targets.append(target)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(webjobs, "_QBIT_COMPLETED_CACHE", (0.0, frozenset()))
+    monkeypatch.setattr(webjobs, "_QBIT_COMPLETED_REFRESHING", False)
+    monkeypatch.setattr(webjobs, "_QBIT_COMPLETED_LAST_ATTEMPT", 0.0)
+    monkeypatch.setattr(webjobs.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(webjobs.threading, "Thread", Thread)
+    monkeypatch.setattr(webjobs, "_fetch_completed_anime_hashes", lambda: frozenset({info_hash}))
+
+    assert webjobs._completed_anime_hashes() == frozenset()
+    assert len(targets) == 1
+    assert webjobs._QBIT_COMPLETED_REFRESHING
+
+    targets[0]()
+    assert webjobs._completed_anime_hashes() == frozenset({info_hash})
+
+
+def test_queue_scheduler_reconciles_without_browser_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    async def to_thread(function):
+        calls.append(True)
+        return function()
+
+    async def stop_after_first(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(webjobs, "reconcile", lambda: 0)
+    monkeypatch.setattr(webjobs.asyncio, "to_thread", to_thread)
+    monkeypatch.setattr(webjobs.asyncio, "sleep", stop_after_first)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(webjobs.scheduler())
+    assert calls == [True]
 
 
 def test_snapshot_hides_detached_operations(monkeypatch: pytest.MonkeyPatch) -> None:
