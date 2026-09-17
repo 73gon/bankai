@@ -1720,6 +1720,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
 # ---------------------------------------------------------------------------
 
 _ACTIVE_RELEASE_STATES = {"queued", "downloading", "complete", "transferring", "deleting"}
+_STALE_READD_REASON = "Torrent could not be re-added"
 # A release being deleted still has a job, but that job already reads "done"
 # and is hidden from the queue by default, so the release row is what keeps
 # the last step visible.
@@ -1854,13 +1855,58 @@ def _rebuilt_args(
     return args
 
 
-async def _readd_torrent(qbit: Any, release: dict[str, Any]) -> bool:
-    """Put a tracked release back into qBittorrent from its stored arguments."""
-    args = release.get("args")
-    magnet = _args_value(args, "--magnet-uri")
-    torrent_url = _args_value(args, "--torrent-url")
-    if not magnet and not torrent_url:
+def _episode_already_published(
+    state: dict[str, Any],
+    release: dict[str, Any],
+    cache: dict[str, set[tuple[int, int]]],
+) -> bool:
+    """Is this episode already sitting in the library?
+
+    The walk is cached per series for the pass; doing it per release meant one
+    directory scan each over a spinning library disk.
+    """
+    parts = str(release.get("canonical") or "").split("|")
+    if len(parts) != 3 or not all(parts):
         return False
+    tvdb_id, season, episode = parts
+    english_title = str(((state.get("series") or {}).get(tvdb_id) or {}).get("english_title") or "")
+    if not english_title:
+        return False
+    try:
+        wanted = (int(season), int(episode))
+    except ValueError:
+        return False
+    if english_title not in cache:
+        from bankai.backend.transfer import _existing_show_folder
+        from bankai.torrent.matcher import parse_se
+
+        found: set[tuple[int, int]] = set()
+        folder = _existing_show_folder(
+            english_title,
+            cache={},
+            roots=[Path(get_settings().transfer.anime_shows_dir)],
+        )
+        if folder is not None:
+            for path in folder.rglob("*"):
+                if path.is_file() and path.suffix.casefold() in _VIDEO_SUFFIXES:
+                    identity = parse_se(path.name)
+                    if identity:
+                        found.add(identity)
+        cache[english_title] = found
+    return wanted in cache[english_title]
+
+
+async def _readd_torrent(qbit: Any, info_hash: str, release: dict[str, Any]) -> bool:
+    """Put a tracked release back into qBittorrent.
+
+    Records written by older builds stored no arguments, so keying this on
+    them held two hundred releases with "could not be re-added" when there was
+    nothing wrong with them. The info hash is the release's identity and is
+    always present, and a magnet needs nothing else -- peers come from DHT.
+    """
+    args = release.get("args")
+    magnet = _args_value(args, "--magnet-uri") or f"magnet:?xt=urn:btih:{info_hash}"
+    torrent_url = _args_value(args, "--torrent-url")
     settings = get_settings()
     try:
         await qbit.add(
@@ -1906,6 +1952,7 @@ async def reconcile_releases() -> dict[str, int]:
             by_hash = {str(item.hash).casefold(): item for item in torrents}
             limit = max(1, settings.anime.max_concurrent_transfers)
             running = _running_transfer_count(state)
+            published: dict[str, set[tuple[int, int]]] = {}
 
             for info_hash, release in list(state["releases"].items()):
                 status = str(release.get("status") or "")
@@ -1914,6 +1961,15 @@ async def reconcile_releases() -> dict[str, int]:
                     # exists. The download is what matters, so re-drive it.
                     status = "queued"
                     release["status"] = status
+                elif status == "held" and str(release.get("reason") or "").startswith(
+                    _STALE_READD_REASON
+                ):
+                    # Held by an earlier bug that refused to re-add a release
+                    # unless its record stored the magnet. Nothing was ever
+                    # wrong with these, so let them back into the pipeline.
+                    status = "queued"
+                    release["status"] = status
+                    release.pop("reason", None)
                 if status not in _ACTIVE_RELEASE_STATES:
                     continue
                 torrent = by_hash.get(info_hash.casefold())
@@ -1951,13 +2007,21 @@ async def reconcile_releases() -> dict[str, int]:
                     # release it has already recorded, and a publishing job is
                     # only spawned once the download is complete. The record
                     # carries the magnet, so the reconciler re-adds it itself.
-                    if await _readd_torrent(qbit, release):
+                    if _episode_already_published(state, release, published):
+                        # Published before the reconciler existed. Re-downloading
+                        # would spend the same scarce disk twice on a file that
+                        # is already sitting in the library.
+                        release["status"] = "done"
+                        release["updated_at"] = time.time()
+                        tally("already_published")
+                        continue
+                    if await _readd_torrent(qbit, info_hash, release):
                         release["status"] = "queued"
                         release["updated_at"] = time.time()
                         tally("readded")
                     else:
                         release["status"] = "held"
-                        release["reason"] = "Torrent could not be re-added to qBittorrent"
+                        release["reason"] = f"{_STALE_READD_REASON} to qBittorrent"
                         release["retry_after"] = 0
                         release["updated_at"] = time.time()
                         tally("held")

@@ -1837,3 +1837,83 @@ def test_blacklist_matches_every_season_of_the_same_series():
     for release in (season_two, season_one, japanese):
         assert erai._is_blacklisted_release(release, policies=policies, mappings=mappings)
     assert not erai._is_blacklisted_release(unrelated, policies=policies, mappings=mappings)
+
+
+def _argless(info_hash, status="queued", **extra):
+    """A record as older builds wrote them: identity, but no stored magnet."""
+    row = {
+        "status": status,
+        "title": "[Erai-raws] Test Show - 11 [1080p][HEVC]",
+        "canonical": "402642|1|11",
+        "updated_at": 1.0,
+    }
+    row.update(extra)
+    return row
+
+
+def test_missing_torrent_is_re_added_from_its_info_hash_alone(monkeypatch, tmp_path):
+    """Two hundred releases were held for wanting a magnet they never needed."""
+    info_hash = "a" * 40
+    state, counts, qbit, _spawned = _run_reconcile(
+        monkeypatch, tmp_path, {info_hash: _argless(info_hash)}, []
+    )
+    assert counts.get("readded") == 1
+    assert state["releases"][info_hash]["status"] == "queued"
+    assert qbit.added[0]["magnet"] == "magnet:?xt=urn:btih:" + info_hash
+
+
+def test_stale_re_add_holds_are_let_back_into_the_pipeline(monkeypatch, tmp_path):
+    """Nothing was ever wrong with them, and held releases are never revisited."""
+    info_hash = "b" * 40
+    releases = {
+        info_hash: _argless(
+            info_hash,
+            status="held",
+            reason="Torrent could not be re-added to qBittorrent",
+        )
+    }
+    torrents = [_Torrent(info_hash, progress=0.3, state="downloading")]
+    state, _counts, _qbit, _spawned = _run_reconcile(monkeypatch, tmp_path, releases, torrents)
+    assert state["releases"][info_hash]["status"] == "downloading"
+    assert "reason" not in state["releases"][info_hash]
+
+
+def test_a_real_hold_is_left_alone(monkeypatch, tmp_path):
+    info_hash = "c" * 40
+    releases = {
+        info_hash: _argless(
+            info_hash, status="held", reason="Nyaa description does not explicitly list German"
+        )
+    }
+    state, _counts, _qbit, _spawned = _run_reconcile(monkeypatch, tmp_path, releases, [])
+    assert state["releases"][info_hash]["status"] == "held"
+
+
+def test_an_episode_already_in_the_library_is_not_downloaded_again(monkeypatch, tmp_path):
+    """Its torrent is gone because it was published before the reconciler existed."""
+    info_hash = "d" * 40
+    season = tmp_path / "shows_anime" / "Test Show" / "Season 01"
+    season.mkdir(parents=True)
+    (season / "Test Show - S01E11.mkv").write_bytes(b"video")
+
+    state = _state_with_series()
+    state["releases"] = {info_hash: _argless(info_hash)}
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+    monkeypatch.setattr(
+        erai,
+        "get_settings",
+        lambda: Settings(
+            anime={"enabled": True},
+            transfer={"anime_shows_dir": tmp_path / "shows_anime"},
+        ),
+    )
+    monkeypatch.setattr(erai.updates, "maintenance_active", lambda: False)
+    qbit = _RecordingQbit([])
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda job_id: None)
+
+    asyncio.run(erai.reconcile_releases())
+    assert state["releases"][info_hash]["status"] == "done"
+    assert qbit.added == []
+
