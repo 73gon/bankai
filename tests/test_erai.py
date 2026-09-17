@@ -1917,3 +1917,86 @@ def test_an_episode_already_in_the_library_is_not_downloaded_again(monkeypatch, 
     assert state["releases"][info_hash]["status"] == "done"
     assert qbit.added == []
 
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        # The real shape of an Erai-raws HEVC release: languages in the title.
+        (
+            "[Erai-raws] Nige Jouzu no Wakagimi - 01 [1080p][HEVC][Multiple Subtitle] "
+            "[ENG][POR-BR][SPA-LA][SPA][ARA][FRE][GER][ITA][RUS]",
+            True,
+        ),
+        ("[Erai-raws] Show - 01 [1080p][HEVC][Multiple Subtitle][ENG][DEU]", True),
+        ("[Erai-raws] Show - 01 [1080p][HEVC][German]", True),
+        ("[Erai-raws] Show - 01 [1080p][HEVC][GER-DE]", True),
+        # No German among the tags.
+        ("[Erai-raws] Show - 01 [1080p][HEVC][Multiple Subtitle][ENG][FRE][ITA]", False),
+        ("[Erai-raws] Show - 01 [1080p CR WEB-DL AVC AAC][MultiSub][350457AB]", False),
+        # "ger" inside a word is not a language tag.
+        ("[Erai-raws] Danger Zone - 01 [1080p][HEVC][ENG]", False),
+        ("[Erai-raws] Gerhard no Bouken - 01 [1080p][HEVC][ENG]", False),
+    ],
+)
+def test_german_language_tags_are_read_from_the_title(title, expected):
+    assert erai.title_lists_german_subtitles(title) is expected
+
+
+def test_a_title_tagged_german_is_not_held(monkeypatch):
+    """150 HEVC episodes were held while stating [GER] in their own name."""
+    state = erai._default_state()
+    item = entry(
+        "[Erai-raws] Test Show - 01 [1080p][HEVC][Multiple Subtitle][ENG][FRE][GER]"
+    )
+
+    async def detail(_client, _url):
+        # The HEVC releases say nothing about subtitles in the description.
+        return ("Some description with no subtitle section", item.magnet_uri, "Erai-raws")
+
+    async def resolve(_entry):
+        return (
+            AnimeTVDBMatch(1, "show", "Test Show", year=2024),
+            SimpleNamespace(season=1, episode=1),
+            None,
+        )
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+    monkeypatch.setattr(erai, "_resolve", resolve)
+    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
+
+    assert asyncio.run(erai._consider(state, item, object())) is True
+    assert state["releases"][item.info_hash]["status"] == "queued"
+
+
+def test_existing_german_tagged_holds_are_reopened(monkeypatch):
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: {
+            "status": "held",
+            "reason": "Nyaa description does not explicitly list German subtitles",
+            "title": "[Erai-raws] Show - 01 [1080p][HEVC][Multiple Subtitle][ENG][GER]",
+            "retry_after": 9e9,
+        },
+        "b" * 40: {
+            "status": "held",
+            "reason": "Nyaa description does not explicitly list German subtitles",
+            "title": "[Erai-raws] Show - 02 [1080p][HEVC][Multiple Subtitle][ENG][FRE]",
+            "retry_after": 9e9,
+        },
+        "c" * 40: {
+            "status": "held",
+            "reason": "No confident TVDB match",
+            "title": "[Erai-raws] Show - 03 [1080p][HEVC][ENG][GER]",
+            "retry_after": 9e9,
+        },
+    }
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+
+    assert erai.release_german_tagged_holds() == 1
+    assert state["releases"]["a" * 40]["retry_after"] == 0
+    # Not tagged German, and a hold for an unrelated reason: both left alone.
+    assert state["releases"]["b" * 40]["retry_after"] == 9e9
+    assert state["releases"]["c" * 40]["retry_after"] == 9e9
+

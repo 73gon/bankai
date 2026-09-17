@@ -756,6 +756,13 @@ def create_app() -> Any:
                         "(%(adopted)d adopted into release tracking)",
                         retired,
                     )
+            with suppress(Exception):
+                reopened = erai_mod.release_german_tagged_holds()
+                if reopened:
+                    log.info(
+                        "Re-opened %d holds whose release title states German subtitles",
+                        reopened,
+                    )
             erai_task = asyncio.create_task(erai_mod.scheduler())
             queue_task = asyncio.create_task(webjobs.scheduler())
         except Exception:

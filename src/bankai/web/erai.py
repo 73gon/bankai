@@ -737,6 +737,20 @@ def _save_state(state: dict[str, Any]) -> None:
         tmp.replace(path)
 
 
+# Erai-raws advertises subtitles two different ways. The AVC releases list
+# them in the Nyaa description; the HEVC ones carry bracketed language tags in
+# the release title itself and say nothing in the description. Reading only the
+# description held 150 HEVC episodes that stated [GER] in their own name.
+_GERMAN_TAG = re.compile(r"\[\s*(?:GER|DEU|GERMAN|DEUTSCH)(?:[-_][A-Z]{2})?\s*\]", re.I)
+
+
+def title_lists_german_subtitles(title: str) -> bool:
+    """Explicit German among a release title's bracketed language tags."""
+    if not title:
+        return False
+    return _GERMAN_TAG.search(title) is not None
+
+
 def has_explicit_german_subtitles(description: str) -> bool:
     """Require explicit positive subtitle evidence in Markdown or HTML."""
     if not description:
@@ -1120,8 +1134,10 @@ async def _consider(
         _hold(state, entry, "Detail-page uploader is not Erai-raws")
         return False
     policy = _series_policy(entry.title)
-    if not has_explicit_german_subtitles(description) and not (
-        policy and policy.get("mode") == "german_allowed"
+    if (
+        not has_explicit_german_subtitles(description)
+        and not title_lists_german_subtitles(entry.title)
+        and not (policy and policy.get("mode") == "german_allowed")
     ):
         _hold(state, entry, "Nyaa description does not explicitly list German subtitles")
         return False
@@ -1756,6 +1772,31 @@ def _torrent_phase(torrent: Any) -> str:
     if "downloading" in state_name or "forceddl" in state_name or "metadl" in state_name:
         return "downloading"
     return "queued"
+
+
+def release_german_tagged_holds() -> int:
+    """Re-open holds for releases that state German in their own title.
+
+    They were held only because the check read the Nyaa description and these
+    releases put their language tags in the title instead. A hold otherwise
+    waits a day before it is looked at again, and there is no reason to make
+    an episode that always qualified wait that long.
+    """
+    cleared = 0
+    with _STATE_LOCK:
+        state = _load_state()
+        for release in state.get("releases", {}).values():
+            if release.get("status") != "held":
+                continue
+            if "German subtitles" not in str(release.get("reason") or ""):
+                continue
+            if not title_lists_german_subtitles(str(release.get("title") or "")):
+                continue
+            release["retry_after"] = 0
+            cleared += 1
+        if cleared:
+            _save_state(state)
+    return cleared
 
 
 def retire_download_pendings() -> dict[str, int]:
