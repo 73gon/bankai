@@ -177,7 +177,40 @@ async def episode_roster(tvdb_id: int) -> list:
     return rows
 
 
-def merge_episodes(files: list[dict], roster: list, *, ended: bool) -> dict:
+def episode_codecs(tvdb_id: int | None) -> dict[tuple[int, int], str]:
+    """Codec of each published episode of a series, keyed by season/episode.
+
+    Read from the release that produced the file rather than by probing it.
+    The library holds thousands of episodes and the disk it lives on is slow;
+    the release title already records the encode that was downloaded.
+    """
+    if not tvdb_id:
+        return {}
+    state = erai._load_state()
+    releases = state.get("releases", {})
+    found: dict[tuple[int, int], str] = {}
+    for canonical, row in state.get("canonical", {}).items():
+        parts = str(canonical).split("|")
+        if len(parts) != 3 or parts[0] != str(tvdb_id):
+            continue
+        release = releases.get(str(row.get("info_hash") or ""))
+        if not release:
+            continue
+        try:
+            key = (int(parts[1]), int(parts[2]))
+        except ValueError:
+            continue
+        found[key] = "hevc" if erai._is_hevc_title(str(release.get("title") or "")) else "avc"
+    return found
+
+
+def merge_episodes(
+    files: list[dict],
+    roster: list,
+    *,
+    ended: bool,
+    codecs: dict[tuple[int, int], str] | None = None,
+) -> dict:
     """Count unique regular episodes, using final files as downloaded evidence."""
     by_number = {}
     others = []
@@ -221,6 +254,8 @@ def merge_episodes(files: list[dict], roster: list, *, ended: bool) -> dict:
                 "tba": tba,
                 "missing": True,
             }
+    for key, row in by_number.items():
+        row["codec"] = (codecs or {}).get(key) if not row.get("missing") else None
     regular = [row for (season, _), row in by_number.items() if season > 0]
     downloaded = sum(not row.get("missing", False) and not row["staged"] for row in regular)
     outstanding = [row for row in regular if row.get("missing", False) or row["staged"]]
@@ -378,12 +413,22 @@ async def group_shows(
             if tvdb_id and discover.is_configured():
                 with suppress(Exception):
                     roster = await episode_roster(tvdb_id)
+        codecs = await asyncio.to_thread(episode_codecs, tvdb_id)
         merged = merge_episodes(
-            files, roster, ended=str(metadata.get("status", "")).casefold() == "ended"
+            files,
+            roster,
+            ended=str(metadata.get("status", "")).casefold() == "ended",
+            codecs=codecs,
         )
         result = {
             "key": title,
             "title": metadata.get("english_title") or title,
+            "avc_count": sum(
+                1 for row in merged["episodes"] if row.get("codec") == "avc"
+            ),
+            "hevc_count": sum(
+                1 for row in merged["episodes"] if row.get("codec") == "hevc"
+            ),
             "tvdb_id": tvdb_id,
             "year": metadata.get("year"),
             "poster_url": metadata.get("poster_url"),

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, Check } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, Check, FileVideo } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -25,6 +25,7 @@ export default function AnimeLibrary() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [transferring, setTransferring] = useState<string | null>(null);
+  const [upgrading, setUpgrading] = useState<string | null>(null);
   const [searchTarget, setSearchTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
   const [results, setResults] = useState<AnimeEntry[]>([]);
   const [searching, setSearching] = useState(false);
@@ -71,6 +72,29 @@ export default function AnimeLibrary() {
       toast.error(error.message);
     } finally {
       setDetailLoading(false);
+    }
+  }
+
+  async function upgradeToHevc(show: AnimeLibraryShow) {
+    if (!show.tvdb_id) return;
+    setUpgrading(show.key);
+    try {
+      const result = await api.upgradeShowToHevc(show.tvdb_id, show.title);
+      if (result.queued === 0) {
+        toast.info(result.no_replacement > 0
+          ? 'No HEVC release is available for the remaining ' + result.no_replacement + ' episode(s)'
+          : 'Nothing to upgrade — every episode is already HEVC');
+      } else {
+        toast.success(
+          'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')
+          + (result.no_replacement ? ' · ' + result.no_replacement + ' left as they are' : ''),
+        );
+      }
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setUpgrading(null);
     }
   }
 
@@ -170,7 +194,21 @@ export default function AnimeLibrary() {
                   <div className='flex flex-col gap-3'>
                     <DialogTitle>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DialogTitle>
                     <DialogDescription>{active.downloaded_count}/{active.total_count} episodes downloaded · {active.season_count} seasons · {formatSize(active.size)} · TVDB ordering</DialogDescription>
-                    {active.tvdb_id && <Button asChild variant='outline' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
+                    <div className='flex flex-wrap items-center gap-2'>
+                      {active.tvdb_id && <Button asChild variant='outline' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
+                      {Boolean(active.avc_count) && (
+                        <Button
+                          size='sm'
+                          variant='secondary'
+                          disabled={!active.tvdb_id || upgrading === active.key}
+                          onClick={() => void upgradeToHevc(active)}
+                          title='Download HEVC versions of this show&apos;s AVC episodes and replace them'
+                        >
+                          <FileVideo data-icon='inline-start' />
+                          {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.avc_count} to HEVC`}
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </DialogHeader>
@@ -182,11 +220,12 @@ export default function AnimeLibrary() {
                   <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto'>
                     <div className='overflow-x-auto'>
                       <table className='w-full min-w-[580px] border-collapse text-sm'>
-                        <thead><tr className='border-b border-border text-left text-muted-foreground'><th className='py-3 pr-3'>Episode</th><th className='px-3 py-3'>Episode / File</th><th className='px-3 py-3 text-right'>Size</th><th className='py-3 pl-3 text-right'>State</th></tr></thead>
+                        <thead><tr className='border-b border-border text-left text-muted-foreground'><th className='py-3 pr-3'>Episode</th><th className='px-3 py-3'>Episode / File</th><th className='px-3 py-3'>Codec</th><th className='px-3 py-3 text-right'>Size</th><th className='py-3 pl-3 text-right'>State</th></tr></thead>
                         <tbody>{active.episodes.filter((entry) => entry.season_number === season).map((entry) => (
                           <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className='border-b border-border/60 last:border-0'>
                             <td className='py-3 pr-3 font-mono'>{entry.episode ?? '—'}</td>
                             <td className='px-3 py-3 text-xs text-muted-foreground'>{entry.episode_title && <p className='text-sm text-foreground'>{entry.episode_title}</p>}{!entry.missing && <p>{entry.name}</p>}{entry.missing && <p>{entry.tba ? 'TBA' : 'Missing'}{entry.aired ? ' · ' + entry.aired : ''}</p>}</td>
+                            <td className='px-3 py-3'>{entry.codec ? <Badge variant={entry.codec === 'hevc' ? 'success' : 'warning'}>{entry.codec.toUpperCase()}</Badge> : <span className='text-xs text-muted-foreground'>—</span>}</td>
                             <td className='px-3 py-3 text-right font-mono text-xs'>{entry.missing ? '—' : formatSize(entry.size)}</td>
                             <td className='py-3 pl-3 text-right'>{entry.missing ? <Button size='sm' variant='secondary' disabled={!active.tvdb_id} onClick={() => void searchMissing(active, entry)}><Search data-icon='inline-start' /> Search</Button> : entry.staged ? (
                               <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>

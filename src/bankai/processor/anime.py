@@ -171,9 +171,12 @@ def _copy_with_sidecars(
     *,
     start_percent: float = 0.0,
     end_percent: float = 100.0,
+    replace: bool = False,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if not destination.exists() or not get_settings().output.skip_existing:
+    # An upgrade is published over the episode it replaces, so skip_existing --
+    # which exists to avoid re-copying work already done -- must not apply.
+    if replace or not destination.exists() or not get_settings().output.skip_existing:
         _atomic_copy2(
             source,
             destination,
@@ -189,7 +192,7 @@ def _copy_with_sidecars(
         # than collapsing every sidecar to the same `.ass` destination.
         qualifier = sidecar.name[len(source.stem) :]
         sidecar_target = destination.parent / f"{destination.stem}{qualifier}"
-        if not sidecar_target.exists() or not get_settings().output.skip_existing:
+        if replace or not sidecar_target.exists() or not get_settings().output.skip_existing:
             _atomic_copy2(sidecar, sidecar_target)
 
 
@@ -336,6 +339,7 @@ async def download_anime(
     episode_override: int | None = None,
     require_german_subtitles: bool = False,
     cleanup_torrent: bool = False,
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -415,7 +419,7 @@ async def download_anime(
                 folder_template=output.movie_folder_template,
                 file_template=output.filename_template,
             ).with_suffix(source.suffix.casefold())
-            _copy_with_sidecars(source, destination)
+            _copy_with_sidecars(source, destination, replace=replace_existing)
             outputs.append(destination)
         else:
             tvdb_episodes = await _tvdb_episode_map(tvdb_id)
@@ -456,6 +460,7 @@ async def download_anime(
                     destination,
                     start_percent=source_index / source_total * 100.0,
                     end_percent=(source_index + 1) / source_total * 100.0,
+                    replace=replace_existing,
                 )
                 outputs.append(destination)
         if not outputs:

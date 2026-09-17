@@ -240,6 +240,8 @@ export interface AnimeLibraryEntry {
 }
 
 export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
+  /** Encode the episode was downloaded as; null when missing or unknown. */
+  codec?: 'hevc' | 'avc' | null;
   missing?: boolean;
   tba?: boolean;
   aired?: string | null;
@@ -249,6 +251,8 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 }
 
 export interface AnimeLibraryShow {
+  avc_count?: number;
+  hevc_count?: number;
   downloaded_count: number;
   total_count: number;
   completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
@@ -693,6 +697,11 @@ export const api = {
     request<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', {
       method: 'POST', body: JSON.stringify({ key }),
     }),
+  upgradeShowToHevc: (tvdbId: number, title: string) =>
+    request<{ ok: boolean; queued: number; no_replacement: number; already_hevc: number }>(
+      '/api/anime/library/upgrade-hevc',
+      { method: 'POST', body: JSON.stringify({ tvdb_id: tvdbId, title }) },
+    ),
   animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
   animeLibraryShow: (key: string) =>
     request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>(

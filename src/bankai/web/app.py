@@ -1596,6 +1596,18 @@ def create_app() -> Any:
             "page_size": page_size,
         }
 
+    @app.post("/api/anime/library/upgrade-hevc")
+    async def anime_library_upgrade_hevc(req: dict) -> dict:
+        """Queue HEVC replacements for one show's published AVC episodes."""
+        tvdb_id = req.get("tvdb_id")
+        english_title = str(req.get("title") or "").strip()
+        if not tvdb_id or not str(tvdb_id).isdigit() or not english_title:
+            raise HTTPException(status_code=422, detail="tvdb_id and title are required")
+        try:
+            return await erai_mod.upgrade_show_to_hevc(int(tvdb_id), english_title)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     @app.get("/api/anime/library")
     async def anime_library(show: str | None = None, include_entries: bool = False) -> dict:
         def scan() -> tuple[Path, list[dict]]:

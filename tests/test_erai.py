@@ -2225,3 +2225,60 @@ def test_the_upgrade_is_bounded_per_cycle(monkeypatch):
     finally:
         erai._ADMISSION.reset(token)
 
+
+def _published_show(monkeypatch, *, twin_available=True):
+    """One show with two published episodes: E01 HEVC, E02 AVC."""
+    state = erai._default_state()
+    hevc_done = entry("[Erai-raws] Show - 01 [1080p CR WEBRip HEVC AAC][MultiSub]", 1)
+    avc_done = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL AVC AAC][MultiSub]", 2)
+    replacement = entry("[Erai-raws] Show - 02 [1080p CR WEBRip HEVC AAC][MultiSub][GER]", 3)
+    state["releases"] = {
+        hevc_done.info_hash: {"status": "done", "title": hevc_done.title},
+        avc_done.info_hash: {"status": "done", "title": avc_done.title},
+    }
+    state["canonical"] = {
+        "555|1|1": {"info_hash": hevc_done.info_hash},
+        "555|1|2": {"info_hash": avc_done.info_hash},
+    }
+    if twin_available:
+        state["backfill"]["catalog_1080"][replacement.info_hash] = erai._entry_dict(replacement)
+
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+
+    async def no_sleep(_seconds):
+        pass
+
+    monkeypatch.setattr(erai.asyncio, "sleep", no_sleep)
+    qbit = _RecordingQbit([])
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
+    return state, avc_done, replacement, qbit
+
+
+def test_upgrading_a_show_queues_hevc_only_for_its_avc_episodes(monkeypatch):
+    state, avc_done, replacement, qbit = _published_show(monkeypatch)
+    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+
+    assert result["queued"] == 1
+    assert result["already_hevc"] == 1
+    queued = state["releases"][replacement.info_hash]
+    assert queued["status"] == "queued"
+    assert queued["canonical"] == "555|1|2"
+    # Publishing must overwrite the episode it replaces.
+    assert "--replace-existing" in queued["args"]
+    assert queued["args"][queued["args"].index("--episode") + 1] == "2"
+    assert len(qbit.added) == 1
+    # The original stays on disk and playable until the replacement lands.
+    assert state["releases"][avc_done.info_hash]["status"] == "done"
+
+
+def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch):
+    state, avc_done, _replacement, qbit = _published_show(monkeypatch, twin_available=False)
+    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+
+    assert result["queued"] == 0
+    assert result["no_replacement"] == 1
+    assert state["releases"][avc_done.info_hash]["status"] == "done"
+    assert qbit.added == []
+

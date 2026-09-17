@@ -1407,6 +1407,123 @@ async def _carries_german(entry: anime_mod.NyaaEntry, client: httpx.AsyncClient)
     return has_explicit_german_subtitles(description)
 
 
+async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, Any]:
+    """Queue HEVC replacements for a show's already-published AVC episodes.
+
+    Unlike the backlog upgrade, these episodes are on disk and watchable. The
+    replacement is downloaded first and published over the original only once
+    it succeeds, so a failed upgrade costs bandwidth and nothing else. An
+    episode with no HEVC release available is left exactly as it is.
+    """
+    settings = get_settings()
+    queued = 0
+    skipped = 0
+    already = 0
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    qbit = QBittorrentClient()
+    headers = {"User-Agent": settings.scraper.user_agent}
+    try:
+        await qbit.login()
+    except Exception as exc:
+        await qbit.aclose()
+        raise RuntimeError(f"qBittorrent is unavailable: {exc}") from exc
+
+    try:
+        async with httpx.AsyncClient(
+            headers=headers, timeout=30, follow_redirects=True
+        ) as client:
+            with _STATE_LOCK:
+                state = _load_state()
+                targets = []
+                for canonical, row in state.get("canonical", {}).items():
+                    parts = str(canonical).split("|")
+                    if len(parts) != 3 or parts[0] != str(tvdb_id):
+                        continue
+                    release = state.get("releases", {}).get(str(row.get("info_hash") or ""))
+                    if not release or release.get("status") != "done":
+                        continue
+                    if _is_hevc_title(str(release.get("title") or "")):
+                        already += 1
+                        continue
+                    targets.append((canonical, parts[1], parts[2], release))
+
+            for canonical, season, episode, release in targets:
+                twin = _hevc_twin(state, release)
+                if twin is None or not await _carries_german(twin, client):
+                    skipped += 1
+                    continue
+                args = [
+                    "anime-download",
+                    "--release-title",
+                    twin.title,
+                    "--torrent-url",
+                    twin.download_url,
+                    "--detail-url",
+                    twin.detail_url,
+                    "--magnet-uri",
+                    twin.magnet_uri,
+                    "--info-hash",
+                    twin.info_hash,
+                    "--kind",
+                    "show",
+                    "--tvdb-id",
+                    str(tvdb_id),
+                    "--english-title",
+                    english_title,
+                    "--season",
+                    str(int(season)),
+                    "--episode",
+                    str(int(episode)),
+                    "--require-german-subtitles",
+                    # Publishing has to overwrite the episode being replaced.
+                    "--replace-existing",
+                ]
+                try:
+                    await qbit.add(
+                        magnet=twin.magnet_uri or None,
+                        torrent_url=None if twin.magnet_uri else twin.download_url,
+                        category=settings.qbittorrent.category,
+                        save_path=Path(settings.qbittorrent.save_path)
+                        if settings.qbittorrent.save_path
+                        else None,
+                    )
+                except Exception as exc:
+                    log.warning("Could not queue HEVC upgrade for %s: %s", twin.title, exc)
+                    skipped += 1
+                    continue
+                with _STATE_LOCK:
+                    state = _load_state()
+                    state["releases"][twin.info_hash] = {
+                        "status": "queued",
+                        "title": twin.title,
+                        "display_title": f"{english_title} S{int(season):02d}E{int(episode):02d}",
+                        "canonical": canonical,
+                        "resolution": _resolution(twin),
+                        "size_bytes": twin.size_bytes,
+                        "args": args,
+                        "replaces": release.get("title"),
+                        "updated_at": time.time(),
+                    }
+                    # The upgrade takes over the episode's slot; the original
+                    # stays on disk and playable until the replacement lands.
+                    state["canonical"][canonical] = {
+                        "info_hash": twin.info_hash,
+                        "resolution": _resolution(twin),
+                    }
+                    _save_state(state)
+                queued += 1
+                await asyncio.sleep(settings.anime.backfill_request_delay_seconds)
+    finally:
+        await qbit.aclose()
+    return {
+        "ok": True,
+        "queued": queued,
+        "no_replacement": skipped,
+        "already_hevc": already,
+    }
+
+
 async def _fetch_rss(client: httpx.AsyncClient) -> list[anime_mod.NyaaEntry]:
     response = await client.get(get_settings().anime.rss_url)
     response.raise_for_status()
