@@ -6,6 +6,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import httpx
 import pytest
@@ -17,6 +18,7 @@ from bankai.processor import anime as processor
 from bankai.web import erai
 from bankai.web import jobs as webjobs
 from bankai.web.anime import AnimeTVDBMatch, NyaaEntry
+from bankai.web.jobs import PendingJob
 
 
 def entry(
@@ -1290,3 +1292,316 @@ async def test_blacklist_removes_holds_and_can_be_restored(tmp_path, monkeypatch
     assert result["requested"] == 1
     assert not erai.blacklist_items()
     await asyncio.sleep(0)
+
+
+class _Torrent:
+    def __init__(self, info_hash, progress=0.0, state="queuedDL"):
+        self.hash = info_hash
+        self.progress = progress
+        self.state = state
+        self.size_bytes = 1024**3
+
+
+class _RecordingQbit:
+    """Stands in for qBittorrent; records what the reconciler asks of it."""
+
+    instances: ClassVar[list] = []
+
+    def __init__(self, torrents=(), fail_add=False):
+        self.torrents = list(torrents)
+        self.removed: list[tuple[str, bool]] = []
+        self.added: list[dict] = []
+        self.fail_add = fail_add
+        _RecordingQbit.instances.append(self)
+
+    async def login(self):
+        pass
+
+    async def list_torrents(self, **_kwargs):
+        return list(self.torrents)
+
+    async def add(self, **kwargs):
+        if self.fail_add:
+            raise RuntimeError("qBittorrent refused the magnet")
+        self.added.append(kwargs)
+
+    async def remove(self, info_hash, *, delete_files=False):
+        self.removed.append((info_hash, delete_files))
+
+    async def aclose(self):
+        pass
+
+
+def _release(info_hash, status="queued", **extra):
+    row = {
+        "status": status,
+        "title": "[Erai-raws] Test Show - 01 [1080p][HEVC]",
+        "display_title": "Test Show S01E01",
+        "args": [
+            "anime-download",
+            "--info-hash",
+            info_hash,
+            "--magnet-uri",
+            "magnet:?xt=urn:btih:" + info_hash,
+            "--tvdb-id",
+            "123",
+        ],
+        "updated_at": 1.0,
+    }
+    row.update(extra)
+    return row
+
+
+def _run_reconcile(monkeypatch, tmp_path, releases, torrents, jobs=None, limit=2, **qbit_kwargs):
+    """Drive one reconciliation pass over an isolated state file."""
+    state = erai._default_state()
+    state["releases"] = releases
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    saved: dict = {}
+    monkeypatch.setattr(erai, "_save_state", lambda value: saved.update({"state": value}))
+    monkeypatch.setattr(
+        erai,
+        "get_settings",
+        lambda: Settings(anime={"enabled": True, "max_concurrent_transfers": limit}),
+    )
+    monkeypatch.setattr(erai.updates, "maintenance_active", lambda: False)
+
+    qbit = _RecordingQbit(torrents, **qbit_kwargs)
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
+
+    spawned: list[dict] = []
+
+    class _Spawned:
+        def __init__(self, job_id):
+            self.id = job_id
+
+    def spawn(*, kind, title, args):
+        spawned.append({"kind": kind, "title": title, "args": args})
+        return _Spawned(f"job{len(spawned)}")
+
+    monkeypatch.setattr("bankai.cli.bgjobs.spawn", spawn)
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda job_id: (jobs or {}).get(job_id))
+
+    counts = asyncio.run(erai.reconcile_releases())
+    return state, counts, qbit, spawned
+
+
+def test_reconciler_tracks_download_state_without_spawning_a_worker(monkeypatch, tmp_path):
+    """Waiting on a download must cost no worker slot at all."""
+    releases = {"a" * 40: _release("a" * 40), "b" * 40: _release("b" * 40)}
+    torrents = [
+        _Torrent("a" * 40, progress=0.0, state="queuedDL"),
+        _Torrent("b" * 40, progress=0.4, state="downloading"),
+    ]
+    state, counts, _qbit, spawned = _run_reconcile(monkeypatch, tmp_path, releases, torrents)
+    assert state["releases"]["a" * 40]["status"] == "queued"
+    assert state["releases"]["b" * 40]["status"] == "downloading"
+    assert spawned == []
+    assert counts.get("downloading") == 1 and counts.get("queued") == 1
+
+
+def test_completed_download_starts_publishing_within_the_transfer_limit(monkeypatch, tmp_path):
+    """Any number may download; only `max_concurrent_transfers` may publish."""
+    releases = {
+        f"{index}".rjust(40, "0"): _release(f"{index}".rjust(40, "0")) for index in range(1, 5)
+    }
+    torrents = [_Torrent(h, progress=1.0, state="queuedUP") for h in releases]
+    state, counts, _qbit, spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, torrents, limit=2
+    )
+    assert len(spawned) == 2
+    assert counts.get("awaiting_transfer_slot") == 2
+    publishing = [r for r in state["releases"].values() if r["status"] == "transferring"]
+    assert len(publishing) == 2
+    assert all(row["args"][0] == "anime-download" for row in spawned)
+
+
+def test_queuedup_counts_as_complete(monkeypatch, tmp_path):
+    """qBittorrent parks a finished torrent in the seeding queue."""
+    info_hash = "c" * 40
+    releases = {info_hash: _release(info_hash)}
+    # progress is reported as 0 but the UP suffix means the download finished.
+    torrents = [_Torrent(info_hash, progress=0.0, state="queuedUP")]
+    _state, _counts, _qbit, spawned = _run_reconcile(monkeypatch, tmp_path, releases, torrents)
+    assert len(spawned) == 1
+
+
+def test_missing_torrent_is_re_added_rather_than_stranded(monkeypatch, tmp_path):
+    """Nothing else re-adds it: discovery skips recorded releases."""
+    info_hash = "d" * 40
+    releases = {info_hash: _release(info_hash)}
+    state, counts, qbit, spawned = _run_reconcile(monkeypatch, tmp_path, releases, [])
+    assert len(qbit.added) == 1
+    assert qbit.added[0]["magnet"].endswith(info_hash)
+    assert state["releases"][info_hash]["status"] == "queued"
+    assert counts.get("readded") == 1
+    assert spawned == []
+
+
+def test_release_is_held_when_it_cannot_be_re_added(monkeypatch, tmp_path):
+    info_hash = "e" * 40
+    releases = {info_hash: _release(info_hash)}
+    state, _counts, _qbit, _spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, [], fail_add=True
+    )
+    assert state["releases"][info_hash]["status"] == "held"
+
+
+def test_published_release_has_its_torrent_removed_then_reads_done(monkeypatch, tmp_path):
+    """A torrent is deleted only after its publishing job succeeded."""
+    info_hash = "f" * 40
+    releases = {info_hash: _release(info_hash, status="transferring", job_id="job1")}
+    torrents = [_Torrent(info_hash, progress=1.0, state="queuedUP")]
+    jobs = {"job1": SimpleNamespace(id="job1", status="done")}
+    state, _counts, qbit, _spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, torrents, jobs=jobs
+    )
+    assert qbit.removed == [(info_hash, True)]
+    assert state["releases"][info_hash]["status"] == "done"
+
+
+def test_a_failed_publish_never_deletes_the_torrent(monkeypatch, tmp_path):
+    """Losing the download would make the failure unrecoverable."""
+    info_hash = "1" * 40
+    releases = {info_hash: _release(info_hash, status="transferring", job_id="job1")}
+    torrents = [_Torrent(info_hash, progress=1.0, state="queuedUP")]
+    jobs = {"job1": SimpleNamespace(id="job1", status="failed")}
+    state, _counts, qbit, _spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, torrents, jobs=jobs
+    )
+    assert qbit.removed == []
+    assert state["releases"][info_hash]["status"] == "failed"
+
+
+def test_running_publish_is_left_alone(monkeypatch, tmp_path):
+    info_hash = "2" * 40
+    releases = {info_hash: _release(info_hash, status="transferring", job_id="job1")}
+    torrents = [_Torrent(info_hash, progress=1.0, state="queuedUP")]
+    jobs = {"job1": SimpleNamespace(id="job1", status="running")}
+    state, _counts, qbit, spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, torrents, jobs=jobs
+    )
+    assert spawned == [] and qbit.removed == []
+    assert state["releases"][info_hash]["status"] == "transferring"
+
+
+def test_errored_torrent_is_held(monkeypatch, tmp_path):
+    info_hash = "3" * 40
+    releases = {info_hash: _release(info_hash)}
+    torrents = [_Torrent(info_hash, progress=0.2, state="error")]
+    state, _counts, _qbit, _spawned = _run_reconcile(monkeypatch, tmp_path, releases, torrents)
+    assert state["releases"][info_hash]["status"] == "held"
+
+
+def test_queue_rows_expose_the_backlog_that_has_no_job(monkeypatch):
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: _release("a" * 40, status="queued"),
+        "b" * 40: _release("b" * 40, status="downloading"),
+        "c" * 40: _release("c" * 40, status="transferring", job_id="job1"),
+        "d" * 40: _release("d" * 40, status="done"),
+    }
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    rows = erai.release_queue_rows()
+    # Only releases without a worker of their own; the rest come from bgjobs.
+    assert {row["phase"] for row in rows} == {"queued", "downloading"}
+    assert all(row["tvdb_id"] == "123" for row in rows)
+    assert all(row["pending"] for row in rows)
+
+
+def _pending(job_id, info_hash, title="Test Show S01E01"):
+    from bankai.web.jobs import PendingJob
+
+    return PendingJob(
+        id=job_id,
+        kind="show",
+        title=title,
+        args=[
+            "anime-download",
+            "--release-title",
+            "[Erai-raws] Test Show - 01 [1080p][HEVC]",
+            "--info-hash",
+            info_hash,
+            "--magnet-uri",
+            "magnet:?xt=urn:btih:" + info_hash,
+        ],
+    )
+
+
+def test_migration_retires_placeholders_and_adopts_untracked_ones(monkeypatch):
+    """A pending job whose release is untracked is that episode's only record."""
+    tracked, untracked, foreign = "a" * 40, "b" * 40, "c" * 40
+    state = erai._default_state()
+    state["releases"] = {tracked: _release(tracked, status="queued")}
+    state["releases"][tracked].pop("args")  # an older record, written before args were stored
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+
+    pending = [
+        _pending("j1", tracked),
+        _pending("j2", untracked, title="Other Show S01E02"),
+        PendingJob(id="j3", kind="movie", title="A Movie", args=["run", "--url", "x"]),
+    ]
+    cancelled: list[str] = []
+    monkeypatch.setattr("bankai.web.jobs.list_pending", lambda: list(pending))
+    monkeypatch.setattr(
+        "bankai.web.jobs.cancel_pending", lambda job_id: cancelled.append(job_id) or True
+    )
+
+    result = erai.retire_download_pendings()
+    assert result == {"retired": 2, "adopted": 1, "kept": 1}
+    assert cancelled == ["j1", "j2"]
+    # The untracked release is now tracked rather than lost with its job.
+    assert state["releases"][untracked]["status"] == "queued"
+    assert state["releases"][untracked]["args"][0] == "anime-download"
+    # The older record gains the arguments publishing will need.
+    assert state["releases"][tracked]["args"][0] == "anime-download"
+    assert foreign not in state["releases"]
+    # A non-anime pending job is none of this migration's business.
+    assert "j3" not in cancelled
+
+
+def test_discovery_records_the_release_before_adding_the_torrent(monkeypatch):
+    """The old order could add a torrent that no record ever pointed at."""
+    order: list[str] = []
+    state = erai._default_state()
+    item = entry("[Erai-raws] Test Show - 01 [1080p][HEVC][MultiSub]")
+
+    class Qbit:
+        async def add(self, **_kwargs):
+            order.append("qbit.add")
+            # The release must already be written down by this point.
+            assert item.info_hash in state["releases"]
+
+    async def detail(_client, _url):
+        return ("Subtitles Info:\nGerman (CR_German) | ASS", item.magnet_uri, "Erai-raws")
+
+    async def resolve(_entry):
+        return (
+            AnimeTVDBMatch(1, "show", "Test Show", year=2024),
+            SimpleNamespace(season=1, episode=1),
+            None,
+        )
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+    monkeypatch.setattr(erai, "_resolve", resolve)
+    monkeypatch.setattr(erai, "_existing_show_folder_lookup", None, raising=False)
+    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
+    token = erai._ADMISSION.set({"qbit": Qbit(), "remaining": 10 * 1024**3})
+
+    def spawn(**_kwargs):
+        raise AssertionError("discovery must not spawn a worker for a download")
+
+    monkeypatch.setattr("bankai.cli.bgjobs.spawn", spawn)
+    try:
+        assert asyncio.run(erai._consider(state, item, object())) is True
+    finally:
+        erai._ADMISSION.reset(token)
+
+    assert order == ["qbit.add"]
+    record = state["releases"][item.info_hash]
+    assert record["status"] == "queued"
+    assert record["display_title"] == "Test Show S01E01"
+    # The arguments are kept so publishing never re-resolves against TVDB.
+    assert record["args"][0] == "anime-download"

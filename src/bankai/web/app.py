@@ -745,6 +745,16 @@ def create_app() -> Any:
             migration_task = asyncio.create_task(
                 anyio.to_thread.run_sync(_backfill_review_metadata)
             )
+            # One-off: releases queued by older builds sit in the pending
+            # queue waiting for a download the reconciler now watches directly.
+            with suppress(Exception):
+                retired = erai_mod.retire_download_pendings()
+                if retired.get("retired"):
+                    log.info(
+                        "Retired %(retired)d download placeholders "
+                        "(%(adopted)d adopted into release tracking)",
+                        retired,
+                    )
             erai_task = asyncio.create_task(erai_mod.scheduler())
             queue_task = asyncio.create_task(webjobs.scheduler())
         except Exception:
@@ -1507,9 +1517,15 @@ def create_app() -> Any:
         q: str | None = None,
         status: str | None = None,
     ) -> dict:
+        from bankai.web import erai as erai_mod
         from bankai.web.anime_library import queue_covers
 
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
+        # Most releases are waiting on qBittorrent and deliberately have no
+        # bankai job, so the queue has to show them from the release table or
+        # the backlog would be invisible.
+        rows = [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows)]
+        rows.sort(key=lambda row: row.get("started_at") or 0.0, reverse=True)
         if not include_done:
             rows = [row for row in rows if row.get("status") != "done"]
         term = (q or "").strip().casefold()

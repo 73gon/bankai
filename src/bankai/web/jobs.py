@@ -284,6 +284,10 @@ def _running_count(jobs: list | None = None) -> int:
         )
         if job.status in {"running", "stopped"}
         and not _is_operation(job.kind, getattr(job, "args", None))
+        # Anime publishing is governed by anime.max_concurrent_transfers and is
+        # spawned by the release reconciler, not from this queue. Counting it
+        # here would let a couple of episode copies stall every movie pipeline.
+        and not _is_anime_job(getattr(job, "args", None))
     )
 
 
@@ -421,9 +425,16 @@ def reconcile() -> int:
         return started
 
 
+# Reconciling releases means talking to qBittorrent about every tracked
+# torrent, which is far heavier than promoting a pending job and does not need
+# to happen on every tick.
+_RELEASE_RECONCILE_SECONDS = 20.0
+
+
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
     """Dispatch queued work continuously, independent of an open browser page."""
 
+    next_release_pass = 0.0
     while True:
         try:
             await asyncio.to_thread(reconcile)
@@ -431,6 +442,16 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
             raise
         except Exception as exc:
             log.warning("queue scheduler failed: %s", exc)
+        if time.monotonic() >= next_release_pass:
+            next_release_pass = time.monotonic() + _RELEASE_RECONCILE_SECONDS
+            try:
+                from bankai.web import erai
+
+                await erai.reconcile_releases()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("release reconciliation failed: %s", exc)
         await asyncio.sleep(poll_seconds)
 
 

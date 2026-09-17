@@ -942,44 +942,54 @@ async def _consider(
             "canonical": canonical,
         }
         return False
-    from bankai.web import jobs as webjobs
-
     admission = _ADMISSION.get()
-    if admission is not None:
-        # Reserve the eventual library size of all submitted torrents, so a
-        # large qBittorrent backlog cannot consume the 100 GiB floor later.
-        required = max(entry.size_bytes, _GIB // 2)
-        if required > admission["remaining"]:
-            return False
-        await admission["qbit"].add(
-            magnet=entry.magnet_uri or None,
-            torrent_url=None if entry.magnet_uri else entry.download_url,
-            category=get_settings().qbittorrent.category,
-            save_path=Path(get_settings().qbittorrent.save_path)
-            if get_settings().qbittorrent.save_path
-            else None,
-        )
-        admission["remaining"] -= required
     title = f"{match.english_title} S{identity.season:02d}E{identity.episode:02d}"
-    result = webjobs.enqueue(kind="show", title=title, args=_anime_args(entry, match, identity))
-    if result.get("status") not in {"running", "queued", "duplicate"}:
-        _hold(state, entry, f"Queue rejected release: {result.get('status', 'unknown')}")
-        return False
+    # Write the release down *before* handing the torrent to qBittorrent. The
+    # old order added the torrent first and only then tried to create a job, so
+    # anything that stopped the job being created -- a duplicate title, an
+    # exception in between -- left a torrent downloading that nothing owned and
+    # nothing would ever publish. The record is what the reconciler drives from,
+    # so it has to exist first.
     state["releases"][entry.info_hash] = {
-        "status": result["status"],
+        "status": "queued",
         "title": entry.title,
+        "display_title": title,
         "canonical": canonical,
-        "job_id": result.get("id"),
         "resolution": resolution,
         "size_bytes": entry.size_bytes,
+        # Kept so publishing never has to resolve against TVDB a second time.
+        "args": _anime_args(entry, match, identity),
+        "updated_at": time.time(),
     }
     state["held"] = [item for item in state["held"] if item.get("info_hash") != entry.info_hash]
     state["canonical"][canonical] = {
         "info_hash": entry.info_hash,
         "resolution": resolution,
-        "job_id": result.get("id"),
     }
-    return result.get("status") in {"running", "queued"}
+    if admission is not None:
+        # Reserve the eventual library size of all submitted torrents, so a
+        # large qBittorrent backlog cannot consume the 100 GiB floor later.
+        required = max(entry.size_bytes, _GIB // 2)
+        if required > admission["remaining"]:
+            state["releases"].pop(entry.info_hash, None)
+            state["canonical"].pop(canonical, None)
+            return False
+        try:
+            await admission["qbit"].add(
+                magnet=entry.magnet_uri or None,
+                torrent_url=None if entry.magnet_uri else entry.download_url,
+                category=get_settings().qbittorrent.category,
+                save_path=Path(get_settings().qbittorrent.save_path)
+                if get_settings().qbittorrent.save_path
+                else None,
+            )
+        except Exception as exc:
+            # The reconciler re-adds a queued release whose torrent is absent,
+            # so a failed add is a retry rather than a lost episode.
+            log.warning("Could not add %s to qBittorrent: %s", entry.info_hash[:8], exc)
+            return False
+        admission["remaining"] -= required
+    return True
 
 
 async def _fetch_rss(client: httpx.AsyncClient) -> list[anime_mod.NyaaEntry]:
@@ -1464,6 +1474,309 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                 await qbit.aclose()
         _save_state(state)
         return status(state=state, running=False)
+
+
+# ---------------------------------------------------------------------------
+# Release reconciliation
+#
+# qBittorrent owns the download; bankai owns publishing. The reconciler reads
+# the former and drives the latter, so a release's state is always derived from
+# what is actually on disk rather than from a job that may have died.
+#
+#   queued -> downloading -> transferring -> deleting -> done
+#
+# Downloading costs bankai nothing, so it is deliberately uncapped -- the old
+# design spawned a worker that blocked on wait_until_complete for hours, which
+# is why three slots could not keep up with a thousand releases and why
+# finished torrents sat unpublished.
+# ---------------------------------------------------------------------------
+
+_ACTIVE_RELEASE_STATES = {"queued", "downloading", "transferring", "deleting"}
+# A release being deleted still has a job, but that job already reads "done"
+# and is hidden from the queue by default, so the release row is what keeps
+# the last step visible.
+_PUBLISHABLE = {"queued", "downloading", "deleting"}
+
+
+def _release_job_running(release: dict[str, Any]) -> bool:
+    from bankai.cli import bgjobs
+
+    job_id = release.get("job_id")
+    if not job_id:
+        return False
+    job = bgjobs.get_job(str(job_id))
+    return job is not None and job.status in {"running", "stopped"}
+
+
+def _running_transfer_count(state: dict[str, Any]) -> int:
+    return sum(
+        1
+        for release in state["releases"].values()
+        if release.get("status") in {"transferring", "deleting"}
+        and _release_job_running(release)
+    )
+
+
+def _torrent_phase(torrent: Any) -> str:
+    """Map a qBittorrent row onto the release vocabulary."""
+    state_name = str(getattr(torrent, "state", "")).casefold()
+    if "error" in state_name or "missing" in state_name:
+        return "error"
+    if float(getattr(torrent, "progress", 0.0)) >= 1.0 or state_name.endswith("up"):
+        return "complete"
+    if "downloading" in state_name or "forceddl" in state_name or "metadl" in state_name:
+        return "downloading"
+    return "queued"
+
+
+def retire_download_pendings() -> dict[str, int]:
+    """Drop pending jobs that only existed to wait for a download.
+
+    Releases used to be pushed into the worker queue at discovery time, where
+    they sat behind the pipeline slot limit for as long as the download took.
+    The reconciler now spawns a job only when there are bytes to copy, so those
+    entries are redundant -- but a pending job whose release is untracked is
+    the only remaining record of that episode, so it is adopted rather than
+    dropped.
+    """
+    from bankai.web import jobs as webjobs
+
+    retired = 0
+    adopted = 0
+    kept = 0
+    with _STATE_LOCK:
+        state = _load_state()
+        releases = state["releases"]
+        by_hash = {key.casefold(): value for key, value in releases.items()}
+        for item in webjobs.list_pending():
+            if not item.args or item.args[0] != "anime-download":
+                kept += 1
+                continue
+            info_hash = (_args_value(item.args, "--info-hash") or "").casefold()
+            release = by_hash.get(info_hash) if info_hash else None
+            if release is None:
+                if not info_hash:
+                    kept += 1
+                    continue
+                releases[info_hash] = {
+                    "status": "queued",
+                    "title": _args_value(item.args, "--release-title") or item.title,
+                    "display_title": item.title,
+                    "args": list(item.args),
+                    "updated_at": time.time(),
+                }
+                adopted += 1
+            elif not release.get("args"):
+                # Older records predate storing the arguments, and without them
+                # the reconciler could never publish the release.
+                release["args"] = list(item.args)
+                release.setdefault("display_title", item.title)
+            webjobs.cancel_pending(item.id)
+            retired += 1
+        _save_state(state)
+    return {"retired": retired, "adopted": adopted, "kept": kept}
+
+
+async def _readd_torrent(qbit: Any, release: dict[str, Any]) -> bool:
+    """Put a tracked release back into qBittorrent from its stored arguments."""
+    args = release.get("args")
+    magnet = _args_value(args, "--magnet-uri")
+    torrent_url = _args_value(args, "--torrent-url")
+    if not magnet and not torrent_url:
+        return False
+    settings = get_settings()
+    try:
+        await qbit.add(
+            magnet=magnet or None,
+            torrent_url=None if magnet else torrent_url,
+            category=settings.qbittorrent.category,
+            save_path=Path(settings.qbittorrent.save_path)
+            if settings.qbittorrent.save_path
+            else None,
+        )
+    except Exception as exc:
+        log.warning("Could not re-add %s: %s", str(release.get("title"))[:60], exc)
+        return False
+    return True
+
+
+async def reconcile_releases() -> dict[str, int]:
+    """Advance every tracked release one step. Safe to call on a timer."""
+    from bankai.cli import bgjobs
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    settings = get_settings()
+    if not settings.anime.enabled or updates.maintenance_active():
+        return {}
+
+    qbit = QBittorrentClient()
+    counts: dict[str, int] = {}
+
+    def tally(name: str) -> None:
+        counts[name] = counts.get(name, 0) + 1
+
+    try:
+        await qbit.login()
+        torrents = await qbit.list_torrents(category=settings.qbittorrent.category)
+    except Exception as exc:
+        log.warning("Release reconciliation skipped; qBittorrent unreachable: %s", exc)
+        await qbit.aclose()
+        return {}
+
+    try:
+        with _STATE_LOCK:
+            state = _load_state()
+            by_hash = {str(item.hash).casefold(): item for item in torrents}
+            limit = max(1, settings.anime.max_concurrent_transfers)
+            running = _running_transfer_count(state)
+
+            for info_hash, release in list(state["releases"].items()):
+                status = str(release.get("status") or "")
+                if status not in _ACTIVE_RELEASE_STATES:
+                    continue
+                torrent = by_hash.get(info_hash.casefold())
+
+                if status in {"transferring", "deleting"}:
+                    job_id = release.get("job_id")
+                    job = bgjobs.get_job(str(job_id)) if job_id else None
+                    if job is None or job.status in {"running", "stopped"}:
+                        tally(status)
+                        continue
+                    if job.status == "done":
+                        # download_anime removes the torrent itself once the
+                        # file is published, so a torrent still present means
+                        # the removal is the only step left.
+                        release["status"] = "deleting" if torrent is not None else "done"
+                        if torrent is not None:
+                            try:
+                                await qbit.remove(info_hash, delete_files=True)
+                                release["status"] = "done"
+                            except Exception as exc:
+                                log.warning(
+                                    "Could not remove published torrent %s: %s",
+                                    info_hash[:8],
+                                    exc,
+                                )
+                    else:
+                        release["status"] = "failed"
+                        release["reason"] = f"Publishing job {job.status}"
+                    release["updated_at"] = time.time()
+                    tally(release["status"])
+                    continue
+
+                if torrent is None:
+                    # Nothing else will ever re-add it: discovery skips a
+                    # release it has already recorded, and a publishing job is
+                    # only spawned once the download is complete. The record
+                    # carries the magnet, so the reconciler re-adds it itself.
+                    if await _readd_torrent(qbit, release):
+                        release["status"] = "queued"
+                        release["updated_at"] = time.time()
+                        tally("readded")
+                    else:
+                        release["status"] = "held"
+                        release["reason"] = "Torrent could not be re-added to qBittorrent"
+                        release["retry_after"] = 0
+                        release["updated_at"] = time.time()
+                        tally("held")
+                    continue
+
+                phase = _torrent_phase(torrent)
+                if phase == "error":
+                    release["status"] = "held"
+                    release["reason"] = f"qBittorrent reports {torrent.state}"
+                    release["retry_after"] = 0
+                    release["updated_at"] = time.time()
+                    tally("held")
+                    continue
+                if phase != "complete":
+                    if release.get("status") != phase:
+                        release["status"] = phase
+                        release["updated_at"] = time.time()
+                    tally(phase)
+                    continue
+
+                # Complete: publish it, as soon as the transfer lane has room.
+                args = release.get("args")
+                if not args:
+                    tally("unpublishable")
+                    continue
+                if running >= limit:
+                    tally("awaiting_transfer_slot")
+                    continue
+                job = bgjobs.spawn(
+                    kind="show",
+                    title=str(release.get("display_title") or release.get("title") or info_hash),
+                    args=list(args),
+                )
+                release["status"] = "transferring"
+                release["job_id"] = job.id
+                release["updated_at"] = time.time()
+                running += 1
+                tally("transferring")
+
+            _save_state(state)
+    finally:
+        await qbit.aclose()
+    return counts
+
+
+def release_queue_rows() -> list[dict[str, Any]]:
+    """Queue rows for releases that have no worker of their own yet.
+
+    Most releases are waiting on qBittorrent and deliberately have no bankai
+    job, so without these the queue would show only the handful of active
+    publishes and none of the backlog.
+    """
+    state = _load_state()
+    rows: list[dict[str, Any]] = []
+    for info_hash, release in state["releases"].items():
+        status = str(release.get("status") or "")
+        if status not in _PUBLISHABLE:
+            continue
+        rows.append(
+            {
+                "id": info_hash[:8],
+                "kind": "show",
+                "title": str(release.get("display_title") or release.get("title") or info_hash),
+                "status": "queued",
+                "phase": status,
+                "started_at": float(release.get("updated_at") or 0.0),
+                "updated_at": float(release.get("updated_at") or 0.0),
+                "finished_at": None,
+                "exit_code": None,
+                "final_path": None,
+                "step": None,
+                "total_steps": None,
+                "step_key": None,
+                "step_label": {
+                    "downloading": "Downloading in qBittorrent",
+                    "deleting": "Removing the torrent",
+                }.get(status, "Waiting for qBittorrent"),
+                "overall_percent": 100.0 if status == "deleting" else 0.0,
+                "transfer_percent": None,
+                "pending": True,
+                "action_required": False,
+                "reason": None,
+                "reason_detail": None,
+                "queue_position": None,
+                "queue_total": None,
+                "tvdb_id": _args_value(release.get("args"), "--tvdb-id"),
+                "german_source_url": None,
+                "torrent_source_url": None,
+                "torrent_source_title": release.get("title"),
+            }
+        )
+    return rows
+
+
+def _args_value(args: Any, flag: str) -> str | None:
+    if not isinstance(args, list):
+        return None
+    try:
+        return str(args[args.index(flag) + 1])
+    except (ValueError, IndexError):
+        return None
 
 
 def status(*, state: dict[str, Any] | None = None, running: bool | None = None) -> dict[str, Any]:

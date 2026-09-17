@@ -112,6 +112,11 @@ class AnimeAutomationSettings(BaseModel):
     settle_minutes: int = Field(default=30, ge=0)
     min_free_space_gib: float = Field(default=100.0, ge=0)
     max_enqueues_per_cycle: int = Field(default=500, ge=1, le=10000)
+    # Downloading is qBittorrent's job and costs bankai nothing, so it is not
+    # capped here. Publishing is different: both ends of a transfer live on the
+    # same spinning library disk, and concurrent large copies there lose far
+    # more to seeking than they gain in parallelism.
+    max_concurrent_transfers: int = Field(default=2, ge=1, le=16)
     backfill_enabled: bool = True
     backfill_request_delay_seconds: float = Field(default=2.0, ge=1.0)
 

@@ -24,6 +24,7 @@ function phaseVariant(phase: string) {
   if (phase === 'downloading') return 'torrent' as const;
   if (phase === 'organizing') return 'extract' as const;
   if (phase === 'transferring') return 'transfer' as const;
+  if (phase === 'deleting') return 'repack' as const;
   return 'info' as const;
 }
 
@@ -69,6 +70,7 @@ const STATUS_ORDER = [
   'downloading',
   'organizing',
   'transferring',
+  'deleting',
   'running',
   'stopped',
   'failed',
