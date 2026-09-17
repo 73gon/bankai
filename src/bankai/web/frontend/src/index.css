@@ -404,6 +404,29 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
+  /* Queue filter chips.
+     Chips are pressed deliberately and rarely, so they earn real press
+     feedback; the rows behind them re-render every five seconds and
+     deliberately get no entry animation at all. Named properties only --
+     `all` would also animate the width change when a count ticks over. */
+  .filter-chip {
+    transition:
+      background-color 150ms var(--button-transition-ease),
+      border-color 150ms var(--button-transition-ease),
+      color 150ms var(--button-transition-ease),
+      transform 120ms var(--button-transition-ease);
+  }
+  .filter-chip:active {
+    transform: scale(0.97);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .filter-chip {
+      transition-property: background-color, border-color, color;
+    }
+    .filter-chip:active {
+      transform: none;
+    }
+  }
 }
 
 @keyframes fade-in {

@@ -50,6 +50,7 @@ def test_anime_queue_uses_separate_snapshot(
     assert client.get("/api/anime/queue").json() == {
         "jobs": [{"id": "anime"}],
         "total": 1,
+        "counts": {"unknown": 1},
         "page": 0,
         "page_size": 100,
     }
@@ -85,6 +86,45 @@ def test_anime_queue_hides_done_by_default(
     shown = client.get("/api/anime/queue", params={"include_done": True}).json()
     assert shown["total"] == 3
     assert [row["id"] for row in shown["jobs"]] == ["done", "running", "failed"]
+
+
+def test_anime_queue_filters_by_title_and_status(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "bankai.web.jobs.anime_snapshot",
+        lambda: [
+            {"id": "1", "title": "Frieren S01E04", "status": "running"},
+            {"id": "2", "title": "Frieren S01E05", "status": "queued"},
+            {"id": "3", "title": "Dandadan S01E01", "status": "failed"},
+            {"id": "4", "title": "Frieren S01E03", "status": "done"},
+        ],
+    )
+
+    unfiltered = client.get("/api/anime/queue").json()
+    assert unfiltered["total"] == 3  # the done row stays hidden by default
+    assert unfiltered["counts"] == {"running": 1, "queued": 1, "failed": 1}
+
+    searched = client.get("/api/anime/queue", params={"q": "frieren"}).json()
+    assert [row["id"] for row in searched["jobs"]] == ["1", "2"]
+    # Counts follow the search, so every chip advertises its own result.
+    assert searched["counts"] == {"running": 1, "queued": 1}
+
+    combined = client.get(
+        "/api/anime/queue", params={"q": "FRIEREN", "status": "queued"}
+    ).json()
+    assert [row["id"] for row in combined["jobs"]] == ["2"]
+    assert combined["total"] == 1
+    # Narrowing to one status must not collapse the other chips to zero.
+    assert combined["counts"] == {"running": 1, "queued": 1}
+
+    done = client.get(
+        "/api/anime/queue", params={"include_done": True, "status": "done"}
+    ).json()
+    assert [row["id"] for row in done["jobs"]] == ["4"]
+
+    assert client.get("/api/anime/queue", params={"status": "all"}).json()["total"] == 3
+    assert client.get("/api/anime/queue", params={"q": "nothing"}).json()["total"] == 0
 
 
 def test_anime_settings_are_validated(client: TestClient) -> None:

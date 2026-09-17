@@ -1504,17 +1504,32 @@ def create_app() -> Any:
         page: int = Query(0, ge=0),
         page_size: int = Query(100, ge=20, le=200),
         include_done: bool = False,
+        q: str | None = None,
+        status: str | None = None,
     ) -> dict:
         from bankai.web.anime_library import queue_covers
 
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
         if not include_done:
             rows = [row for row in rows if row.get("status") != "done"]
+        term = (q or "").strip().casefold()
+        if term:
+            rows = [row for row in rows if term in str(row.get("title") or "").casefold()]
+        # Counts are taken after the search but before the status filter, so a
+        # status chip always advertises exactly what selecting it will show.
+        counts: dict[str, int] = {}
+        for row in rows:
+            name = str(row.get("status") or "unknown")
+            counts[name] = counts.get(name, 0) + 1
+        wanted = (status or "").strip().casefold()
+        if wanted and wanted != "all":
+            rows = [row for row in rows if str(row.get("status") or "").casefold() == wanted]
         start = page * page_size
         visible = rows[start : start + page_size]
         return {
             "jobs": await queue_covers(visible),
             "total": len(rows),
+            "counts": counts,
             "page": page,
             "page_size": page_size,
         }

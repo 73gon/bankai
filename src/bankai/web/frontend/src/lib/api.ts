@@ -327,6 +327,20 @@ export interface FilmpalastDetails {
   episodes: EpisodeItem[];
 }
 
+export interface AnimeQueueFilters {
+  q?: string;
+  status?: string;
+}
+
+export interface AnimeQueuePage {
+  jobs: Job[];
+  total: number;
+  /** Status -> row count for the current search, before the status filter. */
+  counts: Record<string, number>;
+  page: number;
+  page_size: number;
+}
+
 export interface QBittorrentItem {
   hash: string;
   name: string;
@@ -634,10 +648,16 @@ export const api = {
     ),
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
-  animeQueue: (page = 0, pageSize = 100, includeDone = false) =>
-    request<{ jobs: Job[]; total: number; page: number; page_size: number }>(
-      `/api/anime/queue?page=${page}&page_size=${pageSize}&include_done=${includeDone}`,
-    ),
+  animeQueue: (page = 0, pageSize = 100, includeDone = false, filters: AnimeQueueFilters = {}) => {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+      include_done: String(includeDone),
+    });
+    if (filters.q?.trim()) params.set('q', filters.q.trim());
+    if (filters.status && filters.status !== 'all') params.set('status', filters.status);
+    return request<AnimeQueuePage>(`/api/anime/queue?${params}`);
+  },
   animeEpisodeSearch: (tvdbId: number, season: number, episode: number, q?: string) => {
     const params = new URLSearchParams({ tvdb_id: String(tvdbId), season: String(season), episode: String(episode) });
     if (q) params.set('q', q);
