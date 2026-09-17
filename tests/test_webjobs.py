@@ -402,3 +402,22 @@ def test_catalog_titles_does_not_parse_progress_logs(monkeypatch: pytest.MonkeyP
     )
 
     assert webjobs.catalog_titles() == {"Done Movie", "Queued Movie"}
+
+
+@pytest.mark.parametrize(
+    "status,step_key,expected",
+    [
+        ("running", "torrent", "downloading"),
+        ("running", "organize", "organizing"),
+        ("running", "transfer", "transferring"),
+        # A worker that has not announced a stage yet stays plain "running".
+        ("running", None, "running"),
+        ("running", "something-new", "running"),
+        # Everything that is not running already says what it is.
+        ("queued", None, "queued"),
+        ("failed", "torrent", "failed"),
+        ("done", "transfer", "done"),
+    ],
+)
+def test_phase_narrows_running_to_the_announced_stage(status, step_key, expected):
+    assert webjobs._phase(status, step_key) == expected

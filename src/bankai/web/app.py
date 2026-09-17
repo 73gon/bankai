@@ -1515,15 +1515,21 @@ def create_app() -> Any:
         term = (q or "").strip().casefold()
         if term:
             rows = [row for row in rows if term in str(row.get("title") or "").casefold()]
-        # Counts are taken after the search but before the status filter, so a
-        # status chip always advertises exactly what selecting it will show.
+        # Filter on the phase, which narrows "running" to downloading /
+        # organizing / transferring and is the status for everything else.
+        # Counts are taken after the search but before the phase filter, so a
+        # chip always advertises exactly what selecting it will show.
         counts: dict[str, int] = {}
         for row in rows:
-            name = str(row.get("status") or "unknown")
+            name = str(row.get("phase") or row.get("status") or "unknown")
             counts[name] = counts.get(name, 0) + 1
         wanted = (status or "").strip().casefold()
         if wanted and wanted != "all":
-            rows = [row for row in rows if str(row.get("status") or "").casefold() == wanted]
+            rows = [
+                row
+                for row in rows
+                if str(row.get("phase") or row.get("status") or "").casefold() == wanted
+            ]
         start = page * page_size
         visible = rows[start : start + page_size]
         return {

@@ -15,10 +15,15 @@ function formatTime(value: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : '—';
 }
 
-function statusVariant(status: string) {
-  if (status === 'done') return 'success' as const;
-  if (status === 'failed' || status === 'cancelled') return 'destructive' as const;
-  if (status === 'stopped' || status === 'queued') return 'warning' as const;
+// The phase narrows "running" to the stage the worker last announced, so a
+// torrent still downloading reads differently from a copy into the library.
+function phaseVariant(phase: string) {
+  if (phase === 'done') return 'success' as const;
+  if (phase === 'failed' || phase === 'cancelled') return 'destructive' as const;
+  if (phase === 'stopped' || phase === 'queued') return 'warning' as const;
+  if (phase === 'downloading') return 'torrent' as const;
+  if (phase === 'organizing') return 'extract' as const;
+  if (phase === 'transferring') return 'transfer' as const;
   return 'info' as const;
 }
 
@@ -27,7 +32,18 @@ function titleCase(value: string) {
 }
 
 // Fixed order so chips never reshuffle under the pointer as counts change.
-const STATUS_ORDER = ['running', 'queued', 'stopped', 'failed', 'cancelled', 'done'];
+// Ordered the way work actually flows, not alphabetically.
+const STATUS_ORDER = [
+  'queued',
+  'downloading',
+  'organizing',
+  'transferring',
+  'running',
+  'stopped',
+  'failed',
+  'cancelled',
+  'done',
+];
 
 export default function AnimeQueue() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -252,13 +268,26 @@ export default function AnimeQueue() {
                         </div>
                       </div>
                     </td>
-                    <td className='px-3 py-4'><Badge variant={statusVariant(job.status)}>{job.status}</Badge></td>
+                    <td className='px-3 py-4'>
+                      <Badge variant={phaseVariant(job.phase || job.status)}>{titleCase(job.phase || job.status)}</Badge>
+                    </td>
                     <td className='px-3 py-4'>
                       <div className='flex min-w-36 flex-col gap-2'>
                         <span className='font-mono text-xs tabular-nums'>{Math.round(job.overall_percent ?? 0)}%</span>
                         <div className='h-1.5 overflow-hidden rounded-full bg-secondary'>
                           <div className='h-full rounded-full bg-primary transition-[width]' style={{ width: String(Math.max(0, Math.min(100, job.overall_percent ?? 0))) + '%' }} />
                         </div>
+                        {job.transfer_percent !== null && job.transfer_percent !== undefined && (
+                          <div className='flex flex-col gap-1'>
+                            <span className='flex items-center justify-between font-mono text-[0.65rem] tabular-nums text-transfer'>
+                              <span>Transfer</span>
+                              <span>{Math.round(job.transfer_percent)}%</span>
+                            </span>
+                            <div className='h-1 overflow-hidden rounded-full bg-secondary'>
+                              <div className='h-full rounded-full bg-transfer transition-[width]' style={{ width: String(Math.max(0, Math.min(100, job.transfer_percent))) + '%' }} />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td className='px-3 py-4 text-xs text-muted-foreground'>{formatTime(job.updated_at)}</td>

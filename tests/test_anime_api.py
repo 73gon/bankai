@@ -127,6 +127,29 @@ def test_anime_queue_filters_by_title_and_status(
     assert client.get("/api/anime/queue", params={"q": "nothing"}).json()["total"] == 0
 
 
+def test_anime_queue_filters_running_jobs_by_phase(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Waiting on a torrent and copying into the library are both "running"."""
+    monkeypatch.setattr(
+        "bankai.web.jobs.anime_snapshot",
+        lambda: [
+            {"id": "dl", "title": "A S01E01", "status": "running", "phase": "downloading"},
+            {"id": "tx", "title": "B S01E01", "status": "running", "phase": "transferring"},
+            {"id": "q", "title": "C S01E01", "status": "queued", "phase": "queued"},
+        ],
+    )
+
+    body = client.get("/api/anime/queue").json()
+    assert body["counts"] == {"downloading": 1, "transferring": 1, "queued": 1}
+
+    only_transfers = client.get("/api/anime/queue", params={"status": "transferring"}).json()
+    assert [row["id"] for row in only_transfers["jobs"]] == ["tx"]
+
+    # The raw status is no longer a selectable bucket; the phases replace it.
+    assert client.get("/api/anime/queue", params={"status": "running"}).json()["total"] == 0
+
+
 def test_anime_settings_are_validated(client: TestClient) -> None:
     rows = {row["key"]: row for row in client.get("/api/settings").json()["settings"]}
     assert rows["anime.min_free_space_gib"]["value"] == 100

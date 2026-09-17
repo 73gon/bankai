@@ -29,6 +29,16 @@ log = get_logger(__name__)
 _LOCK = threading.RLock()
 _OPERATION_KINDS = {"transfer", "repack", "torrent_replace"}
 _OPERATION_COMMANDS = {"transfer-run", "review-repack", "review-replace-torrent"}
+# A running job says nothing about what it is actually doing: waiting on a
+# torrent and copying into the library are both "running". The stage key the
+# worker already logs distinguishes them, so surface it as the row's phase.
+_PHASE_BY_STEP = {
+    "torrent": "downloading",
+    "organize": "organizing",
+    "transfer": "transferring",
+    "repack": "repacking",
+    "replace": "replacing",
+}
 _STREAM_FAILURE_THRESHOLD = 2
 _STREAM_FAILURE_WINDOW_SECONDS = 10 * 60
 _STREAM_FAILURE_COOLDOWN_SECONDS = 15 * 60
@@ -606,6 +616,13 @@ def _job_revision(job) -> tuple[object, ...] | None:
     )
 
 
+def _phase(status: str, step_key: str | None) -> str:
+    """Narrow "running" to the stage the worker last announced."""
+    if status != "running":
+        return status
+    return _PHASE_BY_STEP.get(step_key or "", "running")
+
+
 def _display_row(job) -> dict:
     """Build the stable part of a queue row, reusing unchanged log parsing."""
 
@@ -635,8 +652,15 @@ def _display_row(job) -> dict:
         "reason_detail": raw_reason,
         "step": snap.step,
         "total_steps": snap.total_steps,
+        "step_key": snap.step_key,
         "step_label": snap.step_label,
         "overall_percent": snap.overall_percent,
+        "phase": _phase(job.status, snap.step_key),
+        # Only the transfer part is carried. The full part map would multiply
+        # the queue payload by every stage on every row.
+        "transfer_percent": (
+            snap.parts["transfer"].percent if "transfer" in snap.parts else None
+        ),
         "pending": False,
         "queue_position": None,
         "queue_total": None,
@@ -711,6 +735,9 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
                 "final_path": None,
                 "step": None,
                 "total_steps": None,
+                "step_key": None,
+                "phase": "queued",
+                "transfer_percent": None,
                 "step_label": (
                     "Waiting for Anime storage reserve"
                     if anime_only and not anime_storage_ready

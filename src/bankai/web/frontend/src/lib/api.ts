@@ -379,8 +379,13 @@ export interface Job {
   final_path: string | null;
   step: number | null;
   total_steps: number | null;
+  step_key: string | null;
   step_label: string;
   overall_percent: number | null;
+  /** "running" narrowed to downloading | organizing | transferring; the status otherwise. */
+  phase: string;
+  /** Byte progress of the library copy, present once the transfer stage starts. */
+  transfer_percent: number | null;
   pending: boolean;
   action_required: boolean;
   reason?: string | null;
