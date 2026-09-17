@@ -4,7 +4,6 @@ import { toast } from 'sonner';
 import { api, type Job } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -17,6 +16,19 @@ function formatTime(value: number | null) {
 
 // The phase narrows "running" to the stage the worker last announced, so a
 // torrent still downloading reads differently from a copy into the library.
+const PHASE_DOT: Record<string, string> = {
+  queued: 'bg-warning',
+  downloading: 'bg-torrent',
+  complete: 'bg-starting',
+  transferring: 'bg-transfer',
+  deleting: 'bg-repack',
+  done: 'bg-success',
+  running: 'bg-info',
+  stopped: 'bg-warning',
+  failed: 'bg-destructive',
+  cancelled: 'bg-destructive',
+};
+
 function phaseVariant(phase: string) {
   if (phase === 'done') return 'success' as const;
   if (phase === 'failed' || phase === 'cancelled') return 'destructive' as const;
@@ -257,15 +269,8 @@ export default function AnimeQueue() {
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Anime downloads</CardTitle>
-          <CardDescription>
-            {total} {showCompleted ? 'historical' : 'unfinished'} job{total === 1 ? '' : 's'}
-            {filtered ? ' matching the current filter' : ''}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className='overflow-x-auto'>
+      <div className='overflow-x-auto rounded-lg border border-border'>
+        <div className='min-w-full'>
           {loading && jobs.length === 0 ? (
             <div className='flex min-h-40 items-center justify-center'><Spinner /></div>
           ) : jobs.length === 0 ? (
@@ -283,32 +288,32 @@ export default function AnimeQueue() {
           ) : (
             <table className='w-full min-w-[820px] border-collapse text-sm'>
               <thead>
-                <tr className='border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground'>
-                  <th className='px-3 py-3 font-medium'>Title</th>
-                  <th className='px-3 py-3 font-medium'>Status</th>
-                  <th className='px-3 py-3 font-medium'>Progress</th>
-                  <th className='px-3 py-3 font-medium'>Updated</th>
-                  <th className='px-3 py-3 text-right font-medium'>Actions</th>
+                <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
+                  <th className='px-3 py-2.5 font-medium'>Title</th>
+                  <th className='px-3 py-2.5 font-medium'>Status</th>
+                  <th className='px-3 py-2.5 font-medium'>Progress</th>
+                  <th className='px-3 py-2.5 font-medium'>Updated</th>
+                  <th className='px-3 py-2.5 text-right font-medium'>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {jobs.map((job) => (
-                  <tr key={job.id} className='border-b border-border/60 align-top last:border-0'>
-                    <td className='px-3 py-4'>
-                      <div className='flex items-start gap-3'>
-                        <AnimePoster url={job.poster_url} title={job.series_title || job.title} className='w-12 shrink-0' />
-                        <div className='flex flex-col gap-1'>
-                          <p className='font-medium text-foreground'>{job.title}</p>
-                          <p className='max-w-xl text-xs text-muted-foreground'>{job.reason || job.step_label || job.kind}</p>
+                  <tr key={job.id} className='data-row border-b border-border/70 last:border-0'>
+                    <td className='px-3 py-2'>
+                      <div className='flex items-center gap-2.5'>
+                        <AnimePoster url={job.poster_url} title={job.series_title || job.title} className='w-8 shrink-0 rounded' />
+                        <div className='min-w-0'>
+                          <p className='truncate font-medium text-foreground' title={job.title}>{job.title}</p>
+                          <p className='truncate text-xs text-muted-foreground' title={job.reason || job.step_label || job.kind}>{job.reason || job.step_label || job.kind}</p>
                         </div>
                       </div>
                     </td>
-                    <td className='px-3 py-4'>
+                    <td className='px-3 py-2'>
                       <Badge variant={phaseVariant(job.phase || job.status)}>{titleCase(job.phase || job.status)}</Badge>
                     </td>
-                    <td className='px-3 py-4'><JobProgress job={job} /></td>
-                    <td className='px-3 py-4 text-xs text-muted-foreground'>{formatTime(job.updated_at)}</td>
-                    <td className='px-3 py-4'>
+                    <td className='px-3 py-2'><JobProgress job={job} /></td>
+                    <td className='px-3 py-2 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatTime(job.updated_at)}</td>
+                    <td className='px-3 py-2'>
                       <div className='flex justify-end gap-1'>
                         {job.status === 'running' && (
                           <Button size='icon' variant='ghost' aria-label={'Stop ' + job.title} onClick={() => void act(job, 'stop')} disabled={busy === job.id}><CircleStop /></Button>
@@ -327,17 +332,33 @@ export default function AnimeQueue() {
               </tbody>
             </table>
           )}
-        </CardContent>
+        </div>
+      </div>
+
+      {/* Aggregates and paging share the footer, as on the library page, so the
+          top of the page belongs to the queue itself. */}
+      <div className='sticky bottom-0 -mx-1 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-border bg-background/95 px-1 py-2.5 text-xs text-muted-foreground backdrop-blur'>
+        <div className='flex flex-wrap items-center gap-x-5 gap-y-1'>
+          <span>
+            <span className='font-mono tabular-nums text-foreground'>{total.toLocaleString()}</span>
+            {' '}{showCompleted ? 'historical' : 'unfinished'} job{total === 1 ? '' : 's'}
+            {filtered ? ' matching the filter' : ''}
+          </span>
+          {STATUS_ORDER.filter((name) => counts[name]).map((name) => (
+            <span key={name} className='flex items-center gap-1.5'>
+              <span className={cn('size-1.5 rounded-full', PHASE_DOT[name] ?? 'bg-muted-foreground')} />
+              <span className='font-mono tabular-nums text-foreground'>{counts[name]}</span> {name}
+            </span>
+          ))}
+        </div>
         {total > pageSize && (
-          <div className='flex items-center justify-between border-t border-border/60 px-6 py-4'>
-            <span className='text-xs text-muted-foreground'>Page {page + 1} of {Math.ceil(total / pageSize)}</span>
-            <div className='flex gap-2'>
-              <Button size='sm' variant='secondary' disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}><ChevronLeft data-icon='inline-start' /> Previous</Button>
-              <Button size='sm' variant='secondary' disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight data-icon='inline-end' /></Button>
-            </div>
+          <div className='flex items-center gap-2'>
+            <span className='font-mono text-[0.68rem] tabular-nums'>Page {page + 1} of {Math.ceil(total / pageSize)}</span>
+            <Button size='sm' variant='secondary' disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}><ChevronLeft data-icon='inline-start' /> Previous</Button>
+            <Button size='sm' variant='secondary' disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight data-icon='inline-end' /></Button>
           </div>
         )}
-      </Card>
+      </div>
     </div>
   );
 }

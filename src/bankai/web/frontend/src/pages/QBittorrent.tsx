@@ -7,7 +7,6 @@ import {
   CirclePause,
   Clock3,
   Download,
-  Gauge,
   Loader2,
   Play,
   RefreshCw,
@@ -15,15 +14,12 @@ import {
   Square,
   TriangleAlert,
   Trash2,
-  Upload,
-  Users,
   type LucideIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type QBittorrentItem } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
@@ -149,6 +145,7 @@ export default function QBittorrent() {
   const totalDown = items.reduce((sum, item) => sum + item.dlspeed, 0);
   const totalUp = items.reduce((sum, item) => sum + item.upspeed, 0);
   const totalPeers = items.reduce((sum, item) => sum + item.peers, 0);
+  const totalSize = items.reduce((sum, item) => sum + item.size_bytes, 0);
   const contextState = contextTorrent?.state.toLowerCase() ?? '';
   const contextStopped = contextState.includes('stopped') || contextState.includes('paused');
 
@@ -210,28 +207,9 @@ export default function QBittorrent() {
         </Button>
       </header>
 
-      <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
-        {[
-          { label: 'Torrents', value: items.length.toLocaleString(), icon: Gauge },
-          { label: 'Downloading', value: downloading.toLocaleString(), icon: Download },
-          { label: 'Down / up', value: `${formatSpeed(totalDown)} / ${formatSpeed(totalUp)}`, icon: Upload },
-          { label: 'Connected peers', value: totalPeers.toLocaleString(), icon: Users },
-        ].map(({ label, value, icon: Icon }) => (
-          <Card key={label}>
-            <CardContent className='flex items-center gap-3 p-4'>
-              <div className='flex size-10 items-center justify-center rounded-md bg-secondary text-muted-foreground'><Icon className='size-5' /></div>
-              <div className='min-w-0'>
-                <div className='text-xs uppercase tracking-wide text-muted-foreground'>{label}</div>
-                <div className='truncate font-mono text-sm font-medium text-foreground'>{value}</div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      <div className='relative max-w-lg'>
+      <div className='relative max-w-sm'>
         <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-        <Input className='pl-9' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter downloads…' />
+        <Input className='pl-9' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter downloads…' aria-label='Filter downloads' />
       </div>
 
       {loading ? (
@@ -245,18 +223,18 @@ export default function QBittorrent() {
       ) : (
         <div className='overflow-x-auto rounded-lg border border-border/70'>
           <table className='w-full min-w-[1180px] border-collapse text-sm'>
-            <thead className='bg-secondary/45 text-left text-xs uppercase tracking-wide text-muted-foreground'>
-              <tr>
-                <th className='px-4 py-3 font-medium'>Name</th>
-                <th className='px-3 py-3 font-medium'>Status</th>
-                <th className='px-3 py-3 font-medium'>Size</th>
-                <th className='w-52 px-3 py-3 font-medium'>Progress</th>
-                <th className='px-3 py-3 text-right font-medium'>Seeds</th>
-                <th className='px-3 py-3 text-right font-medium'>Peers</th>
-                <th className='px-3 py-3 text-right font-medium'>Down</th>
-                <th className='px-3 py-3 text-right font-medium'>Up</th>
-                <th className='px-3 py-3 font-medium'>ETA</th>
-                <th className='px-4 py-3 font-medium'>Added on</th>
+            <thead className='text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
+              <tr className='border-b border-border'>
+                <th className='px-3 py-2.5 font-medium'>Name</th>
+                <th className='px-3 py-2.5 font-medium'>Status</th>
+                <th className='px-3 py-2.5 text-right font-medium'>Size</th>
+                <th className='w-44 px-3 py-2.5 font-medium'>Progress</th>
+                <th className='px-3 py-2.5 text-right font-medium'>Seeds</th>
+                <th className='px-3 py-2.5 text-right font-medium'>Peers</th>
+                <th className='px-3 py-2.5 text-right font-medium'>Down</th>
+                <th className='px-3 py-2.5 text-right font-medium'>Up</th>
+                <th className='px-3 py-2.5 text-right font-medium'>ETA</th>
+                <th className='px-3 py-2.5 font-medium'>Added on</th>
               </tr>
             </thead>
             <tbody>
@@ -271,37 +249,48 @@ export default function QBittorrent() {
                     onContextMenu={(event) => showContextMenu(event, item)}
                     onKeyDown={(event) => showKeyboardMenu(event, item)}
                     className={cn(
-                      'cursor-context-menu border-t border-border/60 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60',
+                      'data-row cursor-context-menu border-b border-border/70 last:border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60',
                       status.row,
                     )}
                   >
-                    <td className='max-w-[28rem] px-4 py-3 font-medium text-foreground'>
+                    <td className='max-w-[26rem] px-3 py-2 font-medium text-foreground'>
                       <div className='flex items-center gap-2'>
-                        <StatusIcon className={cn('size-4 shrink-0', status.iconColor)} aria-hidden='true' />
+                        <StatusIcon className={cn('size-3.5 shrink-0', status.iconColor)} aria-hidden='true' />
                         <div className='truncate' title={item.name}>{item.name}</div>
                       </div>
                     </td>
-                    <td className='px-3 py-3'><Badge variant={status.badge}>{status.label}</Badge></td>
-                    <td className='whitespace-nowrap px-3 py-3 font-mono text-xs'>{formatBytes(item.size_bytes)}</td>
-                    <td className='px-3 py-3'>
+                    <td className='px-3 py-2'><Badge variant={status.badge}>{status.label}</Badge></td>
+                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{formatBytes(item.size_bytes)}</td>
+                    <td className='px-3 py-2'>
                       <div className='flex items-center gap-2'>
-                        <div className='h-2 flex-1 overflow-hidden rounded-full bg-secondary'>
+                        <div className='h-1.5 flex-1 overflow-hidden rounded-full bg-secondary'>
                           <div className={cn('h-full rounded-full transition-[width] duration-300', status.progress)} style={{ width: `${percent}%` }} />
                         </div>
-                        <span className='w-12 text-right font-mono text-xs'>{percent.toFixed(1)}%</span>
+                        <span className='w-10 text-right font-mono text-[0.68rem] tabular-nums'>{percent.toFixed(0)}%</span>
                       </div>
                     </td>
-                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono'>{item.seeds} ({item.seeds_total})</td>
-                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono'>{item.peers} ({item.peers_total})</td>
-                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono text-xs'>{formatSpeed(item.dlspeed)}</td>
-                    <td className='whitespace-nowrap px-3 py-3 text-right font-mono text-xs'>{formatSpeed(item.upspeed)}</td>
-                    <td className='whitespace-nowrap px-3 py-3 font-mono text-xs'>{formatEta(item.eta, item.progress)}</td>
-                    <td className='whitespace-nowrap px-4 py-3 text-xs text-muted-foreground'>{formatAdded(item.added_on)}</td>
+                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{item.seeds} ({item.seeds_total})</td>
+                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{item.peers} ({item.peers_total})</td>
+                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{formatSpeed(item.dlspeed)}</td>
+                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{formatSpeed(item.upspeed)}</td>
+                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-[0.68rem] tabular-nums'>{formatEta(item.eta, item.progress)}</td>
+                    <td className='whitespace-nowrap px-3 py-2 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatAdded(item.added_on)}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {!loading && visible.length > 0 && (
+        <div className='sticky bottom-0 -mx-1 flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-border bg-background/95 px-1 py-2.5 text-xs text-muted-foreground backdrop-blur'>
+          <span><span className='font-mono tabular-nums text-foreground'>{visible.length.toLocaleString()}</span> torrents{visible.length !== items.length ? ` of ${items.length.toLocaleString()}` : ''}</span>
+          <span><span className='font-mono tabular-nums text-foreground'>{downloading.toLocaleString()}</span> downloading</span>
+          <span className='flex items-center gap-1.5'><ChevronsDown className='size-3.5 text-success' /><span className='font-mono tabular-nums text-foreground'>{formatSpeed(totalDown)}</span></span>
+          <span className='flex items-center gap-1.5'><ChevronsUp className='size-3.5 text-info' /><span className='font-mono tabular-nums text-foreground'>{formatSpeed(totalUp)}</span></span>
+          <span><span className='font-mono tabular-nums text-foreground'>{totalPeers.toLocaleString()}</span> peers</span>
+          <span><span className='font-mono tabular-nums text-foreground'>{formatBytes(totalSize)}</span> total</span>
         </div>
       )}
 
