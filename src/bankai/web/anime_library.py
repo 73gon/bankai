@@ -17,6 +17,7 @@ from xml.etree import ElementTree as ET
 from bankai.cli import bgjobs
 from bankai.metadata.tvdb import TVDBEpisode
 from bankai.processor.anime import _tvdb_episode_map
+from bankai.processor.naming import sanitise
 from bankai.torrent.matcher import parse_se
 from bankai.web import anime, discover, erai
 
@@ -71,7 +72,26 @@ def flush_persistent_cache() -> None:
 
 
 def _name(value: str) -> str:
-    return re.sub(r"\s*[\[(]\d{4}[\])]\s*$", "", value).strip().casefold()
+    """Identity of a show for grouping, however its name was written down.
+
+    One side of a comparison is a folder name and the other is a TVDB title,
+    and the folder has been through :func:`sanitise`, which drops characters
+    Windows forbids. Comparing the two raw meant "Jaadugar: A Witch in
+    Mongolia" never matched its own folder "Jaadugar A Witch in Mongolia", and
+    the show was listed twice -- once with its episodes, once empty.
+
+    Repeated trailing years collapse too, so a folder left behind by the
+    double-year bug still groups with the series it belongs to.
+    """
+    cleaned = sanitise(value, fallback=value)
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = re.sub(r"\s*[\[(]\d{4}[\])]\s*$", "", cleaned).strip()
+    return _MULTISPACE.sub(" ", cleaned).strip().casefold()
+
+
+_MULTISPACE = re.compile(r"\s+")
 
 
 async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
