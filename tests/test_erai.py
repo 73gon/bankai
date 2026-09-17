@@ -1969,6 +1969,35 @@ def test_a_title_tagged_german_is_not_held(monkeypatch):
     assert state["releases"][item.info_hash]["status"] == "queued"
 
 
+def test_non_hevc_holds_leave_review_because_the_policy_already_decided(monkeypatch):
+    """They ask for a decision that the codec policy has already made."""
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: {
+            "status": "held",
+            "reason": "Nyaa description does not explicitly list German subtitles",
+            "title": "[Erai-raws] Show - 02 [1080p CR WEB-DL AVC AAC][MultiSub]",
+            "retry_after": 9e9,
+        },
+        "b" * 40: {
+            "status": "held",
+            "reason": "No confident TVDB match",
+            "title": "[Erai-raws] Show - 03 [1080p][HEVC][Multiple Subtitle][ENG]",
+            "retry_after": 9e9,
+        },
+    }
+    state["held"] = [{"info_hash": "a" * 40}, {"info_hash": "b" * 40}]
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(erai, "_save_state", lambda value: None)
+
+    result = erai.reconcile_stale_holds()
+    assert result["filtered"] == 1
+    assert state["releases"]["a" * 40]["status"] == "filtered"
+    # An HEVC release held for a real reason still wants a decision.
+    assert state["releases"]["b" * 40]["status"] == "held"
+    assert [row["info_hash"] for row in state["held"]] == ["b" * 40]
+
+
 def test_existing_german_tagged_holds_are_reopened(monkeypatch):
     state = erai._default_state()
     state["releases"] = {
@@ -1994,9 +2023,87 @@ def test_existing_german_tagged_holds_are_reopened(monkeypatch):
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
 
-    assert erai.release_german_tagged_holds() == 1
+    assert erai.reconcile_stale_holds()["reopened"] == 1
     assert state["releases"]["a" * 40]["retry_after"] == 0
     # Not tagged German, and a hold for an unrelated reason: both left alone.
     assert state["releases"]["b" * 40]["retry_after"] == 9e9
     assert state["releases"]["c" * 40]["retry_after"] == 9e9
+
+
+def _catalogued(state, entry):
+    """Put a release into the backfill catalogue the way a crawl would."""
+    state["backfill"]["catalog_1080"][entry.info_hash] = erai._entry_dict(entry)
+
+
+def test_the_hevc_release_of_the_same_episode_is_tried_before_holding(monkeypatch):
+    """Episode 2 sat in review while its HEVC twin waited in the catalogue."""
+    state = erai._default_state()
+    # What discovery looked at first: HEVC, but no German anywhere.
+    avc = entry(
+        "[Erai-raws] Tai Ari Deshita Ojou-sama - 02 [1080p CR WEB-DL HEVC AAC][MultiSub]", 1
+    )
+    # What was available all along.
+    hevc = entry(
+        "[Erai-raws] Tai Ari Deshita Ojou-sama - 02 [1080p CR WEBRip HEVC AAC][MultiSub]", 2
+    )
+    _catalogued(state, hevc)
+
+    async def detail(_client, url):
+        if url == hevc.detail_url:
+            return ("Subtitles Info:\nGerman (CR_German) | ASS", hevc.magnet_uri, "Erai-raws")
+        return ("No subtitle section here", avc.magnet_uri, "Erai-raws")
+
+    async def resolve(candidate):
+        return (
+            AnimeTVDBMatch(1, "show", "Tai Ari Deshita Ojou-sama", year=2026),
+            SimpleNamespace(season=1, episode=2),
+            None,
+        )
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+    monkeypatch.setattr(erai, "_resolve", resolve)
+    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
+
+    assert asyncio.run(erai._consider(state, avc, object())) is True
+    # The episode is queued from the HEVC release, and nothing is in review.
+    assert state["releases"][hevc.info_hash]["status"] == "queued"
+    assert avc.info_hash not in state["releases"]
+    assert state["held"] == []
+
+
+def test_it_still_holds_when_no_alternative_carries_german(monkeypatch):
+    state = erai._default_state()
+    avc = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL HEVC AAC][MultiSub]", 1)
+    hevc = entry("[Erai-raws] Show - 02 [1080p CR WEBRip HEVC AAC][MultiSub]", 2)
+    _catalogued(state, hevc)
+
+    async def detail(_client, _url):
+        return ("No subtitle section anywhere", avc.magnet_uri, "Erai-raws")
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+
+    assert asyncio.run(erai._consider(state, avc, object())) is False
+    assert state["releases"][avc.info_hash]["status"] == "held"
+
+
+def test_an_alternative_for_a_different_episode_is_not_substituted(monkeypatch):
+    """Swapping in the wrong episode would be far worse than a hold."""
+    state = erai._default_state()
+    avc = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL HEVC AAC][MultiSub]", 1)
+    other_episode = entry("[Erai-raws] Show - 03 [1080p CR WEBRip HEVC AAC][MultiSub]", 2)
+    _catalogued(state, other_episode)
+
+    async def detail(_client, url):
+        if url == other_episode.detail_url:
+            return ("Subtitles Info:\nGerman | ASS", other_episode.magnet_uri, "Erai-raws")
+        return ("No subtitle section here", avc.magnet_uri, "Erai-raws")
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+
+    assert asyncio.run(erai._consider(state, avc, object())) is False
+    assert state["releases"][avc.info_hash]["status"] == "held"
+    assert other_episode.info_hash not in state["releases"]
 

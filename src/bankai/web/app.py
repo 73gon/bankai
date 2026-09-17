@@ -757,11 +757,12 @@ def create_app() -> Any:
                         retired,
                     )
             with suppress(Exception):
-                reopened = erai_mod.release_german_tagged_holds()
-                if reopened:
+                stale = erai_mod.reconcile_stale_holds()
+                if stale.get("reopened") or stale.get("filtered"):
                     log.info(
-                        "Re-opened %d holds whose release title states German subtitles",
-                        reopened,
+                        "Cleared stale review holds: %(reopened)d re-opened, "
+                        "%(filtered)d dropped as non-HEVC",
+                        stale,
                     )
             erai_task = asyncio.create_task(erai_mod.scheduler())
             queue_task = asyncio.create_task(webjobs.scheduler())

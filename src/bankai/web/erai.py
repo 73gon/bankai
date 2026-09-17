@@ -780,9 +780,13 @@ def _resolution(entry: anime_mod.NyaaEntry) -> int:
     return int(match.group(1)) if match else 0
 
 
-def _is_hevc(entry: anime_mod.NyaaEntry) -> bool:
+def _is_hevc_title(title: str) -> bool:
     """Accept explicit HEVC/H.265/x265 release markers only."""
-    return re.search(r"(?i)(?:\bhevc\b|\bx265\b|\bh[.\s-]?265\b)", entry.title) is not None
+    return re.search(r"(?i)(?:\bhevc\b|\bx265\b|\bh[.\s-]?265\b)", title or "") is not None
+
+
+def _is_hevc(entry: anime_mod.NyaaEntry) -> bool:
+    return _is_hevc_title(entry.title)
 
 
 def _release_key(entry: anime_mod.NyaaEntry) -> str | None:
@@ -1102,6 +1106,51 @@ def _anime_args(
     return args
 
 
+async def _german_alternative(
+    state: dict[str, Any],
+    entry: anime_mod.NyaaEntry,
+    client: httpx.AsyncClient,
+    *, limit: int = 3,
+) -> anime_mod.NyaaEntry | None:
+    """Another release of the same episode that does carry German subtitles.
+
+    Erai-raws publishes an episode more than once -- typically an AVC encode
+    and an HEVC one -- and they do not always advertise the same subtitles.
+    Holding the first one we happened to look at put episodes in review while
+    a perfectly good release of the same episode sat in the catalogue
+    untouched, leaving a season with a hole in it.
+    """
+    key = _release_key(entry)
+    if key is None:
+        return None
+    seen = state.get("releases", {})
+    candidates = []
+    for info_hash, row in _catalog_entries(state).items():
+        if info_hash == entry.info_hash or info_hash in seen:
+            continue
+        try:
+            other = _entry_from_dict(row)
+        except Exception:
+            continue
+        if _release_key(other) != key or not _is_hevc(other):
+            continue
+        candidates.append(other)
+    candidates.sort(key=_rank, reverse=True)
+    for other in candidates[:limit]:
+        if title_lists_german_subtitles(other.title):
+            return other
+        try:
+            description, magnet, uploader = await anime_mod._detail_url(client, other.detail_url)
+        except Exception as exc:
+            log.warning("Alternative lookup failed for %s: %s", other.id, exc)
+            continue
+        if (uploader or "").casefold() != "erai-raws":
+            continue
+        if has_explicit_german_subtitles(description):
+            return replace(other, magnet_uri=magnet or other.magnet_uri, description=description)
+    return None
+
+
 async def _consider(
     state: dict[str, Any],
     entry: anime_mod.NyaaEntry,
@@ -1139,6 +1188,16 @@ async def _consider(
         and not title_lists_german_subtitles(entry.title)
         and not (policy and policy.get("mode") == "german_allowed")
     ):
+        alternative = await _german_alternative(state, entry, client)
+        if alternative is not None:
+            log.info(
+                "Using %s instead of %s, which does not list German subtitles",
+                alternative.title,
+                entry.title,
+            )
+            # The alternative was only accepted after its own German evidence
+            # was verified, so this cannot bounce back into this branch.
+            return await _consider(state, alternative, client)
         _hold(state, entry, "Nyaa description does not explicitly list German subtitles")
         return False
     if magnet:
@@ -1774,29 +1833,45 @@ def _torrent_phase(torrent: Any) -> str:
     return "queued"
 
 
-def release_german_tagged_holds() -> int:
-    """Re-open holds for releases that state German in their own title.
+def reconcile_stale_holds() -> dict[str, int]:
+    """Clear holds that the current policy has already made meaningless.
 
-    They were held only because the check read the Nyaa description and these
-    releases put their language tags in the title instead. A hold otherwise
-    waits a day before it is looked at again, and there is no reason to make
-    an episode that always qualified wait that long.
+    Two kinds accumulated. Some releases state German in their own title and
+    were only held because the check read the Nyaa description; a hold
+    otherwise waits a day before being looked at again, and an episode that
+    always qualified should not wait. Others are not HEVC, so the codec policy
+    rejects them the moment they are reconsidered -- leaving those in review
+    implies a decision is wanted when there is none to make, and hides that
+    the episode is still waiting for its HEVC release.
     """
-    cleared = 0
+    reopened = 0
+    filtered = 0
     with _STATE_LOCK:
         state = _load_state()
         for release in state.get("releases", {}).values():
             if release.get("status") != "held":
                 continue
+            title = str(release.get("title") or "")
+            if not _is_hevc_title(title):
+                release["status"] = "filtered"
+                release["reason"] = "Release is not HEVC/H.265"
+                filtered += 1
+                continue
             if "German subtitles" not in str(release.get("reason") or ""):
                 continue
-            if not title_lists_german_subtitles(str(release.get("title") or "")):
+            if not title_lists_german_subtitles(title):
                 continue
             release["retry_after"] = 0
-            cleared += 1
-        if cleared:
+            reopened += 1
+        if reopened or filtered:
+            releases = state.get("releases", {})
+            state["held"] = [
+                row
+                for row in state.get("held", [])
+                if releases.get(row.get("info_hash"), {}).get("status") == "held"
+            ]
             _save_state(state)
-    return cleared
+    return {"reopened": reopened, "filtered": filtered}
 
 
 def retire_download_pendings() -> dict[str, int]:
