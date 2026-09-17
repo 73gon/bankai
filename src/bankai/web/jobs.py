@@ -34,7 +34,11 @@ _OPERATION_COMMANDS = {"transfer-run", "review-repack", "review-replace-torrent"
 # worker already logs distinguishes them, so surface it as the row's phase.
 _PHASE_BY_STEP = {
     "torrent": "downloading",
-    "organize": "organizing",
+    # Organising and transferring are two copies -- pulling the file off the
+    # download host, then writing it into the library -- but they are one
+    # state to anyone reading the queue, and the step label still says which
+    # half is running.
+    "organize": "transferring",
     "transfer": "transferring",
     "repack": "repacking",
     "replace": "replacing",

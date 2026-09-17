@@ -1533,7 +1533,7 @@ def create_app() -> Any:
         if term:
             rows = [row for row in rows if term in str(row.get("title") or "").casefold()]
         # Filter on the phase, which narrows "running" to downloading /
-        # organizing / transferring and is the status for everything else.
+        # transferring, and is the status for everything else.
         # Counts are taken after the search but before the phase filter, so a
         # chip always advertises exactly what selecting it will show.
         counts: dict[str, int] = {}

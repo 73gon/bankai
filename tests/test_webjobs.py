@@ -409,7 +409,8 @@ def test_catalog_titles_does_not_parse_progress_logs(monkeypatch: pytest.MonkeyP
     "status,step_key,expected",
     [
         ("running", "torrent", "downloading"),
-        ("running", "organize", "organizing"),
+        # Both halves of publishing read as one state in the queue.
+        ("running", "organize", "transferring"),
         ("running", "transfer", "transferring"),
         # A worker that has not announced a stage yet stays plain "running".
         ("running", None, "running"),
@@ -472,7 +473,7 @@ def test_wrapped_stage_markers_are_still_parsed(tmp_path):
     # A finished first stage must not make the whole job look finished.
     assert snap.overall_percent is not None
     assert snap.overall_percent < 100.0
-    assert webjobs._phase("running", snap.step_key) == "organizing"
+    assert webjobs._phase("running", snap.step_key) == "transferring"
 
 
 def test_unwrapping_leaves_intact_logs_alone(tmp_path):
@@ -491,3 +492,17 @@ def test_log_console_is_wide_enough_for_markers_when_redirected():
     console = bankai_logging._log_console()
     assert not console.is_terminal
     assert console.width >= 200
+
+
+def test_anime_queue_phases_stay_inside_the_release_state_machine():
+    """The queue must not invent states the reconciler does not track.
+
+    Publishing is two copies internally, but a reader of the queue should see
+    the same vocabulary the release table uses, not an extra stage name.
+    """
+    from bankai.web import erai
+
+    anime_phases = {webjobs._PHASE_BY_STEP[key] for key in ("torrent", "organize", "transfer")}
+    assert anime_phases == {"downloading", "transferring"}
+    assert anime_phases <= erai._ACTIVE_RELEASE_STATES
+

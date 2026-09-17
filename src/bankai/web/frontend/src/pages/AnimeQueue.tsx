@@ -23,7 +23,6 @@ function phaseVariant(phase: string) {
   if (phase === 'stopped' || phase === 'queued') return 'warning' as const;
   if (phase === 'downloading') return 'torrent' as const;
   if (phase === 'complete') return 'starting' as const;
-  if (phase === 'organizing') return 'extract' as const;
   if (phase === 'transferring') return 'transfer' as const;
   if (phase === 'deleting') return 'repack' as const;
   return 'info' as const;
@@ -64,20 +63,21 @@ function JobProgress({ job }: { job: Job }) {
   );
 }
 
-// Fixed order so chips never reshuffle under the pointer as counts change.
-// Ordered the way work actually flows, not alphabetically.
+// The release lifecycle, in the order work actually flows through it, so the
+// chips never reshuffle under the pointer as counts change. These are the same
+// states the reconciler tracks; the queue should not invent its own vocabulary.
 const STATUS_ORDER = [
   'queued',
   'downloading',
   'complete',
-  'organizing',
   'transferring',
   'deleting',
+  'done',
+  // Off the happy path.
   'running',
   'stopped',
   'failed',
   'cancelled',
-  'done',
 ];
 
 export default function AnimeQueue() {
