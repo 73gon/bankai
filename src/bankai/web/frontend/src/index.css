@@ -76,11 +76,9 @@
   --font-ui: 'Geist Mono Variable', ui-monospace, monospace;
   --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', monospace;
 
-  --button-border-width: 1px;
-  --button-border-primary: oklch(1 0 0 / 0.2);
-  --button-border-neutral: oklch(0.78 0 0);
-  --button-surface-noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 72 72' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.88' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='.34'/%3E%3C/svg%3E");
-  --button-transition-duration: 260ms;
+  --button-radius: 14px;
+  --button-border-width: 2px;
+  --button-transition-duration: 200ms;
   --button-transition-ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -141,9 +139,6 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-
-  --button-border-primary: oklch(0 0 0 / 0.2);
-  --button-border-neutral: oklch(1 0 0 / 0.11);
 }
 
 @theme inline {
@@ -204,105 +199,127 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Embossed buttons / inputs (eigenpair). Left UNLAYERED so they win over
-   Tailwind utility layers via cascade order. Buttons/inputs opt in by emitting
-   data-slot / data-variant attributes.
+   Buttons, after resend.com: translucent glass on black rather than a filled
+   pill. The fill is almost nothing, the light comes from a faint diagonal
+   gradient and a soft wide border, and the text stays near-white. Left
+   UNLAYERED so they win over Tailwind utility layers via cascade order.
 --------------------------------------------------------------------------- */
-/* Every button presses. Scale is transform-only so it never reflows the row
-   it sits in, and it is listed explicitly rather than via `all`. */
 [data-slot='button'] {
-  transition: transform 120ms var(--button-transition-ease);
+  font-weight: 600;
+  border-radius: var(--button-radius);
+  /* Named properties only, and transform included, so the press animates
+     rather than snapping -- every variant below extends this list. */
+  transition:
+    background-color var(--button-transition-duration) var(--button-transition-ease),
+    border-color var(--button-transition-duration) var(--button-transition-ease),
+    color var(--button-transition-duration) var(--button-transition-ease),
+    transform 120ms var(--button-transition-ease);
 }
 [data-slot='button']:active:not(:disabled) {
   transform: scale(0.97);
 }
 @media (prefers-reduced-motion: reduce) {
   [data-slot='button'] {
-    transition-property: none;
+    transition-property: background-color, border-color, color;
   }
   [data-slot='button']:active:not(:disabled) {
     transform: none;
   }
 }
 
+/* The primary action. The gradient runs at 104deg so the highlight crosses the
+   button rather than banding it, which is what keeps it from reading as a
+   glossy pill. */
 [data-slot='button'][data-variant='default'] {
-  font-weight: 600;
-  border: var(--button-border-width) solid var(--button-border-primary);
-  background-image: linear-gradient(180deg, oklch(0.3 0 0) 0%, oklch(0.17 0 0) 100%);
-  transition:
-    border-color var(--button-transition-duration) var(--button-transition-ease),
-    box-shadow var(--button-transition-duration) var(--button-transition-ease),
-    color var(--button-transition-duration) var(--button-transition-ease),
-    filter var(--button-transition-duration) var(--button-transition-ease),
-    transform 120ms var(--button-transition-ease);
-  box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.14),
-    inset 0 0 0 1px oklch(1 0 0 / 0.04),
-    0 1px 2px oklch(0 0 0 / 0.28),
-    0 2px 6px oklch(0 0 0 / 0.12);
+  background-color: oklch(1 0 0 / 0.015);
+  background-image: linear-gradient(
+    104deg,
+    oklch(1 0 0 / 0.05) 5%,
+    oklch(0.95 0.02 100 / 0.1) 100%
+  );
+  border: var(--button-border-width) solid oklch(1 0 0 / 0.05);
+  color: oklch(0.985 0 0);
 }
 [data-slot='button'][data-variant='default']:hover {
-  filter: brightness(1.08);
-  box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.18),
-    inset 0 0 0 1px oklch(1 0 0 / 0.05),
-    0 2px 8px oklch(0 0 0 / 0.32),
-    0 3px 10px oklch(0 0 0 / 0.16);
-}
-.dark [data-slot='button'][data-variant='default'] {
-  border-color: var(--button-border-primary);
-  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(0.9 0 0) 100%);
-  box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.6),
-    0 0 0 1px oklch(0 0 0 / 0.05),
-    0 1px 2px oklch(0 0 0 / 0.5),
-    0 6px 22px oklch(1 0 0 / 0.14),
-    0 2px 10px oklch(1 0 0 / 0.1);
-}
-.dark [data-slot='button'][data-variant='default']:hover {
-  filter: brightness(1.03);
-  box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.7),
-    0 0 0 1px oklch(0 0 0 / 0.06),
-    0 2px 4px oklch(0 0 0 / 0.5),
-    0 10px 34px oklch(1 0 0 / 0.24),
-    0 3px 14px oklch(1 0 0 / 0.16);
+  background-color: oklch(1 0 0 / 0.06);
+  border-color: oklch(1 0 0 / 0.12);
 }
 
+/* One step quieter: the same glass without the highlight. */
 [data-slot='button'][data-variant='secondary'],
 [data-slot='button'][data-variant='outline'] {
-  font-weight: 600;
-  background-color: oklch(0.97 0 0);
-  background-image: var(--button-surface-noise);
-  color: var(--foreground);
-  border: var(--button-border-width) solid var(--button-border-neutral);
-  transition:
-    border-color var(--button-transition-duration) var(--button-transition-ease),
-    color var(--button-transition-duration) var(--button-transition-ease),
-    filter var(--button-transition-duration) var(--button-transition-ease),
-    transform 120ms var(--button-transition-ease);
-  box-shadow: none;
+  background-color: oklch(1 0 0 / 0.02);
+  background-image: none;
+  border: var(--button-border-width) solid oklch(1 0 0 / 0.04);
+  color: var(--foreground-soft);
 }
 [data-slot='button'][data-variant='secondary']:hover,
 [data-slot='button'][data-variant='outline']:hover {
-  border-color: oklch(0.85 0 0);
+  background-color: oklch(1 0 0 / 0.05);
+  border-color: oklch(1 0 0 / 0.1);
   color: var(--foreground);
-  filter: brightness(0.97);
 }
-.dark [data-slot='button'][data-variant='secondary'],
-.dark [data-slot='button'][data-variant='outline'] {
-  background-color: oklch(0.15 0 0);
-  background-image: var(--button-surface-noise);
+
+/* Quietest: text only, no edge at all. */
+[data-slot='button'][data-variant='ghost'] {
+  background-color: transparent;
+  background-image: none;
+  border: var(--button-border-width) solid transparent;
+  color: var(--foreground-muted);
+}
+[data-slot='button'][data-variant='ghost']:hover {
+  background-color: oklch(1 0 0 / 0.04);
   color: var(--foreground);
-  border: var(--button-border-width) solid var(--button-border-neutral);
-  box-shadow: none;
 }
-.dark [data-slot='button'][data-variant='secondary']:hover,
-.dark [data-slot='button'][data-variant='outline']:hover {
-  border-color: oklch(1 0 0 / 0.2);
+
+[data-slot='button'][data-variant='destructive'] {
+  background-color: oklch(0.704 0.191 22.216 / 0.12);
+  background-image: none;
+  border: var(--button-border-width) solid oklch(0.704 0.191 22.216 / 0.25);
+  color: oklch(0.8 0.12 22.216);
+}
+[data-slot='button'][data-variant='destructive']:hover {
+  background-color: oklch(0.704 0.191 22.216 / 0.2);
+  border-color: oklch(0.704 0.191 22.216 / 0.4);
+  color: oklch(0.88 0.1 22.216);
+}
+
+/* The light theme keeps the same structure, inverted: the glass darkens the
+   surface instead of lightening it. */
+:root:not(.dark) [data-slot='button'][data-variant='default'] {
+  background-color: oklch(0.145 0 0);
+  background-image: linear-gradient(
+    104deg,
+    oklch(0.28 0 0) 5%,
+    oklch(0.18 0 0) 100%
+  );
+  border-color: oklch(0 0 0 / 0.2);
+  color: oklch(0.985 0 0);
+}
+:root:not(.dark) [data-slot='button'][data-variant='default']:hover {
+  background-color: oklch(0.2 0 0);
+  border-color: oklch(0 0 0 / 0.3);
+}
+:root:not(.dark) [data-slot='button'][data-variant='secondary'],
+:root:not(.dark) [data-slot='button'][data-variant='outline'] {
+  background-color: oklch(0 0 0 / 0.03);
+  border-color: oklch(0 0 0 / 0.1);
+  color: var(--foreground-soft);
+}
+:root:not(.dark) [data-slot='button'][data-variant='secondary']:hover,
+:root:not(.dark) [data-slot='button'][data-variant='outline']:hover {
+  background-color: oklch(0 0 0 / 0.06);
+  border-color: oklch(0 0 0 / 0.16);
   color: var(--foreground);
-  filter: brightness(1.35);
 }
+:root:not(.dark) [data-slot='button'][data-variant='ghost'] {
+  color: var(--foreground-muted);
+}
+:root:not(.dark) [data-slot='button'][data-variant='ghost']:hover {
+  background-color: oklch(0 0 0 / 0.05);
+  color: var(--foreground);
+}
+
 
 [data-slot='input'],
 [data-slot='textarea'],
