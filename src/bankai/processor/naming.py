@@ -57,6 +57,19 @@ def _year_from_query(query: str) -> tuple[str, str | None]:
     return title.strip() or query.strip(), m.group(1)
 
 
+def _with_year(title: str, year: str) -> str:
+    """Append the year unless the title already carries one.
+
+    TVDB English titles sometimes include it ("LIAR GAME (2026)"), and
+    appending it again produced a second show folder for the same series --
+    "LIAR GAME (2026) (2026)" -- which then read as a separate anime.
+    """
+    if not year:
+        return title
+    _, existing = _year_from_query(title)
+    return title if existing else f"{title} ({year})"
+
+
 def _strip_episode_marker(name: str) -> str:
     """Remove a trailing ``SxxEyy``-style marker from a query."""
     cleaned = re.sub(r"\s*[Ss]\d{1,2}[EeXx]\d{1,3}.*$", "", name)
@@ -131,7 +144,7 @@ def render_episode_path(
         "episode": episode,
         "episode_title": (episode_title or "").strip(),
     }
-    show_folder = sanitise(f"{title} ({year})" if include_year and year else title)
+    show_folder = sanitise(_with_year(title, year) if include_year else title)
     season_folder = sanitise(_render(season_folder_template, fields))
     filename = sanitise(_render(file_template, fields), fallback="episode.mkv")
     if not filename.lower().endswith(".mkv"):
