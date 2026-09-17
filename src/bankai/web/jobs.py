@@ -433,12 +433,18 @@ def reconcile() -> int:
 # torrent, which is far heavier than promoting a pending job and does not need
 # to happen on every tick.
 _RELEASE_RECONCILE_SECONDS = 20.0
+# Identifying every episode's encode is a one-off crawl of the whole library.
+# It runs in slices so it never competes for long with publishing, and stops
+# entirely once every file has been identified.
+_CODEC_SWEEP_SECONDS = 60.0
+_CODEC_SWEEP_BATCH = 40
 
 
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
     """Dispatch queued work continuously, independent of an open browser page."""
 
     next_release_pass = 0.0
+    next_codec_pass = 0.0
     while True:
         try:
             await asyncio.to_thread(reconcile)
@@ -456,6 +462,28 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("release reconciliation failed: %s", exc)
+        if time.monotonic() >= next_codec_pass:
+            next_codec_pass = time.monotonic() + _CODEC_SWEEP_SECONDS
+            try:
+                from pathlib import Path
+
+                from bankai.web import anime_library
+
+                result = await asyncio.to_thread(
+                    anime_library.sweep_codecs,
+                    Path(get_settings().transfer.anime_shows_dir),
+                    limit=_CODEC_SWEEP_BATCH,
+                )
+                if result["probed"]:
+                    log.info(
+                        "Identified the encode of %d episode(s); %d still unidentified",
+                        result["probed"],
+                        result["remaining"],
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("codec sweep failed: %s", exc)
         await asyncio.sleep(poll_seconds)
 
 

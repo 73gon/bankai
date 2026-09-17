@@ -242,6 +242,8 @@ export interface AnimeLibraryEntry {
 export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
   /** Encode the episode was downloaded as; null when missing or unknown. */
   codec?: 'hevc' | 'avc' | null;
+  /** Carries a German dub, which Erai-raws never ships — never replaced. */
+  german_dub?: boolean;
   missing?: boolean;
   tba?: boolean;
   aired?: string | null;
@@ -698,7 +700,13 @@ export const api = {
       method: 'POST', body: JSON.stringify({ key }),
     }),
   upgradeShowToHevc: (tvdbId: number, title: string) =>
-    request<{ ok: boolean; queued: number; no_replacement: number; already_hevc: number }>(
+    request<{
+      ok: boolean;
+      queued: number;
+      no_replacement: number;
+      already_hevc: number;
+      german_dub_kept: number;
+    }>(
       '/api/anime/library/upgrade-hevc',
       { method: 'POST', body: JSON.stringify({ tvdb_id: tvdbId, title }) },
     ),

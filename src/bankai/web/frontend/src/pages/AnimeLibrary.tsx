@@ -87,7 +87,8 @@ export default function AnimeLibrary() {
       } else {
         toast.success(
           'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')
-          + (result.no_replacement ? ' · ' + result.no_replacement + ' left as they are' : ''),
+          + (result.no_replacement ? ' · ' + result.no_replacement + ' without a replacement' : '')
+          + (result.german_dub_kept ? ' · ' + result.german_dub_kept + ' German dub kept' : ''),
         );
       }
       await load();
@@ -225,7 +226,12 @@ export default function AnimeLibrary() {
                           <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className='border-b border-border/60 last:border-0'>
                             <td className='py-3 pr-3 font-mono'>{entry.episode ?? '—'}</td>
                             <td className='px-3 py-3 text-xs text-muted-foreground'>{entry.episode_title && <p className='text-sm text-foreground'>{entry.episode_title}</p>}{!entry.missing && <p>{entry.name}</p>}{entry.missing && <p>{entry.tba ? 'TBA' : 'Missing'}{entry.aired ? ' · ' + entry.aired : ''}</p>}</td>
-                            <td className='px-3 py-3'>{entry.codec ? <Badge variant={entry.codec === 'hevc' ? 'success' : 'warning'}>{entry.codec.toUpperCase()}</Badge> : <span className='text-xs text-muted-foreground'>—</span>}</td>
+                            <td className='px-3 py-3'>
+                              <div className='flex flex-wrap items-center gap-1.5'>
+                                {entry.codec ? <Badge variant={entry.codec === 'hevc' ? 'success' : 'warning'}>{entry.codec.toUpperCase()}</Badge> : <span className='text-xs text-muted-foreground'>—</span>}
+                                {entry.german_dub && <Badge variant='review' title='Carries a German dub — never replaced by an HEVC upgrade'>GER dub</Badge>}
+                              </div>
+                            </td>
                             <td className='px-3 py-3 text-right font-mono text-xs'>{entry.missing ? '—' : formatSize(entry.size)}</td>
                             <td className='py-3 pl-3 text-right'>{entry.missing ? <Button size='sm' variant='secondary' disabled={!active.tvdb_id} onClick={() => void searchMissing(active, entry)}><Search data-icon='inline-start' /> Search</Button> : entry.staged ? (
                               <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>

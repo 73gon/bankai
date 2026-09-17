@@ -1407,6 +1407,28 @@ async def _carries_german(entry: anime_mod.NyaaEntry, client: httpx.AsyncClient)
     return has_explicit_german_subtitles(description)
 
 
+def _german_dubbed_episodes(english_title: str) -> set[tuple[int, int]]:
+    """Episodes of a show whose file carries a German dub."""
+    from bankai.backend.transfer import _existing_show_folder
+    from bankai.torrent.matcher import parse_se
+    from bankai.web.anime_library import german_dubbed_episodes
+
+    root = Path(get_settings().transfer.anime_shows_dir)
+    folder = _existing_show_folder(english_title, cache={}, roots=[root])
+    if folder is None:
+        return set()
+    files = []
+    for path in folder.rglob("*"):
+        if not path.is_file() or path.suffix.casefold() not in _VIDEO_SUFFIXES:
+            continue
+        identity = parse_se(path.name)
+        if identity:
+            files.append(
+                {"path": str(path), "season_number": identity[0], "episode": identity[1]}
+            )
+    return german_dubbed_episodes(files)
+
+
 async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, Any]:
     """Queue HEVC replacements for a show's already-published AVC episodes.
 
@@ -1419,6 +1441,11 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
     queued = 0
     skipped = 0
     already = 0
+    dubbed = 0
+    # An episode carrying a German dub is irreplaceable: Erai-raws ships
+    # Japanese audio only, so upgrading one would trade a track that cannot be
+    # got back for a smaller file.
+    protected = _german_dubbed_episodes(english_title)
     from bankai.torrent.qbittorrent import QBittorrentClient
 
     qbit = QBittorrentClient()
@@ -1449,6 +1476,9 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
                     targets.append((canonical, parts[1], parts[2], release))
 
             for canonical, season, episode, release in targets:
+                if (int(season), int(episode)) in protected:
+                    dubbed += 1
+                    continue
                 twin = _hevc_twin(state, release)
                 if twin is None or not await _carries_german(twin, client):
                     skipped += 1
@@ -1521,6 +1551,7 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
         "queued": queued,
         "no_replacement": skipped,
         "already_hevc": already,
+        "german_dub_kept": dubbed,
     }
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 import threading
 import time
 from collections import defaultdict
@@ -21,6 +22,7 @@ from bankai.processor.naming import sanitise
 from bankai.torrent.matcher import parse_se
 from bankai.web import anime, discover, erai
 
+_VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".webm"}
 _CACHE: dict[str, tuple[float, dict]] = {}
 _PERSISTENT_CACHE: dict | None = None
 _PERSISTENT_DIRTY = False
@@ -177,6 +179,181 @@ async def episode_roster(tvdb_id: int) -> list:
     return rows
 
 
+# Probing is cheap per file -- ffprobe reads headers, not the stream -- but the
+# library holds thousands of episodes on a slow disk, so results are cached by
+# identity and the sweep is bounded per pass.
+_CODEC_CACHE_LOCK = threading.Lock()
+_CODEC_CACHE: dict[str, dict] | None = None
+_HEVC_NAMES = {"hevc", "h265", "x265"}
+_AVC_NAMES = {"h264", "avc", "x264"}
+_GERMAN_AUDIO = {"ger", "deu", "de", "german", "deutsch"}
+
+
+def _codec_cache_path() -> Path:
+    return erai._state_path().with_name("anime_codecs.json")
+
+
+def _load_codec_cache() -> dict[str, dict]:
+    global _CODEC_CACHE
+    with _CODEC_CACHE_LOCK:
+        if _CODEC_CACHE is None:
+            try:
+                _CODEC_CACHE = json.loads(_codec_cache_path().read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                _CODEC_CACHE = {}
+        return _CODEC_CACHE
+
+
+def _save_codec_cache(cache: dict[str, dict]) -> None:
+    path = _codec_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """Size and mtime, so a replaced episode is probed again."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (int(stat.st_size), int(stat.st_mtime))
+
+
+def probe_streams(path: Path) -> dict | None:
+    """Video encode and audio languages of one file, in a single probe.
+
+    The audio languages matter as much as the codec: an episode carrying a
+    German dub is irreplaceable, because Erai-raws only ever ships Japanese
+    audio. Reading both here means the upgrade never has to guess.
+    """
+    from bankai.web.media import ffprobe_bin
+
+    binary = ffprobe_bin()
+    if binary is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                binary, "-v", "error",
+                "-show_entries", "stream=codec_type,codec_name:stream_tags=language,title",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+    except json.JSONDecodeError:
+        return None
+    codec = None
+    audio: list[str] = []
+    for stream in streams:
+        kind = str(stream.get("codec_type") or "").casefold()
+        tags = stream.get("tags") or {}
+        if kind == "video" and codec is None:
+            name = str(stream.get("codec_name") or "").casefold()
+            codec = "hevc" if name in _HEVC_NAMES else "avc" if name in _AVC_NAMES else name or None
+        elif kind == "audio":
+            language = str(tags.get("language") or "").casefold()
+            title = str(tags.get("title") or "").casefold()
+            if language:
+                audio.append(language)
+            # Not every muxer sets the language tag; a named track still counts.
+            if not language and title:
+                audio.append(title)
+    if codec is None and not audio:
+        return None
+    return {"codec": codec, "audio": audio}
+
+
+def has_german_audio(entry: dict | None) -> bool:
+    """Does this file carry a German audio track?"""
+    for name in (entry or {}).get("audio") or []:
+        words = set(re.findall(r"[a-z]+", str(name).casefold()))
+        if words & _GERMAN_AUDIO:
+            return True
+    return False
+
+
+def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
+    """Probe up to ``limit`` library files that have not been identified yet.
+
+    Bounded so the sweep never competes for long with publishing, and cached by
+    size and mtime so an episode is only ever probed once -- unless it is
+    replaced, which is exactly when the answer changes.
+    """
+    if limit <= 0 or not root.exists():
+        return {"probed": 0, "remaining": 0}
+    cache = dict(_load_codec_cache())
+    probed = 0
+    remaining = 0
+    for path in root.rglob("*"):
+        if path.suffix.casefold() not in _VIDEO_SUFFIXES or not path.is_file():
+            continue
+        identity = _file_identity(path)
+        if identity is None:
+            continue
+        key = str(path)
+        cached = cache.get(key)
+        if cached and cached.get("size") == identity[0] and cached.get("mtime") == identity[1]:
+            continue
+        if probed >= limit:
+            remaining += 1
+            continue
+        streams = probe_streams(path) or {}
+        cache[key] = {
+            "size": identity[0],
+            "mtime": identity[1],
+            "codec": streams.get("codec"),
+            "audio": streams.get("audio") or [],
+        }
+        probed += 1
+    if probed:
+        with _CODEC_CACHE_LOCK:
+            global _CODEC_CACHE
+            _CODEC_CACHE = cache
+        _save_codec_cache(cache)
+    return {"probed": probed, "remaining": remaining}
+
+
+def probed_codecs(files: list[dict]) -> dict[tuple[int, int], str]:
+    """Codecs read from the files themselves, for episodes already probed."""
+    cache = _load_codec_cache()
+    found: dict[tuple[int, int], str] = {}
+    for row in files:
+        season, episode = row.get("season_number"), row.get("episode")
+        if season is None or episode is None:
+            continue
+        entry = cache.get(str(row.get("path") or ""))
+        codec = (entry or {}).get("codec")
+        if codec:
+            found[(season, episode)] = codec
+    return found
+
+
+def german_dubbed_episodes(files: list[dict]) -> set[tuple[int, int]]:
+    """Episodes whose file carries a German dub, which must never be replaced."""
+    cache = _load_codec_cache()
+    found: set[tuple[int, int]] = set()
+    for row in files:
+        season, episode = row.get("season_number"), row.get("episode")
+        if season is None or episode is None:
+            continue
+        if has_german_audio(cache.get(str(row.get("path") or ""))):
+            found.add((season, episode))
+    return found
+
+
 def episode_codecs(tvdb_id: int | None) -> dict[tuple[int, int], str]:
     """Codec of each published episode of a series, keyed by season/episode.
 
@@ -210,6 +387,7 @@ def merge_episodes(
     *,
     ended: bool,
     codecs: dict[tuple[int, int], str] | None = None,
+    german_dubbed: set[tuple[int, int]] | None = None,
 ) -> dict:
     """Count unique regular episodes, using final files as downloaded evidence."""
     by_number = {}
@@ -256,6 +434,7 @@ def merge_episodes(
             }
     for key, row in by_number.items():
         row["codec"] = (codecs or {}).get(key) if not row.get("missing") else None
+        row["german_dub"] = bool(german_dubbed and key in german_dubbed)
     regular = [row for (season, _), row in by_number.items() if season > 0]
     downloaded = sum(not row.get("missing", False) and not row["staged"] for row in regular)
     outstanding = [row for row in regular if row.get("missing", False) or row["staged"]]
@@ -413,18 +592,26 @@ async def group_shows(
             if tvdb_id and discover.is_configured():
                 with suppress(Exception):
                     roster = await episode_roster(tvdb_id)
-        codecs = await asyncio.to_thread(episode_codecs, tvdb_id)
+        codecs = {
+            **await asyncio.to_thread(episode_codecs, tvdb_id),
+            **await asyncio.to_thread(probed_codecs, files),
+        }
+        dubbed = await asyncio.to_thread(german_dubbed_episodes, files)
         merged = merge_episodes(
             files,
             roster,
             ended=str(metadata.get("status", "")).casefold() == "ended",
             codecs=codecs,
+            german_dubbed=dubbed,
         )
         result = {
             "key": title,
             "title": metadata.get("english_title") or title,
             "avc_count": sum(
-                1 for row in merged["episodes"] if row.get("codec") == "avc"
+                1
+                for row in merged["episodes"]
+                # A German dub is irreplaceable, so it is not on offer.
+                if row.get("codec") == "avc" and not row.get("german_dub")
             ),
             "hevc_count": sum(
                 1 for row in merged["episodes"] if row.get("codec") == "hevc"

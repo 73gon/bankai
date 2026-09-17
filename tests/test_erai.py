@@ -2282,3 +2282,31 @@ def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch):
     assert state["releases"][avc_done.info_hash]["status"] == "done"
     assert qbit.added == []
 
+
+def test_a_german_dubbed_episode_is_never_upgraded(monkeypatch):
+    """Erai-raws ships Japanese audio only, so the dub could not be got back."""
+    state, avc_done, replacement, qbit = _published_show(monkeypatch)
+    # The episode that would otherwise be replaced carries a German dub.
+    monkeypatch.setattr(erai, "_german_dubbed_episodes", lambda title: {(1, 2)})
+
+    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+
+    assert result["queued"] == 0
+    assert result["german_dub_kept"] == 1
+    assert qbit.added == []
+    # The original is untouched and still the canonical release.
+    assert state["releases"][avc_done.info_hash]["status"] == "done"
+    assert state["canonical"]["555|1|2"]["info_hash"] == avc_done.info_hash
+    assert replacement.info_hash not in state["releases"]
+
+
+def test_an_undubbed_episode_of_the_same_show_is_still_upgraded(monkeypatch):
+    """The protection is per episode, not per show."""
+    state, _avc_done, replacement, _qbit = _published_show(monkeypatch)
+    monkeypatch.setattr(erai, "_german_dubbed_episodes", lambda title: {(1, 99)})
+
+    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+    assert result["queued"] == 1
+    assert result["german_dub_kept"] == 0
+    assert state["releases"][replacement.info_hash]["status"] == "queued"
+
