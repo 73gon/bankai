@@ -31,6 +31,37 @@ function titleCase(value: string) {
   return value ? value[0].toUpperCase() + value.slice(1) : value;
 }
 
+/** One bar, showing whichever number is meaningful right now.
+ *
+ * Once the copy into the library starts, overall progress stops telling you
+ * anything useful -- it is pinned near the end of the last stage -- so the bar
+ * hands over to the transfer's own byte progress. The label says which number
+ * it is, since the colour alone should not have to carry that.
+ */
+function JobProgress({ job }: { job: Job }) {
+  const transferring =
+    job.phase === 'transferring' && job.transfer_percent !== null && job.transfer_percent !== undefined;
+  const value = (transferring ? job.transfer_percent : job.overall_percent) ?? 0;
+  const percent = Math.max(0, Math.min(100, value));
+  return (
+    <div className='flex min-w-36 flex-col gap-2'>
+      <span className='flex items-center gap-1.5 font-mono text-xs tabular-nums'>
+        {transferring && <span className='text-transfer'>Transfer</span>}
+        <span>{Math.round(percent)}%</span>
+      </span>
+      <div className='h-1.5 overflow-hidden rounded-full bg-secondary'>
+        <div
+          className={cn(
+            'h-full rounded-full transition-[width,background-color]',
+            transferring ? 'bg-transfer' : 'bg-primary',
+          )}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 // Fixed order so chips never reshuffle under the pointer as counts change.
 // Ordered the way work actually flows, not alphabetically.
 const STATUS_ORDER = [
@@ -271,25 +302,7 @@ export default function AnimeQueue() {
                     <td className='px-3 py-4'>
                       <Badge variant={phaseVariant(job.phase || job.status)}>{titleCase(job.phase || job.status)}</Badge>
                     </td>
-                    <td className='px-3 py-4'>
-                      <div className='flex min-w-36 flex-col gap-2'>
-                        <span className='font-mono text-xs tabular-nums'>{Math.round(job.overall_percent ?? 0)}%</span>
-                        <div className='h-1.5 overflow-hidden rounded-full bg-secondary'>
-                          <div className='h-full rounded-full bg-primary transition-[width]' style={{ width: String(Math.max(0, Math.min(100, job.overall_percent ?? 0))) + '%' }} />
-                        </div>
-                        {job.transfer_percent !== null && job.transfer_percent !== undefined && (
-                          <div className='flex flex-col gap-1'>
-                            <span className='flex items-center justify-between font-mono text-[0.65rem] tabular-nums text-transfer'>
-                              <span>Transfer</span>
-                              <span>{Math.round(job.transfer_percent)}%</span>
-                            </span>
-                            <div className='h-1 overflow-hidden rounded-full bg-secondary'>
-                              <div className='h-full rounded-full bg-transfer transition-[width]' style={{ width: String(Math.max(0, Math.min(100, job.transfer_percent))) + '%' }} />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </td>
+                    <td className='px-3 py-4'><JobProgress job={job} /></td>
                     <td className='px-3 py-4 text-xs text-muted-foreground'>{formatTime(job.updated_at)}</td>
                     <td className='px-3 py-4'>
                       <div className='flex justify-end gap-1'>
