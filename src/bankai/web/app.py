@@ -652,6 +652,7 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.settle_minutes",
     "anime.min_free_space_gib",
     "anime.max_enqueues_per_cycle",
+    "anime.max_concurrent_transfers",
     "anime.backfill_enabled",
     "anime.backfill_request_delay_seconds",
     "scraper.interactive_pick",

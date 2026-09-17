@@ -18,6 +18,7 @@ const LABELS: Record<string, { label: string; description: string; suffix?: stri
   'anime.poll_interval_seconds': { label: 'Nyaa RSS polling interval', description: 'How often the configured Nyaa uploader RSS URL is checked.', suffix: 'seconds' },
   'anime.settle_minutes': { label: 'Quality settling window', description: 'Wait for alternate encodes before choosing the best release.', suffix: 'minutes' },
   'anime.max_enqueues_per_cycle': { label: 'Verified episodes per cycle', description: 'Build a large ordered backlog; qBittorrent controls how many torrents download at once.' },
+  'anime.max_concurrent_transfers': { label: 'Concurrent transfers', description: 'How many finished downloads are published into the library at once. Downloading is unlimited — qBittorrent governs that.' },
   'anime.backfill_request_delay_seconds': { label: 'Backfill request delay', description: 'Delay between historical Nyaa catalogue pages.', suffix: 'seconds' },
 };
 
