@@ -7,9 +7,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
+import { Meter, rampParts } from '@/components/ui/meter';
 import { cn } from '@/lib/utils';
 
 function formatSize(bytes: number) {
@@ -61,13 +63,18 @@ function CodecMix({ show }: { show: AnimeLibraryShow }) {
     unknown && `${unknown} not identified yet`,
   ].filter(Boolean).join(' · ');
   return (
-    <div className='flex items-center gap-2' title={title}>
-      <div className='flex h-1.5 w-16 overflow-hidden rounded-full bg-secondary'>
-        {hevc > 0 && <span className='bg-success' style={{ flexGrow: hevc }} />}
-        {avc > 0 && <span className='bg-warning' style={{ flexGrow: avc }} />}
-        {dubbed > 0 && <span className='bg-transfer' style={{ flexGrow: dubbed }} />}
-        {unknown > 0 && <span className='bg-input' style={{ flexGrow: unknown }} />}
-      </div>
+    <div className='flex items-center gap-2'>
+      <Meter
+        className='w-[74px]'
+        total={total}
+        title={title}
+        parts={[
+          { value: hevc, className: 'bg-trend' },
+          { value: avc, className: 'bg-warning' },
+          { value: dubbed, className: 'bg-transfer' },
+          { value: unknown, className: 'bg-trend-muted' },
+        ]}
+      />
       <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{hevc}/{total}</span>
     </div>
   );
@@ -75,13 +82,14 @@ function CodecMix({ show }: { show: AnimeLibraryShow }) {
 
 function Progress({ show }: { show: AnimeLibraryShow }) {
   const total = show.total_count || show.downloaded_count || 1;
-  const percent = Math.max(0, Math.min(100, (show.downloaded_count / total) * 100));
-  const tone = COMPLETION[show.completion_state] ?? COMPLETION.unknown;
   return (
     <div className='flex items-center gap-2'>
-      <div className='h-1.5 w-20 overflow-hidden rounded-full bg-secondary'>
-        <div className={cn('h-full rounded-full', tone.className)} style={{ width: `${percent}%` }} />
-      </div>
+      <Meter
+        className='w-[74px]'
+        total={total}
+        title={`${show.downloaded_count} of ${show.total_count} episodes`}
+        parts={rampParts(show.downloaded_count, total)}
+      />
       <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
         {show.downloaded_count}/{show.total_count}
       </span>
@@ -345,17 +353,17 @@ export default function AnimeLibrary() {
         </div>
       )}
 
-      <Dialog open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); } }}>
-        <DialogContent className='flex h-[94dvh] w-[96vw] max-w-none flex-col overflow-hidden'>
+      <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); } }}>
+        <DrawerContent aria-describedby={undefined}>
           {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner /></div>}
           {active && (
             <>
-              <DialogHeader className='shrink-0'>
-                <div className='flex items-start gap-5'>
-                  <AnimePoster url={active.poster_url} title={active.title} className='w-24 shrink-0' />
-                  <div className='flex flex-col gap-3'>
-                    <DialogTitle>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DialogTitle>
-                    <DialogDescription>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)} · TVDB ordering</DialogDescription>
+              <DrawerHeader>
+                <div className='flex items-start gap-4 pr-8'>
+                  <AnimePoster url={active.poster_url} title={active.title} className='w-16 shrink-0' />
+                  <div className='flex min-w-0 flex-col gap-2'>
+                    <DrawerTitle className='text-base font-semibold leading-tight'>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DrawerTitle>
+                    <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
                       {active.tvdb_id && <Button asChild variant='secondary' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
                       {Boolean(active.avc_count) && (
@@ -372,15 +380,15 @@ export default function AnimeLibrary() {
                     </div>
                   </div>
                 </div>
-              </DialogHeader>
+              </DrawerHeader>
               <Tabs key={active.key} defaultValue={String(seasons[0])} className='flex min-h-0 flex-1 flex-col'>
-                <TabsList className='flex h-auto flex-wrap justify-start'>
+                <TabsList className='flex h-auto flex-wrap justify-start px-5 pt-3'>
                   {seasons.map((season) => <TabsTrigger key={String(season)} value={String(season)}>{season === null ? 'Other files' : season === 0 ? 'Specials' : 'Season ' + season}</TabsTrigger>)}
                 </TabsList>
                 {seasons.map((season) => (
-                  <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto'>
+                  <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>
                     <div className='overflow-x-auto'>
-                      <table className='w-full min-w-[580px] border-collapse text-sm'>
+                      <table className='w-full border-collapse text-sm'>
                         <thead><tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'><th className='py-2.5 pr-3 font-medium'>Ep</th><th className='px-3 py-2.5 font-medium'>Episode / File</th><th className='px-3 py-2.5 font-medium'>Encode</th><th className='px-3 py-2.5 text-right font-medium'>Size</th><th className='py-2.5 pl-3 text-right font-medium'>State</th></tr></thead>
                         <tbody>{active.episodes.filter((entry) => entry.season_number === season).map((entry) => (
                           <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className='border-b border-border/70 last:border-0'>
@@ -405,8 +413,8 @@ export default function AnimeLibrary() {
               </Tabs>
             </>
           )}
-        </DialogContent>
-      </Dialog>
+        </DrawerContent>
+      </Drawer>
       <Dialog open={Boolean(searchTarget)} onOpenChange={(open) => { if (!open) setSearchTarget(null); }}>
         <DialogContent className='flex h-[90dvh] w-[92vw] max-w-none flex-col overflow-hidden'>
           <DialogHeader>

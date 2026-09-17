@@ -29,8 +29,8 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
 
-  --primary: var(--accent-active);
-  --primary-foreground: var(--accent-active-contrast);
+  --primary: oklch(0.48 0.28 272);
+  --primary-foreground: oklch(0.985 0 0);
 
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -40,6 +40,10 @@
 
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
+
+  --primary-hover: oklch(0.42 0.28 272);
+  --surface-raised: oklch(0.96 0 0);
+  --surface-raised-hover: oklch(0.92 0 0);
 
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
@@ -52,6 +56,11 @@
   --warning: oklch(0.65 0.16 75);
   --transfer: oklch(0.58 0.18 300);
   --repack: oklch(0.58 0.14 190);
+  --trend: oklch(0.6 0.16 155);
+  --trend-muted: oklch(0.78 0.06 155);
+  --meter-track: oklch(0 0 0 / 0.06);
+  --meter-empty: oklch(0.88 0 0);
+  --line-strong: oklch(0.8 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -76,10 +85,9 @@
   --font-ui: 'Geist Mono Variable', ui-monospace, monospace;
   --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', monospace;
 
-  --button-radius: 14px;
   --button-border-width: 2px;
-  --button-transition-duration: 200ms;
-  --button-transition-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --button-transition-duration: 150ms;
+  --button-transition-ease: cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .dark {
@@ -98,8 +106,8 @@
   --popover: oklch(0.115 0 0);
   --popover-foreground: oklch(0.985 0 0);
 
-  --primary: var(--accent-active);
-  --primary-foreground: var(--accent-active-contrast);
+  --primary: oklch(0.48 0.28 272);
+  --primary-foreground: oklch(0.985 0 0);
 
   --secondary: oklch(0.16 0 0);
   --secondary-foreground: oklch(0.985 0 0);
@@ -109,6 +117,11 @@
 
   --accent: oklch(0.18 0 0);
   --accent-foreground: oklch(0.985 0 0);
+
+  /* One saturated colour in the whole interface marks the primary action. */
+  --primary-hover: oklch(0.56 0.25 272);
+  --surface-raised: oklch(0.155 0 0);
+  --surface-raised-hover: oklch(0.22 0 0);
 
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.985 0 0);
@@ -121,6 +134,11 @@
   --warning: oklch(0.78 0.15 75);
   --transfer: oklch(0.75 0.17 300);
   --repack: oklch(0.78 0.14 190);
+  --trend: oklch(0.72 0.17 155);
+  --trend-muted: oklch(0.45 0.07 155);
+  --meter-track: oklch(1 0 0 / 0.08);
+  --meter-empty: oklch(0.3 0 0);
+  --line-strong: oklch(0.33 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 14%);
   --ring: oklch(0.556 0 0);
@@ -169,6 +187,11 @@
   --color-warning: var(--warning);
   --color-transfer: var(--transfer);
   --color-repack: var(--repack);
+  --color-trend: var(--trend);
+  --color-trend-muted: var(--trend-muted);
+  --color-meter-track: var(--meter-track);
+  --color-meter-empty: var(--meter-empty);
+  --color-line-strong: var(--line-strong);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -199,125 +222,71 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Buttons, after resend.com: translucent glass on black rather than a filled
-   pill. The fill is almost nothing, the light comes from a faint diagonal
-   gradient and a soft wide border, and the text stays near-white. Left
-   UNLAYERED so they win over Tailwind utility layers via cascade order.
+   Buttons, after the Kargul Studio CRM: flat fills, no border, no shadow, and
+   a pill shape. The weight comes from the fill alone, which is why one
+   saturated indigo can mark the primary action without anything else
+   competing. Left UNLAYERED so they win over Tailwind utility layers.
 --------------------------------------------------------------------------- */
 [data-slot='button'] {
-  font-weight: 600;
-  border-radius: var(--button-radius);
-  /* Named properties only, and transform included, so the press animates
-     rather than snapping -- every variant below extends this list. */
+  font-weight: 500;
+  border: none;
+  box-shadow: none;
+  border-radius: 999px;
   transition:
     background-color var(--button-transition-duration) var(--button-transition-ease),
-    border-color var(--button-transition-duration) var(--button-transition-ease),
     color var(--button-transition-duration) var(--button-transition-ease),
     transform 120ms var(--button-transition-ease);
 }
+/* Square-ish controls that are not really buttons keep their own corners. */
+[data-slot='button'][data-size='icon'] {
+  border-radius: 999px;
+}
 [data-slot='button']:active:not(:disabled) {
-  transform: scale(0.97);
+  transform: scale(0.96);
 }
 @media (prefers-reduced-motion: reduce) {
   [data-slot='button'] {
-    transition-property: background-color, border-color, color;
+    transition-property: background-color, color;
   }
   [data-slot='button']:active:not(:disabled) {
     transform: none;
   }
 }
 
-/* The primary action. The gradient runs at 104deg so the highlight crosses the
-   button rather than banding it, which is what keeps it from reading as a
-   glossy pill. */
 [data-slot='button'][data-variant='default'] {
-  background-color: oklch(1 0 0 / 0.015);
-  background-image: linear-gradient(
-    104deg,
-    oklch(1 0 0 / 0.05) 5%,
-    oklch(0.95 0.02 100 / 0.1) 100%
-  );
-  border: var(--button-border-width) solid oklch(1 0 0 / 0.05);
-  color: oklch(0.985 0 0);
+  background-color: var(--primary);
+  color: var(--primary-foreground);
 }
-[data-slot='button'][data-variant='default']:hover {
-  background-color: oklch(1 0 0 / 0.06);
-  border-color: oklch(1 0 0 / 0.12);
+[data-slot='button'][data-variant='default']:hover:not(:disabled) {
+  background-color: var(--primary-hover);
 }
 
-/* One step quieter: the same glass without the highlight. */
 [data-slot='button'][data-variant='secondary'],
 [data-slot='button'][data-variant='outline'] {
-  background-color: oklch(1 0 0 / 0.02);
-  background-image: none;
-  border: var(--button-border-width) solid oklch(1 0 0 / 0.04);
-  color: var(--foreground-soft);
-}
-[data-slot='button'][data-variant='secondary']:hover,
-[data-slot='button'][data-variant='outline']:hover {
-  background-color: oklch(1 0 0 / 0.05);
-  border-color: oklch(1 0 0 / 0.1);
+  background-color: var(--surface-raised);
   color: var(--foreground);
 }
+[data-slot='button'][data-variant='secondary']:hover:not(:disabled),
+[data-slot='button'][data-variant='outline']:hover:not(:disabled) {
+  background-color: var(--surface-raised-hover);
+}
 
-/* Quietest: text only, no edge at all. */
 [data-slot='button'][data-variant='ghost'] {
   background-color: transparent;
-  background-image: none;
-  border: var(--button-border-width) solid transparent;
   color: var(--foreground-muted);
 }
-[data-slot='button'][data-variant='ghost']:hover {
-  background-color: oklch(1 0 0 / 0.04);
+[data-slot='button'][data-variant='ghost']:hover:not(:disabled) {
+  background-color: var(--surface-raised);
   color: var(--foreground);
 }
 
 [data-slot='button'][data-variant='destructive'] {
-  background-color: oklch(0.704 0.191 22.216 / 0.12);
-  background-image: none;
-  border: var(--button-border-width) solid oklch(0.704 0.191 22.216 / 0.25);
-  color: oklch(0.8 0.12 22.216);
+  background-color: oklch(0.704 0.191 22.216 / 0.15);
+  color: oklch(0.82 0.13 22.216);
 }
-[data-slot='button'][data-variant='destructive']:hover {
-  background-color: oklch(0.704 0.191 22.216 / 0.2);
-  border-color: oklch(0.704 0.191 22.216 / 0.4);
-  color: oklch(0.88 0.1 22.216);
-}
-
-/* The light theme keeps the same structure, inverted: the glass darkens the
-   surface instead of lightening it. */
-:root:not(.dark) [data-slot='button'][data-variant='default'] {
-  background-color: oklch(0.145 0 0);
-  background-image: linear-gradient(
-    104deg,
-    oklch(0.28 0 0) 5%,
-    oklch(0.18 0 0) 100%
-  );
-  border-color: oklch(0 0 0 / 0.2);
-  color: oklch(0.985 0 0);
-}
-:root:not(.dark) [data-slot='button'][data-variant='default']:hover {
-  background-color: oklch(0.2 0 0);
-  border-color: oklch(0 0 0 / 0.3);
-}
-:root:not(.dark) [data-slot='button'][data-variant='secondary'],
-:root:not(.dark) [data-slot='button'][data-variant='outline'] {
-  background-color: oklch(0 0 0 / 0.03);
-  border-color: oklch(0 0 0 / 0.1);
-  color: var(--foreground-soft);
-}
-:root:not(.dark) [data-slot='button'][data-variant='secondary']:hover,
-:root:not(.dark) [data-slot='button'][data-variant='outline']:hover {
-  background-color: oklch(0 0 0 / 0.06);
-  border-color: oklch(0 0 0 / 0.16);
-  color: var(--foreground);
-}
-:root:not(.dark) [data-slot='button'][data-variant='ghost'] {
-  color: var(--foreground-muted);
-}
-:root:not(.dark) [data-slot='button'][data-variant='ghost']:hover {
-  background-color: oklch(0 0 0 / 0.05);
-  color: var(--foreground);
+[data-slot='button'][data-variant='destructive']:hover:not(:disabled) {
+  background-color: oklch(0.704 0.191 22.216 / 0.26);
+  color: oklch(0.9 0.1 22.216);
 }
 
 
@@ -438,6 +407,23 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
+  /* Detail drawer, after the CRM. The list behind it dims and blurs rather
+     than being covered, so the panel reads as a closer look at the row you
+     clicked. Both halves share one curve and one duration. */
+  .drawer-overlay {
+    background-color: oklch(0 0 0 / 0.6);
+    backdrop-filter: blur(6px);
+    animation: drawer-fade 350ms cubic-bezier(0.25, 1, 0.5, 1);
+  }
+  .drawer-panel {
+    animation: drawer-in 350ms cubic-bezier(0.25, 1, 0.5, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .drawer-panel {
+      animation: drawer-fade 200ms ease;
+    }
+  }
+
   /* Dense library rows. The whole row is the control, so it gets the press
      feedback a button would -- background rather than scale, since a
      full-width row scaling reads as the table itself shifting. */
@@ -514,5 +500,27 @@
   }
   100% {
     transform: translateX(420%);
+  }
+}
+
+@keyframes drawer-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Slides in from its own edge rather than appearing, and only part of the way,
+   so it reads as arriving rather than as being thrown. */
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
   }
 }
