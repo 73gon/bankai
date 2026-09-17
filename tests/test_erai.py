@@ -2107,3 +2107,121 @@ def test_an_alternative_for_a_different_episode_is_not_substituted(monkeypatch):
     assert state["releases"][avc.info_hash]["status"] == "held"
     assert other_episode.info_hash not in state["releases"]
 
+
+def _upgrade_fixture(monkeypatch, *, twin_has_german=True, resolvable=True):
+    """One queued AVC episode with an HEVC encode waiting in the catalogue."""
+    state = erai._default_state()
+    avc = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL AVC AAC][MultiSub]", 1)
+    hevc = entry("[Erai-raws] Show - 02 [1080p CR WEBRip HEVC AAC][MultiSub]", 2)
+    state["releases"][avc.info_hash] = {
+        "status": "queued",
+        "title": avc.title,
+        "canonical": "1|1|2",
+        "resolution": 1080,
+    }
+    state["canonical"]["1|1|2"] = {"info_hash": avc.info_hash, "resolution": 1080}
+    state["backfill"]["catalog_1080"][hevc.info_hash] = erai._entry_dict(hevc)
+
+    async def detail(_client, _url):
+        body = "Subtitles Info:GERMAN_LINE" if twin_has_german else "nothing useful"
+        return (body.replace("GERMAN_LINE", "GERMANLINE"), hevc.magnet_uri, "Erai-raws")
+
+    async def resolve(candidate):
+        if not resolvable:
+            return (None, None, "TVDB resolution failed")
+        # Derive the episode from the release, so several upgrades in one pass
+        # do not all claim the same canonical slot.
+        _season, number = erai.anime_mod.release_episode_info(candidate.title)
+        return (
+            AnimeTVDBMatch(1, "show", "Show", year=2026),
+            SimpleNamespace(season=1, episode=number or 2),
+            None,
+        )
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+    monkeypatch.setattr(erai, "_resolve", resolve)
+    monkeypatch.setattr(erai, "has_explicit_german_subtitles", lambda text: twin_has_german)
+    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
+
+    async def no_sleep(_seconds):
+        pass
+
+    monkeypatch.setattr(erai.asyncio, "sleep", no_sleep)
+    return state, avc, hevc
+
+
+def test_a_queued_avc_episode_is_replaced_by_its_hevc_encode(monkeypatch):
+    """918 episodes and 1.2 TiB were queued as AVC with HEVC already available."""
+    state, avc, hevc = _upgrade_fixture(monkeypatch)
+    qbit = _RecordingQbit([])
+    token = erai._ADMISSION.set({"qbit": qbit, "remaining": 10 * 1024**3})
+    try:
+        upgraded = asyncio.run(erai._upgrade_to_hevc(state, object(), limit=5))
+    finally:
+        erai._ADMISSION.reset(token)
+
+    assert upgraded == 1
+    assert state["releases"][hevc.info_hash]["status"] == "queued"
+    assert avc.info_hash not in state["releases"]
+    # The superseded download is dropped so it stops occupying the disk.
+    assert qbit.removed == [(avc.info_hash, True)]
+
+
+def test_the_avc_release_is_kept_when_the_replacement_is_rejected(monkeypatch):
+    """Losing the episode entirely would be worse than keeping the AVC encode."""
+    state, avc, _hevc = _upgrade_fixture(monkeypatch, resolvable=False)
+    qbit = _RecordingQbit([])
+    token = erai._ADMISSION.set({"qbit": qbit, "remaining": 10 * 1024**3})
+    try:
+        upgraded = asyncio.run(erai._upgrade_to_hevc(state, object(), limit=5))
+    finally:
+        erai._ADMISSION.reset(token)
+
+    assert upgraded == 0
+    assert state["releases"][avc.info_hash]["status"] == "queued"
+    assert state["canonical"]["1|1|2"]["info_hash"] == avc.info_hash
+    assert qbit.removed == []
+
+
+def test_a_replacement_without_german_is_not_used(monkeypatch):
+    state, avc, hevc = _upgrade_fixture(monkeypatch, twin_has_german=False)
+    token = erai._ADMISSION.set({"qbit": _RecordingQbit([]), "remaining": 10 * 1024**3})
+    try:
+        assert asyncio.run(erai._upgrade_to_hevc(state, object(), limit=5)) == 0
+    finally:
+        erai._ADMISSION.reset(token)
+    assert state["releases"][avc.info_hash]["status"] == "queued"
+    assert hevc.info_hash not in state["releases"]
+
+
+def test_only_work_that_has_not_downloaded_yet_is_swapped(monkeypatch):
+    """Swapping something already on disk throws away bytes already paid for."""
+    state, avc, _hevc = _upgrade_fixture(monkeypatch)
+    state["releases"][avc.info_hash]["status"] = "downloading"
+    token = erai._ADMISSION.set({"qbit": _RecordingQbit([]), "remaining": 10 * 1024**3})
+    try:
+        assert asyncio.run(erai._upgrade_to_hevc(state, object(), limit=5)) == 0
+    finally:
+        erai._ADMISSION.reset(token)
+    assert state["releases"][avc.info_hash]["status"] == "downloading"
+
+
+def test_the_upgrade_is_bounded_per_cycle(monkeypatch):
+    state, _avc, _hevc = _upgrade_fixture(monkeypatch)
+    for index in range(3, 8):
+        extra_avc = entry(f"[Erai-raws] Show - {index:02d} [1080p CR WEB-DL AVC AAC][MultiSub]", index * 10)
+        extra_hevc = entry(
+            f"[Erai-raws] Show - {index:02d} [1080p CR WEBRip HEVC AAC][MultiSub]", index * 10 + 1
+        )
+        state["releases"][extra_avc.info_hash] = {
+            "status": "queued", "title": extra_avc.title,
+            "canonical": f"1|1|{index}", "resolution": 1080,
+        }
+        state["backfill"]["catalog_1080"][extra_hevc.info_hash] = erai._entry_dict(extra_hevc)
+    token = erai._ADMISSION.set({"qbit": _RecordingQbit([]), "remaining": 100 * 1024**3})
+    try:
+        assert asyncio.run(erai._upgrade_to_hevc(state, object(), limit=2)) == 2
+    finally:
+        erai._ADMISSION.reset(token)
+

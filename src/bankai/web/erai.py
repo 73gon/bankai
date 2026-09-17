@@ -1295,6 +1295,118 @@ async def _consider(
     return True
 
 
+def _episode_key(title: str) -> tuple[str, Any, Any] | None:
+    """Series and episode identity, for matching two encodes of one episode."""
+    season, episode = anime_mod.release_episode_info(title)
+    if episode is None:
+        return None
+    return (_mapping_key(title), season, episode)
+
+
+def _hevc_twin(state: dict[str, Any], release: dict[str, Any]) -> anime_mod.NyaaEntry | None:
+    """The best catalogued HEVC release of the same episode."""
+    key = _episode_key(str(release.get("title") or ""))
+    if key is None:
+        return None
+    seen = state.get("releases", {})
+    candidates = []
+    for info_hash, row in _catalog_entries(state).items():
+        if info_hash in seen:
+            continue
+        title = str(row.get("title") or "")
+        if not _is_hevc_title(title) or _episode_key(title) != key:
+            continue
+        try:
+            candidates.append(_entry_from_dict(row))
+        except Exception:
+            continue
+    if not candidates:
+        return None
+    return max(candidates, key=_rank)
+
+
+async def _upgrade_to_hevc(
+    state: dict[str, Any],
+    client: httpx.AsyncClient,
+    *,
+    limit: int,
+) -> int:
+    """Replace queued AVC releases with the HEVC encode of the same episode.
+
+    The codec policy only gates what discovery admits, so everything queued
+    before it landed is still AVC -- on the live box that was 918 episodes and
+    1.2 TiB of downloads, every one of which had an HEVC encode already sitting
+    in the catalogue. HEVC is roughly half the size for the same episode, and
+    the disk it lands on is the scarcest thing in the system.
+
+    Bounded per cycle: each upgrade may cost a Nyaa detail fetch, and the
+    backlog is worth converting steadily rather than in one burst.
+    """
+    if limit <= 0:
+        return 0
+    admission = _ADMISSION.get()
+    qbit = admission["qbit"] if admission else None
+    upgraded = 0
+    stale = [
+        (info_hash, release)
+        for info_hash, release in list(state.get("releases", {}).items())
+        # Only work not yet downloaded: swapping something already on disk
+        # would throw away bytes that are paid for.
+        if release.get("status") == "queued"
+        and not _is_hevc_title(str(release.get("title") or ""))
+    ]
+    for info_hash, release in stale:
+        if upgraded >= limit:
+            break
+        twin = _hevc_twin(state, release)
+        if twin is None:
+            continue
+        if not await _carries_german(twin, client):
+            continue
+        # The AVC release holds this episode's canonical slot, and _consider
+        # rejects anything that does not beat the slot's resolution. Release it
+        # before the replacement is offered, or the upgrade reads as a
+        # duplicate of the thing it is replacing.
+        canonical = str(release.get("canonical") or "")
+        if canonical and state.get("canonical", {}).get(canonical, {}).get(
+            "info_hash"
+        ) in (info_hash, None):
+            state["canonical"].pop(canonical, None)
+        state["releases"].pop(info_hash, None)
+        if not await _consider(state, twin, client):
+            # Put the original back rather than losing the episode entirely.
+            state["releases"][info_hash] = release
+            if canonical:
+                state["canonical"][canonical] = {
+                    "info_hash": info_hash,
+                    "resolution": release.get("resolution", 0),
+                }
+            continue
+        if qbit is not None:
+            try:
+                await qbit.remove(info_hash, delete_files=True)
+            except Exception as exc:
+                log.warning("Could not drop superseded torrent %s: %s", info_hash[:8], exc)
+        log.info("Upgraded to HEVC: %s", twin.title)
+        upgraded += 1
+        await asyncio.sleep(get_settings().anime.backfill_request_delay_seconds)
+    return upgraded
+
+
+async def _carries_german(entry: anime_mod.NyaaEntry, client: httpx.AsyncClient) -> bool:
+    """Confirm a replacement really does offer German before swapping to it."""
+    if title_lists_german_subtitles(entry.title):
+        return True
+    try:
+        description, _magnet, uploader = await anime_mod._detail_url(client, entry.detail_url)
+    except Exception as exc:
+        log.warning("Could not read %s while upgrading: %s", entry.id, exc)
+        return False
+    if (uploader or "").casefold() != "erai-raws":
+        return False
+    return has_explicit_german_subtitles(description)
+
+
 async def _fetch_rss(client: httpx.AsyncClient) -> list[anime_mod.NyaaEntry]:
     response = await client.get(get_settings().anime.rss_url)
     response.raise_for_status()
@@ -1763,6 +1875,13 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                             _save_retry_requests(requests)
                     await asyncio.sleep(policy.backfill_request_delay_seconds)
                     if inspected % 10 == 0:
+                        _save_state(state)
+                if prefill:
+                    upgraded = await _upgrade_to_hevc(
+                        state, client, limit=policy.max_hevc_upgrades_per_cycle
+                    )
+                    if upgraded:
+                        state["last_upgraded"] = upgraded
                         _save_state(state)
             state["last_success"] = time.time()
             state["last_error"] = None

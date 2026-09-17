@@ -117,6 +117,10 @@ class AnimeAutomationSettings(BaseModel):
     # same spinning library disk, and concurrent large copies there lose far
     # more to seeking than they gain in parallelism.
     max_concurrent_transfers: int = Field(default=2, ge=1, le=16)
+    # Replacing a queued AVC release with its HEVC encode can cost a Nyaa
+    # detail fetch each, so the backlog is converted steadily rather than
+    # in one burst.
+    max_hevc_upgrades_per_cycle: int = Field(default=25, ge=0, le=500)
     backfill_enabled: bool = True
     backfill_request_delay_seconds: float = Field(default=2.0, ge=1.0)
 

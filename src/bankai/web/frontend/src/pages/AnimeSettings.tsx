@@ -19,6 +19,7 @@ const LABELS: Record<string, { label: string; description: string; suffix?: stri
   'anime.settle_minutes': { label: 'Quality settling window', description: 'Wait for alternate encodes before choosing the best release.', suffix: 'minutes' },
   'anime.max_enqueues_per_cycle': { label: 'Verified episodes per cycle', description: 'Build a large ordered backlog; qBittorrent controls how many torrents download at once.' },
   'anime.max_concurrent_transfers': { label: 'Concurrent transfers', description: 'How many finished downloads are published into the library at once. Downloading is unlimited — qBittorrent governs that.' },
+  'anime.max_hevc_upgrades_per_cycle': { label: 'HEVC upgrades per cycle', description: 'Queued AVC episodes swapped for their HEVC encode each cycle. HEVC is roughly half the size for the same episode. Set to 0 to stop upgrading.' },
   'anime.backfill_request_delay_seconds': { label: 'Backfill request delay', description: 'Delay between historical Nyaa catalogue pages.', suffix: 'seconds' },
 };
 
