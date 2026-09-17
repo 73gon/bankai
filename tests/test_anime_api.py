@@ -392,10 +392,10 @@ def test_anime_review_and_blacklist_actions(client, monkeypatch):
         "bankai.web.anime_library.enrich_review_rows",
         lambda rows: asyncio.sleep(0, result=rows),
     )
-    monkeypatch.setattr(
-        "bankai.web.erai.review_action",
-        lambda info_hash, action: {"ok": True, "requested": 2, "action": action},
-    )
+    async def review_action(info_hash, action):
+        return {"ok": True, "requested": 2, "action": action}
+
+    monkeypatch.setattr("bankai.web.erai.review_action", review_action)
     monkeypatch.setattr(
         "bankai.web.erai.remove_blacklist",
         lambda key: {"ok": True, "requested": 2},

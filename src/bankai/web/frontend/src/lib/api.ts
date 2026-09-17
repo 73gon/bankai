@@ -327,6 +327,15 @@ export interface FilmpalastDetails {
   episodes: EpisodeItem[];
 }
 
+export interface PurgeResult {
+  ok: boolean;
+  blacklisted?: number;
+  removed_torrents: number;
+  deleted_files: number;
+  deleted_folders: string[];
+  freed_bytes: number;
+}
+
 export interface AnimeQueueFilters {
   q?: string;
   status?: string;
@@ -673,8 +682,12 @@ export const api = {
   animeReview: () => request<{ items: AnimeReviewItem[] }>('/api/anime/review'),
   animeBlacklist: () => request<{ items: AnimeReviewItem[] }>('/api/anime/blacklist'),
   reviewAnime: (infoHash: string, action: 'recheck' | 'allow_german' | 'blacklist') =>
-    request<{ ok: boolean; requested: number }>('/api/anime/review/' + infoHash, {
+    request<{ ok: boolean; requested: number; blacklisted?: number }>('/api/anime/review/' + infoHash, {
       method: 'POST', body: JSON.stringify({ action }),
+    }),
+  purgeAnimeSeries: (infoHash: string, deleteFiles: boolean) =>
+    request<PurgeResult>('/api/anime/review/' + infoHash + '/purge', {
+      method: 'POST', body: JSON.stringify({ delete_files: deleteFiles }),
     }),
   removeAnimeBlacklist: (key: string) =>
     request<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', {

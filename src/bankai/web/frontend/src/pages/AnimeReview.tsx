@@ -1,18 +1,27 @@
 import { useEffect, useState } from 'react';
-import { Ban, ExternalLink, RefreshCw, RotateCcw, Search, ShieldCheck } from 'lucide-react';
+import { Ban, ExternalLink, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AnimeReviewItem } from '@/lib/api';
 import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState, Spinner } from '@/components/ui/empty';
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${(value / 1024 ** index).toFixed(index > 1 ? 2 : 0)} ${units[index]}`;
+}
 
 export default function AnimeReview({ blacklist = false }: { blacklist?: boolean }) {
   const [items, setItems] = useState<AnimeReviewItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [mappingTitle, setMappingTitle] = useState<string | null>(null);
+  const [purgeTarget, setPurgeTarget] = useState<AnimeReviewItem | null>(null);
 
   async function load() {
     setLoading(true);
@@ -33,8 +42,29 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     try {
       const result = await api.reviewAnime(item.info_hash, action);
       toast.success(action === 'blacklist'
-        ? 'Show added to the blacklist'
+        ? 'Show discarded' + (result.blacklisted ? ' (' + result.blacklisted + ' releases)' : '')
         : result.requested + ' releases scheduled for a fresh check');
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmPurge() {
+    if (!purgeTarget?.info_hash) return;
+    setBusy(purgeTarget.key);
+    try {
+      const result = await api.purgeAnimeSeries(purgeTarget.info_hash, true);
+      toast.success(
+        'Discarded ' + purgeTarget.title + ' — removed ' + result.deleted_files + ' file'
+        + (result.deleted_files === 1 ? '' : 's')
+        + (result.freed_bytes ? ' (' + formatBytes(result.freed_bytes) + ')' : '')
+        + ' and ' + result.removed_torrents + ' torrent'
+        + (result.removed_torrents === 1 ? '' : 's'),
+      );
+      setPurgeTarget(null);
       await load();
     } catch (error: any) {
       toast.error(error.message);
@@ -115,6 +145,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       {german && <Button onClick={() => void decide(item, 'allow_german')} disabled={Boolean(busy)}><ShieldCheck data-icon='inline-start' /> Always allow German</Button>}
                       {tvdb && item.release_title && <Button variant='outline' onClick={() => setMappingTitle(item.release_title || null)} disabled={Boolean(busy)}><Search data-icon='inline-start' /> Choose TVDB show</Button>}
                       <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={Boolean(busy)}><Ban data-icon='inline-start' /> Discard show</Button>
+                      <Button variant='destructive' onClick={() => setPurgeTarget(item)} disabled={Boolean(busy)}><Trash2 data-icon='inline-start' /> Discard and delete files</Button>
                     </>
                   )}
                 </CardFooter>
@@ -124,6 +155,25 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </div>
       )}
       <AnimeMappingDialog title={mappingTitle} onClose={() => setMappingTitle(null)} onSaved={() => void load()} />
+
+      <Dialog open={purgeTarget !== null} onOpenChange={(open) => { if (!open) setPurgeTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Discard {purgeTarget?.title} and delete its files?</DialogTitle>
+            <DialogDescription>
+              Every season of this show stops being searched for, its torrents are removed from
+              qBittorrent, and every episode already in the library is deleted along with its
+              folders. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant='secondary' disabled={busy !== null} onClick={() => setPurgeTarget(null)}>Cancel</Button>
+            <Button variant='destructive' disabled={busy !== null} onClick={() => void confirmPurge()}>
+              <Trash2 data-icon='inline-start' /> Discard and delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

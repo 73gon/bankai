@@ -102,14 +102,88 @@ def _series_policy(release_title: str) -> dict[str, Any] | None:
     return _load_policies().get(_mapping_key(release_title))
 
 
+def _policy_tvdb_ids(policies: dict[str, Any] | None = None) -> set[str]:
+    """TVDB ids of every blacklisted series."""
+    rows = policies if policies is not None else _load_policies()
+    return {
+        str(row["tvdb_id"])
+        for row in rows.values()
+        if row.get("mode") == "blacklisted" and row.get("tvdb_id")
+    }
+
+
+def _release_tvdb_id(release: dict[str, Any], mappings: dict[str, Any]) -> str | None:
+    """Best known TVDB id for a release, without going back to the network.
+
+    A release resolved by discovery carries its identity in the canonical key.
+    One held before resolution does not, but the series it belongs to has
+    usually been resolved through some other release, so the saved mapping for
+    its title covers it.
+    """
+    canonical = str(release.get("canonical") or "")
+    head = canonical.split("|")[0]
+    if head:
+        return head
+    saved = mappings.get(_mapping_key(str(release.get("title") or "")))
+    tvdb_id = (saved or {}).get("tvdb_id")
+    return str(tvdb_id) if tvdb_id else None
+
+
+def _is_blacklisted_release(
+    release: dict[str, Any],
+    *,
+    policies: dict[str, Any],
+    mappings: dict[str, Any],
+    blacklisted_ids: set[str] | None = None,
+) -> bool:
+    """Does this release belong to a series the user has blacklisted?
+
+    Matching on the title key alone missed whole seasons: the key keeps the
+    "2nd Season" qualifier, so blacklisting one season left the other sitting
+    in review. The TVDB id is the same for every season, part and title
+    variant, so it is the identity that actually matches intent.
+    """
+    key = _mapping_key(str(release.get("title") or ""))
+    policy = policies.get(key)
+    if policy and policy.get("mode") == "blacklisted":
+        return True
+    ids = _policy_tvdb_ids(policies) if blacklisted_ids is None else blacklisted_ids
+    if not ids:
+        return False
+    tvdb_id = _release_tvdb_id(release, mappings)
+    return bool(tvdb_id and tvdb_id in ids)
+
+
+async def _resolve_series_tvdb_id(source_title: str, key: str) -> str | None:
+    """Identify the series behind a held release, for the policy record."""
+    saved = (_load_mappings().get(key) or {}).get("tvdb_id")
+    if saved:
+        return str(saved)
+    try:
+        from bankai.web.anime_library import show_metadata
+
+        metadata = await show_metadata(source_title, None)
+    except Exception as exc:
+        log.warning("Could not identify %s for blacklisting: %s", source_title, exc)
+        return None
+    tvdb_id = (metadata or {}).get("tvdb_id")
+    return str(tvdb_id) if tvdb_id else None
+
+
 def review_items() -> list[dict[str, Any]]:
     """Group held releases by stable Erai source-show identity."""
     state = _load_state()
     groups: dict[str, dict[str, Any]] = {}
     policies = _load_policies()
+    mappings = _load_mappings()
+    blacklisted_ids = _policy_tvdb_ids(policies)
     recent = {item.get("info_hash"): item for item in state.get("held", [])}
     for info_hash, release in state.get("releases", {}).items():
         if release.get("status") != "held" or not release.get("title"):
+            continue
+        if _is_blacklisted_release(
+            release, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
+        ):
             continue
         saved_entry = release.get("entry") or {}
         item = {
@@ -170,18 +244,28 @@ def _request_series_retries(state: dict[str, Any], key: str) -> int:
     return requested
 
 
-def review_action(info_hash: str, action: str) -> dict[str, Any]:
+async def review_action(info_hash: str, action: str) -> dict[str, Any]:
     """Persist a series decision and schedule the affected releases immediately."""
     global _RETRY_TASK
+    with _STATE_LOCK:
+        release = (_load_state().get("releases", {}) or {}).get(info_hash)
+    if not release or not release.get("title"):
+        raise ValueError("Held release was not found")
+    key = _mapping_key(release["title"])
+    tvdb_id = (
+        await _resolve_series_tvdb_id(anime_mod.clean_release_title(release["title"]), key)
+        if action == "blacklist"
+        else None
+    )
     with _STATE_LOCK:
         state = _load_state()
         release = state.get("releases", {}).get(info_hash)
         if not release or not release.get("title"):
             raise ValueError("Held release was not found")
         title = release["title"]
-        key = _mapping_key(title)
         policies = _load_policies()
         requested = 0
+        blacklisted = 0
         if action == "recheck":
             requested = _request_series_retries(state, key)
         elif action == "allow_german":
@@ -196,24 +280,159 @@ def review_action(info_hash: str, action: str) -> dict[str, Any]:
             policies[key] = {
                 "mode": "blacklisted",
                 "source_title": anime_mod.clean_release_title(title),
+                # Recorded so every other season, part and title variant of the
+                # same series is covered. Keying on the title alone left the
+                # other half of a show sitting in review.
+                "tvdb_id": tvdb_id,
                 "updated_at": time.time(),
             }
             _save_policies(policies)
+            mappings = _load_mappings()
+            blacklisted_ids = _policy_tvdb_ids(policies)
             requests = _load_retry_requests()
+            matched: list[str] = []
             for release_hash, row in state.get("releases", {}).items():
-                if _mapping_key(row.get("title", "")) == key:
+                if _is_blacklisted_release(
+                    row, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
+                ):
                     row.update(status="blacklisted", reason="Series blacklisted by user")
                     requests.pop(release_hash, None)
+                    matched.append(release_hash)
+            held_lookup = state.get("releases", {})
             state["held"] = [
-                row for row in state.get("held", []) if _mapping_key(row["title"]) != key
+                row
+                for row in state.get("held", [])
+                if not _is_blacklisted_release(
+                    held_lookup.get(row.get("info_hash"), {"title": row.get("title", "")}),
+                    policies=policies,
+                    mappings=mappings,
+                    blacklisted_ids=blacklisted_ids,
+                )
             ]
             _save_retry_requests(requests)
             _save_state(state)
+            blacklisted = len(matched)
         else:
             raise ValueError("Unknown review action")
     if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
         _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
-    return {"ok": True, "requested": requested}
+    return {"ok": True, "requested": requested, "blacklisted": blacklisted, "key": key}
+
+
+_VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".webm"}
+
+
+def _series_roots() -> list[Path]:
+    """Every directory a blacklisted series may legitimately occupy."""
+    settings = get_settings()
+    roots = [Path(settings.transfer.anime_shows_dir), Path(settings.output.directory)]
+    return [root for root in roots if str(root)]
+
+
+def _contained_by(path: Path, roots: list[Path]) -> bool:
+    """Refuse to delete anything outside the configured library roots.
+
+    The show folder is found by name, so this is the check that keeps a bad
+    name -- or a symlink out of the tree -- from reaching the rest of the disk.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def series_files(english_title: str) -> list[Path]:
+    """Folders already holding episodes of a series, library and staging."""
+    from bankai.backend.transfer import _existing_show_folder
+
+    roots = _series_roots()
+    found: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        folder = _existing_show_folder(english_title, cache={}, roots=[root])
+        if folder is not None and _contained_by(folder, roots) and folder not in found:
+            found.append(folder)
+    return found
+
+
+async def purge_series(
+    key: str, *, english_title: str, delete_files: bool
+) -> dict[str, Any]:
+    """Remove a blacklisted series' torrents and, optionally, its episodes.
+
+    Downloading an episode the user has rejected wastes the same scarce disk
+    twice, so the torrents go regardless. Deleting what is already published is
+    a separate decision and only happens when asked.
+    """
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    with _STATE_LOCK:
+        state = _load_state()
+        policies = _load_policies()
+        mappings = _load_mappings()
+        blacklisted_ids = _policy_tvdb_ids(policies)
+        hashes = [
+            info_hash
+            for info_hash, release in state.get("releases", {}).items()
+            if _is_blacklisted_release(
+                release, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
+            )
+        ]
+
+    removed_torrents = 0
+    if hashes:
+        qbit = QBittorrentClient()
+        try:
+            await qbit.login()
+            for info_hash in hashes:
+                try:
+                    await qbit.remove(info_hash, delete_files=True)
+                    removed_torrents += 1
+                except Exception as exc:
+                    log.warning("Could not remove torrent %s: %s", info_hash[:8], exc)
+        except Exception as exc:
+            log.warning("Could not reach qBittorrent while purging %s: %s", key, exc)
+        finally:
+            await qbit.aclose()
+
+    deleted_files = 0
+    freed_bytes = 0
+    deleted_folders: list[str] = []
+    if delete_files and english_title:
+        roots = _series_roots()
+        for folder in series_files(english_title):
+            if not _contained_by(folder, roots):
+                continue
+            for path in folder.rglob("*"):
+                if path.is_file():
+                    try:
+                        freed_bytes += path.stat().st_size
+                        deleted_files += 1
+                    except OSError:
+                        pass
+            try:
+                shutil.rmtree(folder)
+                deleted_folders.append(str(folder))
+            except OSError as exc:
+                log.warning("Could not delete %s: %s", folder, exc)
+                deleted_files = 0
+                freed_bytes = 0
+    return {
+        "ok": True,
+        "key": key,
+        "removed_torrents": removed_torrents,
+        "deleted_files": deleted_files,
+        "deleted_folders": deleted_folders,
+        "freed_bytes": freed_bytes,
+    }
 
 
 def remove_blacklist(key: str) -> dict[str, Any]:
@@ -911,6 +1130,15 @@ async def _consider(
     match, identity, error = await _resolve(entry)
     if error or match is None or identity is None:
         _hold(state, entry, error or "TVDB resolution failed")
+        return False
+    if str(match.tvdb_id) in _policy_tvdb_ids():
+        # The title key check above only sees the words in this release's name;
+        # the series behind it is only known once TVDB has resolved it.
+        state["releases"][entry.info_hash] = {
+            "status": "blacklisted",
+            "title": entry.title,
+            "reason": "Series blacklisted by user",
+        }
         return False
     state["series"][str(match.tvdb_id)] = asdict(match)
     canonical = f"{match.tvdb_id}|{identity.season}|{identity.episode}"

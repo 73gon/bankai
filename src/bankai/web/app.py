@@ -1447,9 +1447,39 @@ def create_app() -> Any:
     @app.post("/api/anime/review/{info_hash}")
     async def anime_review_action(info_hash: str, req: dict) -> dict:
         try:
-            return erai_mod.review_action(info_hash, str(req.get("action", "")))
+            return await erai_mod.review_action(info_hash, str(req.get("action", "")))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/anime/review/{info_hash}/purge")
+    async def anime_review_purge(info_hash: str, req: dict) -> dict:
+        """Blacklist a series and reclaim what it already occupies.
+
+        Deleting published episodes is destructive and deliberately separate
+        from blacklisting, so it only happens when delete_files is asked for.
+        """
+        from bankai.web.anime_library import show_metadata
+
+        delete_files = bool(req.get("delete_files"))
+        try:
+            decision = await erai_mod.review_action(info_hash, "blacklist")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        key = str(decision.get("key") or "")
+        english_title = ""
+        if delete_files:
+            saved = (await asyncio.to_thread(erai_mod._load_mappings)).get(key) or {}
+            metadata = await show_metadata(
+                (await asyncio.to_thread(erai_mod._load_policies)).get(key, {}).get(
+                    "source_title", ""
+                ),
+                saved.get("tvdb_id"),
+            )
+            english_title = str((metadata or {}).get("english_title") or "")
+        purged = await erai_mod.purge_series(
+            key, english_title=english_title, delete_files=delete_files
+        )
+        return {**decision, **purged}
 
     @app.get("/api/anime/blacklist")
     async def anime_blacklist() -> dict:

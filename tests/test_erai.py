@@ -1266,7 +1266,7 @@ async def test_allow_german_is_series_wide_and_schedules_every_held_release(tmp_
         return {}
 
     monkeypatch.setattr(erai, "run_cycle", no_cycle)
-    result = erai.review_action(one.info_hash, "allow_german")
+    result = await erai.review_action(one.info_hash, "allow_german")
     assert result["requested"] == 2
     assert erai._series_policy(two.title)["mode"] == "german_allowed"
     assert set(erai._load_retry_requests()) == {one.info_hash, two.info_hash}
@@ -1285,7 +1285,7 @@ async def test_blacklist_removes_holds_and_can_be_restored(tmp_path, monkeypatch
         return {}
 
     monkeypatch.setattr(erai, "run_cycle", no_cycle)
-    erai.review_action(item.info_hash, "blacklist")
+    await erai.review_action(item.info_hash, "blacklist")
     assert erai.review_items() == []
     assert erai.blacklist_items()[0]["source_title"] == "Test Show"
     result = erai.remove_blacklist(erai._mapping_key(item.title))
@@ -1735,3 +1735,105 @@ def test_complete_releases_are_visible_in_the_queue(monkeypatch):
     assert row["step_label"] == "Downloaded, waiting to publish"
     assert row["overall_percent"] == 100.0
 
+
+def _library(tmp_path, show="Test Show", episodes=3):
+    root = tmp_path / "shows_anime"
+    season = root / show / "Season 01"
+    season.mkdir(parents=True)
+    for number in range(1, episodes + 1):
+        (season / f"{show} - S01E{number:02d}.mkv").write_bytes(b"video" * 100)
+    return root
+
+
+def _purge_settings(tmp_path):
+    return Settings(
+        anime={"enabled": True},
+        output={"directory": tmp_path / "staging"},
+        transfer={"anime_shows_dir": tmp_path / "shows_anime"},
+    )
+
+
+def test_blacklisting_without_delete_keeps_the_episodes(tmp_path, monkeypatch):
+    """Two separate actions: stopping a show must not destroy what it has."""
+    root = _library(tmp_path)
+    monkeypatch.setattr(erai, "get_settings", lambda: _purge_settings(tmp_path))
+    monkeypatch.setattr(erai, "_load_state", lambda: erai._default_state())
+    monkeypatch.setattr(erai, "_load_policies", lambda: {})
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+
+    result = asyncio.run(erai.purge_series("k", english_title="Test Show", delete_files=False))
+    assert result["deleted_files"] == 0
+    assert list((root / "Test Show" / "Season 01").glob("*.mkv"))
+
+
+def test_purge_deletes_the_show_folder_and_reports_what_it_freed(tmp_path, monkeypatch):
+    root = _library(tmp_path, episodes=3)
+    monkeypatch.setattr(erai, "get_settings", lambda: _purge_settings(tmp_path))
+    monkeypatch.setattr(erai, "_load_state", lambda: erai._default_state())
+    monkeypatch.setattr(erai, "_load_policies", lambda: {})
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+
+    result = asyncio.run(erai.purge_series("k", english_title="Test Show", delete_files=True))
+    assert result["deleted_files"] == 3
+    assert result["freed_bytes"] == 3 * 500
+    assert not (root / "Test Show").exists()
+    # The library root itself is never the thing being removed.
+    assert root.exists()
+
+
+def test_purge_refuses_paths_outside_the_library(tmp_path, monkeypatch):
+    """The show folder is found by name, so containment is the real guard."""
+    _library(tmp_path)
+    outside = tmp_path / "not_the_library"
+    outside.mkdir()
+    (outside / "precious.mkv").write_bytes(b"keep me")
+    monkeypatch.setattr(erai, "get_settings", lambda: _purge_settings(tmp_path))
+    monkeypatch.setattr(erai, "_load_state", lambda: erai._default_state())
+    monkeypatch.setattr(erai, "_load_policies", lambda: {})
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    # Pretend the lookup resolved to somewhere it should never reach.
+    monkeypatch.setattr(erai, "series_files", lambda title: [outside])
+
+    result = asyncio.run(erai.purge_series("k", english_title="Test Show", delete_files=True))
+    assert result["deleted_files"] == 0
+    assert (outside / "precious.mkv").exists()
+
+
+def test_purge_removes_the_series_torrents_with_their_data(tmp_path, monkeypatch):
+    """A rejected episode must not keep downloading onto the same full disk."""
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: {"status": "blacklisted", "title": "[Erai-raws] Test Show - 01 [1080p][HEVC]"},
+        "b" * 40: {"status": "queued", "title": "[Erai-raws] Other Show - 01 [1080p][HEVC]"},
+    }
+    monkeypatch.setattr(erai, "get_settings", lambda: _purge_settings(tmp_path))
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(
+        erai, "_load_policies", lambda: {"test show": {"mode": "blacklisted", "tvdb_id": "1"}}
+    )
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    qbit = _RecordingQbit([])
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
+
+    result = asyncio.run(erai.purge_series("test show", english_title="", delete_files=False))
+    assert result["removed_torrents"] == 1
+    assert qbit.removed == [("a" * 40, True)]
+
+
+def test_blacklist_matches_every_season_of_the_same_series():
+    """The reported bug: one season blacklisted, the other left in review."""
+    policies = {
+        "yozakura san chi no daisakusen 2nd season": {
+            "mode": "blacklisted",
+            "tvdb_id": "417912",
+        }
+    }
+    mappings = {"yozakura san chi no daisakusen": {"tvdb_id": "417912"}}
+    season_two = {"title": "[Erai-raws] Yozakura-san Chi no Daisakusen 2nd Season - 01 [1080p]"}
+    season_one = {"title": "[Erai-raws] Yozakura-san Chi no Daisakusen - 08 [1080p]"}
+    japanese = {"title": "[Erai-raws] Totally Different Name - 03 [1080p]", "canonical": "417912|1|3"}
+    unrelated = {"title": "[Erai-raws] Some Other Show - 01 [1080p]"}
+
+    for release in (season_two, season_one, japanese):
+        assert erai._is_blacklisted_release(release, policies=policies, mappings=mappings)
+    assert not erai._is_blacklisted_release(unrelated, policies=policies, mappings=mappings)
