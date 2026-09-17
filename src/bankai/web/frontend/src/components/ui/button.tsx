@@ -8,7 +8,7 @@ const buttonVariants = cva(
   // Structure only. Every visual property -- fill, border, radius, colour,
   // transition -- is owned by the unlayered button rules in index.css, so the
   // two systems cannot disagree about what a button looks like.
-  'inline-flex cursor-pointer select-none items-center justify-center gap-2 whitespace-nowrap text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0',
+  'inline-flex cursor-pointer select-none items-center justify-center gap-2 whitespace-nowrap text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:size-3.5 [&_svg]:shrink-0',
   {
     variants: {
       variant: {
@@ -18,11 +18,13 @@ const buttonVariants = cva(
         ghost: '',
         destructive: '',
       },
+      // The CRM's control metrics: 30px tall with 9px of padding, which is
+      // noticeably lighter than the 36px these were.
       size: {
-        default: 'h-9 px-4 py-2',
-        sm: 'h-8 px-3 text-xs',
-        lg: 'h-11 px-6 text-sm',
-        icon: 'h-9 w-9',
+        default: 'h-[30px] px-[11px]',
+        sm: 'h-[26px] px-2.5',
+        lg: 'h-9 px-4',
+        icon: 'size-[30px] px-0',
       },
     },
     defaultVariants: { variant: 'default', size: 'default' },
