@@ -5,16 +5,16 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ---------------------------------------------------------------------------
-   Design tokens. The dark palette is taken from the Kargul Studio CRM
-   reference: a near-black ground with solid, very low contrast dividers, so
-   structure comes from spacing and type rather than from boxes.
+   Design tokens. The dark palette is eigenpair.com's: a pitch black ground,
+   near-white type, and one light button for the primary action. Values are
+   full oklch() colours (Tailwind v4 maps them via @theme inline and handles
+   alpha modifiers with color-mix, so no bare-channel trick needed).
 
-   Reference values are kept as hex exactly as measured. Tailwind v4 maps them
-   via @theme inline and handles alpha modifiers with color-mix, so hex and
-   oklch behave the same here.
+   Secondary text sits lighter than eigenpair's 0.66, which is tuned for 20px
+   paragraphs; most of this UI is 11-12px, where 0.66 on black is a strain.
 --------------------------------------------------------------------------- */
 :root {
-  --radius: 0.5rem;
+  --radius: 0.625rem;
 
   --background: oklch(0.99 0 0);
   --foreground: oklch(0.145 0 0);
@@ -84,66 +84,65 @@
 }
 
 .dark {
-  --background: #161616;
-  --foreground: #f9fbff;
-  --foreground-soft: #a4a4a4;
-  --foreground-muted: #7f7f7f;
+  --background: oklch(0.07 0 0);
+  --foreground: oklch(0.985 0 0);
+  /* Lighter than eigenpair's 0.75 / 0.6: this UI sets secondary text at
+     11-12px, where those values read as a strain rather than as hierarchy. */
+  --foreground-soft: oklch(0.82 0 0);
+  --foreground-muted: oklch(0.72 0 0);
 
-  --accent-active: #f9fbff;
-  --accent-active-contrast: #161616;
+  --accent-active: oklch(0.985 0 0);
+  --accent-active-contrast: oklch(0.145 0 0);
 
-  /* Barely lifted off the ground, and very slightly cool against it. */
-  --card: #1b1d20;
-  --card-foreground: #f9fbff;
-  --popover: #1b1d20;
-  --popover-foreground: #f9fbff;
+  --card: oklch(0.115 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.115 0 0);
+  --popover-foreground: oklch(0.985 0 0);
 
   --primary: var(--accent-active);
   --primary-foreground: var(--accent-active-contrast);
 
-  --secondary: #1e1e1e;
-  --secondary-foreground: #f9fbff;
+  --secondary: oklch(0.16 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
 
-  --muted: #2a2a2a;
-  --muted-foreground: #7f7f7f;
+  --muted: oklch(0.155 0 0);
+  --muted-foreground: oklch(0.72 0 0);
 
-  --accent: #2a2a2a;
-  --accent-foreground: #f9fbff;
+  --accent: oklch(0.18 0 0);
+  --accent-foreground: oklch(0.985 0 0);
 
-  --destructive: #f97373;
-  --destructive-foreground: #f9fbff;
-  --success: #22c55e;
-  --queue: #131313;
-  --starting: #818cf8;
-  --extract: #38bdf8;
-  --torrent: #e879f9;
-  --info: #60a5fa;
-  --warning: #fbbf24;
-  --transfer: #a78bfa;
-  --repack: #2dd4bf;
-  /* Solid rather than translucent: a divider should read the same whatever
-     sits behind it, which is what keeps a dense table calm. */
-  --border: #232323;
-  --input: #393939;
-  --ring: #676767;
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --success: oklch(0.72 0.17 145);
+  --queue: oklch(0.02 0 0);
+  --starting: oklch(0.52 0.15 255);
+  --extract: oklch(0.78 0.13 225);
+  --torrent: oklch(0.74 0.21 330);
+  --info: oklch(0.74 0.14 245);
+  --warning: oklch(0.78 0.15 75);
+  --transfer: oklch(0.75 0.17 300);
+  --repack: oklch(0.78 0.14 190);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.556 0 0);
 
-  --chart-1: #f9fbff;
-  --chart-2: #a4a4a4;
-  --chart-3: #7f7f7f;
-  --chart-4: #676767;
-  --chart-5: #454545;
+  --chart-1: oklch(0.985 0 0);
+  --chart-2: oklch(0.8 0 0);
+  --chart-3: oklch(0.66 0 0);
+  --chart-4: oklch(0.52 0 0);
+  --chart-5: oklch(0.38 0 0);
 
-  --sidebar: #171717;
-  --sidebar-foreground: #f9fbff;
+  --sidebar: oklch(0.115 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: var(--accent-active);
   --sidebar-primary-foreground: var(--accent-active-contrast);
-  --sidebar-accent: #232323;
-  --sidebar-accent-foreground: #f9fbff;
-  --sidebar-border: #232323;
-  --sidebar-ring: #676767;
+  --sidebar-accent: oklch(0.18 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
 
   --button-border-primary: oklch(0 0 0 / 0.2);
-  --button-border-neutral: #393939;
+  --button-border-neutral: oklch(1 0 0 / 0.18);
 }
 
 @theme inline {
@@ -208,6 +207,23 @@
    Tailwind utility layers via cascade order. Buttons/inputs opt in by emitting
    data-slot / data-variant attributes.
 --------------------------------------------------------------------------- */
+/* Every button presses. Scale is transform-only so it never reflows the row
+   it sits in, and it is listed explicitly rather than via `all`. */
+[data-slot='button'] {
+  transition: transform 120ms var(--button-transition-ease);
+}
+[data-slot='button']:active:not(:disabled) {
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot='button'] {
+    transition-property: none;
+  }
+  [data-slot='button']:active:not(:disabled) {
+    transform: none;
+  }
+}
+
 [data-slot='button'][data-variant='default'] {
   font-weight: 500;
   border: var(--button-border-width) solid var(--button-border-primary);
@@ -431,16 +447,6 @@
   .poster-card:active {
     transform: translateY(0);
   }
-  /* Grid / table toggle. */
-  .segment {
-    transition:
-      background-color 150ms var(--button-transition-ease),
-      color 150ms var(--button-transition-ease),
-      transform 120ms var(--button-transition-ease);
-  }
-  .segment:active {
-    transform: scale(0.97);
-  }
   @media (hover: hover) and (pointer: fine) {
     .poster-card:hover {
       transform: translateY(-2px);
@@ -449,11 +455,9 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .data-row,
-    .segment,
     .poster-card {
       transition-property: background-color, border-color, color;
     }
-    .segment:active,
     .poster-card:hover,
     .poster-card:active {
       transform: none;

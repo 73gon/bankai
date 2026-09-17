@@ -236,22 +236,19 @@ export default function AnimeLibrary() {
             <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
             <Input aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} className='w-60 pl-9' />
           </div>
-          <div className='flex items-center gap-0.5 rounded-lg border border-border bg-secondary/40 p-0.5' role='group' aria-label='Library view'>
+          <div className='flex items-center gap-1' role='group' aria-label='Library view'>
             {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
-              <button
+              <Button
                 key={value}
-                type='button'
+                size='sm'
+                variant={view === value ? 'secondary' : 'ghost'}
                 aria-pressed={view === value}
                 aria-label={label + ' view'}
                 onClick={() => setView(value)}
-                className={cn(
-                  'segment inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60',
-                  view === value ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground',
-                )}
               >
-                <Icon className='size-3.5' />
+                <Icon data-icon='inline-start' />
                 {label}
-              </button>
+              </Button>
             ))}
           </div>
           <Button variant='secondary' onClick={() => void load()} disabled={loading}><RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan</Button>
@@ -360,11 +357,10 @@ export default function AnimeLibrary() {
                     <DialogTitle>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DialogTitle>
                     <DialogDescription>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)} · TVDB ordering</DialogDescription>
                     <div className='flex flex-wrap items-center gap-2'>
-                      {active.tvdb_id && <Button asChild variant='outline' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
+                      {active.tvdb_id && <Button asChild variant='secondary' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
                       {Boolean(active.avc_count) && (
                         <Button
                           size='sm'
-                          variant='secondary'
                           disabled={!active.tvdb_id || upgrading === active.key}
                           onClick={() => void upgradeToHevc(active)}
                           title='Download HEVC versions of this show&apos;s AVC episodes and replace them'
@@ -425,7 +421,7 @@ export default function AnimeLibrary() {
             {searching ? <div className='flex h-40 items-center justify-center'><Spinner /></div> : results.length ? <div className='flex flex-col gap-2'>
               {results.map((entry) => <Card key={entry.info_hash}><CardContent className='flex flex-wrap items-center justify-between gap-3 p-3'>
                 <div className='flex min-w-0 flex-1 flex-col gap-1'><p className='break-words font-mono text-xs'>{entry.title}</p><p className='text-xs text-muted-foreground'>{entry.quality} · {entry.size} · {entry.seeders} seeds · {entry.publisher}</p></div>
-                <Button asChild size='sm' variant='outline'><a href={entry.detail_url} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> Description</a></Button>
+                <Button asChild size='sm' variant='secondary'><a href={entry.detail_url} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> Description</a></Button>
                 <Button size='sm' disabled={Boolean(downloading)} onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> {downloading === entry.info_hash ? 'Queuing…' : 'Download'}</Button>
               </CardContent></Card>)}
             </div> : <EmptyState icon={Search} title='No matching releases found' description='Try an alternate Erai title above. If numbering is unresolved, select the show mapping in Anime Settings.' />}
