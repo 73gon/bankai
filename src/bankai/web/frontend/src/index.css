@@ -43,6 +43,26 @@
   --surface-raised: oklch(0.96 0 0);
   --surface-raised-hover: oklch(0.92 0 0);
 
+  /* eigenpair's control system. Every interactive surface is raised the same
+     way: a resting fill, an outer stroke and a top highlight. --control-hover
+     is the hovered fill, never the resting one. Fields are the opposite --
+     recessed into --field-surface behind a --field-edge hairline. */
+  --control-surface: #f5f5f5;
+  --control-hover: #ebebeb;
+  --control-edge: #0000001f;
+  --control-highlight: #ffffff;
+  --control-inner-edge: #00000008;
+  --control-focus: #737373;
+  --field-surface: #ffffff;
+  --field-edge: #d4d4d4;
+
+  /* The primary action is a layered fill, not a flat --primary swatch. */
+  --primary-fill: #292929;
+  --primary-fill-hover: #3d3d3d;
+  --primary-sheen: #ffffff1f;
+  --primary-highlight: #ffffff33;
+  --overlay-shadow: 0 12px 36px oklch(0 0 0 / 0.14), 0 2px 6px oklch(0 0 0 / 0.08);
+
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
   --success: oklch(0.59 0.16 145);
@@ -85,11 +105,22 @@
 
   --button-border-width: 2px;
   --button-transition-duration: 150ms;
-  --button-transition-ease: cubic-bezier(0.25, 1, 0.5, 1);
+  --button-transition-ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Text controls 12px, fields 10px, panels 20px. Icon buttons stay circular
+     and are the only round things in the system. */
+  --control-radius: 12px;
+  --field-radius: 10px;
+  --panel-radius: 20px;
+  --raised-sheen: linear-gradient(180deg, var(--control-inner-edge), transparent);
+  --raised-shadow:
+    0 0 0 1px var(--control-edge),
+    inset 0 1px 0 var(--control-highlight),
+    inset 0 0 0 1px var(--control-inner-edge);
 }
 
 .dark {
-  --background: oklch(0 0 0);
+  --background: oklch(0.07 0 0);
   --foreground: oklch(0.985 0 0);
   /* Lighter than eigenpair's 0.75 / 0.6: this UI sets secondary text at
      11-12px, where those values read as a strain rather than as hierarchy. */
@@ -119,7 +150,19 @@
   --primary-hover: oklch(0.89 0 0);
   --surface-raised: oklch(0.19 0 0);
   --surface-raised-hover: oklch(0.25 0 0);
-  --control-edge: inset 0 1px 0 oklch(1 0 0 / 0.08), inset 0 0 0 1px oklch(1 0 0 / 0.055), 0 1px 2px oklch(0 0 0 / 0.5);
+  --control-surface: #1e1e1e;
+  --control-hover: #2a2a2a;
+  --control-edge: #000000a6;
+  --control-highlight: #ffffff1a;
+  --control-inner-edge: #ffffff0f;
+  --control-focus: #999999;
+  --field-surface: #161616;
+  --field-edge: #393939;
+
+  --primary-fill: #ededed;
+  --primary-fill-hover: #ffffff;
+  --primary-sheen: #ffffff40;
+  --primary-highlight: #ffffffcc;
   --overlay-shadow: 0 12px 36px oklch(0 0 0 / 0.6), 0 2px 6px oklch(0 0 0 / 0.35);
 
   --destructive: oklch(0.704 0.191 22.216);
@@ -221,120 +264,150 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Compact CRM-inspired controls translated into Bankai's monochrome palette.
-   Fine inset edges define surfaces without glowing outlines. Unlayered rules
-   keep the shared visual treatment consistent across utility-based layouts.
+   Controls, after the eigenpair brand system.
+
+   One treatment governs every interactive surface -- buttons, sidebar rows,
+   tabs, chips, hoverable cards: a resting fill, an outer stroke and a top
+   highlight, with --control-hover as the hovered fill. The three ways to get
+   this wrong were all in this file: swapping the background alone with no
+   stroke, using the resting fill as a hover state, and leaving the 150ms
+   transition off. Fields go the other way and sit recessed.
 --------------------------------------------------------------------------- */
 [data-slot='button'] {
-  /* Sans, not the mono the rest of this UI is set in. Mono at 14px reads
-     mechanical and wide; the CRM's controls are sans at 12px, and that is
-     most of why they feel light to use. */
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   gap: 6px;
   border: none;
-  box-shadow: var(--control-edge);
-  border-radius: 999px;
+  border-radius: var(--control-radius);
   transition:
     background-color var(--button-transition-duration) var(--button-transition-ease),
     color var(--button-transition-duration) var(--button-transition-ease),
+    box-shadow var(--button-transition-duration) var(--button-transition-ease),
     transform 120ms var(--button-transition-ease);
 }
-/* Square-ish controls that are not really buttons keep their own corners. */
+/* Icon-only buttons are the round ones. Text buttons are not pills. */
 [data-slot='button'][data-size='icon'] {
-  border-radius: 999px;
+  border-radius: 9999px;
 }
 [data-slot='button']:active:not(:disabled):not(:focus-visible) {
   transform: scale(0.97);
 }
 @media (prefers-reduced-motion: reduce) {
   [data-slot='button'] {
-    transition-property: background-color, color;
+    transition-property: background-color, color, box-shadow;
   }
   [data-slot='button']:active:not(:disabled) {
     transform: none;
   }
 }
 
+/* Focus is a flush 2px outline: no detached halo, never suppressed. */
+[data-slot='button']:focus-visible,
+[data-slot='input']:focus-visible,
+[data-slot='textarea']:focus-visible,
+[data-slot='select-trigger']:focus-visible,
+[data-slot='tabs-trigger']:focus-visible,
+.sidebar-link:focus-visible,
+.filter-chip:focus-visible {
+  outline: 2px solid var(--control-focus);
+  outline-offset: 0;
+}
+
+/* The primary action keeps its layered fill rather than a flat --primary. */
 [data-slot='button'][data-variant='default'] {
-  background-color: var(--primary);
+  background-color: var(--primary-fill);
+  background-image: linear-gradient(180deg, var(--primary-sheen), transparent);
   color: var(--primary-foreground);
-  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.3), 0 1px 2px oklch(0 0 0 / 0.3);
+  box-shadow:
+    0 0 0 1px var(--control-edge),
+    inset 0 1px 0 var(--primary-highlight);
 }
 [data-slot='button'][data-variant='default']:hover:not(:disabled) {
-  background-color: var(--primary-hover);
+  background-color: var(--primary-fill-hover);
 }
 
 [data-slot='button'][data-variant='secondary'],
 [data-slot='button'][data-variant='outline'] {
-  background-color: var(--surface-raised);
+  background-color: var(--control-surface);
+  background-image: var(--raised-sheen);
   color: var(--foreground);
+  box-shadow: var(--raised-shadow);
 }
 [data-slot='button'][data-variant='secondary']:hover:not(:disabled),
 [data-slot='button'][data-variant='outline']:hover:not(:disabled) {
-  background-color: var(--surface-raised-hover);
+  background-color: var(--control-hover);
 }
 
+/* Ghost buttons rest flat and rise into the full treatment on hover -- fill,
+   stroke and highlight together, not a bare background swap. */
 [data-slot='button'][data-variant='ghost'] {
   background-color: transparent;
   color: var(--foreground-muted);
   box-shadow: none;
 }
 [data-slot='button'][data-variant='ghost']:hover:not(:disabled) {
-  background-color: var(--surface-raised);
+  background-color: var(--control-hover);
+  background-image: var(--raised-sheen);
   color: var(--foreground);
+  box-shadow: var(--raised-shadow);
 }
 
+/* Red is a status colour here, not a brand accent: it marks the one control
+   that destroys something and appears nowhere else. */
 [data-slot='button'][data-variant='destructive'] {
   background-color: oklch(0.704 0.191 22.216 / 0.15);
   color: oklch(0.82 0.13 22.216);
+  box-shadow: 0 0 0 1px oklch(0.704 0.191 22.216 / 0.28);
 }
 [data-slot='button'][data-variant='destructive']:hover:not(:disabled) {
   background-color: oklch(0.704 0.191 22.216 / 0.26);
   color: oklch(0.9 0.1 22.216);
 }
 
-
+/* Fields are recessed: the one place the raised treatment is inverted. */
 [data-slot='input'],
 [data-slot='textarea'],
 [data-slot='select-trigger'] {
   font-family: var(--font-body);
-  font-size: 12px;
-  background: var(--surface-raised);
-  border-color: var(--border);
+  font-size: 14px;
+  border-radius: var(--field-radius);
+  background: var(--field-surface);
+  border: 1px solid var(--field-edge);
   box-shadow: none;
-  transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+  transition:
+    background-color var(--button-transition-duration) var(--button-transition-ease),
+    border-color var(--button-transition-duration) var(--button-transition-ease),
+    box-shadow var(--button-transition-duration) var(--button-transition-ease);
 }
-[data-slot='select-trigger'] {
-  border-radius: 999px;
-  border: 0;
-  box-shadow: var(--control-edge);
-}
-[data-slot='select-trigger'][data-state='open'] {
-  background: var(--surface-raised-hover);
+[data-slot='input'],
+[data-slot='textarea'] {
+  min-height: 44px;
 }
 @media (hover: hover) and (pointer: fine) {
-  [data-slot='select-trigger']:hover:not(:disabled) { background: var(--surface-raised-hover); }
   [data-slot='input']:hover:not(:disabled),
-  [data-slot='textarea']:hover:not(:disabled) { border-color: var(--line-strong); }
+  [data-slot='textarea']:hover:not(:disabled),
+  [data-slot='select-trigger']:hover:not(:disabled) {
+    border-color: var(--control-focus);
+  }
 }
-[data-slot='input']:focus-visible,
-[data-slot='textarea']:focus-visible,
-[data-slot='select-trigger']:focus-visible {
-  border-color: var(--foreground);
-  box-shadow: 0 0 0 3px oklch(0.6 0 0 / 0.18);
+[data-slot='select-trigger'][data-state='open'] {
+  border-color: var(--control-focus);
 }
 
-/* Menus keep Radix positioning and keyboard behavior with a shared surface. */
+/* Menus keep Radix positioning and keyboard behaviour on a shared surface. */
 [data-slot='select-content'],
 [data-slot='popover-content'],
 [data-slot='tooltip-content'] {
   font-family: var(--font-body);
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--field-edge);
   background: var(--popover);
   box-shadow: var(--overlay-shadow);
-  border-radius: 10px;
+  border-radius: var(--control-radius);
+}
+[data-slot='select-item'] {
+  border-radius: 7px;
+  min-height: 40px;
 }
 [data-slot='select-content'] { transform-origin: var(--radix-select-content-transform-origin); }
 [data-slot='popover-content'] { transform-origin: var(--radix-popover-content-transform-origin); }
@@ -346,22 +419,67 @@
     animation: menu-enter 160ms var(--button-transition-ease);
   }
 }
+
+/* Tabs are interactive surfaces too: the selected one is raised, the rest are
+   flat until hovered. */
 [data-slot='tabs-list'] { font-family: var(--font-body); }
+[data-slot='tabs-trigger'] {
+  border-radius: var(--control-radius);
+  transition:
+    background-color var(--button-transition-duration) var(--button-transition-ease),
+    color var(--button-transition-duration) var(--button-transition-ease),
+    box-shadow var(--button-transition-duration) var(--button-transition-ease);
+}
+[data-slot='tabs-trigger'][data-state='active'] {
+  background-color: var(--control-surface);
+  background-image: var(--raised-sheen);
+  box-shadow: var(--raised-shadow);
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-slot='tabs-trigger']:not([data-state='active']):hover {
+    background-color: var(--control-hover);
+    background-image: var(--raised-sheen);
+    box-shadow: var(--raised-shadow);
+  }
+}
+
+/* Navigation rows: 12px, raised the same way everything else is. */
 .sidebar-link {
+  border-radius: var(--control-radius);
   color: var(--foreground-muted);
-  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+  transition:
+    background-color var(--button-transition-duration) var(--button-transition-ease),
+    color var(--button-transition-duration) var(--button-transition-ease),
+    box-shadow var(--button-transition-duration) var(--button-transition-ease);
 }
 .sidebar-link[aria-current='page'] {
   color: var(--foreground);
-  background: var(--sidebar-primary);
-  box-shadow: var(--control-edge);
+  background-color: var(--control-surface);
+  background-image: var(--raised-sheen);
+  box-shadow: var(--raised-shadow);
 }
-.sidebar-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .sidebar-link svg { opacity: 0.65; }
 .sidebar-link[aria-current='page'] svg { opacity: 1; }
 @media (hover: hover) and (pointer: fine) {
-  .sidebar-link:hover { background: var(--sidebar-accent); color: var(--foreground); }
+  .sidebar-link:hover {
+    background-color: var(--control-hover);
+    background-image: var(--raised-sheen);
+    box-shadow: var(--raised-shadow);
+    color: var(--foreground);
+  }
 }
+
+/* Panels carry the one radius that is not a control's. */
+.panel {
+  border-radius: var(--panel-radius);
+}
+/* The raised treatment on something that is not a control: the wordmark tile. */
+.raised {
+  background-color: var(--control-surface);
+  background-image: var(--raised-sheen);
+  box-shadow: var(--raised-shadow);
+}
+
 @keyframes menu-enter {
   from { opacity: 0; transform: scale(0.97); }
   to { opacity: 1; transform: scale(1); }
@@ -380,6 +498,7 @@
   /* Shared sans typography; explicit mono remains useful for measurements. */
   h1, h2, h3, h4 {
     @apply font-serif;
+    letter-spacing: -0.02em;
   }
 
   /* Body copy: Geist sans. */
@@ -447,7 +566,7 @@
   }
   /* Mono uppercase micro-label ("SOFTWARE"-style eyebrow). */
   .label-mono {
-    @apply font-mono text-[0.7rem] font-medium uppercase tracking-[0.14em] text-muted-foreground;
+    @apply font-mono text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground;
   }
   .ansi-log {
     white-space: pre-wrap;
@@ -459,10 +578,10 @@
   .drawer-overlay {
     background-color: oklch(0 0 0 / 0.6);
     backdrop-filter: blur(6px);
-    animation: drawer-fade 350ms cubic-bezier(0.25, 1, 0.5, 1);
+    animation: drawer-fade 350ms var(--button-transition-ease);
   }
   .drawer-panel {
-    animation: drawer-in 350ms cubic-bezier(0.25, 1, 0.5, 1);
+    animation: drawer-in 350ms var(--button-transition-ease);
   }
   @media (prefers-reduced-motion: reduce) {
     .drawer-panel {
@@ -485,6 +604,7 @@
   .poster-card {
     transition:
       border-color 180ms var(--button-transition-ease),
+      box-shadow 180ms var(--button-transition-ease),
       transform 180ms var(--button-transition-ease);
   }
   .poster-card:active {
@@ -493,7 +613,8 @@
   @media (hover: hover) and (pointer: fine) {
     .poster-card:hover {
       transform: translateY(-2px);
-      border-color: var(--input);
+      border-color: transparent;
+      box-shadow: var(--raised-shadow);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -516,7 +637,29 @@
       background-color 150ms var(--button-transition-ease),
       border-color 150ms var(--button-transition-ease),
       color 150ms var(--button-transition-ease),
+      box-shadow 150ms var(--button-transition-ease),
       transform 120ms var(--button-transition-ease);
+  }
+  .filter-chip[aria-pressed] {
+    border: none;
+    background-color: transparent;
+    color: var(--foreground-muted);
+  }
+  .filter-chip[aria-pressed='true'] {
+    background-color: var(--primary-fill);
+    background-image: linear-gradient(180deg, var(--primary-sheen), transparent);
+    color: var(--primary-foreground);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--primary-highlight);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .filter-chip[aria-pressed='false']:hover {
+      background-color: var(--control-hover);
+      background-image: var(--raised-sheen);
+      box-shadow: var(--raised-shadow);
+      color: var(--foreground);
+    }
   }
   .filter-chip:active {
     transform: scale(0.97);

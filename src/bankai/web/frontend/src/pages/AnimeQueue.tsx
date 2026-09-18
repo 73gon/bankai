@@ -255,10 +255,7 @@ export default function AnimeQueue() {
                 aria-pressed={active}
                 onClick={() => setStatus(chip.value)}
                 className={cn(
-                  'filter-chip inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60',
-                  active
-                    ? 'border-transparent bg-primary text-primary-foreground'
-                    : 'border-border/70 bg-secondary/40 text-muted-foreground hover:bg-secondary hover:text-foreground',
+                  'filter-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium',
                 )}
               >
                 {chip.label}

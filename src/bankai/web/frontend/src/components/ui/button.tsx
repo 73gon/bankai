@@ -8,7 +8,7 @@ const buttonVariants = cva(
   // Structure only. Every visual property -- fill, border, radius, colour,
   // transition -- is owned by the unlayered button rules in index.css, so the
   // two systems cannot disagree about what a button looks like.
-  'inline-flex cursor-pointer select-none items-center justify-center gap-2 whitespace-nowrap text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:size-3.5 [&_svg]:shrink-0',
+  'inline-flex cursor-pointer select-none items-center justify-center gap-2 whitespace-nowrap disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:size-3.5 [&_svg]:shrink-0',
   {
     variants: {
       variant: {

@@ -66,7 +66,7 @@ function useSidebarState() {
 function BrandMark() {
   return (
     <div className='flex items-center gap-2.5'>
-      <span className='flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary text-foreground shadow-[var(--control-edge)]' aria-hidden='true'>
+      <span className='raised flex size-7 shrink-0 items-center justify-center rounded-lg text-foreground' aria-hidden='true'>
         <Clapperboard className='size-4' strokeWidth={1.7} />
       </span>
       <div className='flex flex-col gap-0.5'>
