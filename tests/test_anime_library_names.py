@@ -94,3 +94,58 @@ def test_merge_episodes_marks_each_episode_with_its_codec():
     # An episode that is not downloaded has no encode to report.
     assert by_number[3]["codec"] is None
 
+
+def test_the_release_state_is_read_once_for_the_whole_library(monkeypatch):
+    """It is a fourteen megabyte file; reading it per show cost twenty seconds."""
+    import asyncio
+    from pathlib import Path
+
+    from bankai.web import anime_library, discover, erai
+
+    reads = []
+    state = erai._default_state()
+    state["releases"] = {
+        f"{n:040x}": {"status": "done", "title": f"[Erai-raws] Show {n} - 01 [1080p][HEVC]"}
+        for n in range(1, 21)
+    }
+    state["canonical"] = {
+        f"{n}|1|1": {"info_hash": f"{n:040x}"} for n in range(1, 21)
+    }
+
+    def load():
+        reads.append(1)
+        return state
+
+    monkeypatch.setattr(erai, "_load_state", load)
+    monkeypatch.setattr(anime_library, "known_ids", lambda: {})
+    monkeypatch.setattr(discover, "is_configured", lambda: False)
+    monkeypatch.setattr(anime_library, "_nfo_id", lambda path: None)
+    monkeypatch.setattr(anime_library, "probed_codecs", lambda files: {})
+    monkeypatch.setattr(anime_library, "german_dubbed_episodes", lambda files: set())
+
+    async def metadata(title, tvdb_id=None):
+        return {"english_title": title, "tvdb_id": tvdb_id}
+
+    monkeypatch.setattr(anime_library, "show_metadata", metadata)
+
+    entries = [
+        {
+            "path": f"/library/Show {n}/Season 01/ep.mkv",
+            "rel_path": f"Show {n}/Season 01/ep.mkv",
+            "name": f"Show {n} - S01E01.mkv",
+            "series": f"Show {n}",
+            "season": "Season 01",
+            "size": 1,
+            "mtime": 0,
+            "staged": False,
+            "stage": "final",
+            "transfer_status": "idle",
+        }
+        for n in range(1, 21)
+    ]
+    shows = asyncio.run(anime_library.group_shows(entries, Path("/library")))
+
+    assert len(shows) == 20
+    # One read for the codec index, whatever the library holds.
+    assert len(reads) == 1
+

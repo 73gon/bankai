@@ -354,21 +354,19 @@ def german_dubbed_episodes(files: list[dict]) -> set[tuple[int, int]]:
     return found
 
 
-def episode_codecs(tvdb_id: int | None) -> dict[tuple[int, int], str]:
-    """Codec of each published episode of a series, keyed by season/episode.
+def codec_index(state: dict | None = None) -> dict[str, dict[tuple[int, int], str]]:
+    """Every series' published encodes, from a single read of the release state.
 
-    Read from the release that produced the file rather than by probing it.
-    The library holds thousands of episodes and the disk it lives on is slow;
-    the release title already records the encode that was downloaded.
+    Built for the whole library at once. Asking per series meant re-reading and
+    re-parsing a fourteen megabyte state file once for each of them, which was
+    the entire reason the library page took twenty seconds to answer.
     """
-    if not tvdb_id:
-        return {}
-    state = erai._load_state()
+    state = erai._load_state() if state is None else state
     releases = state.get("releases", {})
-    found: dict[tuple[int, int], str] = {}
+    index: dict[str, dict[tuple[int, int], str]] = {}
     for canonical, row in state.get("canonical", {}).items():
         parts = str(canonical).split("|")
-        if len(parts) != 3 or parts[0] != str(tvdb_id):
+        if len(parts) != 3:
             continue
         release = releases.get(str(row.get("info_hash") or ""))
         if not release:
@@ -377,8 +375,16 @@ def episode_codecs(tvdb_id: int | None) -> dict[tuple[int, int], str]:
             key = (int(parts[1]), int(parts[2]))
         except ValueError:
             continue
-        found[key] = "hevc" if erai._is_hevc_title(str(release.get("title") or "")) else "avc"
-    return found
+        codec = "hevc" if erai._is_hevc_title(str(release.get("title") or "")) else "avc"
+        index.setdefault(parts[0], {})[key] = codec
+    return index
+
+
+def episode_codecs(tvdb_id: int | None) -> dict[tuple[int, int], str]:
+    """Codecs for one series. Prefer :func:`codec_index` for a whole page."""
+    if not tvdb_id:
+        return {}
+    return codec_index().get(str(tvdb_id), {})
 
 
 def merge_episodes(
@@ -572,7 +578,11 @@ async def group_shows(
             }
         )
     ids = await asyncio.to_thread(known_ids)
-    tracked = (await asyncio.to_thread(erai._load_state)).get("series", {})
+    # One read of the release state for the whole page, not one per show: it
+    # is a fourteen megabyte file, and per show it cost twenty seconds.
+    state = await asyncio.to_thread(erai._load_state)
+    codecs_by_series = codec_index(state)
+    tracked = state.get("series", {})
     names = {_name(title) for title in groups}
     for record in tracked.values():
         title = record.get("english_title")
@@ -593,7 +603,7 @@ async def group_shows(
                 with suppress(Exception):
                     roster = await episode_roster(tvdb_id)
         codecs = {
-            **await asyncio.to_thread(episode_codecs, tvdb_id),
+            **codecs_by_series.get(str(tvdb_id), {}),
             **await asyncio.to_thread(probed_codecs, files),
         }
         dubbed = await asyncio.to_thread(german_dubbed_episodes, files)
