@@ -34,6 +34,50 @@ def test_a_folder_and_its_tvdb_title_are_the_same_show(folder_name, tvdb_title):
     assert _name(folder_name) == _name(tvdb_title)
 
 
+@pytest.mark.parametrize(
+    "source_title,expected",
+    [
+        # Erai names a source show per season; TVDB holds one series.
+        ("Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"),
+        ("Some Show Season 2", "Some Show"),
+        ("Some Show 3rd Season", "Some Show"),
+        ("Some Show S04", "Some Show"),
+        ("Some Show (2024)", "Some Show"),
+        # A number that is part of the name stays.
+        ("Mob Psycho 100", "Mob Psycho 100"),
+        ("Steins;Gate 0", "Steins;Gate 0"),
+        ("86", "86"),
+    ],
+)
+def test_the_season_suffix_comes_off_before_the_tvdb_search(source_title, expected):
+    """Left on, it went into the query and the alias comparison, so nothing
+    matched and the card kept its romaji name with no cover."""
+    from bankai.web.anime_library import _search_title
+
+    assert _search_title(source_title) == expected
+
+
+def test_a_failed_lookup_is_not_cached_as_an_answer(monkeypatch, tmp_path):
+    """A miss held the show at its romaji name with no cover for a full day."""
+    import asyncio
+
+    from bankai.web import anime_library, discover
+
+    monkeypatch.setattr(anime_library, "_CACHE", {})
+    monkeypatch.setattr(discover, "is_configured", lambda: True)
+
+    async def no_candidates(query):
+        return []
+
+    monkeypatch.setattr(anime_library.anime, "tvdb_candidates", no_candidates)
+    stored: dict = {}
+    monkeypatch.setattr(anime_library, "_persistent_put", lambda k, v: stored.update({k: v}))
+    monkeypatch.setattr(anime_library, "_persistent_get", lambda k: None)
+
+    assert asyncio.run(anime_library.show_metadata("Nothing Matches This")) == {}
+    assert stored == {}
+
+
 def test_genuinely_different_shows_stay_apart():
     assert _name("Grand Blue") != _name("Grand Blue Dreaming")
     assert _name("Show A (2024)") != _name("Show B (2024)")

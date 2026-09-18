@@ -96,12 +96,28 @@ def _name(value: str) -> str:
 _MULTISPACE = re.compile(r"\s+")
 
 
+# " S3", " Season 3", " 3rd Season" -- how Erai distinguishes a season, and
+# not part of the show's name as TVDB knows it.
+_SEASON_SUFFIX = re.compile(
+    r"\s+(?:S\d{1,2}|Season\s+\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s+Season)$",
+    re.IGNORECASE,
+)
+
+
+def _search_title(title: str) -> str:
+    """The show's own name, without the year or the season it happens to be."""
+    stripped = re.sub(r"\s*\(\d{4}\)$", "", title).strip()
+    return _SEASON_SUFFIX.sub("", stripped).strip() or stripped
+
+
 async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
     key = f"id:{tvdb_id}" if tvdb_id else _name(title)
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < 900:
         return hit[1]
-    persisted = _persistent_get(f"metadata:{key}")
+    # Versioned: entries cached before the season suffix was understood hold an
+    # empty result that would otherwise be served for another day.
+    persisted = _persistent_get(f"metadata:v2:{key}")
     if isinstance(persisted, dict):
         _CACHE[key] = (time.time(), persisted)
         return persisted
@@ -111,12 +127,13 @@ async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
             if tvdb_id:
                 metadata = asdict(await anime.series_metadata(tvdb_id))
             else:
-                candidates = await anime.tvdb_candidates(re.sub(r"\s*\(\d{4}\)$", "", title))
+                query = _search_title(title)
+                candidates = await anime.tvdb_candidates(query)
                 exact = [
                     item
                     for item in candidates
                     if item.kind == "show"
-                    and _name(title)
+                    and _name(query)
                     in {
                         _name(item.english_title),
                         _name(item.japanese_title or ""),
@@ -128,7 +145,10 @@ async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
         except Exception:
             pass  # Library browsing remains available during provider outages.
     _CACHE[key] = (time.time(), metadata)
-    _persistent_put(f"metadata:{key}", metadata)
+    # A miss is not an answer. Persisting it would hold the show at its romaji
+    # name with no cover for a day, including through a provider outage.
+    if metadata:
+        _persistent_put(f"metadata:v2:{key}", metadata)
     return metadata
 
 

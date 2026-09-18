@@ -36,6 +36,22 @@ def test_anime_nested_pages_have_spa_routes(client: TestClient) -> None:
         assert "<html" in response.text
 
 
+def test_marking_a_series_owned_is_not_read_as_an_info_hash(client: TestClient) -> None:
+    """/api/anime/review/owned once matched /api/anime/review/{info_hash}.
+
+    FastAPI takes routes in registration order, so "owned" arrived as an info
+    hash, no release by that name existed, and every "Already downloaded"
+    click answered "Held release was not found".
+    """
+    response = client.post("/api/anime/review/owned", json={"key": "nothing-held"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "cleared": 0}
+
+
+def test_marking_owned_still_requires_something_to_mark(client: TestClient) -> None:
+    assert client.post("/api/anime/review/owned", json={}).status_code == 422
+
+
 def test_anime_automation_defaults_to_100_gib_reserve(client: TestClient) -> None:
     body = client.get("/api/anime/automation").json()
     assert body["min_free_space_gib"] == 100

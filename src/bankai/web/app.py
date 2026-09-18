@@ -1453,6 +1453,17 @@ def create_app() -> Any:
         rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.review_items))
         return {"items": rows}
 
+    @app.post("/api/anime/review/owned")
+    async def anime_review_mark_owned(req: dict) -> dict:
+        """Dismiss held releases already present in the library."""
+        hashes = req.get("info_hashes")
+        key = str(req.get("key") or "")
+        if isinstance(hashes, list) and hashes:
+            return await asyncio.to_thread(erai_mod.mark_releases_owned, [str(h) for h in hashes])
+        if key:
+            return await asyncio.to_thread(erai_mod.mark_series_owned, key)
+        raise HTTPException(status_code=422, detail="info_hashes or key is required")
+
     @app.post("/api/anime/review/{info_hash}")
     async def anime_review_action(info_hash: str, req: dict) -> dict:
         try:
@@ -1495,17 +1506,6 @@ def create_app() -> Any:
         """Every held release behind one review card."""
         rows = await asyncio.to_thread(erai_mod.review_releases, key)
         return {"items": rows}
-
-    @app.post("/api/anime/review/owned")
-    async def anime_review_mark_owned(req: dict) -> dict:
-        """Dismiss held releases already present in the library."""
-        hashes = req.get("info_hashes")
-        key = str(req.get("key") or "")
-        if isinstance(hashes, list) and hashes:
-            return await asyncio.to_thread(erai_mod.mark_releases_owned, [str(h) for h in hashes])
-        if key:
-            return await asyncio.to_thread(erai_mod.mark_series_owned, key)
-        raise HTTPException(status_code=422, detail="info_hashes or key is required")
 
     @app.get("/api/anime/blacklist")
     async def anime_blacklist() -> dict:

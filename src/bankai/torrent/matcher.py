@@ -20,8 +20,10 @@ from bankai.scraper.base import EpisodeRef
 
 _VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts", ".webm"}
 
-_SXX_EXX = re.compile(r"[Ss](?P<season>\d{1,2})[._\s-]?[Ee](?P<episode>\d{1,3})")
-_NUM_X_NUM = re.compile(r"\b(?P<season>\d{1,2})x(?P<episode>\d{1,3})\b")
+# Four digits, not three: One Piece is past 1100, and a three-digit cap does
+# not fail on "S21E1085" -- it quietly returns episode 108.
+_SXX_EXX = re.compile(r"[Ss](?P<season>\d{1,2})[._\s-]?[Ee](?P<episode>\d{1,4})")
+_NUM_X_NUM = re.compile(r"\b(?P<season>\d{1,2})x(?P<episode>\d{1,4})\b")
 
 
 @dataclass(frozen=True, slots=True)

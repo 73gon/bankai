@@ -236,6 +236,20 @@ def test_parse_se_variants() -> None:
     assert parse_se("Movie.2010.mkv") is None
 
 
+def test_parse_se_reads_four_digit_episodes() -> None:
+    """A three-digit cap did not fail on One Piece, it lied.
+
+    "S21E1085" came back as episode 108 -- the real episode 108's key -- so
+    the library collapsed dozens of episodes onto a handful of wrong numbers
+    and reported the survivors.
+    """
+    assert parse_se("One Piece - S21E1085.mkv") == (21, 1085)
+    assert parse_se("One Piece - S21E0999.mkv") == (21, 999)
+    assert parse_se("One Piece - 21x1085.mkv") == (21, 1085)
+    # Shorter numbers are untouched.
+    assert parse_se("One Piece - S21E108.mkv") == (21, 108)
+
+
 def test_pick_movie_file_returns_largest(tmp_path: Path) -> None:
     (tmp_path / "small.mkv").write_bytes(b"x" * 100)
     big = tmp_path / "movie.mkv"
