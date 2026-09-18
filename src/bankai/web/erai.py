@@ -46,6 +46,7 @@ _STOP = asyncio.Event()
 _GIB = 1024**3
 _ROSTERS: ContextVar[dict | None] = ContextVar("erai_rosters", default=None)
 _ADMISSION: ContextVar[dict | None] = ContextVar("erai_admission", default=None)
+_DISK_INDEX: ContextVar[dict | None] = ContextVar("erai_disk_index", default=None)
 _GERMAN_LINE = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:german|deutsch)(?:\s*\([^\n)]*\))?\s*(?:[|:]|$)"
 )
@@ -215,6 +216,74 @@ def review_items() -> list[dict[str, Any]]:
         if reason and reason not in row["reasons"]:
             row["reasons"].append(reason)
     return sorted(groups.values(), key=lambda row: row["source_title"].casefold())
+
+
+def review_releases(key: str) -> list[dict[str, Any]]:
+    """Every held release behind one review card.
+
+    A group can hold dozens of releases that do not agree with each other --
+    One Piece had sixty-three, some listing German and some not -- and the card
+    only ever showed the first. Judging them needs all of them.
+    """
+    state = _load_state()
+    recent = {item.get("info_hash"): item for item in state.get("held", [])}
+    rows: list[dict[str, Any]] = []
+    for info_hash, release in state.get("releases", {}).items():
+        title = str(release.get("title") or "")
+        if release.get("status") != "held" or not title or _mapping_key(title) != key:
+            continue
+        saved = release.get("entry") or {}
+        rows.append(
+            {
+                "info_hash": info_hash,
+                "title": title,
+                "reason": release.get("reason", "Held for review"),
+                "detail_url": saved.get("detail_url") or recent.get(info_hash, {}).get("detail_url"),
+                "quality": saved.get("quality") or recent.get(info_hash, {}).get("quality"),
+                # Shown so the disagreement inside a group is visible at a
+                # glance rather than only in the release name.
+                "german_in_title": title_lists_german_subtitles(title),
+                "hevc": _is_hevc_title(title),
+                "episode": anime_mod.release_episode_info(title)[1],
+            }
+        )
+    rows.sort(key=lambda row: (row["episode"] is None, row["episode"] or 0, row["title"]))
+    return rows
+
+
+def mark_releases_owned(info_hashes: list[str]) -> dict[str, int]:
+    """Dismiss held releases as already downloaded.
+
+    Neither blacklisting nor deleting: the episode is in the library, the
+    release is simply not wanted. Recorded as "existing" so discovery treats it
+    the way it treats anything else it finds already on disk.
+    """
+    cleared = 0
+    with _STATE_LOCK:
+        state = _load_state()
+        requests = _load_retry_requests()
+        wanted = {str(value).casefold() for value in info_hashes}
+        for info_hash, release in state.get("releases", {}).items():
+            if info_hash.casefold() not in wanted or release.get("status") != "held":
+                continue
+            release.update(status="existing", reason="Already in the library")
+            release.pop("retry_after", None)
+            requests.pop(info_hash, None)
+            cleared += 1
+        if cleared:
+            state["held"] = [
+                row
+                for row in state.get("held", [])
+                if str(row.get("info_hash", "")).casefold() not in wanted
+            ]
+            _save_retry_requests(requests)
+            _save_state(state)
+    return {"ok": True, "cleared": cleared}
+
+
+def mark_series_owned(key: str) -> dict[str, int]:
+    """Dismiss every held release of one series as already downloaded."""
+    return mark_releases_owned([row["info_hash"] for row in review_releases(key)])
 
 
 def blacklist_items() -> list[dict[str, Any]]:
@@ -1151,6 +1220,40 @@ async def _german_alternative(
     return None
 
 
+def _episode_on_disk(english_title: str, season: int, episode: int) -> bool:
+    """Is this episode already in the library?
+
+    Cached for the cycle: a season pack asks the same question for every
+    episode it contains, and the answer is one directory walk over a slow
+    library disk.
+    """
+    from bankai.backend.transfer import _existing_show_folder
+    from bankai.torrent.matcher import parse_se
+
+    if not english_title:
+        return False
+    cache = _DISK_INDEX.get()
+    if cache is None:
+        cache = {}
+        _DISK_INDEX.set(cache)
+    have = cache.get(english_title)
+    if have is None:
+        have = set()
+        folder = _existing_show_folder(
+            english_title,
+            cache={},
+            roots=[Path(get_settings().transfer.anime_shows_dir)],
+        )
+        if folder is not None:
+            for path in folder.rglob("*"):
+                if path.is_file() and path.suffix.casefold() in _VIDEO_SUFFIXES:
+                    identity = parse_se(path.name)
+                    if identity:
+                        have.add(identity)
+        cache[english_title] = have
+    return (season, episode) in have
+
+
 async def _consider(
     state: dict[str, Any],
     entry: anime_mod.NyaaEntry,
@@ -1174,6 +1277,43 @@ async def _consider(
     if not entry.trusted or entry.remake:
         _hold(state, entry, "Release is not a trusted, original Nyaa upload")
         return False
+    # Identity first, then ownership, and only then subtitles. The subtitle
+    # check used to run before either, so an episode already sitting in the
+    # library was held for review over subtitles it did not need -- which is
+    # what put a finished Bleach arc in the review queue. Resolving first also
+    # means an episode we already have costs no Nyaa request at all.
+    match, identity, error = await _resolve(entry)
+    if error or match is None or identity is None:
+        _hold(state, entry, error or "TVDB resolution failed")
+        return False
+    if str(match.tvdb_id) in _policy_tvdb_ids():
+        # The title key check above only sees the words in this release's name;
+        # the series behind it is only known once TVDB has resolved it.
+        state["releases"][entry.info_hash] = {
+            "status": "blacklisted",
+            "title": entry.title,
+            "reason": "Series blacklisted by user",
+        }
+        return False
+    state["series"][str(match.tvdb_id)] = asdict(match)
+    canonical = f"{match.tvdb_id}|{identity.season}|{identity.episode}"
+    previous = state["canonical"].get(canonical)
+    resolution = _resolution(entry)
+    if previous and int(previous.get("resolution", 0)) >= resolution:
+        state["releases"][entry.info_hash] = {
+            "status": "duplicate",
+            "title": entry.title,
+            "canonical": canonical,
+        }
+        return False
+    if _episode_on_disk(match.english_title, identity.season, identity.episode):
+        state["releases"][entry.info_hash] = {
+            "status": "existing",
+            "title": entry.title,
+            "canonical": canonical,
+        }
+        return False
+
     try:
         description, magnet, uploader = await anime_mod._detail_url(client, entry.detail_url)
     except Exception as exc:
@@ -1202,49 +1342,6 @@ async def _consider(
         return False
     if magnet:
         entry = replace(entry, magnet_uri=magnet, description=description)
-    match, identity, error = await _resolve(entry)
-    if error or match is None or identity is None:
-        _hold(state, entry, error or "TVDB resolution failed")
-        return False
-    if str(match.tvdb_id) in _policy_tvdb_ids():
-        # The title key check above only sees the words in this release's name;
-        # the series behind it is only known once TVDB has resolved it.
-        state["releases"][entry.info_hash] = {
-            "status": "blacklisted",
-            "title": entry.title,
-            "reason": "Series blacklisted by user",
-        }
-        return False
-    state["series"][str(match.tvdb_id)] = asdict(match)
-    canonical = f"{match.tvdb_id}|{identity.season}|{identity.episode}"
-    previous = state["canonical"].get(canonical)
-    resolution = _resolution(entry)
-    if previous and int(previous.get("resolution", 0)) >= resolution:
-        state["releases"][entry.info_hash] = {
-            "status": "duplicate",
-            "title": entry.title,
-            "canonical": canonical,
-        }
-        return False
-    from bankai.backend.transfer import _existing_show_folder
-    from bankai.torrent.matcher import parse_se
-
-    folder = _existing_show_folder(
-        match.english_title,
-        cache={},
-        roots=[Path(get_settings().transfer.anime_shows_dir)],
-    )
-    if folder is not None and any(
-        parse_se(path.name) == (identity.season, identity.episode)
-        for path in folder.rglob("*")
-        if path.is_file() and path.suffix.casefold() in {".mkv", ".mp4", ".m4v", ".avi", ".webm"}
-    ):
-        state["releases"][entry.info_hash] = {
-            "status": "existing",
-            "title": entry.title,
-            "canonical": canonical,
-        }
-        return False
     admission = _ADMISSION.get()
     title = f"{match.english_title} S{identity.season:02d}E{identity.episode:02d}"
     # Write the release down *before* handing the torrent to qBittorrent. The

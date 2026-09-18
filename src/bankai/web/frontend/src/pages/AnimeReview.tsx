@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Ban, ExternalLink, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { Ban, Check, ChevronDown, ExternalLink, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type AnimeReviewItem } from '@/lib/api';
+import { api, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
 import { AnimePoster } from '@/components/AnimePoster';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -22,6 +23,41 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   const [busy, setBusy] = useState<string | null>(null);
   const [mappingTitle, setMappingTitle] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<AnimeReviewItem | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [releases, setReleases] = useState<HeldRelease[]>([]);
+  const [loadingReleases, setLoadingReleases] = useState(false);
+
+  async function toggleReleases(item: AnimeReviewItem) {
+    if (expanded === item.key) {
+      setExpanded(null);
+      return;
+    }
+    setExpanded(item.key);
+    setReleases([]);
+    setLoadingReleases(true);
+    try {
+      const result = await api.animeReviewReleases(item.key);
+      setReleases(result.items);
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setLoadingReleases(false);
+    }
+  }
+
+  async function markOwned(payload: { key?: string; info_hashes?: string[] }, label: string) {
+    setBusy(payload.key ?? payload.info_hashes?.[0] ?? '');
+    try {
+      const result = await api.markAnimeOwned(payload);
+      toast.success('Dismissed ' + result.cleared + ' release' + (result.cleared === 1 ? '' : 's') + ' of ' + label);
+      setExpanded(null);
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function load() {
     setLoading(true);
@@ -144,11 +180,55 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       <Button variant='secondary' onClick={() => void decide(item, 'recheck')} disabled={Boolean(busy)}><RefreshCw data-icon='inline-start' /> Recheck</Button>
                       {german && <Button onClick={() => void decide(item, 'allow_german')} disabled={Boolean(busy)}><ShieldCheck data-icon='inline-start' /> Always allow German</Button>}
                       {tvdb && item.release_title && <Button variant='outline' onClick={() => setMappingTitle(item.release_title || null)} disabled={Boolean(busy)}><Search data-icon='inline-start' /> Choose TVDB show</Button>}
+                      <Button variant='secondary' onClick={() => void markOwned({ key: item.key }, item.title)} disabled={Boolean(busy)}><Check data-icon='inline-start' /> Already downloaded</Button>
+                      {(item.release_count || 1) > 1 && (
+                        <Button variant='ghost' onClick={() => void toggleReleases(item)} disabled={Boolean(busy)}>
+                          <ChevronDown data-icon='inline-start' className={expanded === item.key ? 'rotate-180' : ''} />
+                          {expanded === item.key ? 'Hide' : 'Show'} {item.release_count} releases
+                        </Button>
+                      )}
                       <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={Boolean(busy)}><Ban data-icon='inline-start' /> Discard show</Button>
                       <Button variant='destructive' onClick={() => setPurgeTarget(item)} disabled={Boolean(busy)}><Trash2 data-icon='inline-start' /> Discard and delete files</Button>
                     </>
                   )}
                 </CardFooter>
+                {expanded === item.key && (
+                  <div className='border-t border-border px-4 py-3'>
+                    {loadingReleases ? (
+                      <div className='flex justify-center py-4'><Spinner /></div>
+                    ) : releases.length === 0 ? (
+                      <p className='py-2 text-xs text-muted-foreground'>No held releases left for this show.</p>
+                    ) : (
+                      <ul className='flex flex-col gap-1'>
+                        {releases.map((release) => (
+                          <li key={release.info_hash} className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/40'>
+                            <span className='w-8 shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
+                              {release.episode ?? '—'}
+                            </span>
+                            <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={release.title}>
+                              {release.title}
+                            </span>
+                            {release.german_in_title && <Badge variant='success'>GER</Badge>}
+                            {release.hevc && <Badge variant='secondary'>HEVC</Badge>}
+                            {release.detail_url && (
+                              <Button asChild size='sm' variant='ghost'>
+                                <a href={release.detail_url} target='_blank' rel='noreferrer' aria-label='Nyaa description'><ExternalLink /></a>
+                              </Button>
+                            )}
+                            <Button
+                              size='sm'
+                              variant='ghost'
+                              disabled={Boolean(busy)}
+                              onClick={() => void markOwned({ info_hashes: [release.info_hash] }, release.title)}
+                            >
+                              <Check data-icon='inline-start' /> Have it
+                            </Button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </Card>
             );
           })}

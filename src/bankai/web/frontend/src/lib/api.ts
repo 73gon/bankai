@@ -169,6 +169,18 @@ export interface AnimeSearchPage {
   aliases: string[];
 }
 
+export interface HeldRelease {
+  info_hash: string;
+  title: string;
+  reason: string;
+  detail_url?: string | null;
+  quality?: string | null;
+  /** The release names German among its own language tags. */
+  german_in_title: boolean;
+  hevc: boolean;
+  episode: number | null;
+}
+
 export interface AnimeReviewItem {
   key: string;
   info_hash?: string;
@@ -687,6 +699,12 @@ export const api = {
   },
   saveAnimeMapping: (releaseTitle: string, tvdbId: number, season?: number, episodeOffset = 0) =>
     request('/api/anime/mapping', { method: 'POST', body: JSON.stringify({ release_title: releaseTitle, tvdb_id: tvdbId, season, episode_offset: episodeOffset }) }),
+  animeReviewReleases: (key: string) =>
+    request<{ items: HeldRelease[] }>('/api/anime/review/' + encodeURIComponent(key) + '/releases'),
+  markAnimeOwned: (payload: { key?: string; info_hashes?: string[] }) =>
+    request<{ ok: boolean; cleared: number }>('/api/anime/review/owned', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
   animeReview: () => request<{ items: AnimeReviewItem[] }>('/api/anime/review'),
   animeBlacklist: () => request<{ items: AnimeReviewItem[] }>('/api/anime/blacklist'),
   reviewAnime: (infoHash: string, action: 'recheck' | 'allow_german' | 'blacklist') =>

@@ -1490,6 +1490,23 @@ def create_app() -> Any:
         )
         return {**decision, **purged}
 
+    @app.get("/api/anime/review/{key}/releases")
+    async def anime_review_releases(key: str) -> dict:
+        """Every held release behind one review card."""
+        rows = await asyncio.to_thread(erai_mod.review_releases, key)
+        return {"items": rows}
+
+    @app.post("/api/anime/review/owned")
+    async def anime_review_mark_owned(req: dict) -> dict:
+        """Dismiss held releases already present in the library."""
+        hashes = req.get("info_hashes")
+        key = str(req.get("key") or "")
+        if isinstance(hashes, list) and hashes:
+            return await asyncio.to_thread(erai_mod.mark_releases_owned, [str(h) for h in hashes])
+        if key:
+            return await asyncio.to_thread(erai_mod.mark_series_owned, key)
+        raise HTTPException(status_code=422, detail="info_hashes or key is required")
+
     @app.get("/api/anime/blacklist")
     async def anime_blacklist() -> dict:
         from bankai.web.anime_library import enrich_review_rows

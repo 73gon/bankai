@@ -2310,3 +2310,77 @@ def test_an_undubbed_episode_of_the_same_show_is_still_upgraded(monkeypatch):
     assert result["german_dub_kept"] == 0
     assert state["releases"][replacement.info_hash]["status"] == "queued"
 
+
+def test_an_episode_already_in_the_library_is_never_held_for_subtitles(tmp_path, monkeypatch):
+    """A finished Bleach arc sat in review over subtitles it did not need."""
+    season = tmp_path / "shows_anime" / "Bleach" / "Season 17"
+    season.mkdir(parents=True)
+    (season / "Bleach - S17E15.mkv").write_bytes(b"video")
+
+    state = erai._default_state()
+    item = entry(
+        "[Erai-raws] Bleach - Sennen Kessen Hen - Ketsubetsu Tan - 02 "
+        "[1080p][HEVC][Multiple Subtitle][ENG]"
+    )
+
+    async def detail(_client, _url):
+        raise AssertionError("an episode we already have must cost no Nyaa request")
+
+    async def resolve(_candidate):
+        return (
+            AnimeTVDBMatch(74796, "show", "Bleach", year=2004),
+            SimpleNamespace(season=17, episode=15),
+            None,
+        )
+
+    monkeypatch.setattr(
+        erai,
+        "get_settings",
+        lambda: Settings(
+            anime={"enabled": True},
+            transfer={"anime_shows_dir": tmp_path / "shows_anime"},
+        ),
+    )
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+    monkeypatch.setattr(erai, "_resolve", resolve)
+    token = erai._DISK_INDEX.set(None)
+    try:
+        assert asyncio.run(erai._consider(state, item, object())) is False
+    finally:
+        erai._DISK_INDEX.reset(token)
+
+    assert state["releases"][item.info_hash]["status"] == "existing"
+    assert state["held"] == []
+
+
+def test_an_episode_we_do_not_have_still_goes_through_the_subtitle_check(tmp_path, monkeypatch):
+    state = erai._default_state()
+    item = entry("[Erai-raws] Bleach - Ketsubetsu Tan - 03 [1080p][HEVC][Multiple Subtitle][ENG]")
+
+    async def detail(_client, _url):
+        return ("no subtitle section", item.magnet_uri, "Erai-raws")
+
+    async def resolve(_candidate):
+        return (
+            AnimeTVDBMatch(74796, "show", "Bleach", year=2004),
+            SimpleNamespace(season=17, episode=16),
+            None,
+        )
+
+    monkeypatch.setattr(
+        erai,
+        "get_settings",
+        lambda: Settings(
+            anime={"enabled": True},
+            transfer={"anime_shows_dir": tmp_path / "empty"},
+        ),
+    )
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+    monkeypatch.setattr(erai, "_resolve", resolve)
+    token = erai._DISK_INDEX.set(None)
+    try:
+        assert asyncio.run(erai._consider(state, item, object())) is False
+    finally:
+        erai._DISK_INDEX.reset(token)
+    assert state["releases"][item.info_hash]["status"] == "held"
+
