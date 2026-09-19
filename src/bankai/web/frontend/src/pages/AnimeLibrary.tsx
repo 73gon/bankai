@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, Check, FileVideo, LayoutGrid, Rows3 } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Meter, rampParts } from '@/components/ui/meter';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { cn } from '@/lib/utils';
 
 function formatSize(bytes: number) {
@@ -244,21 +245,17 @@ export default function AnimeLibrary() {
             <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
             <Input aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} className='w-60 pl-9' />
           </div>
-          <div className='flex items-center gap-1' role='group' aria-label='Library view'>
+          <ToggleGroup label='Library view'>
             {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
-              <Button
+              <ToggleGroupItem
                 key={value}
-                size='sm'
-                variant={view === value ? 'secondary' : 'ghost'}
-                aria-pressed={view === value}
-                aria-label={label + ' view'}
+                icon={Icon}
+                label={label}
+                selected={view === value}
                 onClick={() => setView(value)}
-              >
-                <Icon data-icon='inline-start' />
-                {label}
-              </Button>
+              />
             ))}
-          </div>
+          </ToggleGroup>
           <Button variant='secondary' onClick={() => void load()} disabled={loading}><RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan</Button>
         </div>
       </div>
@@ -266,6 +263,7 @@ export default function AnimeLibrary() {
       {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : visible.length === 0 ? (
         <EmptyState icon={HardDrive} title={shows.length ? 'No matching Anime' : 'No Anime in your library yet'} description='Completed and staged episodes are grouped into their TVDB shows.' />
       ) : view === 'grid' ? (
+        <div className='min-h-0 flex-1 overflow-y-auto'>
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
           {visible.map((show) => {
             const tone = COMPLETION[show.completion_state] ?? COMPLETION.unknown;
@@ -275,9 +273,10 @@ export default function AnimeLibrary() {
                   <div className='relative block w-full'>
                     <AnimePoster url={show.poster_url} title={show.title} />
                     <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/75 to-transparent px-3 pb-2.5 pt-10 text-left text-sm font-medium leading-tight text-white'>{show.title}</span>
-                    {show.finished && <span className='absolute right-2 top-2 rounded-full bg-background/90 p-1 text-success' aria-label='Finished show, all episodes downloaded'><Check className='size-4' /></span>}
-                    <span className={cn('absolute inset-x-0 top-0 h-0.5', tone.className)} />
                   </div>
+                  {/* The completion colour, as the rule between the cover and
+                      what is written under it. */}
+                  <span className={cn('block h-0.5 w-full', tone.className)} title={tone.label} aria-hidden='true' />
                   <CardContent className='flex flex-col gap-2 p-3'>
                     <Progress show={show} />
                     <div className='flex items-center justify-between gap-2'>
@@ -290,10 +289,11 @@ export default function AnimeLibrary() {
             );
           })}
         </div>
+        </div>
       ) : (
-        <div className='overflow-x-auto rounded-lg border border-border'>
+        <div className='panel min-h-0 flex-1 overflow-auto'>
           <table className='w-full min-w-[820px] border-collapse text-sm'>
-            <thead>
+            <thead className='sticky top-0 z-10 bg-card'>
               <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
                 <th className='px-3 py-2.5 font-medium'>Series</th>
                 <th className='px-3 py-2.5 font-medium'>Seasons</th>
@@ -343,14 +343,14 @@ export default function AnimeLibrary() {
       )}
 
       {!loading && visible.length > 0 && (
-        <div className='sticky bottom-0 -mx-1 flex flex-wrap items-center gap-x-6 gap-y-1 border-t border-border bg-background/95 px-1 py-2.5 text-xs text-muted-foreground backdrop-blur'>
+        <footer className='flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 border-t border-border pt-2.5 text-xs text-muted-foreground'>
           <span><span className='font-mono tabular-nums text-foreground'>{visible.length}</span> series{visible.length !== shows.length ? ` of ${shows.length}` : ''}</span>
           <span><span className='font-mono tabular-nums text-foreground'>{totals.episodes.toLocaleString()}</span> episodes</span>
           <span><span className='font-mono tabular-nums text-foreground'>{formatSize(totals.size)}</span> stored</span>
           <span className='flex items-center gap-1.5'><span className='size-1.5 rounded-full bg-success' /><span className='font-mono tabular-nums text-foreground'>{totals.hevc}</span> HEVC</span>
           <span className='flex items-center gap-1.5'><span className='size-1.5 rounded-full bg-warning' /><span className='font-mono tabular-nums text-foreground'>{totals.avc}</span> AVC</span>
           {totals.dubbed > 0 && <span className='flex items-center gap-1.5'><span className='size-1.5 rounded-full bg-transfer' /><span className='font-mono tabular-nums text-foreground'>{totals.dubbed}</span> German dub</span>}
-        </div>
+        </footer>
       )}
 
       <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); } }}>

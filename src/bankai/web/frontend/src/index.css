@@ -473,6 +473,54 @@
   }
 }
 
+/* The segmented control: field treatment on the track, secondary-button
+   treatment on the current segment. Thirty pixels overall rather than the
+   thirty-eight the guide gives, because it shares a toolbar with controls
+   that are all thirty, and a dense surface uses one step throughout. */
+[data-slot='toggle-group'] {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--field-radius);
+  background: var(--field-surface);
+  border: 1px solid var(--field-edge);
+  box-shadow: var(--field-shadow);
+}
+[data-slot='toggle-group-item'] {
+  display: inline-flex;
+  min-height: 24px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-radius: calc(var(--field-radius) - 4px);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground-muted);
+  transition:
+    background-color var(--button-transition-duration) var(--button-transition-ease),
+    color var(--button-transition-duration) var(--button-transition-ease),
+    box-shadow var(--button-transition-duration) var(--button-transition-ease);
+}
+[data-slot='toggle-group-item']:focus-visible {
+  outline: 2px solid var(--control-focus);
+  outline-offset: 0;
+}
+[data-slot='toggle-group-item'][data-state='on'] {
+  background-color: var(--control-surface);
+  background-image: var(--raised-sheen);
+  box-shadow: var(--raised-shadow);
+  color: var(--foreground);
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-slot='toggle-group-item'][data-state='off']:hover {
+    color: var(--foreground);
+  }
+}
+
 /* Navigation rows: 12px, raised the same way everything else is. */
 .sidebar-link {
   border-radius: var(--control-radius);
