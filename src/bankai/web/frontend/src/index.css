@@ -125,7 +125,7 @@
      and are the only round things in the system. */
   --control-radius: 12px;
   --field-radius: 10px;
-  --panel-radius: 20px;
+  --panel-radius: 12px;
   --raised-sheen: linear-gradient(180deg, var(--control-inner-edge), transparent);
   --raised-shadow:
     0 0 0 1px var(--control-edge),
@@ -489,9 +489,13 @@
   }
 }
 
-/* Panels carry the one radius that is not a control's. */
+/* A card, as the brand room builds one: a flat fill inside a hairline, no
+   shadow and no gradient. Depth on this ground comes from the border being
+   visible, not from a glow underneath. */
 .panel {
   border-radius: var(--panel-radius);
+  background: var(--card);
+  border: 1px solid var(--border);
 }
 /* The raised treatment on something that is not a control: the wordmark tile. */
 .raised {
@@ -633,8 +637,7 @@
   @media (hover: hover) and (pointer: fine) {
     .poster-card:hover {
       transform: translateY(-2px);
-      border-color: transparent;
-      box-shadow: var(--raised-shadow);
+      border-color: var(--line-strong);
     }
   }
   @media (prefers-reduced-motion: reduce) {
