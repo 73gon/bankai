@@ -213,11 +213,17 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
     return row ? currentValue(row) : undefined;
   }
 
+  // Only judge fields this page is showing. The torrent selector lives on
+  // the Movies & Shows page, and a size complaint raised here would name
+  // settings that are not on screen while disabling a Save button that
+  // cannot reach them.
+  const judgesSelector = groups.some(([section]) => section === 'selector');
   const minSize = Number(valueForKey('selector.min_size_gib'));
   const maxSize = Number(valueForKey('selector.max_size_gib'));
   const minSeeders = Number(valueForKey('selector.min_seeders'));
-  const validationError =
-    !Number.isFinite(minSize) || minSize < 0
+  const validationError = !judgesSelector
+    ? null
+    : !Number.isFinite(minSize) || minSize < 0
       ? 'Minimum torrent size must be zero or greater.'
       : !Number.isFinite(maxSize) || maxSize <= 0
         ? 'Maximum torrent size must be greater than zero.'
@@ -228,20 +234,21 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
             : null;
 
   return (
-    <div className='mx-auto max-w-3xl space-y-8 pb-24'>
-      <header className='flex flex-wrap items-end justify-between gap-4'>
-        <div className='flex items-baseline gap-2'>
-          <h1 className='text-2xl font-semibold'>Settings</h1>
-          <span className='text-sm text-muted-foreground'>— Edit safe configuration keys, then save all at once.</span>
+    <div className='mx-auto max-w-5xl pb-16'>
+      <header className='flex flex-wrap items-end justify-between gap-4 pb-2'>
+        <div className='flex flex-col gap-1'>
+          <p className='label-mono'>{scope === 'mas' ? 'Movies & Shows' : 'System'}</p>
+          <h1 className='font-serif text-3xl'>Settings</h1>
+          <p className='text-sm text-muted-foreground'>Edit safe configuration keys, then save them all at once.</p>
         </div>
         <div className='flex items-center gap-2'>
           {dirtyCount > 0 && (
-            <Button variant='ghost' size='sm' onClick={() => setEdits({})} disabled={saving}>
-              <RotateCcw className='h-4 w-4' /> Discard
+            <Button variant='ghost' onClick={() => setEdits({})} disabled={saving}>
+              <RotateCcw data-icon='inline-start' /> Discard
             </Button>
           )}
           <Button onClick={saveAll} disabled={saving || dirtyCount === 0 || Boolean(validationError)}>
-            {saving ? <Loader2 className='h-4 w-4 animate-spin' /> : <Save className='h-4 w-4' />}
+            {saving ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Save data-icon='inline-start' />}
             {dirtyCount > 0 ? `Save ${dirtyCount} change${dirtyCount === 1 ? '' : 's'}` : 'Saved'}
           </Button>
         </div>
@@ -259,15 +266,19 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
           No editable settings.
         </div>
       ) : (
-        <div className='space-y-10'>
-          {validationError && <p className='rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300'>{validationError}</p>}
+        <div>
+          {validationError && (
+            <p className='mb-4 border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground'>
+              {validationError}
+            </p>
+          )}
           {groups.map(([section, sectionRows]) => (
-            <section key={section}>
-              {/* Group divider + title */}
-              <div className='mb-4 flex items-center gap-3 border-b border-border pb-2'>
-                <h2 className='text-sm font-semibold uppercase tracking-wider text-foreground'>{sectionLabel(section)}</h2>
-              </div>
-              <div className='divide-y divide-border/60'>
+            <section
+              key={section}
+              className='grid gap-x-10 gap-y-6 border-t border-border/60 py-8 last:border-b md:grid-cols-[168px_1fr]'
+            >
+              <h2 className='label-mono md:pt-1.5'>{sectionLabel(section)}</h2>
+              <div className='flex flex-col gap-6'>
                 {sectionRows.map((row) => {
                   const isBool = typeof row.value === 'boolean';
                   const val = currentValue(row);
@@ -275,7 +286,7 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
                   const dirty = row.key in edits;
                   const ui = SETTING_UI[row.key];
                   return (
-                    <div key={row.key} className='flex flex-wrap items-start justify-between gap-4 py-3'>
+                    <div key={row.key} className='flex flex-wrap items-start justify-between gap-x-6 gap-y-2'>
                       <div className='min-w-0 space-y-1'>
                         <div className='flex items-center gap-2'>
                           <span className='text-foreground'>{fieldLabel(row.key)}</span>
