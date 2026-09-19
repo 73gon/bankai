@@ -293,6 +293,42 @@ export interface AnimeLibraryShow {
   episodes: AnimeLibraryEpisode[];
 }
 
+/** A film on the server, as the Movies & Shows library presents it. */
+export interface MasMovie {
+  key: string;
+  folders: string[];
+  title: string;
+  tvdb_id: number | null;
+  year: number | null;
+  poster_url: string | null;
+  metadata_available: boolean;
+  file_count: number;
+  size: number;
+  /** Configured roots it was found under; more than one means it is stored twice. */
+  roots: string[];
+  files: AnimeLibraryEntry[];
+}
+
+/** A series on the server, merged against its TVDB roster. */
+export interface MasShow {
+  key: string;
+  folders: string[];
+  title: string;
+  tvdb_id: number | null;
+  year: number | null;
+  poster_url: string | null;
+  episode_count: number;
+  season_count: number;
+  size: number;
+  roots: string[];
+  downloaded_count: number;
+  total_count: number;
+  completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
+  finished: boolean;
+  metadata_available: boolean;
+  episodes: AnimeLibraryEpisode[];
+}
+
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
 
 export interface PersonSuggestion {
@@ -839,6 +875,10 @@ export const api = {
       body: JSON.stringify({ paths }),
     }),
 
+  masLibrary: (includeEpisodes = false, rescan = false) =>
+    request<{ movies: MasMovie[]; shows: MasShow[] }>(
+      `/api/mas/library?include_episodes=${includeEpisodes}&rescan=${rescan}`,
+    ),
   serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[]; anime: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
 
   serverShow: (path: string) => request<{ path: string; seasons: ServerSeason[] }>(`/api/server/show?path=${encodeURIComponent(path)}`),

@@ -3431,6 +3431,23 @@ def create_app() -> Any:
     # ------------------------------------------------------------------
     # Server page (media-server contents)
     # ------------------------------------------------------------------
+    @app.get("/api/mas/library")
+    async def mas_library(include_episodes: bool = False, rescan: bool = False) -> dict:
+        """The Movies & Shows library, as cards, over the configured roots.
+
+        Its own roots, not the anime ones: the server library below it scans
+        all three, this one deliberately scans two.
+        """
+        from bankai.web import mas_library as mas
+
+        s = get_settings()
+        return await mas.library(
+            list(s.web.server_movie_dirs),
+            list(s.web.server_show_dirs),
+            include_episodes=include_episodes,
+            rescan=rescan,
+        )
+
     @app.get("/api/server/contents")
     def server_contents(rescan: bool = Query(False)) -> dict:
         if rescan:

@@ -176,8 +176,10 @@ def _search_title(title: str) -> str:
     return _SEASON_SUFFIX.sub("", stripped).strip() or stripped
 
 
-async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
-    key = f"id:{tvdb_id}" if tvdb_id else _name(title)
+async def show_metadata(title: str, tvdb_id: int | None = None, kind: str = "show") -> dict:
+    # The kind is part of the key: a film and a series can share a name, and
+    # the movie library must not be handed the series' artwork.
+    key = f"id:{tvdb_id}" if tvdb_id else f"{kind}:{_name(title)}"
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < 900:
         return hit[1]
@@ -198,7 +200,7 @@ async def show_metadata(title: str, tvdb_id: int | None = None) -> dict:
                 exact = [
                     item
                     for item in candidates
-                    if item.kind == "show"
+                    if item.kind == kind
                     and _name(query)
                     in {
                         _name(item.english_title),

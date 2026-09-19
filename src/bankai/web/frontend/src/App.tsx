@@ -11,6 +11,7 @@ import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
 import Library from '@/pages/Library';
 import Server from '@/pages/Server';
+import MasLibrary from '@/pages/MasLibrary';
 import Settings from '@/pages/Settings';
 import Anime from '@/pages/Anime';
 import AnimeQueue from '@/pages/AnimeQueue';
@@ -400,7 +401,7 @@ export default function App() {
               <Route path='/mas/search' element={<Search />} />
               <Route path='/mas/filmpalast' element={<Recent />} />
               <Route path='/mas/queue' element={<Library />} />
-              <Route path='/mas/library' element={<Server />} />
+              <Route path='/mas/library' element={<MasLibrary />} />
               <Route path='/mas/settings' element={<Settings scope='mas' />} />
 
               {/* Anime. */}
