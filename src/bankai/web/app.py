@@ -29,6 +29,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 
 from bankai import __version__
+from bankai.cli import bgjobs as bgjobs_mod
 from bankai.config import (
     AnimeAutomationSettings,
     SelectorSettings,
@@ -677,6 +678,20 @@ _DIRECTORY_LIST_KEYS = {
     "web.server_movie_dirs",
     "web.server_show_dirs",
     "web.server_anime_dirs",
+}
+
+def _queue_progress(row: dict) -> float:
+    """What the progress column is showing, so sorting matches the eye."""
+    if row.get("phase") == "transferring" and row.get("transfer_percent") is not None:
+        return float(row.get("transfer_percent") or 0.0)
+    return float(row.get("overall_percent") or 0.0)
+
+
+_QUEUE_SORTERS = {
+    "title": lambda row: str(row.get("title") or "").casefold(),
+    "status": lambda row: str(row.get("phase") or row.get("status") or ""),
+    "progress": _queue_progress,
+    "updated": lambda row: float(row.get("updated_at") or row.get("started_at") or 0.0),
 }
 
 _SERVER_DIR_KEYS = {
@@ -1603,6 +1618,8 @@ def create_app() -> Any:
         include_done: bool = False,
         q: str | None = None,
         status: str | None = None,
+        sort: str | None = None,
+        direction: str = "desc",
     ) -> dict:
         from bankai.web import erai as erai_mod
         from bankai.web.anime_library import queue_covers
@@ -1612,7 +1629,13 @@ def create_app() -> Any:
         # bankai job, so the queue has to show them from the release table or
         # the backlog would be invisible.
         rows = [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows)]
-        rows.sort(key=lambda row: row.get("started_at") or 0.0, reverse=True)
+        # Sorted here rather than in the browser: the page is a slice of the
+        # whole queue, so sorting what arrived would only order the slice.
+        sorter = _QUEUE_SORTERS.get(str(sort or ""))
+        if sorter is None:
+            rows.sort(key=lambda row: row.get("started_at") or 0.0, reverse=True)
+        else:
+            rows.sort(key=sorter, reverse=direction != "asc")
         if not include_done:
             rows = [row for row in rows if row.get("status") != "done"]
         term = (q or "").strip().casefold()
@@ -2163,14 +2186,73 @@ def create_app() -> Any:
             raise HTTPException(status_code=409, detail="job is no longer queued")
         return {"id": job_id, "position": position}
 
-    @app.post("/api/queue/{job_id}/retry")
-    def queue_retry(job_id: str) -> dict:
-        from bankai.cli import bgjobs
+    async def _anime_already_handled(args: list[str]) -> str | None:
+        """Why an anime retry should not start a download, if it should not.
 
-        job = bgjobs.get_job(job_id)
+        A failure is often stale by the time anyone clicks it. The episode may
+        have been published since by another release, the release may already
+        be moving through the pipeline, and the torrent may still be sitting
+        in qBittorrent. Starting a second download in any of those cases is
+        how one episode ends up as several rows.
+        """
+        title = bgjobs_mod.argument_value(args, "--english-title") or ""
+        season = bgjobs_mod.argument_value(args, "--season") or ""
+        episode = bgjobs_mod.argument_value(args, "--episode") or ""
+        if title and season.isdigit() and episode.isdigit():
+            on_disk = await asyncio.to_thread(
+                erai_mod._episode_on_disk, title, int(season), int(episode)
+            )
+            if on_disk:
+                return "The episode is already in the library"
+
+        info_hash = (bgjobs_mod.argument_value(args, "--info-hash") or "").casefold()
+        if not info_hash:
+            return None
+
+        state = await asyncio.to_thread(erai_mod._load_state)
+        release = (state.get("releases") or {}).get(info_hash) or {}
+        status = str(release.get("status") or "")
+        if status in erai_mod._ACTIVE_RELEASE_STATES:
+            return f"The release is already {status}"
+
+        with suppress(Exception):
+            from bankai.torrent.qbittorrent import QBittorrentClient
+
+            async with QBittorrentClient() as client:
+                torrents = await client.list_torrents()
+            if any(str(t.hash).casefold() == info_hash for t in torrents):
+                return "The torrent is still in qBittorrent"
+        return None
+
+    @app.post("/api/queue/{job_id}/retry")
+    async def queue_retry(job_id: str) -> dict:
+        """Run a job again in place of its failure, not beside it.
+
+        This used to enqueue a fresh job and leave the failed one in the
+        list, so three attempts at one episode left three rows disagreeing
+        about what it was doing. The record being retried is dropped once its
+        replacement is accepted -- or once we find the work already done or
+        already running -- so one episode stays one row.
+        """
+        job = bgjobs_mod.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
-        return webjobs.enqueue(kind=job.kind, title=job.title, args=job.args)
+
+        args = list(job.args or [])
+        if args and args[0] == "anime-download":
+            handled = await _anime_already_handled(args)
+            if handled:
+                await asyncio.to_thread(job.delete)
+                return {"status": "resolved", "title": job.title, "detail": handled}
+
+        result = await asyncio.to_thread(
+            webjobs.enqueue, kind=job.kind, title=job.title, args=args
+        )
+        # "duplicate" means the same work is already running or pending, which
+        # is just as good a reason to stop showing the failure.
+        if result.get("status") in {"running", "queued", "duplicate"}:
+            await asyncio.to_thread(job.delete)
+        return result
 
     @app.post("/api/queue/{job_id}/retry-with-source")
     def queue_retry_with_source(job_id: str, req: SourceRetryRequest) -> dict:

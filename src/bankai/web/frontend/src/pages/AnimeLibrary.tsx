@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Meter, rampParts } from '@/components/ui/meter';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
 import { cn } from '@/lib/utils';
 
 function formatSize(bytes: number) {
@@ -21,6 +22,26 @@ function formatSize(bytes: number) {
   const gib = bytes / 1024 ** 3;
   return gib >= 1 ? gib.toFixed(2) + ' GiB' : (bytes / 1024 ** 2).toFixed(0) + ' MiB';
 }
+
+type LibrarySortKey = 'title' | 'seasons' | 'episodes' | 'encode' | 'size' | 'state';
+
+const LIBRARY_SORTERS: Record<LibrarySortKey, (show: AnimeLibraryShow) => number | string> = {
+  title: (show) => show.title.toLocaleLowerCase(),
+  seasons: (show) => show.season_count,
+  episodes: (show) => show.downloaded_count,
+  // By how much of the show is the newer encode, not by a raw count, so a
+  // long series part-converted does not outrank a short one fully converted.
+  encode: (show) => {
+    const known = (show.hevc_count ?? 0) + (show.avc_count ?? 0);
+    return known ? (show.hevc_count ?? 0) / known : -1;
+  },
+  size: (show) => show.size,
+  state: (show) => show.completion_state,
+};
+
+const LIBRARY_FIRST_DIRECTION: Record<LibrarySortKey, SortDir> = {
+  title: 'asc', seasons: 'desc', episodes: 'desc', encode: 'desc', size: 'desc', state: 'asc',
+};
 
 type View = 'grid' | 'table';
 const VIEW_KEY = 'bankai.anime.library.view';
@@ -103,6 +124,7 @@ export default function AnimeLibrary() {
   const [root, setRoot] = useState('');
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>(storedView);
+  const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedShow, setSelectedShow] = useState<AnimeLibraryShow | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -221,7 +243,20 @@ export default function AnimeLibrary() {
   }
 
   useEffect(() => { void load(); }, []);
-  const visible = useMemo(() => shows.filter((show) => show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [shows, query]);
+  const visible = useMemo(() => {
+    const matched = shows.filter((show) => show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+    if (!sort) return matched;
+    const pick = LIBRARY_SORTERS[sort.key];
+    const factor = sort.dir === 'asc' ? 1 : -1;
+    return [...matched].sort((left, right) => {
+      const a = pick(left);
+      const b = pick(right);
+      if (typeof a === 'string' || typeof b === 'string') {
+        return String(a).localeCompare(String(b)) * factor;
+      }
+      return (a === b ? 0 : a < b ? -1 : 1) * factor;
+    });
+  }, [shows, query, sort]);
   const totals = useMemo(() => visible.reduce((acc, show) => ({
     size: acc.size + show.size,
     episodes: acc.episodes + show.episode_count,
@@ -229,6 +264,10 @@ export default function AnimeLibrary() {
     avc: acc.avc + (show.avc_count ?? 0),
     dubbed: acc.dubbed + (show.german_dub_count ?? 0),
   }), { size: 0, episodes: 0, hevc: 0, avc: 0, dubbed: 0 }), [visible]);
+  function toggleSort(key: LibrarySortKey) {
+    setSort((current) => nextSort(current, key, LIBRARY_FIRST_DIRECTION));
+  }
+
   const active = selectedShow;
   const seasons = active ? Array.from(new Set(active.episodes.map((episode) => episode.season_number))).sort((a, b) => (a ?? -1) - (b ?? -1)) : [];
 
@@ -295,12 +334,12 @@ export default function AnimeLibrary() {
           <table className='w-full min-w-[820px] border-collapse text-sm'>
             <thead className='sticky top-0 z-10 bg-card'>
               <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
-                <th className='px-3 py-2.5 font-medium'>Series</th>
-                <th className='px-3 py-2.5 font-medium'>Seasons</th>
-                <th className='px-3 py-2.5 font-medium'>Episodes</th>
-                <th className='px-3 py-2.5 font-medium'>Encode</th>
-                <th className='px-3 py-2.5 text-right font-medium'>Size</th>
-                <th className='px-3 py-2.5 font-medium'>State</th>
+                <SortHeader label='Series' column='title' sort={sort} onSort={toggleSort} />
+                <SortHeader label='Seasons' column='seasons' sort={sort} onSort={toggleSort} />
+                <SortHeader label='Episodes' column='episodes' sort={sort} onSort={toggleSort} />
+                <SortHeader label='Encode' column='encode' sort={sort} onSort={toggleSort} />
+                <SortHeader label='Size' column='size' sort={sort} onSort={toggleSort} align='right' />
+                <SortHeader label='State' column='state' sort={sort} onSort={toggleSort} />
               </tr>
             </thead>
             <tbody>

@@ -26,6 +26,7 @@ export function ToggleGroupItem({
   label,
   showLabel = true,
   icon: Icon,
+  children,
   ...props
 }: Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label'> & {
   selected: boolean;
@@ -47,6 +48,7 @@ export function ToggleGroupItem({
     >
       {Icon && <Icon className='size-3.5 shrink-0' />}
       {showLabel && <span>{label}</span>}
+      {children}
     </button>
   );
 }

@@ -6,6 +6,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
+import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Switch } from '@/components/ui/switch';
 import { AnimePoster } from '@/components/AnimePoster';
 import { cn } from '@/lib/utils';
@@ -78,6 +80,13 @@ function JobProgress({ job }: { job: Job }) {
 // The release lifecycle, in the order work actually flows through it, so the
 // chips never reshuffle under the pointer as counts change. These are the same
 // states the reconciler tracks; the queue should not invent its own vocabulary.
+type QueueSortKey = 'title' | 'status' | 'progress' | 'updated';
+
+// Text reads A-Z; a number or a time is most interesting at its largest.
+const QUEUE_FIRST_DIRECTION: Record<QueueSortKey, SortDir> = {
+  title: 'asc', status: 'asc', progress: 'desc', updated: 'desc',
+};
+
 const STATUS_ORDER = [
   'queued',
   'downloading',
@@ -101,6 +110,7 @@ export default function AnimeQueue() {
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('all');
+  const [sort, setSort] = useState<SortState<QueueSortKey> | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -124,10 +134,21 @@ export default function AnimeQueue() {
     if (!showCompleted && status === 'done') setStatus('all');
   }, [showCompleted, status]);
 
+  function toggleSort(key: QueueSortKey) {
+    setSort((current) => nextSort(current, key, QUEUE_FIRST_DIRECTION));
+    // A different order means a different first page.
+    setPage(0);
+  }
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const result = await api.animeQueue(page, pageSize, showCompleted, { q: search, status });
+      const result = await api.animeQueue(page, pageSize, showCompleted, {
+        q: search,
+        status,
+        sort: sort?.key,
+        dir: sort?.dir,
+      });
       setJobs(result.jobs);
       setTotal(result.total);
       setCounts(result.counts ?? {});
@@ -136,7 +157,7 @@ export default function AnimeQueue() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [page, showCompleted, search, status]);
+  }, [page, showCompleted, search, status, sort]);
 
   useEffect(() => {
     let cancelled = false;
@@ -245,28 +266,21 @@ export default function AnimeQueue() {
             </button>
           )}
         </div>
-        <div className='flex flex-wrap items-center gap-1.5' role='group' aria-label='Filter by status'>
-          {chips.map((chip) => {
-            const active = status === chip.value;
-            return (
-              <button
-                key={chip.value}
-                type='button'
-                aria-pressed={active}
-                onClick={() => setStatus(chip.value)}
-                className={cn(
-                  'filter-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium',
-                )}
-              >
-                {chip.label}
-                <span className='font-mono text-[0.65rem] tabular-nums opacity-70'>{chip.count}</span>
-              </button>
-            );
-          })}
-        </div>
+        <ToggleGroup label='Filter by status' className='flex-wrap'>
+          {chips.map((chip) => (
+            <ToggleGroupItem
+              key={chip.value}
+              label={chip.label}
+              selected={status === chip.value}
+              onClick={() => setStatus(chip.value)}
+            >
+              <span className='font-mono text-[0.65rem] tabular-nums opacity-70'>{chip.count}</span>
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
       </div>
 
-      <div className='overflow-x-auto rounded-lg border border-border'>
+      <div className='panel min-h-0 flex-1 overflow-auto'>
         <div className='min-w-full'>
           {loading && jobs.length === 0 ? (
             <div className='flex min-h-40 items-center justify-center'><Spinner /></div>
@@ -291,12 +305,13 @@ export default function AnimeQueue() {
                 <col className='w-32' />
                 <col className='w-20' />
               </colgroup>
-              <thead>
+              <thead className='sticky top-0 z-10 bg-card'>
                 <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
-                  <th className='px-3 py-2.5 font-medium'>Title</th>
-                  <th className='px-3 py-2.5 font-medium'>Status</th>
-                  <th className='px-3 py-2.5 font-medium'>Progress</th>
-                  <th className='px-3 py-2.5 font-medium'>Updated</th>
+                  <SortHeader label='Title' column='title' sort={sort} onSort={toggleSort} />
+                  <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />
+                  <SortHeader label='Progress' column='progress' sort={sort} onSort={toggleSort} />
+                  <SortHeader label='Updated' column='updated' sort={sort} onSort={toggleSort} />
+                  {/* Actions are buttons, not a value, so there is nothing to order by. */}
                   <th className='px-3 py-2.5 text-right font-medium'>Actions</th>
                 </tr>
               </thead>
@@ -341,7 +356,7 @@ export default function AnimeQueue() {
 
       {/* Aggregates and paging share the footer, as on the library page, so the
           top of the page belongs to the queue itself. */}
-      <div className='sticky bottom-0 -mx-1 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-border bg-background/95 px-1 py-2.5 text-xs text-muted-foreground backdrop-blur'>
+      <footer className='flex shrink-0 flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-border pt-2.5 text-xs text-muted-foreground'>
         <div className='flex flex-wrap items-center gap-x-5 gap-y-1'>
           <span>
             <span className='font-mono tabular-nums text-foreground'>{total.toLocaleString()}</span>
@@ -362,7 +377,7 @@ export default function AnimeQueue() {
             <Button size='sm' variant='secondary' disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight data-icon='inline-end' /></Button>
           </div>
         )}
-      </div>
+      </footer>
     </div>
   );
 }

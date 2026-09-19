@@ -402,6 +402,10 @@ export interface PurgeResult {
 export interface AnimeQueueFilters {
   q?: string;
   status?: string;
+  /** Sorted on the server: a page is a slice, so sorting it here would only
+   *  order the slice. */
+  sort?: string;
+  dir?: 'asc' | 'desc';
 }
 
 export interface AnimeQueuePage {
@@ -733,6 +737,10 @@ export const api = {
     });
     if (filters.q?.trim()) params.set('q', filters.q.trim());
     if (filters.status && filters.status !== 'all') params.set('status', filters.status);
+    if (filters.sort) {
+      params.set('sort', filters.sort);
+      params.set('direction', filters.dir ?? 'desc');
+    }
     return request<AnimeQueuePage>(`/api/anime/queue?${params}`);
   },
   animeEpisodeSearch: (tvdbId: number, season: number, episode: number, q?: string) => {

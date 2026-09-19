@@ -1,8 +1,5 @@
 import { type KeyboardEvent, type MouseEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ArrowDown,
-  ArrowUp,
-  ArrowUpDown,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -31,6 +28,7 @@ import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
+import { SortHeader, nextSort, type SortState } from '@/components/ui/sort-header';
 import { cn } from '@/lib/utils';
 
 function formatBytes(value: number) {
@@ -129,7 +127,7 @@ type SortKey =
   | 'name' | 'status' | 'size' | 'progress' | 'seeds'
   | 'peers' | 'dlspeed' | 'upspeed' | 'eta' | 'added_on';
 
-type Sort = { key: SortKey; dir: 'asc' | 'desc' };
+type Sort = SortState<SortKey>;
 
 const SORTERS: Record<SortKey, (item: QBittorrentItem) => number | string> = {
   name: (item) => item.name.toLocaleLowerCase(),
@@ -152,42 +150,6 @@ const FIRST_DIRECTION: Record<SortKey, 'asc' | 'desc'> = {
   name: 'asc', status: 'asc', size: 'desc', progress: 'desc', seeds: 'desc',
   peers: 'desc', dlspeed: 'desc', upspeed: 'desc', eta: 'asc', added_on: 'desc',
 };
-
-function SortHeader({
-  label, column, sort, onSort, align = 'left', className,
-}: {
-  label: string;
-  column: SortKey;
-  sort: Sort | null;
-  onSort: (key: SortKey) => void;
-  align?: 'left' | 'right';
-  className?: string;
-}) {
-  const active = sort?.key === column;
-  const Icon = !active ? ArrowUpDown : sort.dir === 'asc' ? ArrowUp : ArrowDown;
-  return (
-    <th
-      className={cn('px-3 py-2.5 font-medium', className)}
-      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
-    >
-      <button
-        type='button'
-        onClick={() => onSort(column)}
-        className={cn(
-          'group inline-flex w-full items-center gap-1 whitespace-nowrap uppercase tracking-wide transition-colors hover:text-foreground',
-          active && 'text-foreground',
-          align === 'right' && 'flex-row-reverse',
-        )}
-      >
-        {label}
-        <Icon
-          aria-hidden='true'
-          className={cn('size-3 shrink-0 transition-opacity', active ? 'opacity-100' : 'opacity-0 group-hover:opacity-50')}
-        />
-      </button>
-    </th>
-  );
-}
 
 export default function QBittorrent() {
   const [items, setItems] = useState<QBittorrentItem[]>([]);
@@ -255,11 +217,7 @@ export default function QBittorrent() {
   }, [items, query, statuses, sort]);
 
   function toggleSort(key: SortKey) {
-    setSort((current) =>
-      current?.key === key
-        ? { key, dir: current.dir === 'asc' ? 'desc' : 'asc' }
-        : { key, dir: FIRST_DIRECTION[key] },
-    );
+    setSort((current) => nextSort(current, key, FIRST_DIRECTION));
   }
 
   function toggleStatus(label: string) {
