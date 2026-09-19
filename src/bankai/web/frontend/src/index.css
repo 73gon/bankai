@@ -144,7 +144,12 @@
   --accent-active: oklch(0.985 0 0);
   --accent-active-contrast: oklch(0.145 0 0);
 
-  --card: oklch(0.115 0 0);
+  /* What the brand room actually paints a card with. Its own token list
+     documents oklch(0.115), but that value appears on exactly one element
+     there -- a swatch in the palette demo -- while every real card and
+     container is #1e1e1e. Measured, not read: 0.115 sits within a few
+     percent of the 0.07 ground and reads as no card at all. */
+  --card: #1e1e1e;
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.18 0 0);
   --popover-foreground: oklch(0.985 0 0);
