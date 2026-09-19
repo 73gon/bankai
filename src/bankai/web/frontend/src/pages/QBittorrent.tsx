@@ -1,12 +1,18 @@
 import { type KeyboardEvent, type MouseEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Check,
   CheckCircle2,
+  ChevronDown,
   ChevronsDown,
   ChevronsUp,
   CircleHelp,
   CirclePause,
   Clock3,
   Download,
+  ListFilter,
   Loader2,
   Play,
   RefreshCw,
@@ -23,7 +29,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
-import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
 
@@ -105,9 +111,89 @@ function torrentStatus(item: QBittorrentItem): StatusStyle {
   return { label: 'Unknown', icon: CircleHelp, badge: 'muted', row: 'bg-muted/20 hover:bg-muted/30', iconColor: 'text-muted-foreground', progress: 'bg-muted-foreground' };
 }
 
+// Every status torrentStatus can return, in the order they matter while
+// something is actually running.
+const STATUSES = [
+  'Downloading',
+  'Seeding',
+  'Completed',
+  'Queued',
+  'Stalled',
+  'Checking',
+  'Paused',
+  'Error',
+  'Unknown',
+] as const;
+
+type SortKey =
+  | 'name' | 'status' | 'size' | 'progress' | 'seeds'
+  | 'peers' | 'dlspeed' | 'upspeed' | 'eta' | 'added_on';
+
+type Sort = { key: SortKey; dir: 'asc' | 'desc' };
+
+const SORTERS: Record<SortKey, (item: QBittorrentItem) => number | string> = {
+  name: (item) => item.name.toLocaleLowerCase(),
+  status: (item) => torrentStatus(item).label,
+  size: (item) => item.size_bytes,
+  progress: (item) => item.progress,
+  seeds: (item) => item.seeds,
+  peers: (item) => item.peers,
+  dlspeed: (item) => item.dlspeed,
+  upspeed: (item) => item.upspeed,
+  // A finished torrent has no ETA at all, so it sorts past every real one
+  // rather than landing among the fastest at zero seconds.
+  eta: (item) => (item.progress >= 1 ? Number.POSITIVE_INFINITY : item.eta),
+  added_on: (item) => item.added_on,
+};
+
+// Text reads naturally A-Z; a number is nearly always most interesting at its
+// largest, so the first click on each gives you what you probably wanted.
+const FIRST_DIRECTION: Record<SortKey, 'asc' | 'desc'> = {
+  name: 'asc', status: 'asc', size: 'desc', progress: 'desc', seeds: 'desc',
+  peers: 'desc', dlspeed: 'desc', upspeed: 'desc', eta: 'asc', added_on: 'desc',
+};
+
+function SortHeader({
+  label, column, sort, onSort, align = 'left', className,
+}: {
+  label: string;
+  column: SortKey;
+  sort: Sort | null;
+  onSort: (key: SortKey) => void;
+  align?: 'left' | 'right';
+  className?: string;
+}) {
+  const active = sort?.key === column;
+  const Icon = !active ? ArrowUpDown : sort.dir === 'asc' ? ArrowUp : ArrowDown;
+  return (
+    <th
+      className={cn('px-3 py-2.5 font-medium', className)}
+      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <button
+        type='button'
+        onClick={() => onSort(column)}
+        className={cn(
+          'group inline-flex w-full items-center gap-1 whitespace-nowrap uppercase tracking-wide transition-colors hover:text-foreground',
+          active && 'text-foreground',
+          align === 'right' && 'flex-row-reverse',
+        )}
+      >
+        {label}
+        <Icon
+          aria-hidden='true'
+          className={cn('size-3 shrink-0 transition-opacity', active ? 'opacity-100' : 'opacity-0 group-hover:opacity-50')}
+        />
+      </button>
+    </th>
+  );
+}
+
 export default function QBittorrent() {
   const [items, setItems] = useState<QBittorrentItem[]>([]);
   const [query, setQuery] = useState('');
+  const [statuses, setStatuses] = useState<Set<string>>(new Set());
+  const [sort, setSort] = useState<Sort | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,10 +223,52 @@ export default function QBittorrent() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  // Counted before the status filter is applied, so the dropdown keeps
+  // showing what selecting each one would get you.
+  const statusCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of items) {
+      const label = torrentStatus(item).label;
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return counts;
+  }, [items]);
+
   const visible = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
-    return term ? items.filter((item) => item.name.toLocaleLowerCase().includes(term)) : items;
-  }, [items, query]);
+    const filtered = items.filter(
+      (item) =>
+        (!term || item.name.toLocaleLowerCase().includes(term)) &&
+        (statuses.size === 0 || statuses.has(torrentStatus(item).label)),
+    );
+    if (!sort) return filtered;
+    const pick = SORTERS[sort.key];
+    const factor = sort.dir === 'asc' ? 1 : -1;
+    return [...filtered].sort((left, right) => {
+      const a = pick(left);
+      const b = pick(right);
+      if (typeof a === 'string' || typeof b === 'string') {
+        return String(a).localeCompare(String(b)) * factor;
+      }
+      return (a === b ? 0 : a < b ? -1 : 1) * factor;
+    });
+  }, [items, query, statuses, sort]);
+
+  function toggleSort(key: SortKey) {
+    setSort((current) =>
+      current?.key === key
+        ? { key, dir: current.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: FIRST_DIRECTION[key] },
+    );
+  }
+
+  function toggleStatus(label: string) {
+    setStatuses((current) => {
+      const next = new Set(current);
+      if (!next.delete(label)) next.add(label);
+      return next;
+    });
+  }
   const downloading = items.filter((item) => item.progress < 1 && item.dlspeed > 0).length;
   const totalDown = items.reduce((sum, item) => sum + item.dlspeed, 0);
   const totalUp = items.reduce((sum, item) => sum + item.upspeed, 0);
@@ -195,7 +323,10 @@ export default function QBittorrent() {
   }
 
   return (
-    <div className='flex flex-col gap-6'>
+    // A column that fills the page: the table scrolls inside it and the
+    // summary sits under the table as a real footer rather than floating
+    // over the last few rows.
+    <div className='flex h-full min-h-0 flex-col gap-4'>
       <header className='flex flex-wrap items-start justify-between gap-3'>
         <div>
           <h1 className='text-2xl font-semibold'>qBittorrent</h1>
@@ -207,9 +338,60 @@ export default function QBittorrent() {
         </Button>
       </header>
 
-      <div className='relative max-w-sm'>
-        <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-        <Input className='pl-9' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter downloads…' aria-label='Filter downloads' />
+      <div className='flex flex-wrap items-center gap-2'>
+        <div className='relative w-full max-w-xs'>
+          <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
+          <Input className='pl-9' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter downloads…' aria-label='Filter downloads' />
+        </div>
+
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant='secondary' aria-label='Filter by status'>
+              <ListFilter data-icon='inline-start' />
+              {statuses.size === 0 ? 'All statuses' : `${statuses.size} selected`}
+              <ChevronDown className='opacity-60' aria-hidden='true' />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align='start' className='w-60 p-1'>
+            {STATUSES.map((label) => {
+              const on = statuses.has(label);
+              const count = statusCounts.get(label) ?? 0;
+              return (
+                <button
+                  key={label}
+                  type='button'
+                  role='menuitemcheckbox'
+                  aria-checked={on}
+                  onClick={() => toggleStatus(label)}
+                  disabled={count === 0 && !on}
+                  className='flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-accent disabled:opacity-40'
+                >
+                  <span className='flex size-3.5 shrink-0 items-center justify-center'>
+                    {on && <Check className='size-3.5' aria-hidden='true' />}
+                  </span>
+                  <span className='flex-1'>{label}</span>
+                  <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{count}</span>
+                </button>
+              );
+            })}
+            {statuses.size > 0 && (
+              <>
+                <Separator className='my-1' />
+                <button
+                  type='button'
+                  onClick={() => setStatuses(new Set())}
+                  className='w-full rounded-md px-2 py-1.5 text-left text-[13px] text-muted-foreground hover:bg-accent hover:text-foreground'
+                >
+                  Clear
+                </button>
+              </>
+            )}
+          </PopoverContent>
+        </Popover>
+
+        {sort && (
+          <Button variant='ghost' onClick={() => setSort(null)}>Reset sort</Button>
+        )}
       </div>
 
       {loading ? (
@@ -221,20 +403,20 @@ export default function QBittorrent() {
       ) : visible.length === 0 ? (
         <EmptyState icon={Download} title={query ? 'No matching downloads' : 'No torrents'} description={query ? 'Try another filter.' : 'qBittorrent has no downloads yet.'} />
       ) : (
-        <div className='overflow-x-auto rounded-lg border border-border/70'>
+        <div className='panel min-h-0 flex-1 overflow-auto'>
           <table className='w-full min-w-[1180px] border-collapse text-sm'>
-            <thead className='text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
+            <thead className='sticky top-0 z-10 bg-card text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
               <tr className='border-b border-border'>
-                <th className='px-3 py-2.5 font-medium'>Name</th>
-                <th className='px-3 py-2.5 font-medium'>Status</th>
-                <th className='px-3 py-2.5 text-right font-medium'>Size</th>
-                <th className='w-44 px-3 py-2.5 font-medium'>Progress</th>
-                <th className='px-3 py-2.5 text-right font-medium'>Seeds</th>
-                <th className='px-3 py-2.5 text-right font-medium'>Peers</th>
-                <th className='px-3 py-2.5 text-right font-medium'>Down</th>
-                <th className='px-3 py-2.5 text-right font-medium'>Up</th>
-                <th className='px-3 py-2.5 text-right font-medium'>ETA</th>
-                <th className='px-3 py-2.5 font-medium'>Added on</th>
+                <SortHeader label='Name' column='name' sort={sort} onSort={toggleSort} />
+                <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />
+                <SortHeader label='Size' column='size' sort={sort} onSort={toggleSort} align='right' />
+                <SortHeader label='Progress' column='progress' sort={sort} onSort={toggleSort} className='w-44' />
+                <SortHeader label='Seeds' column='seeds' sort={sort} onSort={toggleSort} align='right' />
+                <SortHeader label='Peers' column='peers' sort={sort} onSort={toggleSort} align='right' />
+                <SortHeader label='Down' column='dlspeed' sort={sort} onSort={toggleSort} align='right' />
+                <SortHeader label='Up' column='upspeed' sort={sort} onSort={toggleSort} align='right' />
+                <SortHeader label='ETA' column='eta' sort={sort} onSort={toggleSort} align='right' />
+                <SortHeader label='Added on' column='added_on' sort={sort} onSort={toggleSort} />
               </tr>
             </thead>
             <tbody>
@@ -284,14 +466,14 @@ export default function QBittorrent() {
       )}
 
       {!loading && visible.length > 0 && (
-        <div className='sticky bottom-0 -mx-1 flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-border bg-background/95 px-1 py-2.5 text-xs text-muted-foreground backdrop-blur'>
+        <footer className='flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t border-border pt-2.5 text-xs text-muted-foreground'>
           <span><span className='font-mono tabular-nums text-foreground'>{visible.length.toLocaleString()}</span> torrents{visible.length !== items.length ? ` of ${items.length.toLocaleString()}` : ''}</span>
           <span><span className='font-mono tabular-nums text-foreground'>{downloading.toLocaleString()}</span> downloading</span>
           <span className='flex items-center gap-1.5'><ChevronsDown className='size-3.5 text-success' /><span className='font-mono tabular-nums text-foreground'>{formatSpeed(totalDown)}</span></span>
           <span className='flex items-center gap-1.5'><ChevronsUp className='size-3.5 text-info' /><span className='font-mono tabular-nums text-foreground'>{formatSpeed(totalUp)}</span></span>
           <span><span className='font-mono tabular-nums text-foreground'>{totalPeers.toLocaleString()}</span> peers</span>
           <span><span className='font-mono tabular-nums text-foreground'>{formatBytes(totalSize)}</span> total</span>
-        </div>
+        </footer>
       )}
 
       <Popover open={contextTorrent !== null} onOpenChange={(open) => !open && setContextTorrent(null)}>
