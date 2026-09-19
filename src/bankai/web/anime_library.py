@@ -103,6 +103,39 @@ _SEASON_SUFFIX = re.compile(
 )
 
 
+# Kana, kanji, hangul, and the fullwidth forms that come with them.
+_JAPANESE_SCRIPT = re.compile(
+    "[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff"
+    "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    "\uff00-\uffef\uac00-\ud7af]"
+)
+
+
+def _is_romaji(value: str) -> bool:
+    """Written in letters you can type, and so search a release name for."""
+    return bool(value.strip()) and not _JAPANESE_SCRIPT.search(value)
+
+
+def _romaji_alias(metadata: dict) -> str:
+    """A Latin-script second name for a show, or nothing.
+
+    TVDB's Japanese translation is usually kana and kanji -- "Akame ga Kill!"
+    comes back as its Japanese title -- and the whole point of showing a
+    second name is to match it against what Erai publishes, which is always
+    romaji. A name in a script you cannot type does not do that job, so it is
+    better to show none at all.
+    """
+    english = _name(str(metadata.get("english_title") or ""))
+    candidates = [
+        str(metadata.get("japanese_title") or ""),
+        *(str(value) for value in metadata.get("aliases") or []),
+    ]
+    for value in candidates:
+        if _is_romaji(value) and _name(value) != english:
+            return value.strip()
+    return ""
+
+
 def _search_title(title: str) -> str:
     """The show's own name, without the year or the season it happens to be."""
     stripped = re.sub(r"\s*\(\d{4}\)$", "", title).strip()
@@ -737,8 +770,7 @@ async def group_shows(
             # right files back after two of them were merged.
             "folders": slot["titles"],
             "title": metadata.get("english_title") or title,
-            "source_title": source_titles.get(str(tvdb_id))
-            or str(metadata.get("japanese_title") or ""),
+            "source_title": source_titles.get(str(tvdb_id)) or _romaji_alias(metadata),
             "avc_count": sum(
                 1
                 for row in merged_episodes["episodes"]

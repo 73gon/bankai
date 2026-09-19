@@ -326,3 +326,65 @@ def test_asking_for_one_merged_show_returns_its_folders(monkeypatch):
     by_folder = _run_library(monkeypatch, folders, resolve=resolve, only_key=romaji)
     assert len(by_folder) == 1
     assert by_folder[0]["title"] == english
+def test_a_second_name_is_only_shown_when_it_is_in_letters_you_can_type():
+    """Akame ga Kill! was captioned with its Japanese title.
+
+    The second name exists to be matched against what Erai publishes, which
+    is always romaji. Kana and kanji cannot do that job, so showing nothing
+    is the better answer.
+    """
+    from bankai.web.anime_library import _is_romaji, _romaji_alias
+
+    assert _is_romaji("Akame ga Kiru!")
+    assert _is_romaji("Fate/stay night: Unlimited Blade Works")
+    assert not _is_romaji("\u30a2\u30ab\u30e1\u304c\u65ac\u308b!")
+    assert not _is_romaji("")
+
+    # Nothing typeable to add beyond the English title, so nothing is shown.
+    assert (
+        _romaji_alias(
+            {
+                "english_title": "Akame ga Kill!",
+                "japanese_title": "\u30a2\u30ab\u30e1\u304c\u65ac\u308b!",
+                "aliases": ["Akame ga Kill!"],
+            }
+        )
+        == ""
+    )
+    # A romaji alias is exactly what is wanted.
+    assert (
+        _romaji_alias(
+            {
+                "english_title": "Classroom of the Elite",
+                "japanese_title": "\u3088\u3046\u3053\u305d\u5b9f\u529b\u81f3\u4e0a\u4e3b\u7fa9\u306e\u6559\u5ba4\u3078",
+                "aliases": ["Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"],
+            }
+        )
+        == "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
+    )
+    # A Japanese title that happens to be romanised is fine as it stands.
+    assert (
+        _romaji_alias(
+            {"english_title": "Some Show", "japanese_title": "Betsu no Namae", "aliases": []}
+        )
+        == "Betsu no Namae"
+    )
+
+
+def test_erai_name_beats_a_tvdb_alias(monkeypatch):
+    """What Erai actually published is better evidence than an alias list."""
+    from bankai.web import anime_library, erai
+
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: {
+            "status": "done",
+            "title": "[Erai-raws] Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3 - 05 [1080p]",
+        }
+    }
+    state["canonical"] = {"337912|3|5": {"info_hash": "a" * 40}}
+
+    titles = anime_library.erai_source_titles(state)
+    # The season marker is kept: it is part of how Erai names the show, and
+    # the review page shows the same string.
+    assert titles == {"337912": "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"}
