@@ -15,7 +15,7 @@ export const SelectTrigger = React.forwardRef<
     ref={ref}
     data-slot='select-trigger'
     className={cn(
-      'flex h-[30px] w-full cursor-pointer items-center justify-between gap-2 rounded-full px-3 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 [&>span]:truncate',
+      'flex w-full cursor-pointer items-center justify-between gap-2 px-3 font-medium text-foreground outline-none disabled:cursor-not-allowed disabled:opacity-50 [&>span]:truncate',
       className,
     )}
     {...props}

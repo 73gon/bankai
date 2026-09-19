@@ -350,7 +350,7 @@ export default function App() {
                       to={to}
                       className={() =>
                         cn(
-                          'sidebar-link group flex min-h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[13px] font-medium',
+                          'sidebar-link group flex shrink-0 items-center gap-2 whitespace-nowrap px-2.5 text-[13px] font-medium',
                           collapsed && 'md:size-9 md:justify-center md:gap-0 md:p-0',
                         )
                       }

@@ -125,7 +125,9 @@
      and are the only round things in the system. */
   --control-radius: 12px;
   --field-radius: 10px;
-  --panel-radius: 12px;
+  /* Content containers are square. The hairline already separates them, and
+     rounding one costs the distinction that says what can be clicked. */
+  --panel-radius: 0px;
   --raised-sheen: linear-gradient(180deg, var(--control-inner-edge), transparent);
   --raised-shadow:
     0 0 0 1px var(--control-edge),
@@ -388,11 +390,14 @@
 
 /* Fields are recessed: the one place the raised treatment is inverted. */
 [data-slot='input'],
+[data-slot='select-trigger'] {
+  min-height: 30px;
+}
+[data-slot='input'],
 [data-slot='textarea'],
 [data-slot='select-trigger'] {
   font-family: var(--font-body);
   font-size: 14px;
-  min-height: 38px;
   border-radius: var(--field-radius);
   background: var(--field-surface);
   border: 1px solid var(--field-edge);
@@ -432,7 +437,7 @@
 }
 [data-slot='select-item'] {
   border-radius: 7px;
-  min-height: 40px;
+  min-height: 30px;
 }
 [data-slot='select-content'] { transform-origin: var(--radix-select-content-transform-origin); }
 [data-slot='popover-content'] { transform-origin: var(--radix-popover-content-transform-origin); }
@@ -471,6 +476,7 @@
 /* Navigation rows: 12px, raised the same way everything else is. */
 .sidebar-link {
   border-radius: var(--control-radius);
+  min-height: 30px;
   color: var(--foreground-muted);
   transition:
     background-color var(--button-transition-duration) var(--button-transition-ease),
