@@ -1694,10 +1694,13 @@ def create_app() -> Any:
             include_episodes=show is not None,
             only_key=show,
         )
+        # One show can span several folders, so its entries are the ones
+        # belonging to any folder behind the card rather than to its name.
+        folders = {name for row in shows for name in row.get("folders", [])}
         visible_entries = (
             entries
             if include_entries and show is None
-            else [row for row in entries if row["series"] == show]
+            else [row for row in entries if row["series"] in folders]
             if include_entries
             else []
         )

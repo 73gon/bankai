@@ -275,6 +275,8 @@ export interface AnimeLibraryShow {
   finished: boolean;
   metadata_available: boolean;
   key: string;
+  /** Every library folder behind this one card; more than one once merged. */
+  folders: string[];
   title: string;
   tvdb_id: number | null;
   year: number | null;

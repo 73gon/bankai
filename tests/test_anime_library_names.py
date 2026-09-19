@@ -192,4 +192,137 @@ def test_the_release_state_is_read_once_for_the_whole_library(monkeypatch):
     assert len(shows) == 20
     # One read for the codec index, whatever the library holds.
     assert len(reads) == 1
+def _run_library(monkeypatch, folders, *, resolve=None, tracked=(), only_key=None):
+    """group_shows over a library holding ``folders`` -> {folder: [episode, ...]}.
 
+    ``resolve`` stands in for TVDB: {title: (tvdb_id, english_title)}.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from bankai.web import anime_library, discover, erai
+
+    state = erai._default_state()
+    state["series"] = {
+        str(index): {"english_title": title, "tvdb_id": None}
+        for index, title in enumerate(tracked, start=1)
+    }
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+    monkeypatch.setattr(anime_library, "known_ids", lambda: {})
+    monkeypatch.setattr(discover, "is_configured", lambda: False)
+    monkeypatch.setattr(anime_library, "_nfo_id", lambda path: None)
+    monkeypatch.setattr(anime_library, "probed_codecs", lambda files: {})
+    monkeypatch.setattr(anime_library, "german_dubbed_episodes", lambda files: set())
+
+    async def metadata(title, tvdb_id=None):
+        if resolve and title in resolve:
+            found, english = resolve[title]
+            return {"english_title": english, "tvdb_id": found}
+        return {"english_title": title, "tvdb_id": tvdb_id}
+
+    monkeypatch.setattr(anime_library, "show_metadata", metadata)
+
+    entries = [
+        {
+            "path": f"/library/{folder}/Season 01/{name}",
+            "rel_path": f"{folder}/Season 01/{name}",
+            "name": name,
+            "series": folder,
+            "season": "Season 01",
+            "size": 1,
+            "mtime": 0,
+            "staged": False,
+            "stage": "final",
+            "transfer_status": "idle",
+        }
+        for folder, names in folders.items()
+        for name in names
+    ]
+    return asyncio.run(
+        anime_library.group_shows(entries, Path("/library"), only_key=only_key)
+    )
+
+
+def test_one_show_in_two_folders_is_one_card(monkeypatch):
+    """The folder name was the group key, so a second folder was a second card.
+
+    Normalising the name only ever decided whether to add an empty card for a
+    tracked title; it never merged two folders that both held episodes.
+    """
+    shows = _run_library(
+        monkeypatch,
+        {
+            "Show": ["Show - S01E01.mkv"],
+            "Show (2024)": ["Show - S01E02.mkv"],
+        },
+    )
+    assert len(shows) == 1
+    assert sorted(shows[0]["folders"]) == ["Show", "Show (2024)"]
+    # Both folders' episodes end up on the one card.
+    assert shows[0]["episode_count"] == 2
+
+
+def test_two_names_for_one_series_are_one_card(monkeypatch):
+    """A romaji folder beside its English one shares no spelling at all.
+
+    Nothing about the two names can be compared; the TVDB id is what says
+    they are the same series.
+    """
+    romaji = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
+    english = "Classroom of the Elite"
+    shows = _run_library(
+        monkeypatch,
+        {
+            romaji: ["ep - S01E01.mkv"],
+            english: ["ep - S02E01.mkv"],
+        },
+        resolve={romaji: (337912, english), english: (337912, english)},
+    )
+    assert len(shows) == 1
+    assert shows[0]["title"] == english
+    assert shows[0]["tvdb_id"] == 337912
+    assert sorted(shows[0]["folders"]) == sorted([romaji, english])
+    assert shows[0]["episode_count"] == 2
+
+
+def test_a_tracked_title_does_not_duplicate_the_folder_it_belongs_to(monkeypatch):
+    """The empty card for a tracked show has to land on its own folder."""
+    romaji = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"
+    english = "Classroom of the Elite"
+    shows = _run_library(
+        monkeypatch,
+        {romaji: ["ep - S03E01.mkv"]},
+        resolve={romaji: (337912, english), english: (337912, english)},
+        tracked=[english],
+    )
+    assert len(shows) == 1
+    assert shows[0]["title"] == english
+
+
+def test_shows_without_a_tvdb_id_are_not_merged_on_a_guess(monkeypatch):
+    """With no id there is nothing better than the name; separate is correct."""
+    shows = _run_library(
+        monkeypatch,
+        {
+            "Grand Blue": ["a - S01E01.mkv"],
+            "Grand Blue Dreaming": ["b - S01E01.mkv"],
+        },
+    )
+    assert len(shows) == 2
+
+
+def test_asking_for_one_merged_show_returns_its_folders(monkeypatch):
+    """The card's key is the English title, which need not be a folder name."""
+    romaji = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
+    english = "Classroom of the Elite"
+    folders = {romaji: ["ep - S01E01.mkv"], "Unrelated Show": ["u - S01E01.mkv"]}
+    resolve = {romaji: (337912, english)}
+
+    by_key = _run_library(monkeypatch, folders, resolve=resolve, only_key=english)
+    assert len(by_key) == 1
+    assert by_key[0]["folders"] == [romaji]
+
+    # The folder name still works, so a link made before the merge survives.
+    by_folder = _run_library(monkeypatch, folders, resolve=resolve, only_key=romaji)
+    assert len(by_folder) == 1
+    assert by_folder[0]["title"] == english

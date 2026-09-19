@@ -8,7 +8,6 @@ import re
 import subprocess
 import threading
 import time
-from collections import defaultdict
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import date
@@ -578,6 +577,29 @@ async def search_episode(tvdb_id: int, season: int, episode: int, query: str | N
     }
 
 
+def _display_title(titles: list[str], english: str = "") -> str:
+    """One name for a show that is on disk under more than one.
+
+    Deterministic, because it becomes the card's key and the page asks for a
+    single show back by it. The longest folder name wins: it is the one
+    carrying the year or the fuller punctuation.
+    """
+    if english:
+        return english
+    if not titles:
+        return ""
+    return sorted(titles, key=lambda value: (-len(value), value))[0]
+
+
+def _folder_tvdb_id(root: Path, titles: list[str]) -> int | None:
+    """The first tvshow.nfo id among the folders a show is sitting in."""
+    for title in titles:
+        found = _nfo_id(root / title)
+        if found:
+            return found
+    return None
+
+
 async def group_shows(
     entries: list[dict],
     root: Path,
@@ -585,49 +607,99 @@ async def group_shows(
     include_episodes: bool = True,
     only_key: str | None = None,
 ) -> list[dict]:
-    groups = defaultdict(list)
+    """One card per show, however many folders and spellings it arrived under.
+
+    Grouping used to key on the raw folder name, so a show sitting in two
+    folders got two cards -- "Show" beside "Show (2024)", or a romaji folder
+    beside its English one. Normalising the name only ever decided whether to
+    add an empty card for a tracked title; it never merged two real folders.
+
+    Identity is now decided twice. The normalised name catches the pairs that
+    differ in punctuation or a trailing year, and the TVDB id catches the
+    pairs that share no spelling at all.
+    """
+    buckets: dict[str, dict] = {}
     for entry in entries:
-        if only_key is not None and entry["series"] != only_key:
-            continue
-        identity = parse_se(entry["name"])
-        groups[entry["series"]].append(
-            {
-                **entry,
-                "season_number": identity[0] if identity else None,
-                "episode": identity[1] if identity else None,
-            }
-        )
+        season, episode = parse_se(entry["name"]) or (None, None)
+        bucket = buckets.setdefault(_name(entry["series"]), {"titles": [], "files": []})
+        if entry["series"] not in bucket["titles"]:
+            bucket["titles"].append(entry["series"])
+        bucket["files"].append({**entry, "season_number": season, "episode": episode})
+
     ids = await asyncio.to_thread(known_ids)
     # One read of the release state for the whole page, not one per show: it
     # is a fourteen megabyte file, and per show it cost twenty seconds.
     state = await asyncio.to_thread(erai._load_state)
     codecs_by_series = codec_index(state)
     tracked = state.get("series", {})
-    names = {_name(title) for title in groups}
+
+    # A tracked show with nothing on disk yet still gets a card.
     for record in tracked.values():
         title = record.get("english_title")
-        if only_key is not None and title != only_key:
-            continue
-        if title and _name(title) not in names:
-            groups[title] = []
-            names.add(_name(title))
+        if title and _name(title) not in buckets:
+            buckets[_name(title)] = {"titles": [title], "files": []}
+
     slots = asyncio.Semaphore(6)
 
-    async def build(title: str, files: list[dict]) -> dict:
-        tvdb_id = ids.get(_name(title)) or await asyncio.to_thread(_nfo_id, root / title)
+    async def identify(name: str, bucket: dict) -> dict:
+        tvdb_id = ids.get(name) or await asyncio.to_thread(
+            _folder_tvdb_id, root, bucket["titles"]
+        )
         async with slots:
-            metadata = await show_metadata(title, tvdb_id)
-            tvdb_id = metadata.get("tvdb_id") or tvdb_id
-            roster = []
-            if tvdb_id and discover.is_configured():
-                with suppress(Exception):
-                    roster = await episode_roster(tvdb_id)
+            metadata = await show_metadata(_display_title(bucket["titles"]), tvdb_id)
+        return {
+            "name": name,
+            "titles": bucket["titles"],
+            "files": bucket["files"],
+            "tvdb_id": metadata.get("tvdb_id") or tvdb_id,
+            "metadata": metadata,
+        }
+
+    identified = await asyncio.gather(*(identify(n, b) for n, b in buckets.items()))
+
+    # Second pass. Two folders can normalise differently and still be one
+    # series; the TVDB id is what says so. Without an id there is nothing
+    # better than the name, so those stay separate rather than guess.
+    merged: dict[object, dict] = {}
+    for item in identified:
+        identity = item["tvdb_id"] or f"name:{item['name']}"
+        slot = merged.setdefault(
+            identity,
+            {"titles": [], "files": [], "tvdb_id": item["tvdb_id"], "metadata": {}},
+        )
+        slot["titles"].extend(item["titles"])
+        slot["files"].extend(item["files"])
+        if item["metadata"] and not slot["metadata"]:
+            slot["metadata"] = item["metadata"]
+    for slot in merged.values():
+        slot["titles"] = sorted(dict.fromkeys(slot["titles"]))
+        slot["key"] = _display_title(
+            slot["titles"], str(slot["metadata"].get("english_title") or "")
+        )
+
+    if only_key is not None:
+        wanted = _name(only_key)
+        merged = {
+            identity: slot
+            for identity, slot in merged.items()
+            if wanted == _name(slot["key"]) or wanted in {_name(t) for t in slot["titles"]}
+        }
+
+    async def build(slot: dict) -> dict:
+        metadata = slot["metadata"]
+        tvdb_id = slot["tvdb_id"]
+        files = slot["files"]
+        title = slot["key"]
+        roster = []
+        if tvdb_id and discover.is_configured():
+            with suppress(Exception):
+                roster = await episode_roster(tvdb_id)
         codecs = {
             **codecs_by_series.get(str(tvdb_id), {}),
             **await asyncio.to_thread(probed_codecs, files),
         }
         dubbed = await asyncio.to_thread(german_dubbed_episodes, files)
-        merged = merge_episodes(
+        merged_episodes = merge_episodes(
             files,
             roster,
             ended=str(metadata.get("status", "")).casefold() == "ended",
@@ -636,20 +708,23 @@ async def group_shows(
         )
         result = {
             "key": title,
+            # Every folder behind this one card, so the page can ask for the
+            # right files back after two of them were merged.
+            "folders": slot["titles"],
             "title": metadata.get("english_title") or title,
             "avc_count": sum(
                 1
-                for row in merged["episodes"]
+                for row in merged_episodes["episodes"]
                 # A German dub is irreplaceable, so it is not on offer.
                 if row.get("codec") == "avc" and not row.get("german_dub")
             ),
             "hevc_count": sum(
-                1 for row in merged["episodes"] if row.get("codec") == "hevc"
+                1 for row in merged_episodes["episodes"] if row.get("codec") == "hevc"
             ),
             # Counted separately from avc_count, which is what the upgrade can
             # actually offer to replace.
             "german_dub_count": sum(
-                1 for row in merged["episodes"] if row.get("german_dub")
+                1 for row in merged_episodes["episodes"] if row.get("german_dub")
             ),
             "tvdb_id": tvdb_id,
             "year": metadata.get("year"),
@@ -658,19 +733,19 @@ async def group_shows(
             "season_count": len(
                 {
                     row["season_number"]
-                    for row in merged["episodes"]
+                    for row in merged_episodes["episodes"]
                     if row["season_number"] is not None
                 }
             ),
             "size": sum(row["size"] for row in files),
             "staged_count": sum(row["staged"] for row in files),
-            **merged,
+            **merged_episodes,
         }
         if not include_episodes:
             result["episodes"] = []
         return result
 
-    shows = await asyncio.gather(*(build(title, episodes) for title, episodes in groups.items()))
+    shows = await asyncio.gather(*(build(slot) for slot in merged.values()))
     await asyncio.to_thread(flush_persistent_cache)
     return sorted(shows, key=lambda row: row["title"].casefold())
 
