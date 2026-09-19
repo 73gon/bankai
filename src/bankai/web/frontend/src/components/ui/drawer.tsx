@@ -25,7 +25,7 @@ export const DrawerContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'drawer-panel fixed inset-y-0 right-0 z-50 flex w-full max-w-[560px] flex-col border-l border-line-strong bg-background',
+        'drawer-panel fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-line-strong bg-background md:w-1/2',
         className,
       )}
       {...props}

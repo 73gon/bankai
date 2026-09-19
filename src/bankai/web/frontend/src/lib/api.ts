@@ -278,6 +278,8 @@ export interface AnimeLibraryShow {
   /** Every library folder behind this one card; more than one once merged. */
   folders: string[];
   title: string;
+  /** The romaji name Erai-raws publishes under, for cross-referencing. */
+  source_title: string;
   tvdb_id: number | null;
   year: number | null;
   poster_url: string | null;

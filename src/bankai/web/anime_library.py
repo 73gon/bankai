@@ -399,6 +399,30 @@ def codec_index(state: dict | None = None) -> dict[str, dict[tuple[int, int], st
     return index
 
 
+def erai_source_titles(state: dict | None = None) -> dict[str, str]:
+    """The name Erai-raws publishes each series under, keyed by TVDB id.
+
+    The library calls a show by its English title, but every release, every
+    held review card and every log line names it the way Erai does. Holding
+    both is what makes a mismatch traceable, so the drawer carries the source
+    name as well. Built from the same single read as :func:`codec_index`.
+    """
+    state = erai._load_state() if state is None else state
+    releases = state.get("releases", {})
+    titles: dict[str, str] = {}
+    for canonical, row in state.get("canonical", {}).items():
+        tvdb_id = str(canonical).split("|")[0]
+        if tvdb_id in titles:
+            continue
+        release = releases.get(str(row.get("info_hash") or ""))
+        if not release:
+            continue
+        source = anime.clean_release_title(str(release.get("title") or ""))
+        if source:
+            titles[tvdb_id] = source
+    return titles
+
+
 def episode_codecs(tvdb_id: int | None) -> dict[tuple[int, int], str]:
     """Codecs for one series. Prefer :func:`codec_index` for a whole page."""
     if not tvdb_id:
@@ -631,6 +655,7 @@ async def group_shows(
     # is a fourteen megabyte file, and per show it cost twenty seconds.
     state = await asyncio.to_thread(erai._load_state)
     codecs_by_series = codec_index(state)
+    source_titles = erai_source_titles(state)
     tracked = state.get("series", {})
 
     # A tracked show with nothing on disk yet still gets a card.
@@ -712,6 +737,8 @@ async def group_shows(
             # right files back after two of them were merged.
             "folders": slot["titles"],
             "title": metadata.get("english_title") or title,
+            "source_title": source_titles.get(str(tvdb_id))
+            or str(metadata.get("japanese_title") or ""),
             "avc_count": sum(
                 1
                 for row in merged_episodes["episodes"]

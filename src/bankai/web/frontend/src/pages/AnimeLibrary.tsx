@@ -363,6 +363,11 @@ export default function AnimeLibrary() {
                   <AnimePoster url={active.poster_url} title={active.title} className='w-16 shrink-0' />
                   <div className='flex min-w-0 flex-col gap-2'>
                     <DrawerTitle className='text-base font-semibold leading-tight'>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DrawerTitle>
+                    {active.source_title && active.source_title !== active.title && (
+                      <p className='font-mono text-[0.7rem] leading-tight text-muted-foreground' title='The name Erai-raws publishes this show under'>
+                        {active.source_title}
+                      </p>
+                    )}
                     <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
                       {active.tvdb_id && <Button asChild variant='secondary' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
@@ -401,7 +406,7 @@ export default function AnimeLibrary() {
                               </div>
                             </td>
                             <td className='px-3 py-2.5 text-right font-mono text-xs tabular-nums'>{entry.missing ? '—' : formatSize(entry.size)}</td>
-                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='sm' variant='secondary' disabled={!active.tvdb_id} onClick={() => void searchMissing(active, entry)}><Search data-icon='inline-start' /> Search</Button> : entry.staged ? (
+                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={!active.tvdb_id} aria-label='Search for a release' title='Search for a release' onClick={() => void searchMissing(active, entry)}><Search /></Button> : entry.staged ? (
                               <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>
                             ) : <Badge variant='success'>In library</Badge>}</td>
                           </tr>
