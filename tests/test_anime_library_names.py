@@ -397,8 +397,13 @@ def test_a_second_name_that_repeats_the_title_is_not_printed(monkeypatch):
     assert run(anime_library.second_name(280329, "Red Eyes Sword")) == "Akame ga Kill!"
 
 
-def test_the_erai_name_wins_over_the_release_list(monkeypatch):
-    """What Erai published is evidence; the list is a lookup."""
+def test_the_series_name_beats_the_name_of_one_of_its_seasons(monkeypatch):
+    """A card stands for a series, so its second name has to as well.
+
+    Preferring the firsthand Erai name sounded right and was not: Erai
+    publishes each season separately, so the Bleach card was labelled with
+    one late arc and Classroom of the Elite with its fourth season.
+    """
     import asyncio
 
     from bankai.web import anime_library
@@ -411,7 +416,40 @@ def test_the_erai_name_wins_over_the_release_list(monkeypatch):
         anime_library.second_name(
             329822, "Classroom of the Elite", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"
         )
-    ) == "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"
+    ) == "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
+
+
+def test_the_erai_name_is_used_when_the_release_list_has_nothing(monkeypatch):
+    import asyncio
+
+    from bankai.web import anime_library
+
+    async def related(tvdb_id):
+        return []
+
+    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
+    assert asyncio.run(
+        anime_library.second_name(1, "Some Show", "Betsu no Namae")
+    ) == "Betsu no Namae"
+
+
+def test_the_erai_name_for_a_series_is_its_shortest_not_its_first():
+    """Bleach was labelled with whichever arc came first out of a dict."""
+    from bankai.web import anime_library, erai
+
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: {"title": "[Erai-raws] Bleach: Sennen Kessen Hen - Kashin Tan - 03 [1080p]"},
+        "b" * 40: {"title": "[Erai-raws] Bleach - 210 [1080p]"},
+        "c" * 40: {"title": "[Erai-raws] Bleach: Sennen Kessen Hen - 01 [1080p]"},
+    }
+    # The late arc is indexed first, as it was on the real server.
+    state["canonical"] = {
+        "74796|7|3": {"info_hash": "a" * 40},
+        "74796|1|210": {"info_hash": "b" * 40},
+        "74796|5|1": {"info_hash": "c" * 40},
+    }
+    assert anime_library.erai_source_titles(state) == {"74796": "Bleach"}
 
 
 def test_a_show_with_no_release_list_entry_gets_no_second_name(monkeypatch):

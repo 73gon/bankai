@@ -137,12 +137,17 @@ def _same_name(left: str, right: str) -> bool:
 async def second_name(tvdb_id: int | None, shown_as: str, erai: str = "") -> str:
     """The name to print under a show's title, or nothing.
 
+    A card stands for a whole series, so its second name has to as well. The
+    AniDB list is organised that way and its first entry is the series; an
+    Erai release name is only ever the season it belongs to, which is why it
+    is the fallback rather than the preference despite being firsthand.
+
     Nothing is the right answer more often than it looks. "Akame ga Kill!" is
     already the romaji, so repeating it under itself says nothing; the page
     compared the two exactly, which would still have printed a second line
     over a stray exclamation mark.
     """
-    candidate = erai or await romaji_name(tvdb_id)
+    candidate = await romaji_name(tvdb_id) or erai
     return "" if _same_name(candidate, shown_as) else candidate
 
 
@@ -474,13 +479,18 @@ def erai_source_titles(state: dict | None = None) -> dict[str, str]:
     titles: dict[str, str] = {}
     for canonical, row in state.get("canonical", {}).items():
         tvdb_id = str(canonical).split("|")[0]
-        if tvdb_id in titles:
-            continue
         release = releases.get(str(row.get("info_hash") or ""))
         if not release:
             continue
         source = anime.clean_release_title(str(release.get("title") or ""))
-        if source:
+        if not source:
+            continue
+        # The shortest, not the first. Erai publishes each season under its
+        # own name -- "Bleach", then "Bleach: Sennen Kessen Hen - Kashin Tan"
+        # -- and taking whichever came first out of a dict labelled the Bleach
+        # card with one late arc. The shortest is the series, not an arc.
+        current = titles.get(tvdb_id)
+        if current is None or (len(source), source) < (len(current), current):
             titles[tvdb_id] = source
     return titles
 
