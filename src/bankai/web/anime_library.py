@@ -121,6 +121,31 @@ def _is_romaji(value: str) -> bool:
     )
 
 
+_PUNCTUATION = re.compile(r"[^0-9a-z]+")
+
+
+def _same_name(left: str, right: str) -> bool:
+    """One name, for the purpose of not printing it under itself.
+
+    Compared with punctuation dropped as well as case: _name only removes
+    what Windows forbids in a folder, so an exclamation mark survives it and
+    "Akame ga Kill!" did not match "Akame ga Kill".
+    """
+    return _PUNCTUATION.sub("", _name(left)) == _PUNCTUATION.sub("", _name(right))
+
+
+async def second_name(tvdb_id: int | None, shown_as: str, erai: str = "") -> str:
+    """The name to print under a show's title, or nothing.
+
+    Nothing is the right answer more often than it looks. "Akame ga Kill!" is
+    already the romaji, so repeating it under itself says nothing; the page
+    compared the two exactly, which would still have printed a second line
+    over a stray exclamation mark.
+    """
+    candidate = erai or await romaji_name(tvdb_id)
+    return "" if _same_name(candidate, shown_as) else candidate
+
+
 async def romaji_name(tvdb_id: int | None) -> str:
     """The romaji name a series is released under, from the AniDB list.
 
@@ -774,7 +799,11 @@ async def group_shows(
             # right files back after two of them were merged.
             "folders": slot["titles"],
             "title": metadata.get("english_title") or title,
-            "source_title": source_titles.get(str(tvdb_id)) or await romaji_name(tvdb_id),
+            "source_title": await second_name(
+                tvdb_id,
+                str(metadata.get("english_title") or title),
+                source_titles.get(str(tvdb_id), ""),
+            ),
             "avc_count": sum(
                 1
                 for row in merged_episodes["episodes"]

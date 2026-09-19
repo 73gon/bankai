@@ -375,6 +375,45 @@ def test_the_romaji_name_comes_from_the_release_lists_not_tvdb_aliases(monkeypat
     assert asyncio.run(anime_library.romaji_name(None)) == ""
 
 
+def test_a_second_name_that_repeats_the_title_is_not_printed(monkeypatch):
+    """Akame ga Kill! is already the romaji; printing it twice says nothing.
+
+    Compared through the same normalisation the library groups by, so a
+    stray exclamation mark or a trailing year does not sneak a second line
+    back in.
+    """
+    import asyncio
+
+    from bankai.web import anime_library
+
+    async def related(tvdb_id):
+        return ["Akame ga Kill!"]
+
+    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
+    run = asyncio.run
+    assert run(anime_library.second_name(280329, "Akame ga Kill!")) == ""
+    assert run(anime_library.second_name(280329, "Akame ga Kill")) == ""
+    # A genuinely different name is still worth showing.
+    assert run(anime_library.second_name(280329, "Red Eyes Sword")) == "Akame ga Kill!"
+
+
+def test_the_erai_name_wins_over_the_release_list(monkeypatch):
+    """What Erai published is evidence; the list is a lookup."""
+    import asyncio
+
+    from bankai.web import anime_library
+
+    async def related(tvdb_id):
+        return ["Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"]
+
+    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
+    assert asyncio.run(
+        anime_library.second_name(
+            329822, "Classroom of the Elite", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"
+        )
+    ) == "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"
+
+
 def test_a_show_with_no_release_list_entry_gets_no_second_name(monkeypatch):
     """Better than captioning it with something unusable."""
     import asyncio
