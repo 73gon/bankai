@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Ban, Check, ChevronDown, ExternalLink, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { Ban, Check, ExternalLink, Layers, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card } from '@/components/ui/card';
+import { cn } from '@/lib/utils';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState, Spinner } from '@/components/ui/empty';
 
@@ -23,16 +24,12 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   const [busy, setBusy] = useState<string | null>(null);
   const [mappingTitle, setMappingTitle] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<AnimeReviewItem | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [releasesFor, setReleasesFor] = useState<AnimeReviewItem | null>(null);
   const [releases, setReleases] = useState<HeldRelease[]>([]);
   const [loadingReleases, setLoadingReleases] = useState(false);
 
-  async function toggleReleases(item: AnimeReviewItem) {
-    if (expanded === item.key) {
-      setExpanded(null);
-      return;
-    }
-    setExpanded(item.key);
+  async function openReleases(item: AnimeReviewItem) {
+    setReleasesFor(item);
     setReleases([]);
     setLoadingReleases(true);
     try {
@@ -50,7 +47,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     try {
       const result = await api.markAnimeOwned(payload);
       toast.success('Dismissed ' + result.cleared + ' release' + (result.cleared === 1 ? '' : 's') + ' of ' + label);
-      setExpanded(null);
+      setReleasesFor(null);
       await load();
     } catch (error: any) {
       toast.error(error.message);
@@ -157,76 +154,116 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           description={blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}
         />
       ) : (
-        <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4'>
+        <div
+          className={cn(
+            'grid gap-3',
+            // A blacklist card is a cover and one button, so it packs far
+            // tighter than a review card carrying six decisions.
+            blacklist
+              ? 'grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 2xl:grid-cols-10'
+              : 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5',
+          )}
+        >
           {items.map((item) => {
-            const german = (item.reasons || [item.reason || '']).some((reason) => reason.includes('German subtitles'));
-            const tvdb = (item.reasons || [item.reason || '']).some((reason) => reason.includes('TVDB'));
+            const reasons = (item.reasons || [item.reason]).filter(Boolean) as string[];
+            const german = reasons.some((reason) => reason.includes('German subtitles'));
+            const tvdb = reasons.some((reason) => reason.includes('TVDB'));
+            const count = item.release_count || 1;
             return (
-              <Card key={item.key} className='overflow-hidden'>
-                <AnimePoster url={item.poster_url} title={item.title} />
-                <CardHeader>
-                  <CardTitle>{item.title}{item.year ? ' (' + item.year + ')' : ''}</CardTitle>
-                  <CardDescription>{blacklist ? item.source_title : (item.release_count || 1) + ' held release' + ((item.release_count || 1) === 1 ? '' : 's')}</CardDescription>
-                </CardHeader>
-                {!blacklist && <CardContent className='flex flex-col gap-2'>
-                  {(item.reasons || [item.reason]).filter(Boolean).map((reason) => <p key={reason} className='text-sm text-warning'>{reason}</p>)}
-                  {item.detail_url && <Button asChild variant='outline' size='sm'><a href={item.detail_url} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> Nyaa description</a></Button>}
-                </CardContent>}
-                <CardFooter className='flex flex-wrap gap-2'>
-                  {blacklist ? (
-                    <Button variant='secondary' onClick={() => void restore(item)} disabled={busy === item.key}><RotateCcw data-icon='inline-start' /> Restore and recheck</Button>
-                  ) : (
-                    <>
-                      <Button variant='secondary' onClick={() => void decide(item, 'recheck')} disabled={Boolean(busy)}><RefreshCw data-icon='inline-start' /> Recheck</Button>
-                      {german && <Button onClick={() => void decide(item, 'allow_german')} disabled={Boolean(busy)}><ShieldCheck data-icon='inline-start' /> Always allow German</Button>}
-                      {tvdb && item.release_title && <Button variant='outline' onClick={() => setMappingTitle(item.release_title || null)} disabled={Boolean(busy)}><Search data-icon='inline-start' /> Choose TVDB show</Button>}
-                      <Button variant='secondary' onClick={() => void markOwned({ key: item.key }, item.title)} disabled={Boolean(busy)}><Check data-icon='inline-start' /> Already downloaded</Button>
-                      {(item.release_count || 1) > 1 && (
-                        <Button variant='ghost' onClick={() => void toggleReleases(item)} disabled={Boolean(busy)}>
-                          <ChevronDown data-icon='inline-start' className={expanded === item.key ? 'rotate-180' : ''} />
-                          {expanded === item.key ? 'Hide' : 'Show'} {item.release_count} releases
+              <Card key={item.key} className='flex flex-col overflow-hidden'>
+                {/* The cover carries the name, so the card is mostly poster. */}
+                <div className='relative'>
+                  <AnimePoster url={item.poster_url} title={item.title} />
+                  <div className='pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-2 pb-2 pt-10'>
+                    <p
+                      className='line-clamp-2 text-[11px] font-medium leading-tight text-white'
+                      title={blacklist ? item.source_title : item.title}
+                    >
+                      {item.title}{item.year ? ' (' + item.year + ')' : ''}
+                    </p>
+                  </div>
+                  {blacklist && (
+                    <div className='absolute right-1.5 top-1.5'>
+                      <Button
+                        size='icon'
+                        variant='secondary'
+                        title='Restore and recheck'
+                        aria-label={'Restore and recheck ' + item.title}
+                        onClick={() => void restore(item)}
+                        disabled={busy === item.key}
+                      >
+                        <RotateCcw />
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
+                {!blacklist && (
+                  <div className='flex flex-col gap-2 p-2'>
+                    {reasons.length > 0 && (
+                      <p className='line-clamp-2 text-[11px] leading-snug text-warning' title={reasons.join(' · ')}>
+                        {reasons.join(' · ')}
+                      </p>
+                    )}
+                    <div className='grid grid-cols-2 gap-1.5'>
+                      {item.detail_url && (
+                        <Button asChild variant='outline'>
+                          <a href={item.detail_url} target='_blank' rel='noreferrer'>
+                            <ExternalLink data-icon='inline-start' /> Nyaa
+                          </a>
                         </Button>
                       )}
-                      <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={Boolean(busy)}><Ban data-icon='inline-start' /> Discard show</Button>
-                      <Button variant='destructive' onClick={() => setPurgeTarget(item)} disabled={Boolean(busy)}><Trash2 data-icon='inline-start' /> Discard and delete files</Button>
-                    </>
-                  )}
-                </CardFooter>
-                {expanded === item.key && (
-                  <div className='border-t border-border px-4 py-3'>
-                    {loadingReleases ? (
-                      <div className='flex justify-center py-4'><Spinner /></div>
-                    ) : releases.length === 0 ? (
-                      <p className='py-2 text-xs text-muted-foreground'>No held releases left for this show.</p>
-                    ) : (
-                      <ul className='flex flex-col gap-1'>
-                        {releases.map((release) => (
-                          <li key={release.info_hash} className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/40'>
-                            <span className='w-8 shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
-                              {release.episode ?? '—'}
-                            </span>
-                            <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={release.title}>
-                              {release.title}
-                            </span>
-                            {release.german_in_title && <Badge variant='success'>GER</Badge>}
-                            {release.hevc && <Badge variant='secondary'>HEVC</Badge>}
-                            {release.detail_url && (
-                              <Button asChild size='sm' variant='ghost'>
-                                <a href={release.detail_url} target='_blank' rel='noreferrer' aria-label='Nyaa description'><ExternalLink /></a>
-                              </Button>
-                            )}
-                            <Button
-                              size='sm'
-                              variant='ghost'
-                              disabled={Boolean(busy)}
-                              onClick={() => void markOwned({ info_hashes: [release.info_hash] }, release.title)}
-                            >
-                              <Check data-icon='inline-start' /> Have it
-                            </Button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                      <Button
+                        variant='secondary'
+                        className={cn(!item.detail_url && 'col-span-2')}
+                        onClick={() => void decide(item, 'recheck')}
+                        disabled={Boolean(busy)}
+                      >
+                        <RefreshCw data-icon='inline-start' /> Recheck
+                      </Button>
+
+                      {german && (
+                        <Button
+                          title='Always allow German subtitles for this show'
+                          onClick={() => void decide(item, 'allow_german')}
+                          disabled={Boolean(busy)}
+                        >
+                          <ShieldCheck data-icon='inline-start' /> Allow
+                        </Button>
+                      )}
+                      <Button
+                        variant='secondary'
+                        className={cn(!german && 'col-span-2')}
+                        onClick={() => void markOwned({ key: item.key }, item.title)}
+                        disabled={Boolean(busy)}
+                      >
+                        <Check data-icon='inline-start' /> Already downloaded
+                      </Button>
+
+                      {tvdb && item.release_title && (
+                        <Button
+                          variant='outline'
+                          className='col-span-2'
+                          onClick={() => setMappingTitle(item.release_title || null)}
+                          disabled={Boolean(busy)}
+                        >
+                          <Search data-icon='inline-start' /> Choose TVDB show
+                        </Button>
+                      )}
+
+                      <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={Boolean(busy)}>
+                        <Ban data-icon='inline-start' /> Discard
+                      </Button>
+                      <Button variant='destructive' onClick={() => setPurgeTarget(item)} disabled={Boolean(busy)}>
+                        <Trash2 data-icon='inline-start' /> Discard and delete
+                      </Button>
+
+                      {count > 1 && (
+                        <Button variant='ghost' className='col-span-2' onClick={() => void openReleases(item)} disabled={Boolean(busy)}>
+                          <Layers data-icon='inline-start' /> Show {count} releases
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
               </Card>
@@ -235,6 +272,54 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </div>
       )}
       <AnimeMappingDialog title={mappingTitle} onClose={() => setMappingTitle(null)} onSaved={() => void load()} />
+
+      {/* Sixty-three releases would have made one card taller than the page,
+          so they open beside it rather than inside it. */}
+      <Dialog open={releasesFor !== null} onOpenChange={(open) => { if (!open) setReleasesFor(null); }}>
+        <DialogContent className='max-w-3xl'>
+          <DialogHeader>
+            <DialogTitle>{releasesFor?.title}</DialogTitle>
+            <DialogDescription>
+              Every release held for this show. Dismiss the ones already in the library, or read a
+              description on Nyaa.
+            </DialogDescription>
+          </DialogHeader>
+          <div className='max-h-[60vh] overflow-y-auto'>
+            {loadingReleases ? (
+              <div className='flex justify-center py-8'><Spinner /></div>
+            ) : releases.length === 0 ? (
+              <p className='py-4 text-xs text-muted-foreground'>No held releases left for this show.</p>
+            ) : (
+              <ul className='flex flex-col gap-1'>
+                {releases.map((release) => (
+                  <li key={release.info_hash} className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/40'>
+                    <span className='w-8 shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
+                      {release.episode ?? '—'}
+                    </span>
+                    <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={release.title}>
+                      {release.title}
+                    </span>
+                    {release.german_in_title && <Badge variant='success'>GER</Badge>}
+                    {release.hevc && <Badge variant='secondary'>HEVC</Badge>}
+                    {release.detail_url && (
+                      <Button asChild size='icon' variant='ghost' title='Nyaa description'>
+                        <a href={release.detail_url} target='_blank' rel='noreferrer' aria-label='Nyaa description'><ExternalLink /></a>
+                      </Button>
+                    )}
+                    <Button
+                      variant='ghost'
+                      disabled={Boolean(busy)}
+                      onClick={() => void markOwned({ info_hashes: [release.info_hash] }, release.title)}
+                    >
+                      <Check data-icon='inline-start' /> Have it
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={purgeTarget !== null} onOpenChange={(open) => { if (!open) setPurgeTarget(null); }}>
         <DialogContent>

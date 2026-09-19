@@ -409,8 +409,11 @@ export default function App() {
               <Route path='/a/discover' element={<Anime />} />
               <Route path='/a/queue' element={<AnimeQueue />} />
               <Route path='/a/library' element={<AnimeLibrary />} />
-              <Route path='/a/review' element={<AnimeReview />} />
-              <Route path='/a/blacklist' element={<AnimeReview blacklist />} />
+              {/* Keyed apart: both render AnimeReview, so without this React
+                  reuses the instance and the open releases dialog, the busy
+                  flag and the purge target all follow you between them. */}
+              <Route path='/a/review' element={<AnimeReview key='review' />} />
+              <Route path='/a/blacklist' element={<AnimeReview key='blacklist' blacklist />} />
               <Route path='/a/settings' element={<AnimeSettings />} />
 
               {/* Neither library's own. */}
