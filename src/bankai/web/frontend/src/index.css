@@ -127,7 +127,7 @@
   --field-radius: 10px;
   /* Content containers are square. The hairline already separates them, and
      rounding one costs the distinction that says what can be clicked. */
-  --panel-radius: 0px;
+  --panel-radius: 20px;
   --raised-sheen: linear-gradient(180deg, var(--control-inner-edge), transparent);
   --raised-shadow:
     0 0 0 1px var(--control-edge),
@@ -503,10 +503,23 @@
 /* A card, as the brand room builds one: a flat fill inside a hairline, no
    shadow and no gradient. Depth on this ground comes from the border being
    visible, not from a glow underneath. */
+/* The enclosed panel treatment, which the brand room reserves for its one
+   rounded container and we use for all of them, by preference.
+
+   Three details carry it. The edge is --field-edge, the same one the inputs
+   inside wear, so the panel reads as one object rather than a box with
+   controls dropped into it -- --border here would mismatch its own contents.
+   The fill is a 160 degree gradient rather than a flat colour, lifting the
+   top-left corner the way the controls are lit. And the drop shadow is the
+   only container shadow in the system; it does not license shadows anywhere
+   else. */
 .panel {
   border-radius: var(--panel-radius);
-  background: var(--card);
-  border: 1px solid var(--border);
+  border: 1px solid var(--field-edge);
+  background: linear-gradient(160deg, var(--control-surface), var(--field-surface) 55%);
+  box-shadow:
+    inset 0 1px 0 var(--control-highlight),
+    0 4px 16px rgb(0 0 0 / 0.04);
 }
 /* The raised treatment on something that is not a control: the wordmark tile. */
 .raised {
