@@ -367,9 +367,24 @@ class ServerTitle:
 _SERVER_CACHE: dict[str, tuple[float, list[ServerTitle]]] = {}
 
 
+# Anime is shaped like a show -- a folder of seasons -- and only differs in
+# which roots it lives under.
+_SHOW_LIKE = {"show", "anime"}
+
+
+def server_roots(kind: str) -> list:
+    """The configured roots for one kind of library content."""
+    web = get_settings().web
+    if kind == "movie":
+        return list(web.server_movie_dirs)
+    if kind == "anime":
+        return list(web.server_anime_dirs)
+    return list(web.server_show_dirs)
+
+
 def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
     settings = get_settings()
-    dirs = settings.web.server_movie_dirs if kind == "movie" else settings.web.server_show_dirs
+    dirs = server_roots(kind)
     cache_key = kind
     ttl = settings.web.cache_ttl_seconds
     if use_cache:
@@ -395,7 +410,7 @@ def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
             score = 1
             new_entry = key not in seen
             replace = new_entry
-            if not replace and kind == "show" and child.is_dir():
+            if not replace and kind in _SHOW_LIKE and child.is_dir():
                 existing_score = scores[key]
                 if existing_score < 0:
                     existing_location = seen[key].location
@@ -417,7 +432,7 @@ def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
                 )
                 # Delay recursive counting until a duplicate actually appears.
                 scores[key] = (
-                    -1 if new_entry and kind == "show" and child.is_dir() else score
+                    -1 if new_entry and kind in _SHOW_LIKE and child.is_dir() else score
                 )
     titles = sorted(seen.values(), key=lambda t: t.name.casefold())
     _SERVER_CACHE[cache_key] = (time.time(), titles)

@@ -36,6 +36,36 @@ def test_anime_nested_pages_have_spa_routes(client: TestClient) -> None:
         assert "<html" in response.text
 
 
+def test_the_server_library_manages_anime_roots_too(client: TestClient, tmp_path) -> None:
+    """The bottom library is where anything on the server is added.
+
+    It scanned movie and show roots only, so anime -- which the pipeline
+    publishes to its own directory -- could not be reached from it.
+    """
+    body = client.get("/api/server/dirs").json()
+    assert set(body) == {"movie_dirs", "show_dirs", "anime_dirs"}
+
+    root = tmp_path / "extra_anime_root"
+    root.mkdir()
+    added = client.post("/api/server/dirs", json={"kind": "anime", "path": str(root)})
+    assert added.status_code == 200
+    assert str(root) in added.json()["dirs"]
+    assert str(root) in client.get("/api/server/dirs").json()["anime_dirs"]
+
+    # Anime is listed beside movies and shows, not folded into them.
+    assert "anime" in client.get("/api/server/contents").json()
+
+    removed = client.request("DELETE", "/api/server/dirs", json={"kind": "anime", "path": str(root)})
+    assert removed.status_code == 200
+    assert str(root) not in removed.json()["dirs"]
+
+
+def test_an_unknown_server_directory_kind_is_refused(client: TestClient) -> None:
+    response = client.post("/api/server/dirs", json={"kind": "podcast", "path": "/tmp/x"})
+    assert response.status_code == 400
+    assert "movie, show or anime" in response.json()["detail"]
+
+
 def test_sidebar_counts_answers_every_badge_in_one_call(client: TestClient) -> None:
     """Five badges polling five endpoints would be five state reads a tick."""
     body = client.get("/api/sidebar/counts").json()

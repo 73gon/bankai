@@ -224,6 +224,9 @@ class WebSettings(BaseModel):
     # transfers also reuse an existing matching series folder in these roots.
     server_movie_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/movies"), Path("/mnt/remote_media/movies")])
     server_show_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/shows"), Path("/mnt/remote_media/shows")])
+    # Anime roots are listed separately so the Movies & Shows library can scan
+    # its own two lists while the server library scans all three.
+    server_anime_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/shows_anime")])
     # Seconds to cache TVDB discover/trending responses and ffprobe data.
     cache_ttl_seconds: int = 900
 

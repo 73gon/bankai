@@ -667,12 +667,23 @@ SAFE_SETTING_KEYS: set[str] = {
     # per-machine and the defaults describe somebody else's disks.
     "web.server_movie_dirs",
     "web.server_show_dirs",
+    "web.server_anime_dirs",
     "web.max_concurrent_jobs",
     "web.transcode_fallback",
 }
 
 
-_DIRECTORY_LIST_KEYS = {"web.server_movie_dirs", "web.server_show_dirs"}
+_DIRECTORY_LIST_KEYS = {
+    "web.server_movie_dirs",
+    "web.server_show_dirs",
+    "web.server_anime_dirs",
+}
+
+_SERVER_DIR_KEYS = {
+    "movie": "web.server_movie_dirs",
+    "show": "web.server_show_dirs",
+    "anime": "web.server_anime_dirs",
+}
 
 
 def _validate_setting_value(key: str, value: Any) -> Any:
@@ -3424,34 +3435,30 @@ def create_app() -> Any:
     def server_contents(rescan: bool = Query(False)) -> dict:
         if rescan:
             media_mod.invalidate_server_cache()
-        movies = media_mod.scan_server("movie", use_cache=not rescan)
-        shows = media_mod.scan_server("show", use_cache=not rescan)
-        return {
-            "movies": [
+        def rows(kind: str) -> list[dict]:
+            return [
                 {
                     "name": t.name,
                     "present": t.present,
                     "location": t.location,
                     "directory": t.directory,
                 }
-                for t in movies
-            ],
-            "shows": [
-                {
-                    "name": t.name,
-                    "present": t.present,
-                    "location": t.location,
-                    "directory": t.directory,
-                }
-                for t in shows
-            ],
-        }
+                for t in media_mod.scan_server(kind, use_cache=not rescan)
+            ]
+
+        # All three, because this page is where anything already on the server
+        # is added and renamed, whichever library it belongs to.
+        return {"movies": rows("movie"), "shows": rows("show"), "anime": rows("anime")}
 
     @app.get("/api/server/show")
     def server_show(path: str = Query(...)) -> dict:
         s = get_settings()
         target = Path(path).resolve()
-        allowed = [Path(d).resolve() for d in s.web.server_show_dirs]
+        # Anime series drill down into seasons the same way, so their roots
+        # have to pass this check too or the rows would not open.
+        allowed = [
+            Path(d).resolve() for d in [*s.web.server_show_dirs, *s.web.server_anime_dirs]
+        ]
         if not any(target == a or a in target.parents for a in allowed):
             raise HTTPException(status_code=403, detail="path not under a configured show dir")
         if not target.is_dir():
@@ -3570,53 +3577,48 @@ def create_app() -> Any:
             "folder_renamed": folder_moved,
         }
 
+    def _dir_setting(kind: str) -> str:
+        key = _SERVER_DIR_KEYS.get(kind)
+        if key is None:
+            raise HTTPException(
+                status_code=400, detail="kind must be movie, show or anime"
+            )
+        return key
+
+    def _write_dirs(kind: str, dirs: list[str]) -> dict:
+        from bankai.cli.main import _set_config_value
+
+        _set_config_value(_dir_setting(kind), dirs)
+        reset_settings_cache()
+        media_mod.invalidate_server_cache()
+        return {"kind": kind, "dirs": dirs}
+
     @app.get("/api/server/dirs")
     def server_dirs() -> dict:
         s = get_settings()
         return {
             "movie_dirs": [str(p) for p in s.web.server_movie_dirs],
             "show_dirs": [str(p) for p in s.web.server_show_dirs],
+            "anime_dirs": [str(p) for p in s.web.server_anime_dirs],
         }
 
     @app.post("/api/server/dirs")
     def server_dirs_add(req: ServerDirRequest) -> dict:
-        if req.kind not in {"movie", "show"}:
-            raise HTTPException(status_code=400, detail="kind must be movie or show")
+        _dir_setting(req.kind)
         path = req.path.strip()
         if not path:
             raise HTTPException(status_code=400, detail="path required")
-        key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
-        s = get_settings()
-        current = [
-            str(p)
-            for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
-        ]
+        current = [str(p) for p in media_mod.server_roots(req.kind)]
         if path not in current:
             current.append(path)
-        from bankai.cli.main import _set_config_value
-
-        _set_config_value(key, current)
-        reset_settings_cache()
-        media_mod.invalidate_server_cache()
-        return {"kind": req.kind, "dirs": current}
+        return _write_dirs(req.kind, current)
 
     @app.delete("/api/server/dirs")
     def server_dirs_remove(req: ServerDirRequest) -> dict:
-        if req.kind not in {"movie", "show"}:
-            raise HTTPException(status_code=400, detail="kind must be movie or show")
-        key = "web.server_movie_dirs" if req.kind == "movie" else "web.server_show_dirs"
-        s = get_settings()
-        current = [
-            str(p)
-            for p in (s.web.server_movie_dirs if req.kind == "movie" else s.web.server_show_dirs)
-        ]
-        current = [p for p in current if p != req.path.strip()]
-        from bankai.cli.main import _set_config_value
-
-        _set_config_value(key, current)
-        reset_settings_cache()
-        media_mod.invalidate_server_cache()
-        return {"kind": req.kind, "dirs": current}
+        _dir_setting(req.kind)
+        target = req.path.strip()
+        current = [str(p) for p in media_mod.server_roots(req.kind) if str(p) != target]
+        return _write_dirs(req.kind, current)
 
     # ------------------------------------------------------------------
     # Settings

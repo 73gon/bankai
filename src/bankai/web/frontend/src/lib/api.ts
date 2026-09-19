@@ -264,6 +264,9 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
   episode: number | null;
 }
 
+/** The three kinds of root the server library scans. */
+export type ServerDirKind = 'movie' | 'show' | 'anime';
+
 export interface AnimeLibraryShow {
   /** AVC episodes an upgrade could actually replace (dubs are excluded). */
   avc_count?: number;
@@ -836,7 +839,7 @@ export const api = {
       body: JSON.stringify({ paths }),
     }),
 
-  serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
+  serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[]; anime: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
 
   serverShow: (path: string) => request<{ path: string; seasons: ServerSeason[] }>(`/api/server/show?path=${encodeURIComponent(path)}`),
   renameServerItem: (kind: 'movie' | 'episode', path: string, title: string) =>
@@ -845,13 +848,13 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ kind, path, title }) },
     ),
 
-  serverDirs: () => request<{ movie_dirs: string[]; show_dirs: string[] }>('/api/server/dirs'),
-  addServerDir: (kind: 'movie' | 'show', path: string) =>
+  serverDirs: () => request<{ movie_dirs: string[]; show_dirs: string[]; anime_dirs: string[] }>('/api/server/dirs'),
+  addServerDir: (kind: ServerDirKind, path: string) =>
     request<{ kind: string; dirs: string[] }>('/api/server/dirs', {
       method: 'POST',
       body: JSON.stringify({ kind, path }),
     }),
-  removeServerDir: (kind: 'movie' | 'show', path: string) =>
+  removeServerDir: (kind: ServerDirKind, path: string) =>
     request<{ kind: string; dirs: string[] }>('/api/server/dirs', {
       method: 'DELETE',
       body: JSON.stringify({ kind, path }),

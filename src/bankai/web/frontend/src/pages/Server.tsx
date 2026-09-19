@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Server as ServerIcon, RefreshCw, Film, Tv, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
+import { Server as ServerIcon, RefreshCw, Film, Tv, Sparkles, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type ServerTitle, type ServerSeason } from '@/lib/api';
+import { api, type ServerTitle, type ServerSeason, type ServerDirKind } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -10,6 +10,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+
+// Anime is listed here too: this page is where anything already on the server
+// is added and renamed, whichever library it belongs to.
+const KINDS: { kind: ServerDirKind; title: string; icon: typeof Film; hint: string }[] = [
+  { kind: 'movie', title: 'Movie directories', icon: Film, hint: 'G:\media\movies' },
+  { kind: 'show', title: 'Show directories', icon: Tv, hint: 'G:\media\shows' },
+  { kind: 'anime', title: 'Anime directories', icon: Sparkles, hint: 'G:\media\shows_anime' },
+];
 
 type RenameTarget = {
   kind: 'movie' | 'episode';
@@ -233,14 +241,15 @@ export default function Server() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [revision, setRevision] = useState(0);
+  const [anime, setAnime] = useState<ServerTitle[]>([]);
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
 
-  const [movieDirs, setMovieDirs] = useState<string[]>([]);
-  const [showDirs, setShowDirs] = useState<string[]>([]);
-  const [newMovieDir, setNewMovieDir] = useState('');
-  const [newShowDir, setNewShowDir] = useState('');
+  // Three kinds now, so they are held by kind rather than as one pair of
+  // state variables per list.
+  const [dirs, setDirs] = useState<Record<ServerDirKind, string[]>>({ movie: [], show: [], anime: [] });
+  const [draft, setDraft] = useState<Record<ServerDirKind, string>>({ movie: '', show: '', anime: '' });
   const [dirBusy, setDirBusy] = useState(false);
 
   async function load(rescan = false) {
@@ -250,6 +259,7 @@ export default function Server() {
       const r = await api.serverContents(rescan);
       setMovies(r.movies);
       setShows(r.shows);
+      setAnime(r.anime ?? []);
       setRevision((value) => value + 1);
     } catch (e: any) {
       setError(e.message);
@@ -262,8 +272,7 @@ export default function Server() {
   async function loadDirs() {
     try {
       const r = await api.serverDirs();
-      setMovieDirs(r.movie_dirs);
-      setShowDirs(r.show_dirs);
+      setDirs({ movie: r.movie_dirs, show: r.show_dirs, anime: r.anime_dirs ?? [] });
     } catch (e: any) {
       toast.error(e.message);
     }
@@ -274,13 +283,13 @@ export default function Server() {
     loadDirs();
   }, []);
 
-  async function addDir(kind: 'movie' | 'show', path: string) {
+  async function addDir(kind: ServerDirKind, path: string) {
     if (!path.trim()) return;
     setDirBusy(true);
     try {
       const r = await api.addServerDir(kind, path.trim());
-      kind === 'movie' ? setMovieDirs(r.dirs) : setShowDirs(r.dirs);
-      kind === 'movie' ? setNewMovieDir('') : setNewShowDir('');
+      setDirs((current) => ({ ...current, [kind]: r.dirs }));
+      setDraft((current) => ({ ...current, [kind]: '' }));
       toast.success('Directory added');
       await load(true);
     } catch (e: any) {
@@ -290,11 +299,11 @@ export default function Server() {
     }
   }
 
-  async function removeDir(kind: 'movie' | 'show', path: string) {
+  async function removeDir(kind: ServerDirKind, path: string) {
     setDirBusy(true);
     try {
       const r = await api.removeServerDir(kind, path);
-      kind === 'movie' ? setMovieDirs(r.dirs) : setShowDirs(r.dirs);
+      setDirs((current) => ({ ...current, [kind]: r.dirs }));
       toast.success('Directory removed');
       await load(true);
     } catch (e: any) {
@@ -353,41 +362,37 @@ export default function Server() {
       </header>
 
       <Card>
-        <CardContent className='grid gap-4 pt-6 md:grid-cols-2'>
-          <DirManager
-            title='Movie directories'
-            icon={Film}
-            dirs={movieDirs}
-            value={newMovieDir}
-            onChange={setNewMovieDir}
-            onAdd={() => addDir('movie', newMovieDir)}
-            onRemove={(p) => removeDir('movie', p)}
-            busy={dirBusy}
-          />
-          <DirManager
-            title='Show directories'
-            icon={Tv}
-            dirs={showDirs}
-            value={newShowDir}
-            onChange={setNewShowDir}
-            onAdd={() => addDir('show', newShowDir)}
-            onRemove={(p) => removeDir('show', p)}
-            busy={dirBusy}
-          />
+        <CardContent className='grid gap-4 pt-6 md:grid-cols-2 xl:grid-cols-3'>
+          {KINDS.map(({ kind, title, icon, hint }) => (
+            <DirManager
+              key={kind}
+              title={title}
+              icon={icon}
+              hint={hint}
+              dirs={dirs[kind]}
+              value={draft[kind]}
+              onChange={(value) => setDraft((current) => ({ ...current, [kind]: value }))}
+              onAdd={() => addDir(kind, draft[kind])}
+              onRemove={(p) => removeDir(kind, p)}
+              busy={dirBusy}
+            />
+          ))}
         </CardContent>
       </Card>
 
       {error ? (
         <EmptyState icon={ServerIcon} title='Could not read server' description={error} />
       ) : loading ? (
-        <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2'>
+        <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2 xl:grid-cols-3'>
+          <Skeleton className='h-96' />
           <Skeleton className='h-96' />
           <Skeleton className='h-96' />
         </div>
       ) : (
-        <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2'>
-          <Column title='Movies' icon={Film} items={movies} directories={movieDirs} filter={filter} revision={revision} onRename={openRename} />
-          <Column title='Shows' icon={Tv} items={shows} directories={showDirs} filter={filter} expandable revision={revision} onRename={openRename} />
+        <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2 xl:grid-cols-3'>
+          <Column title='Movies' icon={Film} items={movies} directories={dirs.movie} filter={filter} revision={revision} onRename={openRename} />
+          <Column title='Shows' icon={Tv} items={shows} directories={dirs.show} filter={filter} expandable revision={revision} onRename={openRename} />
+          <Column title='Anime' icon={Sparkles} items={anime} directories={dirs.anime} filter={filter} expandable revision={revision} onRename={openRename} />
         </div>
       )}
 
@@ -441,8 +446,10 @@ function DirManager({
   onAdd,
   onRemove,
   busy,
+  hint,
 }: {
   title: string;
+  hint: string;
   icon: React.ComponentType<{ className?: string }>;
   dirs: string[];
   value: string;
@@ -475,7 +482,7 @@ function DirManager({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && onAdd()}
-          placeholder='/mnt/media12/movies'
+          placeholder={hint}
           className='flex-1'
         />
         <Button size='icon' variant='outline' onClick={onAdd} disabled={busy || !value.trim()}>
