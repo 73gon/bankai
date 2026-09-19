@@ -326,49 +326,79 @@ def test_asking_for_one_merged_show_returns_its_folders(monkeypatch):
     by_folder = _run_library(monkeypatch, folders, resolve=resolve, only_key=romaji)
     assert len(by_folder) == 1
     assert by_folder[0]["title"] == english
-def test_a_second_name_is_only_shown_when_it_is_in_letters_you_can_type():
-    """Akame ga Kill! was captioned with its Japanese title.
+@pytest.mark.parametrize(
+    "label,value,expected",
+    [
+        ("romaji", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e", True),
+        ("punctuation", "Fate/stay night: Unlimited Blade Works", True),
+        ("accented latin", "Pok\u00e9mon Kanojo", True),
+        # A blocklist of the scripts I thought of let this one straight
+        # through, and the drawer captioned Demon Slayer in Arabic.
+        ("arabic", "\u0642\u0627\u062a\u0644 \u0627\u0644\u0634\u064a\u0627\u0637\u064a\u0646", False),
+        ("kana and kanji", "\u30a2\u30ab\u30e1\u304c\u65ac\u308b!", False),
+        ("cyrillic", "\u041a\u043b\u0438\u043d\u043e\u043a", False),
+        ("greek", "\u0394\u03b1\u03af\u03bc\u03bf\u03bd\u03b1\u03c2", False),
+        ("digits alone", "2017", False),
+        ("empty", "", False),
+    ],
+)
+def test_a_second_name_must_be_in_letters_you_can_type(label, value, expected):
+    """The name is there to be matched against a release title.
 
-    The second name exists to be matched against what Erai publishes, which
-    is always romaji. Kana and kanji cannot do that job, so showing nothing
-    is the better answer.
+    A script you cannot type does not do that job, whichever script it is.
     """
-    from bankai.web.anime_library import _is_romaji, _romaji_alias
+    from bankai.web.anime_library import _is_romaji
 
-    assert _is_romaji("Akame ga Kiru!")
-    assert _is_romaji("Fate/stay night: Unlimited Blade Works")
-    assert not _is_romaji("\u30a2\u30ab\u30e1\u304c\u65ac\u308b!")
-    assert not _is_romaji("")
+    assert _is_romaji(value) is expected
 
-    # Nothing typeable to add beyond the English title, so nothing is shown.
-    assert (
-        _romaji_alias(
-            {
-                "english_title": "Akame ga Kill!",
-                "japanese_title": "\u30a2\u30ab\u30e1\u304c\u65ac\u308b!",
-                "aliases": ["Akame ga Kill!"],
-            }
-        )
-        == ""
+
+def test_the_romaji_name_comes_from_the_release_lists_not_tvdb_aliases(monkeypatch):
+    """TVDB aliases are translations into every language, in no useful order.
+
+    Picking from them gave Demon Slayer its Arabic name and Classroom of the
+    Elite the mouthful naming one specific season. The AniDB list is what
+    release groups publish under, and what bankai already searches Nyaa with.
+    """
+    import asyncio
+
+    from bankai.web import anime_library
+
+    async def related(tvdb_id):
+        assert tvdb_id == 1234
+        return ["\u30a2\u30ab\u30e1\u304c\u65ac\u308b!", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"]
+
+    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
+    # The Japanese entry is skipped; the first typeable one is taken.
+    assert asyncio.run(anime_library.romaji_name(1234)) == (
+        "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
     )
-    # A romaji alias is exactly what is wanted.
-    assert (
-        _romaji_alias(
-            {
-                "english_title": "Classroom of the Elite",
-                "japanese_title": "\u3088\u3046\u3053\u305d\u5b9f\u529b\u81f3\u4e0a\u4e3b\u7fa9\u306e\u6559\u5ba4\u3078",
-                "aliases": ["Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"],
-            }
-        )
-        == "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
-    )
-    # A Japanese title that happens to be romanised is fine as it stands.
-    assert (
-        _romaji_alias(
-            {"english_title": "Some Show", "japanese_title": "Betsu no Namae", "aliases": []}
-        )
-        == "Betsu no Namae"
-    )
+    assert asyncio.run(anime_library.romaji_name(None)) == ""
+
+
+def test_a_show_with_no_release_list_entry_gets_no_second_name(monkeypatch):
+    """Better than captioning it with something unusable."""
+    import asyncio
+
+    from bankai.web import anime_library
+
+    async def related(tvdb_id):
+        return ["\u30a2\u30ab\u30e1\u304c\u65ac\u308b!"]
+
+    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
+    assert asyncio.run(anime_library.romaji_name(4321)) == ""
+
+
+def test_the_romaji_lookup_survives_the_mapping_list_being_unreachable(monkeypatch):
+    """The library must still render when AniDB cannot be fetched."""
+    import asyncio
+
+    from bankai.web import anime_library
+
+    async def boom(tvdb_id):
+        raise RuntimeError("anime-list.xml unreachable")
+
+    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", boom)
+    assert asyncio.run(anime_library.romaji_name(1234)) == ""
 
 
 def test_erai_name_beats_a_tvdb_alias(monkeypatch):

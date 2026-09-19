@@ -2,6 +2,18 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* The display face, self-hosted from the brand room rather than linked to it.
+   One Light cut carries every heading weight, which is how eigenpair declares
+   it: naming the face at each weight stops the browser synthesising a bold
+   that does not exist. */
+@font-face {
+  font-family: 'Cooper Light BT';
+  src: url('/fonts/cooper-light-bt.woff') format('woff');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ---------------------------------------------------------------------------
    Design tokens. The dark palette is eigenpair.com's: a pitch black ground,
    near-white type, and one light button for the primary action. Values are
@@ -100,7 +112,7 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 
-  --font-heading: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Cooper Light BT', ui-serif, Georgia, serif;
   --font-body: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
   --font-ui: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', monospace;

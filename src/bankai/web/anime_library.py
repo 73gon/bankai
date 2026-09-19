@@ -8,6 +8,7 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import date
@@ -15,6 +16,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from bankai.cli import bgjobs
+from bankai.metadata import anime_mapping
 from bankai.metadata.tvdb import TVDBEpisode
 from bankai.processor.anime import _tvdb_episode_map
 from bankai.processor.naming import sanitise
@@ -103,36 +105,38 @@ _SEASON_SUFFIX = re.compile(
 )
 
 
-# Kana, kanji, hangul, and the fullwidth forms that come with them.
-_JAPANESE_SCRIPT = re.compile(
-    "[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff"
-    "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
-    "\uff00-\uffef\uac00-\ud7af]"
-)
-
-
 def _is_romaji(value: str) -> bool:
-    """Written in letters you can type, and so search a release name for."""
-    return bool(value.strip()) and not _JAPANESE_SCRIPT.search(value)
+    """Every letter in it is a Latin one, so it can be typed and searched.
 
-
-def _romaji_alias(metadata: dict) -> str:
-    """A Latin-script second name for a show, or nothing.
-
-    TVDB's Japanese translation is usually kana and kanji -- "Akame ga Kill!"
-    comes back as its Japanese title -- and the whole point of showing a
-    second name is to match it against what Erai publishes, which is always
-    romaji. A name in a script you cannot type does not do that job, so it is
-    better to show none at all.
+    Written as an allowlist after a blocklist of the scripts I thought of let
+    Arabic straight through. Asking what each letter actually is cannot be
+    outflanked by a script I did not consider. Accented Latin passes; kana,
+    kanji, Cyrillic, Greek and Arabic do not.
     """
-    english = _name(str(metadata.get("english_title") or ""))
-    candidates = [
-        str(metadata.get("japanese_title") or ""),
-        *(str(value) for value in metadata.get("aliases") or []),
-    ]
-    for value in candidates:
-        if _is_romaji(value) and _name(value) != english:
-            return value.strip()
+    letters = [character for character in value if character.isalpha()]
+    if not letters:
+        return False
+    return all(
+        "LATIN" in unicodedata.name(character, "") for character in letters
+    )
+
+
+async def romaji_name(tvdb_id: int | None) -> str:
+    """The romaji name a series is released under, from the AniDB list.
+
+    Not from TVDB's aliases. That list is translations into every language it
+    holds, in no useful order, so picking from it gave a show's Arabic name
+    or the mouthful that is one specific season. The AniDB list is the names
+    release groups actually publish under -- it is already what bankai
+    searches Nyaa with -- so it is the same string the rest of the pipeline
+    reasons about. Cached in memory for an hour by the mapping layer.
+    """
+    if not tvdb_id:
+        return ""
+    with suppress(Exception):
+        for value in await anime_mapping.related_titles(int(tvdb_id)):
+            if _is_romaji(value):
+                return value.strip()
     return ""
 
 
@@ -770,7 +774,7 @@ async def group_shows(
             # right files back after two of them were merged.
             "folders": slot["titles"],
             "title": metadata.get("english_title") or title,
-            "source_title": source_titles.get(str(tvdb_id)) or _romaji_alias(metadata),
+            "source_title": source_titles.get(str(tvdb_id)) or await romaji_name(tvdb_id),
             "avc_count": sum(
                 1
                 for row in merged_episodes["episodes"]
