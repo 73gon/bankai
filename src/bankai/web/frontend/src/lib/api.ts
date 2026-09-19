@@ -734,6 +734,8 @@ export const api = {
       '/api/anime/library/upgrade-hevc',
       { method: 'POST', body: JSON.stringify({ tvdb_id: tvdbId, title }) },
     ),
+  /** Every sidebar badge in one call; see /api/sidebar/counts. */
+  sidebarCounts: () => request<{ counts: Record<string, number | null> }>('/api/sidebar/counts'),
   animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
   animeLibraryShow: (key: string) =>
     request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>(

@@ -171,9 +171,9 @@ async def _resolve_series_tvdb_id(source_title: str, key: str) -> str | None:
     return str(tvdb_id) if tvdb_id else None
 
 
-def review_items() -> list[dict[str, Any]]:
+def review_items(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Group held releases by stable Erai source-show identity."""
-    state = _load_state()
+    state = _load_state() if state is None else state
     groups: dict[str, dict[str, Any]] = {}
     policies = _load_policies()
     mappings = _load_mappings()
@@ -2562,14 +2562,14 @@ async def reconcile_releases() -> dict[str, int]:
     return counts
 
 
-def release_queue_rows() -> list[dict[str, Any]]:
+def release_queue_rows(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Queue rows for releases that have no worker of their own yet.
 
     Most releases are waiting on qBittorrent and deliberately have no bankai
     job, so without these the queue would show only the handful of active
     publishes and none of the backlog.
     """
-    state = _load_state()
+    state = _load_state() if state is None else state
     rows: list[dict[str, Any]] = []
     for info_hash, release in state["releases"].items():
         status = str(release.get("status") or "")

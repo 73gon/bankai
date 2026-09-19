@@ -663,13 +663,32 @@ SAFE_SETTING_KEYS: set[str] = {
     "selector.preferred_resolutions",
     "web.port",
     "web.host",
+    # The roots the Movies & Shows library scans. Editable because they are
+    # per-machine and the defaults describe somebody else's disks.
+    "web.server_movie_dirs",
+    "web.server_show_dirs",
     "web.max_concurrent_jobs",
     "web.transcode_fallback",
 }
 
 
+_DIRECTORY_LIST_KEYS = {"web.server_movie_dirs", "web.server_show_dirs"}
+
+
 def _validate_setting_value(key: str, value: Any) -> Any:
     """Coerce and validate a web setting before it reaches config.toml."""
+    if key in _DIRECTORY_LIST_KEYS:
+        # Accepted as a list or as one per line, which is how a textarea in
+        # the browser hands back several paths.
+        if isinstance(value, str):
+            value = [line.strip() for line in value.replace(",", "\n").splitlines()]
+        if not isinstance(value, list):
+            raise ValueError("expected one directory per line")
+        paths = [str(item).strip() for item in value if str(item).strip()]
+        if not paths:
+            raise ValueError("at least one directory is required")
+        return paths
+
     if key.startswith("anime."):
         field = key.removeprefix("anime.")
         data = get_settings().anime.model_dump()
@@ -1897,6 +1916,50 @@ def create_app() -> Any:
     # ------------------------------------------------------------------
     # Queue / jobs
     # ------------------------------------------------------------------
+    @app.get("/api/sidebar/counts")
+    async def sidebar_counts() -> dict:
+        """Every sidebar badge in one call.
+
+        Five badges polling five endpoints would be five reads of a fourteen
+        megabyte state file per tick, and the sidebar is on every page, so it
+        is the one thing that has to stay cheap. The three anime counts share
+        a single read. Each count is guarded on its own, so a provider being
+        unreachable dims one badge rather than emptying the row.
+        """
+        counts: dict[str, int | None] = {}
+
+        def unfinished(rows: list[dict]) -> int:
+            return sum(
+                1
+                for row in rows
+                if str(row.get("status") or "") not in {"done", "failed", "cancelled"}
+            )
+
+        with suppress(Exception):
+            counts["mas_queue"] = unfinished(await asyncio.to_thread(webjobs.snapshot))
+
+        state = None
+        with suppress(Exception):
+            state = await asyncio.to_thread(erai_mod._load_state)
+        if state is not None:
+            with suppress(Exception):
+                rows = await asyncio.to_thread(webjobs.anime_snapshot)
+                rows = [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows, state)]
+                counts["anime_queue"] = unfinished(rows)
+            with suppress(Exception):
+                counts["anime_review"] = len(
+                    await asyncio.to_thread(erai_mod.review_items, state)
+                )
+        with suppress(Exception):
+            counts["anime_blacklist"] = len(await asyncio.to_thread(erai_mod.blacklist_items))
+        with suppress(Exception):
+            from bankai.torrent.qbittorrent import QBittorrentClient
+
+            async with QBittorrentClient() as client:
+                counts["qbittorrent"] = len(await client.list_torrents())
+
+        return {"counts": counts}
+
     @app.get("/api/queue")
     def queue_list() -> dict:
         return {"jobs": webjobs.snapshot()}

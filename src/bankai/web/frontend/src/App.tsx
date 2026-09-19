@@ -20,29 +20,65 @@ import AnimeReview from '@/pages/AnimeReview';
 import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
 
-const MAIN_NAV = [
-  { to: '/discover', label: 'Discover', icon: Compass },
-  { to: '/search', label: 'Search', icon: SearchIcon },
-  { to: '/filmpalast', label: 'Filmpalast', icon: CalendarClock },
-  { to: '/qbittorrent', label: 'qBittorrent', icon: Download },
-  { to: '/queue', label: 'Queue', icon: ListVideo },
+// Two libraries live here, so the paths say which one they mean: /mas for
+// movies and shows, /a for anime. `count` names a key of /api/sidebar/counts.
+const MAS_NAV = [
+  { to: '/mas/discover', label: 'Discover', icon: Compass },
+  { to: '/mas/search', label: 'Search', icon: SearchIcon },
+  { to: '/mas/filmpalast', label: 'Filmpalast', icon: CalendarClock },
+  { to: '/mas/queue', label: 'Queue', icon: ListVideo, count: 'mas_queue' },
+  { to: '/mas/library', label: 'Library', icon: HardDrive },
+  { to: '/mas/settings', label: 'Settings', icon: SettingsIcon },
+];
+
+const ANIME_NAV = [
+  { to: '/a/discover', label: 'Discover', icon: Sparkles },
+  { to: '/a/queue', label: 'Queue', icon: ListVideo, count: 'anime_queue' },
+  { to: '/a/library', label: 'Library', icon: HardDrive },
+  { to: '/a/review', label: 'Review', icon: ShieldAlert, count: 'anime_review' },
+  { to: '/a/blacklist', label: 'Blacklist', icon: Ban, count: 'anime_blacklist' },
+  { to: '/a/settings', label: 'Settings', icon: SettingsIcon },
+];
+
+// Neither library's own: the torrent client and the machine behind both.
+const SYSTEM_NAV = [
+  { to: '/qbittorrent', label: 'qBittorrent', icon: Download, count: 'qbittorrent' },
   { to: '/library', label: 'Library', icon: HardDrive },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
-const ANIME_NAV = [
-  { to: '/anime/discover', label: 'Discover', icon: Sparkles },
-  { to: '/anime/queue', label: 'Queue', icon: ListVideo },
-  { to: '/anime/library', label: 'Library', icon: HardDrive },
-  { to: '/anime/review', label: 'Review', icon: ShieldAlert },
-  { to: '/anime/blacklist', label: 'Blacklist', icon: Ban },
-  { to: '/anime/settings', label: 'Settings', icon: SettingsIcon },
+const NAV_GROUPS = [
+  { label: 'Movies & Shows', items: MAS_NAV },
+  { label: 'Anime', items: ANIME_NAV },
+  { label: '', items: SYSTEM_NAV },
 ];
 
-const NAV_GROUPS = [
-  { label: 'Bankai', items: MAIN_NAV },
-  { label: 'Anime', items: ANIME_NAV },
-];
+/** Badge counts for the whole sidebar, from one endpoint on one timer.
+ *
+ *  A badge per endpoint would mean several reads of a large state file every
+ *  tick, on every page. A count that fails to arrive simply has no badge.
+ */
+function useSidebarCounts(): Record<string, number | null | undefined> {
+  const [counts, setCounts] = useState<Record<string, number | null>>({});
+  useEffect(() => {
+    let alive = true;
+    async function tick() {
+      try {
+        const result = await api.sidebarCounts();
+        if (alive) setCounts(result.counts);
+      } catch {
+        /* the row simply shows no numbers */
+      }
+    }
+    void tick();
+    const timer = window.setInterval(() => void tick(), 15_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  return counts;
+}
 const SIDEBAR_KEY = 'bankai:sidebar-collapsed';
 
 function useSidebarState() {
@@ -69,10 +105,7 @@ function BrandMark() {
       <span className='raised flex size-7 shrink-0 items-center justify-center rounded-lg text-foreground' aria-hidden='true'>
         <Clapperboard className='size-4' strokeWidth={1.7} />
       </span>
-      <div className='flex flex-col gap-0.5'>
-        <span className='font-mono text-sm font-semibold tracking-tight text-foreground'>bankai</span>
-        <span className='hidden text-[11px] leading-none text-muted-foreground md:block'>Media workspace</span>
-      </div>
+      <span className='font-mono text-sm font-semibold tracking-tight text-foreground'>bankai</span>
     </div>
   );
 }
@@ -211,26 +244,31 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
     );
   }
 
+  // A control, like the update button above it, rather than a line of text
+  // with a button sometimes stuck on the end. Connected it re-checks;
+  // disconnected it connects.
   return (
-    <div className='flex min-h-8 items-center gap-2 px-2 text-xs text-muted-foreground'>
-      <ShieldCheck className='size-3.5 shrink-0' aria-hidden='true' />
-      <span className='font-medium'>{connected ? 'VPN connected' : 'VPN'}</span>
-      <Tooltip>
-        <TooltipTrigger asChild>{dot}</TooltipTrigger>
-        <TooltipContent side='right'>{status?.detail || statusLabel}</TooltipContent>
-      </Tooltip>
-      {disconnected && (
-        <Button className='ml-auto' size='sm' variant='secondary' onClick={() => void connect()} disabled={connecting}>
-          {connecting && <Loader2 data-icon='inline-start' className='animate-spin' />}
-          Connect
-        </Button>
+    <Button
+      variant='secondary'
+      className='w-full justify-start'
+      onClick={() => void (disconnected ? connect() : refresh())}
+      disabled={connecting}
+      title={status?.detail || statusLabel}
+    >
+      {connecting ? (
+        <Loader2 className='animate-spin' aria-hidden='true' />
+      ) : (
+        <ShieldCheck aria-hidden='true' />
       )}
-    </div>
+      <span>{connected ? 'VPN connected' : disconnected ? 'Connect VPN' : 'VPN'}</span>
+      <span className='ml-auto flex items-center'>{dot}</span>
+    </Button>
   );
 }
 
 export default function App() {
   const [collapsed, setCollapsed] = useSidebarState();
+  const counts = useSidebarCounts();
   useEffect(() => {
     const pointer = () => { document.documentElement.dataset.inputMethod = 'pointer'; };
     const keyboard = () => { document.documentElement.dataset.inputMethod = 'keyboard'; };
@@ -296,12 +334,15 @@ export default function App() {
                 )}
               >
                 {groupIndex > 0 && <Separator className='my-3 hidden md:block' />}
-                {!collapsed && (
+                {!collapsed && group.label && (
                   <p className='hidden px-2 pb-2 pt-1 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground md:block'>
                     {group.label}
                   </p>
                 )}
-                {group.items.map(({ to, label, icon: Icon }) => {
+                {group.items.map(({ to, label, icon: Icon, count }) => {
+                  // Zero is the resting state of most of these, and a row of
+                  // noughts reads as clutter rather than as information.
+                  const badge = count ? counts[count] : undefined;
                   const link = (
                     <NavLink
                       key={to}
@@ -315,12 +356,25 @@ export default function App() {
                     >
                       <Icon className='size-4 shrink-0' strokeWidth={1.65} aria-hidden='true' />
                       <span className={cn('md:inline', collapsed && 'md:hidden')}>{label}</span>
+                      {typeof badge === 'number' && badge > 0 && (
+                        <span
+                          className={cn(
+                            'ml-auto font-mono text-[11px] leading-none tabular-nums text-muted-foreground',
+                            collapsed && 'md:hidden',
+                          )}
+                        >
+                          {badge > 999 ? '999+' : badge}
+                        </span>
+                      )}
                     </NavLink>
                   );
                   return collapsed ? (
                     <Tooltip key={to}>
                       <TooltipTrigger asChild>{link}</TooltipTrigger>
-                      <TooltipContent side='right'>{group.label}: {label}</TooltipContent>
+                      <TooltipContent side='right'>
+                        {group.label ? `${group.label}: ${label}` : label}
+                        {typeof badge === 'number' && badge > 0 ? ` (${badge})` : ''}
+                      </TooltipContent>
                     </Tooltip>
                   ) : link;
                 })}
@@ -338,23 +392,46 @@ export default function App() {
         <main className='min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-6'>
           <div className='h-full w-full animate-fade-in'>
             <Routes>
-              <Route path='/' element={<Navigate to='/discover' replace />} />
-              <Route path='/discover' element={<Discover />} />
-              <Route path='/search' element={<Search />} />
-              <Route path='/filmpalast' element={<Recent />} />
-              <Route path='/recent' element={<Navigate to='/filmpalast' replace />} />
-              <Route path='/anime' element={<Navigate to='/anime/discover' replace />} />
-              <Route path='/anime/discover' element={<Anime />} />
-              <Route path='/anime/queue' element={<AnimeQueue />} />
-              <Route path='/anime/library' element={<AnimeLibrary />} />
-              <Route path='/anime/review' element={<AnimeReview />} />
-              <Route path='/anime/blacklist' element={<AnimeReview blacklist />} />
-              <Route path='/anime/settings' element={<AnimeSettings />} />
+              <Route path='/' element={<Navigate to='/mas/discover' replace />} />
+
+              {/* Movies & shows. */}
+              <Route path='/mas' element={<Navigate to='/mas/discover' replace />} />
+              <Route path='/mas/discover' element={<Discover />} />
+              <Route path='/mas/search' element={<Search />} />
+              <Route path='/mas/filmpalast' element={<Recent />} />
+              <Route path='/mas/queue' element={<Library />} />
+              <Route path='/mas/library' element={<Server />} />
+              <Route path='/mas/settings' element={<Settings scope='mas' />} />
+
+              {/* Anime. */}
+              <Route path='/a' element={<Navigate to='/a/discover' replace />} />
+              <Route path='/a/discover' element={<Anime />} />
+              <Route path='/a/queue' element={<AnimeQueue />} />
+              <Route path='/a/library' element={<AnimeLibrary />} />
+              <Route path='/a/review' element={<AnimeReview />} />
+              <Route path='/a/blacklist' element={<AnimeReview blacklist />} />
+              <Route path='/a/settings' element={<AnimeSettings />} />
+
+              {/* Neither library's own. */}
               <Route path='/qbittorrent' element={<QBittorrent />} />
-              <Route path='/queue' element={<Library />} />
               <Route path='/library' element={<Server />} />
+              <Route path='/settings' element={<Settings scope='global' />} />
+
+              {/* The paths these pages used to live at. Kept so a bookmark,
+                  an open tab or a link in a note still arrives somewhere. */}
+              <Route path='/discover' element={<Navigate to='/mas/discover' replace />} />
+              <Route path='/search' element={<Navigate to='/mas/search' replace />} />
+              <Route path='/filmpalast' element={<Navigate to='/mas/filmpalast' replace />} />
+              <Route path='/recent' element={<Navigate to='/mas/filmpalast' replace />} />
+              <Route path='/queue' element={<Navigate to='/mas/queue' replace />} />
               <Route path='/server' element={<Navigate to='/library' replace />} />
-              <Route path='/settings' element={<Settings />} />
+              <Route path='/anime' element={<Navigate to='/a/discover' replace />} />
+              <Route path='/anime/discover' element={<Navigate to='/a/discover' replace />} />
+              <Route path='/anime/queue' element={<Navigate to='/a/queue' replace />} />
+              <Route path='/anime/library' element={<Navigate to='/a/library' replace />} />
+              <Route path='/anime/review' element={<Navigate to='/a/review' replace />} />
+              <Route path='/anime/blacklist' element={<Navigate to='/a/blacklist' replace />} />
+              <Route path='/anime/settings' element={<Navigate to='/a/settings' replace />} />
             </Routes>
           </div>
         </main>

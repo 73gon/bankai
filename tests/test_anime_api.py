@@ -36,6 +36,30 @@ def test_anime_nested_pages_have_spa_routes(client: TestClient) -> None:
         assert "<html" in response.text
 
 
+def test_sidebar_counts_answers_every_badge_in_one_call(client: TestClient) -> None:
+    """Five badges polling five endpoints would be five state reads a tick."""
+    body = client.get("/api/sidebar/counts").json()
+    assert set(body) == {"counts"}
+    # Every value is a number; a count that could not be gathered is absent
+    # rather than zero, so a badge dims instead of lying.
+    assert all(isinstance(value, int) for value in body["counts"].values())
+    assert body["counts"]["anime_review"] == 0
+    assert body["counts"]["anime_blacklist"] == 0
+
+
+def test_a_count_that_cannot_be_gathered_is_left_out(client: TestClient, monkeypatch) -> None:
+    """qBittorrent being unreachable must not empty the rest of the row."""
+    from bankai.web import erai as erai_mod
+
+    def boom() -> list:
+        raise RuntimeError("state unreadable")
+
+    monkeypatch.setattr(erai_mod, "blacklist_items", boom)
+    counts = client.get("/api/sidebar/counts").json()["counts"]
+    assert "anime_blacklist" not in counts
+    assert "anime_review" in counts
+
+
 def test_marking_a_series_owned_is_not_read_as_an_info_hash(client: TestClient) -> None:
     """/api/anime/review/owned once matched /api/anime/review/{info_hash}.
 

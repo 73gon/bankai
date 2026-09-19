@@ -12,8 +12,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 
 const SETTING_UI: Record<
   string,
-  { label: string; description: string; kind: 'number' | 'quality'; min?: number; step?: number; suffix?: string }
+  { label: string; description: string; kind: 'number' | 'quality' | 'paths'; min?: number; step?: number; suffix?: string }
 > = {
+  'web.server_movie_dirs': {
+    label: 'Movie directories',
+    description: 'Roots the Movies & Shows library scans for films. One per line.',
+    kind: 'paths',
+  },
+  'web.server_show_dirs': {
+    label: 'Show directories',
+    description: 'Roots the Movies & Shows library scans for series. One per line.',
+    kind: 'paths',
+  },
   'selector.preferred_resolutions': {
     label: 'Preferred quality',
     description: 'Try this resolution first, then fall back to the other HQ option.',
@@ -81,7 +91,25 @@ function valuesEqual(a: any, b: any): boolean {
   return false;
 }
 
-export default function Settings() {
+/** Which half of the settings a page shows.
+ *
+ *  There is one config behind two pages: the Movies & Shows page carries what
+ *  belongs to that library, and the global page carries the rest. Anime keeps
+ *  its own page and its keys are left on the global one rather than hidden,
+ *  so nothing becomes unreachable if that page does not cover all of them.
+ */
+export type SettingsScope = 'mas' | 'global' | 'all';
+
+const MAS_SECTIONS = new Set(['scraper', 'selector']);
+const MAS_KEYS = new Set(['web.server_movie_dirs', 'web.server_show_dirs']);
+
+function inScope(key: string, scope: SettingsScope): boolean {
+  if (scope === 'all') return true;
+  const mas = MAS_SECTIONS.has(sectionOf(key)) || MAS_KEYS.has(key);
+  return scope === 'mas' ? mas : !mas;
+}
+
+export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = {}) {
   const [rows, setRows] = useState<SettingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [edits, setEdits] = useState<Record<string, any>>({});
@@ -168,6 +196,7 @@ export default function Settings() {
   const groups = useMemo(() => {
     const map = new Map<string, SettingRow[]>();
     for (const row of rows) {
+      if (!inScope(row.key, scope)) continue;
       const s = sectionOf(row.key);
       if (!map.has(s)) map.set(s, []);
       map.get(s)!.push(row);
@@ -177,7 +206,7 @@ export default function Settings() {
       selectorRows.sort((a, b) => SELECTOR_ORDER.indexOf(a.key) - SELECTOR_ORDER.indexOf(b.key));
     }
     return Array.from(map.entries());
-  }, [rows]);
+  }, [rows, scope]);
 
   function valueForKey(key: string): any {
     const row = rows.find((r) => r.key === key);
@@ -279,6 +308,15 @@ export default function Settings() {
                               </SelectGroup>
                             </SelectContent>
                           </Select>
+                        ) : ui?.kind === 'paths' ? (
+                          <textarea
+                            data-slot='textarea'
+                            rows={Math.max(2, String(Array.isArray(val) ? val.join('\n') : (val ?? '')).split('\n').length)}
+                            value={Array.isArray(val) ? val.join('\n') : (val ?? '')}
+                            spellCheck={false}
+                            onChange={(e) => setEdit(row.key, e.target.value.split('\n'), original)}
+                            className='w-96 resize-y px-3 py-2 font-mono text-xs'
+                          />
                         ) : ui?.kind === 'number' ? (
                           <div className='flex items-center gap-2'>
                             <Input
