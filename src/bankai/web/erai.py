@@ -2159,6 +2159,25 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
 # ---------------------------------------------------------------------------
 
 _ACTIVE_RELEASE_STATES = {"queued", "downloading", "complete", "transferring", "deleting"}
+
+# A publish that fails must not abandon a finished download. "failed" is
+# otherwise terminal, so nothing retries it, and cleanup only removes torrents
+# it can see published -- so the download keeps its disk space forever. Eighty
+# eight of those once filled the staging drive, which then failed every
+# further publish, which stranded more downloads: the queue stopped moving
+# entirely. Retried on a widening backoff, and only a few times, so a release
+# that genuinely cannot be published gives up rather than cycling.
+_MAX_PUBLISH_ATTEMPTS = 5
+_PUBLISH_BACKOFF_SECONDS = 900.0
+
+
+def _worth_republishing(release: dict[str, Any], torrent: Any) -> bool:
+    """Is this a finished download whose publish failed, ready to try again?"""
+    if torrent is None or float(getattr(torrent, "progress", 0.0) or 0.0) < 1.0:
+        return False
+    if int(release.get("publish_attempts") or 0) >= _MAX_PUBLISH_ATTEMPTS:
+        return False
+    return time.time() >= float(release.get("publish_retry_after") or 0.0)
 _STALE_READD_REASON = "Torrent could not be re-added"
 # A release being deleted still has a job, but that job already reads "done"
 # and is hidden from the queue by default, so the release row is what keeps
@@ -2441,6 +2460,19 @@ async def reconcile_releases() -> dict[str, int]:
                     # exists. The download is what matters, so re-drive it.
                     status = "queued"
                     release["status"] = status
+                elif status == "failed" and _worth_republishing(
+                    release, by_hash.get(info_hash.casefold())
+                ):
+                    # The bytes are already on disk, so this costs no download
+                    # and frees the torrent's space as soon as it lands.
+                    attempts = int(release.get("publish_attempts") or 0) + 1
+                    release["publish_attempts"] = attempts
+                    release["publish_retry_after"] = time.time() + (
+                        _PUBLISH_BACKOFF_SECONDS * (2 ** (attempts - 1))
+                    )
+                    status = "queued"
+                    release["status"] = status
+                    release.pop("reason", None)
                 elif status == "held" and str(release.get("reason") or "").startswith(
                     _STALE_READD_REASON
                 ):
@@ -2464,6 +2496,8 @@ async def reconcile_releases() -> dict[str, int]:
                         # download_anime removes the torrent itself once the
                         # file is published, so a torrent still present means
                         # the removal is the only step left.
+                        release.pop("publish_attempts", None)
+                        release.pop("publish_retry_after", None)
                         release["status"] = "deleting" if torrent is not None else "done"
                         if torrent is not None:
                             try:

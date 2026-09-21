@@ -176,6 +176,8 @@ def test_native_move_waits_and_retries_transient_file_lock(
     progress: list[str] = []
     monkeypatch.setattr("bankai.backend.transfer.shutil.copy2", flaky_copy2)
     monkeypatch.setattr("bankai.backend.transfer.time.sleep", lambda _seconds: None)
+    # Both paths are under one tmp_path, so this is the copy across volumes.
+    monkeypatch.setattr("bankai.backend.transfer._same_volume", lambda *_: False)
 
     _native_move(source, destination, progress=progress.append)
 
@@ -206,6 +208,7 @@ def test_native_move_reports_byte_progress(
     monkeypatch.setattr("bankai.backend.transfer._COPY_PROGRESS_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr("bankai.backend.transfer.shutil.copy2", slow_copy)
 
+    monkeypatch.setattr("bankai.backend.transfer._same_volume", lambda *_: False)
     _native_move(source, destination, progress=progress.append)
 
     percentages = [
@@ -215,3 +218,107 @@ def test_native_move_reports_byte_progress(
     ]
     assert any(0 < percent < 100 for percent in percentages)
     assert percentages[-1] == 100
+def test_a_publish_on_one_volume_renames_instead_of_copying(tmp_path, monkeypatch):
+    """Publishing wrote every episode twice: into staging, then the library.
+
+    On one volume a rename does the same job instantly, needs no second copy,
+    and lands atomically, so a scanner never sees a half-written file.
+    """
+    from bankai.backend.transfer import _native_move
+
+    source = tmp_path / "staging" / "episode.mkv"
+    destination = tmp_path / "media" / "episode.mkv"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"complete episode")
+
+    copies = 0
+
+    def counted(src, dst):
+        nonlocal copies
+        copies += 1
+
+    monkeypatch.setattr("bankai.backend.transfer.shutil.copy2", counted)
+    progress: list[str] = []
+    _native_move(source, destination, progress=progress.append)
+
+    assert copies == 0
+    assert destination.read_bytes() == b"complete episode"
+    assert not source.exists()
+
+
+def test_a_rename_that_cannot_happen_still_copies(tmp_path, monkeypatch):
+    """Two paths can share a device number across a junction or mount point."""
+    from bankai.backend.transfer import _native_move
+
+    source = tmp_path / "staging" / "episode.mkv"
+    destination = tmp_path / "media" / "episode.mkv"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"complete episode")
+
+    real_replace = Path.replace
+
+    def refuse(self, target):
+        # Only the direct staging -> library rename is refused. The copy path
+        # finishes with a replace of its own .part file, and failing that too
+        # would test nothing.
+        if self.parent.name == "staging":
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    monkeypatch.setattr("bankai.backend.transfer._same_volume", lambda *_: True)
+    _native_move(source, destination, progress=lambda _line: None)
+
+    assert destination.read_bytes() == b"complete episode"
+    assert not source.exists()
+
+
+def test_a_staged_duplicate_is_discarded_when_the_library_already_has_it(tmp_path, monkeypatch):
+    """This is what filled a 465 GB drive with 256 GiB of staging.
+
+    Each retry staged the episode again, found the destination already there,
+    skipped the transfer and walked away from the copy it had just made.
+    """
+    from bankai.backend import transfer as transfer_mod
+
+    staged = tmp_path / "library" / "Shows" / "Show" / "episode.mkv"
+    published = tmp_path / "media" / "episode.mkv"
+    staged.parent.mkdir(parents=True)
+    published.parent.mkdir(parents=True)
+    staged.write_bytes(b"same bytes")
+    published.write_bytes(b"same bytes")
+
+    item = transfer_mod.TransferItem(source=staged, destination=published, kind="show")
+    monkeypatch.setattr(
+        transfer_mod, "get_settings", lambda: type("S", (), {"output": type("O", (), {"directory": tmp_path / "library"})()})()
+    )
+    transfer_mod._discard_staged_duplicate(item, progress=lambda _line: None)
+
+    assert not staged.exists()
+    assert published.read_bytes() == b"same bytes"
+
+
+def test_a_staged_copy_is_kept_when_the_published_one_differs(tmp_path, monkeypatch):
+    """A destination of a different size is truncated or a different encode.
+
+    Six files in the library were shorter than their staged copies and
+    cluster-aligned, which is what an interrupted write looks like. Deleting
+    staging there would have left the broken one as the only one.
+    """
+    from bankai.backend import transfer as transfer_mod
+
+    staged = tmp_path / "library" / "episode.mkv"
+    published = tmp_path / "media" / "episode.mkv"
+    staged.parent.mkdir(parents=True)
+    published.parent.mkdir(parents=True)
+    staged.write_bytes(b"the whole episode")
+    published.write_bytes(b"truncated")
+
+    item = transfer_mod.TransferItem(source=staged, destination=published, kind="show")
+    lines: list[str] = []
+    transfer_mod._discard_staged_duplicate(item, progress=lines.append)
+
+    assert staged.exists()
+    assert any("size differs" in line for line in lines)

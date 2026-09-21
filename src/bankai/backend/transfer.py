@@ -106,6 +106,12 @@ def transfer_with_rsync(
         if item.destination.exists():
             progress(f"SKIP exists: {item.destination}")
             result.skipped.append(item)
+            # The published file is already there, so the staged one is a
+            # duplicate and nothing but a claim on the staging disk. Removed
+            # only when the two are the same size: a destination that differs
+            # is either truncated or a different encode, and in both cases the
+            # staged copy is the one worth keeping.
+            _discard_staged_duplicate(item, progress=progress)
             completed += 1
             _emit_transfer_progress(progress, completed=completed, total=len(items))
             continue
@@ -361,6 +367,33 @@ def _run_rsync(cmd: list[str], *, progress: ProgressCallback) -> None:
         raise TransferError(f"rsync exited with {code}")
 
 
+def _same_volume(source: Path, destination: Path) -> bool:
+    """Are these two paths on the same volume, so a rename would work?"""
+    try:
+        return source.stat().st_dev == destination.parent.stat().st_dev
+    except OSError:
+        return False
+
+
+def _discard_staged_duplicate(item: TransferItem, *, progress: ProgressCallback) -> None:
+    """Drop a staged file the library already holds, byte for byte."""
+    try:
+        staged = item.source.stat().st_size
+        published = item.destination.stat().st_size
+    except OSError:
+        return
+    if staged != published:
+        progress(
+            f"KEEP staged copy, size differs: {item.source} "
+            f"({staged} staged, {published} published)"
+        )
+        return
+    with suppress(OSError):
+        item.source.unlink(missing_ok=True)
+        progress(f"DISCARD staged duplicate: {item.source}")
+        _cleanup_empty_source(item.source, Path(get_settings().output.directory))
+
+
 def _native_move(
     source: Path,
     destination: Path,
@@ -373,6 +406,18 @@ def _native_move(
     source. Used when rsync is unavailable (e.g. a native-Windows host writing
     to a local drive). Writes to a ``.part`` temp first for an atomic finish.
     """
+    if _same_volume(source, destination):
+        _wait_for_transfer_source(source, progress=progress)
+        try:
+            source.replace(destination)
+        except OSError:
+            # Fall through to the copy: a rename can still fail across a
+            # junction or a mount point that shares a device number.
+            pass
+        else:
+            progress("BANKAI_PROGRESS stage=transfer pct=100.0 status=renamed")
+            return
+
     tmp = destination.with_name(destination.name + ".part")
     try:
         _wait_for_transfer_source(source, progress=progress)
