@@ -118,7 +118,11 @@ def transfer_with_rsync(
         item.destination.parent.mkdir(parents=True, exist_ok=True)
         progress(f"MOVE {item.source} -> {item.destination}")
         try:
-            if use_native:
+            # rsync copies even when both ends sit on one filesystem, where a
+            # rename would do the same work at once. The native path knows how
+            # to tell, so it takes anything same-volume whether or not rsync
+            # is installed -- which on Linux it always is.
+            if use_native or _same_volume(item.source, item.destination):
                 _native_move(
                     item.source,
                     item.destination,

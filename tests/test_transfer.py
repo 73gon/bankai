@@ -322,3 +322,35 @@ def test_a_staged_copy_is_kept_when_the_published_one_differs(tmp_path, monkeypa
 
     assert staged.exists()
     assert any("size differs" in line for line in lines)
+
+
+def test_one_volume_renames_even_where_rsync_is_installed(tmp_path, monkeypatch):
+    """Linux always has rsync, and rsync copies even within one filesystem.
+
+    Staging and the library share a volume by design, so the publish should
+    be a rename there -- instant, and no second pass over a 9p mount.
+    """
+    from bankai.backend import transfer as transfer_mod
+
+    source = tmp_path / "library" / "Movies" / "Film (2020)" / "Film (2020).mkv"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"feature")
+    monkeypatch.setenv("BANKAI_TRANSFER__MOVIES_DIR", str(tmp_path / "media12" / "movies"))
+    reset_settings_cache()
+
+    # rsync present, as it is on any Linux host.
+    monkeypatch.setattr(transfer_mod.shutil, "which", lambda _name: "/usr/bin/rsync")
+    ran_rsync = False
+
+    def fail_if_used(*_args, **_kwargs):
+        nonlocal ran_rsync
+        ran_rsync = True
+
+    monkeypatch.setattr(transfer_mod, "_run_rsync", fail_if_used)
+
+    result = transfer_mod.transfer_with_rsync([source], progress=lambda _line: None)
+
+    assert ran_rsync is False
+    assert len(result.transferred) == 1
+    assert result.transferred[0].destination.read_bytes() == b"feature"
+    assert not source.exists()
