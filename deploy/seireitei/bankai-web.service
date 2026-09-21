@@ -1,0 +1,28 @@
+[Unit]
+# bankai under WSL on keller, following the shape of codex-remote.service.
+#
+# systemd is what makes this survive an SSH disconnect: the service belongs to
+# the distro, not to a login session, so closing a terminal does nothing to it
+# and a crash is restarted. The distro itself is kept alive by the Windows
+# scheduled task "Seireitei WSL Server", which boots it and holds it open, so
+# an enabled unit here comes back with the machine.
+Description=bankai web
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=malik
+WorkingDirectory=/home/malik/projects/bankai
+Environment=HOME=/home/malik
+Environment=PATH=/home/malik/projects/bankai/.venv/bin:/usr/local/bin:/usr/bin:/bin
+# Bound to loopback on purpose. Reaching it from anywhere else is tailscale
+# serve's job, which is how 7001-7003 already work; listening publicly here
+# would put a second, unauthenticated door on the same app.
+ExecStart=/home/malik/projects/bankai/.venv/bin/bankai web serve --host 127.0.0.1 --port 3003
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
