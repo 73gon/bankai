@@ -42,10 +42,10 @@ echo "==> Python environment"
 if [[ ! -x "$VENV/bin/bankai" ]]; then
   sudo -u "$OWNER" python3 -m venv "$VENV"
   sudo -u "$OWNER" "$VENV/bin/pip" install --quiet --upgrade pip
-  sudo -u "$OWNER" "$VENV/bin/pip" install --quiet -e "$REPO"
+  sudo -u "$OWNER" "$VENV/bin/pip" install --quiet -e "$REPO[web]"
   echo "    built $VENV"
 else
-  sudo -u "$OWNER" "$VENV/bin/pip" install --quiet -e "$REPO"
+  sudo -u "$OWNER" "$VENV/bin/pip" install --quiet -e "$REPO[web]"
   echo "    refreshed $VENV"
 fi
 sudo -u "$OWNER" "$VENV/bin/bankai" --help >/dev/null && echo "    bankai runs"
@@ -69,9 +69,13 @@ echo "==> tailscale serve"
 if tailscale serve status 2>/dev/null | grep -q ':7004'; then
   echo "    7004 already served"
 else
-  tailscale serve --bg --https=7004 http://127.0.0.1:3003 2>/dev/null \
-    || tailscale serve --bg 7004 http://127.0.0.1:3003
+  tailscale serve --bg --http=7004 http://127.0.0.1:3003
   echo "    7004 -> 127.0.0.1:3003"
+fi
+
+if ! tailscale serve status 2>/dev/null | grep -q ':7005'; then
+  tailscale serve --bg --http=7005 http://127.0.0.1:8080
+  echo "    7005 -> 127.0.0.1:8080 (qBittorrent)"
 fi
 
 cat <<'DONE'
