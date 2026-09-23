@@ -43,6 +43,10 @@ services:
       # at random. If no German server forwards a port, gluetun refuses to
       # start rather than connecting somewhere unintended.
       SERVER_COUNTRIES: Germany
+      # The handshake completes and small packets flow, but anything near
+      # full size is lost on the way: Docker inside WSL inside Windows' NAT,
+      # over a DSL line, leaves less room than WireGuard's default assumes.
+      WIREGUARD_MTU: "1280"
       TZ: Europe/Berlin
     ports:
       # Both on loopback. The WebUI is reached through tailscale serve like
