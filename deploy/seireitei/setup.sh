@@ -51,9 +51,13 @@ fi
 sudo -u "$OWNER" "$VENV/bin/bankai" --help >/dev/null && echo "    bankai runs"
 
 echo "==> Directories"
-# Downloads live on ext4, which measured 773 MB/s against 88.9 on the 9p
-# mount. Torrent writes are small and scattered, which is where 9p is worst.
-sudo -u "$OWNER" mkdir -p /home/malik/downloads /home/malik/bankai-work
+# Downloads live on G:, not inside the WSL image. The image grows on C:
+# with whatever is written into it and never shrinks back, and the free space
+# it reports is its own virtual maximum rather than what C: has left -- so the
+# 100 GiB reserve never fired, and 233 GB of torrents filled C: to zero. On G:
+# the reported free space is real, and the download already sits on the same
+# volume as staging and the library.
+sudo -u "$OWNER" mkdir -p /mnt/g/qbit/.incomplete /home/malik/bankai-work
 # Staging shares a volume with the library so publishing is a rename rather
 # than a second pass over 9p, and sits outside /mnt/g/media so a half-written
 # file is never inside a scanned root.
@@ -90,7 +94,7 @@ Before starting, the Windows service must stop owning the data:
        /mnt/c/Windows/System32/config/systemprofile/AppData/Local/bankai/erai_automation.json
      to
        /home/malik/.local/state/bankai/erai_automation.json
-  3. Point the config at Linux paths (/mnt/g/media/..., /home/malik/downloads).
+  3. Point the config at Linux paths (/mnt/g/media/..., /mnt/g/qbit).
 
 Then:
 

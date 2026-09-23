@@ -108,15 +108,17 @@ tests/                       pytest — always target 107 pass
 | Logs         | `journalctl -u bankai-web -f`                                         |
 | Listens      | bankai `127.0.0.1:3003`, qBittorrent `127.0.0.1:8080`                 |
 | Reachable    | `http://seireitei:7003` , qBittorrent `http://seireitei:7004`         |
-| Downloads    | `/home/malik/downloads/bankai` — **ext4**, measured 773 MB/s          |
+| Downloads    | `/mnt/g/qbit` (G:\qbit) — **not** inside the WSL image, see below    |
 | Staging      | `/mnt/g/bankai/staging` — same volume as the library, so publish renames |
 | Media roots  | `/mnt/g/media/{movies,shows,shows_anime}` — 9p, measured 88.9 MB/s    |
 | Boot         | Windows task "Seireitei WSL Server" starts the distro and holds it open |
 | Setup        | `deploy/seireitei/setup.sh` (idempotent, run as root)                 |
 
-Downloads sit on ext4 and staging on /mnt/g because of those two measurements:
-torrent I/O is small and scattered, which is where 9p is worst, while staging
-beside the library makes the publish a rename instead of a second 9p crossing.
+Downloads sit on G:, not on ext4 inside the image. The image lives on C:,
+grows with everything written into it and never shrinks back, and reports its
+virtual maximum as free space -- so the 100 GiB reserve never fired and 233 GB
+of torrents filled C: to zero (Sept 2026). On G: the free space is real, and
+download, staging and library share one volume.
 
 #### Windows side (drives only, service disabled)
 
