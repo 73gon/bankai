@@ -92,6 +92,35 @@ tests/                       pytest — always target 107 pass
 
 ### keller (primary — runs the web UI + pipeline jobs)
 
+> **Moved to WSL (Sept 2026).** bankai no longer runs as the Windows service
+> `bankai-web`; that service is stopped and disabled. It runs inside the WSL2
+> distro **seireitei** under systemd, together with qBittorrent, so the whole
+> pipeline sits on one machine and off the laptop. The Windows rows below are
+> kept because the media drives are still NTFS, reached via `/mnt/g`, `/mnt/e`.
+
+| Property     | Value                                                                |
+| ------------ | -------------------------------------------------------------------- |
+| Distro       | `wsl -d seireitei` (Ubuntu 24.04, systemd, WSL2)                      |
+| Repo / venv  | `/home/malik/projects/bankai` , `.venv` installed as `.[web]`         |
+| Config       | `/home/malik/projects/bankai/config.toml`                             |
+| State        | `/home/malik/.local/state/bankai/`                                    |
+| Services     | `systemctl {status,restart} bankai-web` / `qbittorrent`               |
+| Logs         | `journalctl -u bankai-web -f`                                         |
+| Listens      | bankai `127.0.0.1:3003`, qBittorrent `127.0.0.1:8080`                 |
+| Reachable    | `http://seireitei:7004` , qBittorrent `http://seireitei:7005`         |
+| Downloads    | `/home/malik/downloads/bankai` — **ext4**, measured 773 MB/s          |
+| Staging      | `/mnt/g/bankai/staging` — same volume as the library, so publish renames |
+| Media roots  | `/mnt/g/media/{movies,shows,shows_anime}` — 9p, measured 88.9 MB/s    |
+| Boot         | Windows task "Seireitei WSL Server" starts the distro and holds it open |
+| Setup        | `deploy/seireitei/setup.sh` (idempotent, run as root)                 |
+
+Downloads sit on ext4 and staging on /mnt/g because of those two measurements:
+torrent I/O is small and scattered, which is where 9p is worst, while staging
+beside the library makes the publish a rename instead of a second 9p crossing.
+
+#### Windows side (drives only, service disabled)
+
+
 | Property            | Value                                                                                              |
 | ------------------- | -------------------------------------------------------------------------------------------------- |
 | Host                | `192.168.178.27`                                                                                   |
@@ -150,9 +179,15 @@ git add -A
 git commit -m "…"
 git push origin main
 
-# 4. Deploy to keller
-ssh keller "cd C:\bankai; git fetch --all; git reset --hard origin/main; Restart-Service bankai-web; Start-Sleep -Seconds 2; (Invoke-WebRequest -UseBasicParsing http://localhost:9988/api/health).StatusCode"
+# 4. Deploy to keller (now WSL under systemd, not the Windows service)
+ssh keller "wsl -d seireitei -- git -C /home/malik/projects/bankai pull --ff-only"
+ssh keller "wsl -d seireitei -u root -- systemctl restart bankai-web"
+ssh keller "wsl -d seireitei -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3003/api/health"
 # Expected output: 200
+
+# Quoting: nesting ssh -> PowerShell -> wsl -> bash strips $variables and eats
+# & and quotes. For anything non-trivial, base64 the script and decode it on
+# the far side -- several silent failures came from exactly that.
 
 # 5. Sync mediaserver (when pipeline/scraper/torrent code changed)
 ssh malik@192.168.178.29 "cd /home/malik/bankai && git fetch --all && git reset --hard origin/main && git rev-parse --short HEAD"
