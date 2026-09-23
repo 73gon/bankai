@@ -1,0 +1,72 @@
+# qBittorrent behind ProtonVPN, with no way around the tunnel.
+#
+# qBittorrent has no network of its own: it shares gluetun's, and gluetun's
+# firewall only lets traffic out through the WireGuard interface. If the tunnel
+# drops, qBittorrent is offline -- it cannot fall back to the home connection.
+# On the laptop, NordVPN protected the whole machine but nothing stopped a
+# torrent when the tunnel went down.
+#
+# Proton rather than Nord because its P2P servers forward a port. Without one,
+# qBittorrent can only reach peers that accept incoming connections, so fewer
+# peers and slower downloads on anything thinly seeded.
+#
+#     cd /home/malik/projects/bankai/deploy/seireitei/vpn
+#     sudo docker compose up -d
+#     sudo docker compose logs -f gluetun
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: protonvpn
+      VPN_TYPE: wireguard
+      # Read from a root-only file, never from this file or the environment.
+      WIREGUARD_PRIVATE_KEY_SECRETFILE: /run/secrets/wireguard_private_key
+      # Only servers that forward a port, which on Proton are the P2P ones.
+      PORT_FORWARD_ONLY: "on"
+      VPN_PORT_FORWARDING: "on"
+      VPN_PORT_FORWARDING_PROVIDER: protonvpn
+      # Hand the forwarded port to qBittorrent whenever Proton assigns one, and
+      # pin qBittorrent to the tunnel interface as a second line of defence.
+      VPN_PORT_FORWARDING_UP_COMMAND: >-
+        /bin/sh -c 'wget -qO- --retry-connrefused --post-data
+        "json={\"listen_port\":{{PORT}},\"current_network_interface\":\"tun0\",\"random_port\":false,\"upnp\":false}"
+        http://127.0.0.1:8080/api/v2/app/setPreferences'
+      SERVER_COUNTRIES: Switzerland,Netherlands
+      TZ: Europe/Berlin
+    ports:
+      # Both on loopback. The WebUI is reached through tailscale serve like
+      # everything else here; the control server is for bankai's VPN status.
+      - 127.0.0.1:8080:8080
+      - 127.0.0.1:8000:8000
+    secrets:
+      - wireguard_private_key
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Berlin
+      WEBUI_PORT: "8080"
+    volumes:
+      - /home/malik/.config/qbittorrent-vpn:/config
+      # Same path inside as out, so qBittorrent reports paths bankai can read
+      # directly and no path_map is needed.
+      - /mnt/g/qbit:/mnt/g/qbit
+    restart: unless-stopped
+
+secrets:
+  wireguard_private_key:
+    file: /home/malik/.config/bankai-vpn/wireguard_private_key
