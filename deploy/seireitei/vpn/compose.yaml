@@ -37,7 +37,12 @@ services:
         /bin/sh -c 'wget -qO- --retry-connrefused --post-data
         "json={\"listen_port\":{{PORT}},\"current_network_interface\":\"tun0\",\"random_port\":false,\"upnp\":false}"
         http://127.0.0.1:8080/api/v2/app/setPreferences'
-      SERVER_COUNTRIES: Switzerland,Netherlands
+      # Germany alone: closest, so lowest latency and best throughput, and the
+      # exit country barely matters for privacy -- a swarm only ever sees
+      # Proton's address. Listing several would have gluetun pick among them
+      # at random. If no German server forwards a port, gluetun refuses to
+      # start rather than connecting somewhere unintended.
+      SERVER_COUNTRIES: Germany
       TZ: Europe/Berlin
     ports:
       # Both on loopback. The WebUI is reached through tailscale serve like
