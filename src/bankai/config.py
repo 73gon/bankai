@@ -208,6 +208,20 @@ class NotificationsSettings(BaseModel):
     on_failure: bool = True
 
 
+class VpnSettings(BaseModel):
+    """Where to ask whether downloads are going through the VPN.
+
+    Set ``control_url`` to gluetun's control server when qBittorrent runs
+    behind it. Left empty, bankai falls back to asking NordVPN on the laptop
+    over SSH, which is how the Windows deployment worked.
+    """
+
+    control_url: str = ""
+    # gluetun's control server stops answering anonymously after v3.40, and
+    # the image tag follows releases, so the key is set up before it is needed.
+    api_key: str = ""
+
+
 class WebSettings(BaseModel):
     """Settings for the bankai web UI / HTTP API server."""
 
@@ -255,6 +269,7 @@ class Settings(BaseSettings):
     selector: SelectorSettings = Field(default_factory=SelectorSettings)
     notifications: NotificationsSettings = Field(default_factory=NotificationsSettings)
     web: WebSettings = Field(default_factory=WebSettings)
+    vpn: VpnSettings = Field(default_factory=VpnSettings)
 
     @classmethod
     def settings_customise_sources(

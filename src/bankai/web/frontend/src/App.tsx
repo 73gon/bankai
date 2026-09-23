@@ -205,8 +205,8 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
     try {
       const next = await api.vpnConnect();
       setStatus(next);
-      if (next.connected) toast.success('NordVPN connected on laptop.');
-      else toast.error('NordVPN did not report a connected state.');
+      if (next.connected) toast.success('VPN connected.');
+      else toast.error('The VPN did not report a connected state.');
     } catch (error: any) {
       toast.error(error.message);
       await refresh();
@@ -233,7 +233,7 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
       <Tooltip>
         <TooltipTrigger asChild>
           {disconnected ? (
-            <Button size='icon' variant='ghost' onClick={() => void connect()} disabled={connecting} aria-label={`${statusLabel}. Connect NordVPN`}>
+            <Button size='icon' variant='ghost' onClick={() => void connect()} disabled={connecting} aria-label={`${statusLabel}. Reconnect VPN`}>
               {connecting ? <Loader2 data-icon='inline-start' className='animate-spin' /> : dot}
             </Button>
           ) : (

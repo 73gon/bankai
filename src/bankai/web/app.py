@@ -156,6 +156,58 @@ def _laptop_vpn_command(command: str, *, timeout: int = 20) -> subprocess.Comple
     )
 
 
+def _gluetun_get(path: str, *, method: str = "GET", json_body: dict | None = None) -> dict:
+    import httpx
+
+    vpn = get_settings().vpn
+    headers = {"X-API-Key": vpn.api_key} if vpn.api_key else {}
+    response = httpx.request(
+        method,
+        vpn.control_url.rstrip("/") + path,
+        headers=headers,
+        json=json_body,
+        timeout=8.0,
+    )
+    response.raise_for_status()
+    return response.json() if response.content else {}
+
+
+def _gluetun_vpn_status() -> dict:
+    """What the tunnel qBittorrent sits behind is doing, from gluetun itself.
+
+    "Connected" means the tunnel is running *and* traffic is actually leaving
+    through it: gluetun can report running for a moment after a server stops
+    answering, and a public IP is only known once packets have made it out.
+    """
+    try:
+        state = _gluetun_get("/v1/vpn/status").get("status")
+        ip = _gluetun_get("/v1/publicip/ip")
+    except Exception as exc:  # unreachable, unauthorised, or not JSON
+        return {"connected": False, "status": "unavailable", "detail": f"gluetun: {exc}"[:500]}
+    port = None
+    with suppress(Exception):
+        port = _gluetun_get("/v1/portforward").get("port") or None
+    public_ip = ip.get("public_ip") or ""
+    connected = state == "running" and bool(public_ip)
+    where = ", ".join(part for part in (ip.get("city"), ip.get("country")) if part)
+    parts = [f"Proton via gluetun: {state or 'unknown'}"]
+    if public_ip:
+        parts.append(f"{public_ip} ({where})" if where else public_ip)
+    if port:
+        parts.append(f"forwarded port {port}")
+    return {
+        "connected": connected,
+        "status": "connected" if connected else "disconnected",
+        "detail": " · ".join(parts),
+        "public_ip": public_ip or None,
+        "forwarded_port": port,
+    }
+
+
+def _vpn_status() -> dict:
+    return _gluetun_vpn_status() if get_settings().vpn.control_url else _laptop_vpn_status()
+
+
 def _laptop_vpn_status() -> dict:
     try:
         result = _laptop_vpn_command("status")
@@ -1791,10 +1843,18 @@ def create_app() -> Any:
 
     @app.get("/api/vpn/status")
     def vpn_status() -> dict:
-        return _laptop_vpn_status()
+        return _vpn_status()
 
     @app.post("/api/vpn/connect")
     def vpn_connect() -> dict:
+        if get_settings().vpn.control_url:
+            # gluetun reconnects by itself, so "connect" asks it to bring the
+            # tunnel back up now rather than at its next health check.
+            try:
+                _gluetun_get("/v1/vpn/status", method="PUT", json_body={"status": "running"})
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"VPN reconnect failed: {exc}") from exc
+            return _gluetun_vpn_status()
         try:
             result = _laptop_vpn_command("connect", timeout=75)
         except (OSError, subprocess.SubprocessError) as exc:
