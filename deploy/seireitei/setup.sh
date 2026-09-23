@@ -65,17 +65,17 @@ systemctl daemon-reload
 echo "    installed $UNIT (not enabled, not started)"
 
 echo "==> tailscale serve"
-# 7001-7003 are taken by the other projects; bankai follows on 7004.
-if tailscale serve status 2>/dev/null | grep -q ':7004'; then
-  echo "    7004 already served"
+# bankai takes 7003 and qBittorrent 7004, after 7001 and 7002.
+if tailscale serve status 2>/dev/null | grep -q ':7003'; then
+  echo "    7003 already served"
 else
-  tailscale serve --bg --http=7004 http://127.0.0.1:3003
-  echo "    7004 -> 127.0.0.1:3003"
+  tailscale serve --bg --http=7003 http://127.0.0.1:3003
+  echo "    7003 -> 127.0.0.1:3003"
 fi
 
-if ! tailscale serve status 2>/dev/null | grep -q ':7005'; then
-  tailscale serve --bg --http=7005 http://127.0.0.1:8080
-  echo "    7005 -> 127.0.0.1:8080 (qBittorrent)"
+if ! tailscale serve status 2>/dev/null | grep -q ':7004'; then
+  tailscale serve --bg --http=7004 http://127.0.0.1:8080
+  echo "    7004 -> 127.0.0.1:8080 (qBittorrent)"
 fi
 
 cat <<'DONE'

@@ -107,7 +107,7 @@ tests/                       pytest — always target 107 pass
 | Services     | `systemctl {status,restart} bankai-web` / `qbittorrent`               |
 | Logs         | `journalctl -u bankai-web -f`                                         |
 | Listens      | bankai `127.0.0.1:3003`, qBittorrent `127.0.0.1:8080`                 |
-| Reachable    | `http://seireitei:7004` , qBittorrent `http://seireitei:7005`         |
+| Reachable    | `http://seireitei:7003` , qBittorrent `http://seireitei:7004`         |
 | Downloads    | `/home/malik/downloads/bankai` — **ext4**, measured 773 MB/s          |
 | Staging      | `/mnt/g/bankai/staging` — same volume as the library, so publish renames |
 | Media roots  | `/mnt/g/media/{movies,shows,shows_anime}` — 9p, measured 88.9 MB/s    |
