@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from bankai.web.anime_library import _name
@@ -57,25 +59,79 @@ def test_the_season_suffix_comes_off_before_the_tvdb_search(source_title, expect
     assert _search_title(source_title) == expected
 
 
-def test_a_failed_lookup_is_not_cached_as_an_answer(monkeypatch, tmp_path):
-    """A miss held the show at its romaji name with no cover for a full day."""
-    import asyncio
-
+@pytest.fixture()
+def metadata_store(monkeypatch):
+    """show_metadata against a TVDB answered from ``provider``, saving to a dict."""
     from bankai.web import anime_library, discover
 
     monkeypatch.setattr(anime_library, "_CACHE", {})
+    monkeypatch.setattr(anime_library, "_PERSISTENT_CACHE", {})
+    monkeypatch.setattr(anime_library, "_REFRESHING", set())
+    monkeypatch.setattr(anime_library, "flush_persistent_cache", lambda: None)
     monkeypatch.setattr(discover, "is_configured", lambda: True)
+    provider = {"answer": [], "calls": 0}
 
-    async def no_candidates(query):
-        return []
+    async def candidates(query, **kwargs):
+        provider["calls"] += 1
+        if isinstance(provider["answer"], Exception):
+            raise provider["answer"]
+        return provider["answer"]
 
-    monkeypatch.setattr(anime_library.anime, "tvdb_candidates", no_candidates)
-    stored: dict = {}
-    monkeypatch.setattr(anime_library, "_persistent_put", lambda k, v: stored.update({k: v}))
-    monkeypatch.setattr(anime_library, "_persistent_get", lambda k: None)
+    monkeypatch.setattr(anime_library.anime, "tvdb_candidates", candidates)
+    return provider
+
+
+def test_an_outage_is_not_cached_as_an_answer(metadata_store):
+    """A failure held the show at its romaji name with no cover for a full day."""
+    import asyncio
+
+    from bankai.web import anime_library
+
+    metadata_store["answer"] = RuntimeError("TVDB is down")
 
     assert asyncio.run(anime_library.show_metadata("Nothing Matches This")) == {}
-    assert stored == {}
+    assert anime_library._PERSISTENT_CACHE == {}
+
+
+def test_no_such_title_is_remembered_so_a_restart_does_not_ask_again(metadata_store):
+    """Every unmatched film was searched for again on every restart.
+
+    That was ~360 provider round trips before the Movies & Shows page could
+    answer: over two minutes.
+    """
+    import asyncio
+
+    from bankai.web import anime_library
+
+    assert asyncio.run(anime_library.show_metadata("Nothing Matches This", kind="movie")) == {}
+    # Remembered as a miss, never as a match.
+    assert [key.split(":")[0] for key in anime_library._PERSISTENT_CACHE] == ["miss"]
+
+    anime_library._CACHE.clear()  # a restart: memory gone, the file kept
+    assert asyncio.run(anime_library.show_metadata("Nothing Matches This", kind="movie")) == {}
+    assert metadata_store["calls"] == 1
+
+
+def test_an_expired_answer_is_served_while_it_refreshes(metadata_store):
+    """Expiry used to block the page on the provider, once a day per card."""
+    import asyncio
+
+    from bankai.web import anime_library
+
+    key = "metadata:v2:show:frieren"
+    anime_library._PERSISTENT_CACHE[key] = {
+        "saved_at": time.time() - anime_library._PERSISTENT_TTL_SECONDS - 60,
+        "value": {"english_title": "Frieren", "tvdb_id": 424536},
+    }
+
+    async def load():
+        first = await anime_library.show_metadata("Frieren")
+        # Let the background refresh run before the loop closes.
+        await asyncio.gather(*anime_library._BACKGROUND)
+        return first
+
+    assert asyncio.run(load())["tvdb_id"] == 424536
+    assert metadata_store["calls"] == 1
 
 
 def test_genuinely_different_shows_stay_apart():

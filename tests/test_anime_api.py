@@ -267,7 +267,9 @@ def test_library_groups_episodes_into_one_show_with_sorted_seasons(
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"video")
-    body = client.get("/api/anime/library").json()
+    # Rescan: the app's scheduler may already hold a tree walked while these
+    # files were still being written, as it would until its next refresh.
+    body = client.get("/api/anime/library", params={"rescan": True}).json()
     assert len(body["shows"]) == 1
     show = body["shows"][0]
     assert show["episode_count"] == 3 and show["season_count"] == 2

@@ -9,10 +9,10 @@ user can fix German dub sync before approving a transfer.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -364,9 +364,6 @@ class ServerTitle:
     directory: str | None = None
 
 
-_SERVER_CACHE: dict[str, tuple[float, list[ServerTitle]]] = {}
-
-
 # Anime is shaped like a show -- a folder of seasons -- and only differs in
 # which roots it lives under.
 _SHOW_LIKE = {"show", "anime"}
@@ -383,44 +380,53 @@ def server_roots(kind: str) -> list:
 
 
 def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
-    settings = get_settings()
+    """Every title directly under the configured roots of one kind.
+
+    Read from the held library tree (:mod:`bankai.web.library_walk`) rather
+    than listing the roots again: they sit on the same 9p mount as the
+    libraries, and the tree already knows every directory and video in them.
+    """
+    from bankai.web import library_walk
+
     dirs = server_roots(kind)
-    cache_key = kind
-    ttl = settings.web.cache_ttl_seconds
-    if use_cache:
-        cached = _SERVER_CACHE.get(cache_key)
-        if cached and time.time() - cached[0] < ttl:
-            return cached[1]
     seen: dict[str, ServerTitle] = {}
     scores: dict[str, int] = {}
     for d in dirs:
         p = Path(d)
-        if not p.is_dir():
+        tree = library_walk.directories(p, rescan=not use_cache)
+        top = tree.get(str(p))
+        if top is None:
             continue
-        for child in sorted(p.iterdir()):
-            if child.is_dir():
-                name = child.name
-            elif child.is_file() and child.suffix.lower() in _VIDEO_EXTS:
-                # Many movies live as a bare ``Title (Year).mkv`` rather than
-                # inside a folder — surface those too.
-                name = child.stem
-            else:
-                continue
+
+        def video_count(folder: Path, tree: dict = tree) -> int:
+            prefix = str(folder)
+            return sum(
+                len(node["files"])
+                for path, node in tree.items()
+                if path == prefix or path.startswith(prefix + os.sep)
+            )
+
+        children = [(p / name, True) for name in top["subdirs"]] + [
+            # Many movies live as a bare ``Title (Year).mkv`` rather than
+            # inside a folder — surface those too.
+            (p / name, False)
+            for name, _size, _mtime in top["files"]
+        ]
+        for child, is_dir in sorted(children, key=lambda item: str(item[0])):
+            name = child.name if is_dir else child.stem
             key = name.casefold()
             score = 1
             new_entry = key not in seen
             replace = new_entry
-            if not replace and kind in _SHOW_LIKE and child.is_dir():
+            if not replace and kind in _SHOW_LIKE and is_dir:
                 existing_score = scores[key]
                 if existing_score < 0:
                     existing_location = seen[key].location
                     existing_score = (
-                        _server_video_count(Path(existing_location))
-                        if existing_location
-                        else 0
+                        video_count(Path(existing_location)) if existing_location else 0
                     )
                     scores[key] = existing_score
-                score = _server_video_count(child)
+                score = video_count(child)
                 replace = score > existing_score
             if replace:
                 seen[key] = ServerTitle(
@@ -432,26 +438,16 @@ def scan_server(kind: str, *, use_cache: bool = True) -> list[ServerTitle]:
                 )
                 # Delay recursive counting until a duplicate actually appears.
                 scores[key] = (
-                    -1 if new_entry and kind in _SHOW_LIKE and child.is_dir() else score
+                    -1 if new_entry and kind in _SHOW_LIKE and is_dir else score
                 )
-    titles = sorted(seen.values(), key=lambda t: t.name.casefold())
-    _SERVER_CACHE[cache_key] = (time.time(), titles)
-    return titles
-
-
-def _server_video_count(folder: Path) -> int:
-    count = 0
-    try:
-        for child in folder.rglob("*"):
-            if child.is_file() and child.suffix.lower() in _VIDEO_EXTS:
-                count += 1
-    except OSError:
-        pass
-    return count
+    return sorted(seen.values(), key=lambda t: t.name.casefold())
 
 
 def invalidate_server_cache() -> None:
-    _SERVER_CACHE.clear()
+    """After a change made here, have the next scan check the disk first."""
+    from bankai.web import library_walk
+
+    library_walk.mark_stale()
 
 
 @dataclass(frozen=True, slots=True)

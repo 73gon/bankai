@@ -146,10 +146,10 @@ export default function AnimeLibrary() {
     }
   }, [view]);
 
-  async function load() {
+  async function load(rescan = false) {
     setLoading(true);
     try {
-      const result = await api.animeLibrary();
+      const result = await api.animeLibrary(rescan);
       setShows(result.shows);
       setRoot(result.root);
     } catch (error: any) {
@@ -295,7 +295,7 @@ export default function AnimeLibrary() {
               />
             ))}
           </ToggleGroup>
-          <Button variant='secondary' onClick={() => void load()} disabled={loading}><RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan</Button>
+          <Button variant='secondary' onClick={() => void load(true)} disabled={loading}><RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan</Button>
         </div>
       </div>
 

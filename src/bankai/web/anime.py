@@ -350,7 +350,15 @@ async def series_metadata(tvdb_id: int) -> AnimeTVDBMatch:
     return item
 
 
-async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]:
+async def tvdb_candidates(
+    query: str, *, limit: int = 8, raise_errors: bool = False
+) -> list[AnimeTVDBMatch]:
+    """TVDB matches for an anime title.
+
+    A failed search returns ``[]`` like a search that found nothing, unless
+    ``raise_errors``: callers that cache the answer have to tell the two apart,
+    or an outage is remembered as "no such show".
+    """
     clean = query.strip()
     if not clean or not discover.is_configured():
         return []
@@ -410,6 +418,8 @@ async def tvdb_candidates(query: str, *, limit: int = 8) -> list[AnimeTVDBMatch]
         movies = [*movies_eng, *movies_jpn]
     except Exception as exc:
         log.warning("TVDB anime lookup failed for %r: %s", clean, exc)
+        if raise_errors:
+            raise
         return []
     finally:
         await client.aclose()

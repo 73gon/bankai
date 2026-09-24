@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
 
-from bankai.web import anime_library
+from bankai.web import anime_library, library_walk
 
 
 @pytest.fixture(autouse=True)
@@ -75,7 +77,14 @@ def test_a_replaced_episode_is_identified_again(tmp_path, monkeypatch):
     anime_library.sweep_codecs(root, limit=10)
     assert anime_library.probed_codecs([_row(episode)]) == {(1, 1): "avc"}
 
-    episode.write_bytes(b"a different, larger file entirely")
+    # Published the way the pipeline does it: written beside, renamed over.
+    # That changes the folder, which is what the held library tree watches.
+    upgrade = episode.with_name(episode.name + ".part")
+    upgrade.write_bytes(b"a different, larger file entirely")
+    upgrade.replace(episode)
+    later = time.time() + 5  # whole-second mtimes on some filesystems
+    os.utime(episode.parent, (later, later))
+    library_walk.refresh_all()
     monkeypatch.setattr(
         anime_library, "probe_streams", lambda path: {"codec": "hevc", "audio": ["jpn"]}
     )

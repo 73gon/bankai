@@ -14,13 +14,11 @@ ripped by hand. This module walks the configured roots and nothing else.
 from __future__ import annotations
 
 import asyncio
-import time
 from contextlib import suppress
 from pathlib import Path
 
-from bankai.config import get_settings
 from bankai.torrent.matcher import parse_se
-from bankai.web import discover
+from bankai.web import discover, library_walk
 from bankai.web.anime_library import (
     _display_title,
     _name,
@@ -28,23 +26,16 @@ from bankai.web.anime_library import (
     flush_persistent_cache,
     merge_episodes,
     show_metadata,
-    walk_videos,
 )
 
 # Shows and films are resolved concurrently but not without limit: each miss
 # is a provider call, and a first scan of a large library is all misses.
 _SLOTS = 6
 
-# Walking every root is the expensive part, and the disk these libraries
-# live on is the slowest thing in the system. Held for the configured TTL,
-# the way the server library holds its own scan; the page's Rescan button
-# asks for a fresh one.
-_WALK_CACHE: dict[str, tuple[float, list[dict]]] = {}
-
 
 def invalidate() -> None:
-    """Forget the cached walk, so the next read touches the disk."""
-    _WALK_CACHE.clear()
+    """Have the next read check the disk first, rather than the held tree."""
+    library_walk.mark_stale()
 
 
 def _walk(roots: list[str | Path], *, use_cache: bool = True) -> list[dict]:
@@ -52,41 +43,14 @@ def _walk(roots: list[str | Path], *, use_cache: bool = True) -> list[dict]:
 
     A title is the first path segment when the file is nested and the file's
     own name when it is not, because a film is as likely to be a bare
-    ``Title (Year).mkv`` as a folder containing one.
+    ``Title (Year).mkv`` as a folder containing one. The walk itself is the
+    held tree shared with every other library view; the page's Rescan button
+    checks it against the disk.
     """
-    key = "|".join(str(root) for root in roots)
-    if use_cache:
-        hit = _WALK_CACHE.get(key)
-        if hit and time.time() - hit[0] < get_settings().web.cache_ttl_seconds:
-            return hit[1]
-    entries: list[dict] = []
-    for raw in roots:
-        root = Path(raw)
-        if not root.is_dir():
-            continue
-        for path, stat in walk_videos(root):
-            try:
-                relative = path.relative_to(root)
-            except ValueError:
-                continue
-            parts = relative.parts
-            entries.append(
-                {
-                    "path": str(path),
-                    "rel_path": str(relative),
-                    "name": path.name,
-                    "series": parts[0] if len(parts) > 1 else path.stem,
-                    "season": parts[1] if len(parts) > 2 else None,
-                    "size": stat.st_size,
-                    "mtime": stat.st_mtime,
-                    "root": str(root),
-                    "staged": False,
-                    "stage": "transferred",
-                    "transfer_status": "done",
-                }
-            )
-    _WALK_CACHE[key] = (time.time(), entries)
-    return entries
+    return [
+        {**entry, "staged": False, "stage": "transferred", "transfer_status": "done"}
+        for entry in library_walk.files(roots, rescan=not use_cache)
+    ]
 
 
 def _bucket(entries: list[dict]) -> dict[str, dict]:

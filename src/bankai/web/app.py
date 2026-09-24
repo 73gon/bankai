@@ -1731,32 +1731,21 @@ def create_app() -> Any:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.get("/api/anime/library")
-    async def anime_library(show: str | None = None, include_entries: bool = False) -> dict:
+    async def anime_library(
+        show: str | None = None, include_entries: bool = False, rescan: bool = False
+    ) -> dict:
         def scan() -> tuple[Path, list[dict]]:
             root = Path(get_settings().transfer.anime_shows_dir)
             entries: list[dict] = []
             if root.exists():
-                from bankai.web.anime_library import walk_videos
+                from bankai.web import library_walk
 
-                for path, stat in walk_videos(root):
-                    try:
-                        relative = str(path.relative_to(root))
-                    except ValueError:
-                        continue
-                    parts = Path(relative).parts
+                # The held tree, kept current by the scheduler: walking the
+                # library over 9p on every page load took 10 s and more.
+                for entry in library_walk.files([root], rescan=rescan):
+                    entry.pop("root", None)
                     entries.append(
-                        {
-                            "path": str(path),
-                            "rel_path": relative,
-                            "name": path.name,
-                            "series": parts[0] if len(parts) > 1 else path.stem,
-                            "season": parts[1] if len(parts) > 2 else None,
-                            "size": stat.st_size,
-                            "mtime": stat.st_mtime,
-                            "staged": False,
-                            "stage": "transferred",
-                            "transfer_status": "done",
-                        }
+                        {**entry, "staged": False, "stage": "transferred", "transfer_status": "done"}
                     )
             for entry in media_mod.scan_library():
                 state = review_mod.get_state(entry.path)

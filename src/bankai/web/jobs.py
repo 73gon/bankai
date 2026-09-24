@@ -435,11 +435,13 @@ def reconcile() -> int:
 # to happen on every tick.
 _RELEASE_RECONCILE_SECONDS = 20.0
 # Identifying every episode's encode is a one-off crawl of the whole library.
-# It runs in slices so it never competes for long with publishing, and slows
-# to every half hour once every file has been identified.
+# It runs in slices so it never competes for long with publishing, and reads
+# the held library tree, so a pass with nothing left to probe costs nothing.
 _CODEC_SWEEP_SECONDS = 60.0
-_CODEC_IDLE_SECONDS = 1800.0
 _CODEC_SWEEP_BATCH = 40
+# How often the held library tree is checked against the disk: the delay
+# before a newly published episode shows in the libraries.
+_LIBRARY_WALK_SECONDS = 60.0
 
 
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
@@ -447,6 +449,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
 
     next_release_pass = 0.0
     next_codec_pass = 0.0
+    next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
+    walk_task: asyncio.Future | None = None
     while True:
         try:
             await asyncio.to_thread(reconcile)
@@ -454,6 +458,15 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
             raise
         except Exception as exc:
             log.warning("queue scheduler failed: %s", exc)
+        # Off to the side: checking the tree is seconds of 9p round trips, and
+        # dispatching queued work must not wait for it.
+        if time.monotonic() >= next_walk_pass and (walk_task is None or walk_task.done()):
+            next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
+            if walk_task is not None and walk_task.exception() is not None:
+                log.warning("library walk refresh failed: %s", walk_task.exception())
+            from bankai.web import library_walk
+
+            walk_task = asyncio.ensure_future(asyncio.to_thread(library_walk.refresh_all))
         if time.monotonic() >= next_release_pass:
             next_release_pass = time.monotonic() + _RELEASE_RECONCILE_SECONDS
             try:
@@ -476,12 +489,6 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                     Path(get_settings().transfer.anime_shows_dir),
                     limit=_CODEC_SWEEP_BATCH,
                 )
-                if not result["probed"] and not result["remaining"]:
-                    # Every file is identified. Finding that out still means
-                    # walking the whole library over 9p, which every page
-                    # load then queues behind, so look again only rarely:
-                    # new episodes wait a while for their codec, nothing else.
-                    next_codec_pass = time.monotonic() + _CODEC_IDLE_SECONDS
                 if result["probed"]:
                     log.info(
                         "Identified the encode of %d episode(s); %d still unidentified",

@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import subprocess
 import threading
 import time
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree as ET
 
 from bankai.cli import bgjobs
+from bankai.logging import get_logger
 from bankai.metadata import anime_mapping
 from bankai.metadata.tvdb import TVDBEpisode
 from bankai.processor.anime import _tvdb_episode_map
@@ -25,39 +26,20 @@ from bankai.processor.naming import sanitise
 from bankai.torrent.matcher import parse_se
 from bankai.web import anime, discover, erai
 
+log = get_logger(__name__)
+
 _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".webm"}
-
-
-def walk_videos(root: Path) -> Iterator[tuple[Path, os.stat_result]]:
-    """Every video file under ``root`` with its stat, touching as little as possible.
-
-    The libraries sit on Windows drives reached over 9p, where every stat is a
-    round trip. ``rglob`` plus ``is_file`` plus ``stat`` paid two of them for
-    every entry, subtitles and artwork included: 31 s for the anime library.
-    ``scandir`` already knows which entries are directories, so only video
-    files are stat'ed, once: 5.5 s for the same 3,645 files.
-    """
-    try:
-        entries = os.scandir(root)
-    except OSError:
-        return
-    with entries:
-        for entry in entries:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    yield from walk_videos(Path(entry.path))
-                    continue
-                if os.path.splitext(entry.name)[1].casefold() not in _VIDEO_SUFFIXES:
-                    continue
-                stat = entry.stat()
-            except OSError:
-                continue
-            yield Path(entry.path), stat
 _CACHE: dict[str, tuple[float, dict]] = {}
 _PERSISTENT_CACHE: dict | None = None
 _PERSISTENT_DIRTY = False
 _PERSISTENT_LOCK = threading.RLock()
 _PERSISTENT_TTL_SECONDS = 24 * 60 * 60
+# How long "TVDB has no such title" is believed. Without it, every title that
+# does not match -- most films on the Movies & Shows page -- was searched for
+# again on every restart, one provider round trip each.
+_MISS_TTL_SECONDS = 12 * 60 * 60
+_REFRESHING: set[str] = set()
+_BACKGROUND: set[asyncio.Task] = set()
 
 
 def _persistent_path() -> Path:
@@ -76,11 +58,46 @@ def _persistent_data() -> dict:
         return _PERSISTENT_CACHE
 
 
-def _persistent_get(key: str):
+def _persistent_entry(key: str) -> tuple[Any, float] | None:
+    """A saved value and its age in seconds, however old; ``None`` if never saved."""
     hit = _persistent_data().get(key)
-    if not isinstance(hit, dict) or time.time() - float(hit.get("saved_at", 0)) >= _PERSISTENT_TTL_SECONDS:
+    if not isinstance(hit, dict) or "value" not in hit:
         return None
-    return hit.get("value")
+    return hit["value"], time.time() - float(hit.get("saved_at", 0))
+
+
+def _persistent_get(key: str):
+    entry = _persistent_entry(key)
+    return entry[0] if entry is not None and entry[1] < _PERSISTENT_TTL_SECONDS else None
+
+
+def _refresh_later(key: str, fetch: Callable[[], Awaitable[Any]]) -> None:
+    """Fetch an expired entry again in the background, once at a time.
+
+    The page is answered with what was saved. Blocking it instead meant that
+    once a day every card in a library waited on the provider, and after a
+    restart the Movies & Shows page took over two minutes.
+    """
+    if key in _REFRESHING:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _REFRESHING.add(key)
+
+    async def run() -> None:
+        try:
+            await fetch()
+            await asyncio.to_thread(flush_persistent_cache)
+        except Exception as exc:
+            log.debug("Background metadata refresh of %s failed: %s", key, exc)
+        finally:
+            _REFRESHING.discard(key)
+
+    task = loop.create_task(run())
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
 
 
 def _persistent_put(key: str, value) -> None:
@@ -214,39 +231,68 @@ async def show_metadata(title: str, tvdb_id: int | None = None, kind: str = "sho
         return hit[1]
     # Versioned: entries cached before the season suffix was understood hold an
     # empty result that would otherwise be served for another day.
-    persisted = _persistent_get(f"metadata:v2:{key}")
-    if isinstance(persisted, dict):
-        _CACHE[key] = (time.time(), persisted)
-        return persisted
-    metadata = {}
-    if discover.is_configured():
-        try:
-            if tvdb_id:
-                metadata = asdict(await anime.series_metadata(tvdb_id))
-            else:
-                query = _search_title(title)
-                candidates = await anime.tvdb_candidates(query)
-                exact = [
-                    item
-                    for item in candidates
-                    if item.kind == kind
-                    and _name(query)
-                    in {
-                        _name(item.english_title),
-                        _name(item.japanese_title or ""),
-                        *(_name(alias) for alias in item.aliases),
-                    }
-                ]
-                if len(exact) == 1:
-                    metadata = asdict(exact[0])
-        except Exception:
-            pass  # Library browsing remains available during provider outages.
+    saved = _persistent_entry(f"metadata:v2:{key}")
+    if saved is not None and isinstance(saved[0], dict):
+        _CACHE[key] = (time.time(), saved[0])
+        if saved[1] >= _PERSISTENT_TTL_SECONDS:
+            _refresh_later(key, lambda: _fetch_metadata(key, title, tvdb_id, kind))
+        return saved[0]
+    miss = _persistent_entry(f"miss:v1:{key}")
+    if miss is not None and miss[1] < _MISS_TTL_SECONDS:
+        _CACHE[key] = (time.time(), {})
+        return {}
+    return await _fetch_metadata(key, title, tvdb_id, kind)
+
+
+async def _fetch_metadata(key: str, title: str, tvdb_id: int | None, kind: str) -> dict:
+    """Ask the provider, and remember the answer -- but never an outage."""
+    try:
+        metadata = await _lookup_metadata(title, tvdb_id, kind)
+    except Exception:
+        # Library browsing remains available during provider outages, on
+        # whatever was saved before; a failure is held only in memory, and
+        # briefly, so the next page load after the outage asks again.
+        hit = _CACHE.get(key)
+        if not (hit and hit[1]):
+            _CACHE[key] = (time.time(), {})
+        return hit[1] if hit and hit[1] else {}
+    if not metadata:
+        # A title that matched before and no longer does keeps its old match:
+        # losing the cover to a provider's search ranking is worse than an
+        # answer a day older.
+        previous = _persistent_entry(f"metadata:v2:{key}")
+        if previous is not None and isinstance(previous[0], dict) and previous[0]:
+            metadata = previous[0]
     _CACHE[key] = (time.time(), metadata)
-    # A miss is not an answer. Persisting it would hold the show at its romaji
-    # name with no cover for a day, including through a provider outage.
     if metadata:
         _persistent_put(f"metadata:v2:{key}", metadata)
+    else:
+        # The provider answered and has no such title. That is worth
+        # remembering, for less long than a match.
+        _persistent_put(f"miss:v1:{key}", True)
     return metadata
+
+
+async def _lookup_metadata(title: str, tvdb_id: int | None, kind: str) -> dict:
+    """The provider's answer; ``{}`` when it has no match, raising when it failed."""
+    if not discover.is_configured():
+        raise RuntimeError("TVDB is not configured")
+    if tvdb_id:
+        return asdict(await anime.series_metadata(tvdb_id))
+    query = _search_title(title)
+    candidates = await anime.tvdb_candidates(query, raise_errors=True)
+    exact = [
+        item
+        for item in candidates
+        if item.kind == kind
+        and _name(query)
+        in {
+            _name(item.english_title),
+            _name(item.japanese_title or ""),
+            *(_name(alias) for alias in item.aliases),
+        }
+    ]
+    return asdict(exact[0]) if len(exact) == 1 else {}
 
 
 def known_ids() -> dict[str, int]:
@@ -285,11 +331,18 @@ async def episode_roster(tvdb_id: int) -> list:
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < 900:
         return hit[1]
-    persisted = _persistent_get(key)
-    if isinstance(persisted, list):
-        rows = [TVDBEpisode(**row) for row in persisted if isinstance(row, dict)]
+    saved = _persistent_entry(key)
+    if saved is not None and isinstance(saved[0], list):
+        rows = [TVDBEpisode(**row) for row in saved[0] if isinstance(row, dict)]
         _CACHE[key] = (time.time(), rows)
+        if saved[1] >= _PERSISTENT_TTL_SECONDS:
+            _refresh_later(key, lambda: _fetch_roster(tvdb_id))
         return rows
+    return await _fetch_roster(tvdb_id)
+
+
+async def _fetch_roster(tvdb_id: int) -> list:
+    key = f"episodes:{tvdb_id}"
     rows = await _tvdb_episode_map(tvdb_id)
     _CACHE[key] = (time.time(), rows)
     _persistent_put(key, [asdict(row) for row in rows])
@@ -405,8 +458,15 @@ def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
     cache = dict(_load_codec_cache())
     probed = 0
     remaining = 0
-    for path, stat in walk_videos(root):
-        identity = (int(stat.st_size), int(stat.st_mtime))
+    from bankai.web import library_walk
+
+    # The held tree rather than a walk of its own: finding out that nothing
+    # is left to probe used to mean crossing the whole library over 9p.
+    for row in library_walk.files([root]):
+        if Path(row["name"]).suffix.casefold() not in _VIDEO_SUFFIXES:
+            continue
+        path = Path(row["path"])
+        identity = (int(row["size"]), int(row["mtime"]))
         key = str(path)
         cached = cache.get(key)
         if cached and cached.get("size") == identity[0] and cached.get("mtime") == identity[1]:

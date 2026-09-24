@@ -783,7 +783,11 @@ export const api = {
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   sidebarCounts: () => request<{ counts: Record<string, number | null> }>('/api/sidebar/counts'),
-  animeLibrary: () => request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>('/api/anime/library'),
+  /** `rescan` checks the library against the disk first instead of the held tree. */
+  animeLibrary: (rescan = false) =>
+    request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>(
+      `/api/anime/library${rescan ? '?rescan=true' : ''}`,
+    ),
   animeLibraryShow: (key: string) =>
     request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>(
       `/api/anime/library?show=${encodeURIComponent(key)}`,
