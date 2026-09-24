@@ -435,9 +435,10 @@ def reconcile() -> int:
 # to happen on every tick.
 _RELEASE_RECONCILE_SECONDS = 20.0
 # Identifying every episode's encode is a one-off crawl of the whole library.
-# It runs in slices so it never competes for long with publishing, and stops
-# entirely once every file has been identified.
+# It runs in slices so it never competes for long with publishing, and slows
+# to every half hour once every file has been identified.
 _CODEC_SWEEP_SECONDS = 60.0
+_CODEC_IDLE_SECONDS = 1800.0
 _CODEC_SWEEP_BATCH = 40
 
 
@@ -475,6 +476,12 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                     Path(get_settings().transfer.anime_shows_dir),
                     limit=_CODEC_SWEEP_BATCH,
                 )
+                if not result["probed"] and not result["remaining"]:
+                    # Every file is identified. Finding that out still means
+                    # walking the whole library over 9p, which every page
+                    # load then queues behind, so look again only rarely:
+                    # new episodes wait a while for their codec, nothing else.
+                    next_codec_pass = time.monotonic() + _CODEC_IDLE_SECONDS
                 if result["probed"]:
                     log.info(
                         "Identified the encode of %d episode(s); %d still unidentified",
