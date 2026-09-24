@@ -114,22 +114,22 @@ def test_completed_hash_refresh_is_non_blocking_and_updates_cache(
 def test_queue_scheduler_reconciles_without_browser_poll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[bool] = []
+    reconciled: list[bool] = []
 
-    async def to_thread(function):
-        calls.append(True)
-        return function()
+    async def to_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
 
     async def stop_after_first(_seconds: float) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(webjobs, "reconcile", lambda: 0)
+    monkeypatch.setattr(webjobs, "reconcile", lambda: reconciled.append(True) or 0)
+    monkeypatch.setattr(webjobs, "_archive_jobs", lambda: 0)
     monkeypatch.setattr(webjobs.asyncio, "to_thread", to_thread)
     monkeypatch.setattr(webjobs.asyncio, "sleep", stop_after_first)
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(webjobs.scheduler())
-    assert calls == [True]
+    assert reconciled == [True]
 
 
 def test_snapshot_hides_detached_operations(monkeypatch: pytest.MonkeyPatch) -> None:

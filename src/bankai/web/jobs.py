@@ -442,6 +442,23 @@ _CODEC_SWEEP_BATCH = 40
 # How often the held library tree is checked against the disk: the delay
 # before a newly published episode shows in the libraries.
 _LIBRARY_WALK_SECONDS = 60.0
+# Superseded and month-old finished jobs are moved out of the jobs directory,
+# which every snapshot visits; see bgjobs.archive_finished_jobs.
+_JOB_ARCHIVE_SECONDS = 3600.0
+
+
+def _archive_jobs() -> int:
+    from bankai.web import erai
+
+    # A release points at its job, and one in "transferring" with no job to
+    # find would be counted as still running forever.
+    state = erai._load_state()
+    keep = {
+        str(release["job_id"])
+        for release in (state.get("releases") or {}).values()
+        if isinstance(release, dict) and release.get("job_id")
+    }
+    return bgjobs.archive_finished_jobs(keep_ids=keep)
 
 
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
@@ -451,7 +468,18 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_codec_pass = 0.0
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
+    next_archive_pass = 0.0
     while True:
+        if time.monotonic() >= next_archive_pass:
+            next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
+            try:
+                moved = await asyncio.to_thread(_archive_jobs)
+                if moved:
+                    log.info("Archived %d finished job(s) nobody needs any more", moved)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("job archive failed: %s", exc)
         try:
             await asyncio.to_thread(reconcile)
         except asyncio.CancelledError:

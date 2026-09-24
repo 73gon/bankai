@@ -15,6 +15,7 @@ this module is a *display* layer for the user-friendly queue UI.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import re
@@ -30,8 +31,31 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+_ROOT_CACHE: tuple[tuple, Path] | None = None
+
 
 def jobs_root() -> Path:
+    """The jobs directory, resolved once per environment.
+
+    Every ``job.dir`` and ``job.log_path`` goes through here, so with
+    thousands of jobs the ``mkdir`` it used to run on every call was
+    thousands of filesystem round trips per queue snapshot.
+    """
+    global _ROOT_CACHE
+    key = (
+        os.environ.get("XDG_STATE_HOME"),
+        os.environ.get("LOCALAPPDATA"),
+        os.environ.get("APPDATA"),
+        os.environ.get("HOME"),
+    )
+    if _ROOT_CACHE is not None and _ROOT_CACHE[0] == key:
+        return _ROOT_CACHE[1]
+    root = _resolve_jobs_root()
+    _ROOT_CACHE = (key, root)
+    return root
+
+
+def _resolve_jobs_root() -> Path:
     base = os.environ.get("XDG_STATE_HOME")
     candidates: list[Path] = []
     if base:
@@ -573,25 +597,154 @@ def _log_looks_failed(path: Path) -> bool:
     return False
 
 
+# job dir -> (identity of its meta.json and log, the job as last read)
+_JOB_CACHE: dict[str, tuple[tuple, BgJob]] = {}
+
+
+def _file_key(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _read_job(directory: Path) -> BgJob | None:
+    """One job, re-read only when its files changed.
+
+    Parsing every meta.json on every call -- and, for each failed job,
+    scanning its whole log for a late success line -- was thousands of reads
+    per queue snapshot, and the sidebar, the queue and the scheduler all take
+    snapshots. A finished job whose meta.json and log are as they were is the
+    same job. A running one is refreshed every time: that is its liveness check.
+    """
+    meta = directory / "meta.json"
+    meta_key = _file_key(meta)
+    if meta_key is None:
+        _JOB_CACHE.pop(str(directory), None)
+        return None
+    key = (meta_key, _file_key(directory / "log"))
+    hit = _JOB_CACHE.get(str(directory))
+    if hit is not None and hit[0] == key and hit[1].status != "running":
+        # A copy: callers change fields before saving, and must not change
+        # what the next caller is handed.
+        return copy.copy(hit[1])
+    try:
+        job = BgJob(**json.loads(meta.read_text())).refresh()
+    except Exception:
+        return None
+    # refresh() may have saved; key on what is on disk now.
+    _JOB_CACHE[str(directory)] = ((_file_key(meta), _file_key(directory / "log")), job)
+    return copy.copy(job)
+
+
 def list_jobs() -> list[BgJob]:
     jobs: list[BgJob] = []
-    for meta in sorted(jobs_root().glob("*/meta.json"), reverse=True):
-        if meta.parent.name.startswith(".deleted-"):
-            shutil.rmtree(meta.parent, ignore_errors=True)
+    root = jobs_root()
+    seen: set[str] = set()
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.is_dir(follow_symlinks=False):
             continue
-        try:
-            data = json.loads(meta.read_text())
-            jobs.append(BgJob(**data).refresh())
-        except Exception:
+        if entry.name.startswith(".deleted-"):
+            shutil.rmtree(entry.path, ignore_errors=True)
             continue
+        seen.add(entry.path)
+        job = _read_job(Path(entry.path))
+        if job is not None:
+            jobs.append(job)
+    for gone in set(_JOB_CACHE) - seen:
+        _JOB_CACHE.pop(gone, None)
     return sorted(jobs, key=lambda j: j.started_at, reverse=True)
 
 
 def get_job(job_id: str) -> BgJob | None:
-    for j in list_jobs():
-        if j.id == job_id or j.id.startswith(job_id):
-            return j
+    """One job by id, or by a unique-enough prefix of one, without reading the rest."""
+    if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
+        return None
+    root = jobs_root()
+    exact = _read_job(root / job_id)
+    if exact is not None:
+        return exact
+    try:
+        names = sorted((entry.name for entry in os.scandir(root) if entry.is_dir()), reverse=True)
+    except OSError:
+        return None
+    for name in names:
+        if name.startswith(job_id) and not name.startswith(".deleted-"):
+            job = _read_job(root / name)
+            if job is not None:
+                return job
     return None
+
+
+def archive_finished_jobs(
+    *,
+    keep_ids: set[str] | frozenset[str] = frozenset(),
+    older_than_days: float = 30.0,
+    dry_run: bool = False,
+) -> int:
+    """Move finished jobs nobody needs out of the jobs directory.
+
+    Every queue snapshot visits every job, and a week of retries left
+    thousands of them. Two kinds go, into ``jobs_archive`` beside it -- moved,
+    not deleted, logs intact:
+
+    * an anime download superseded by a newer job for the same release: the
+      newest attempt is the one the queue shows and the one a retry replaces;
+    * any job finished longer than ``older_than_days`` ago -- except a
+      completed movie or show, which is what marks a title as already added
+      in Search and Discover.
+
+    Nothing running or stopped is touched, nor anything in ``keep_ids``: the
+    jobs releases still point at. ``dry_run`` counts without moving anything.
+    """
+    now = time.time()
+    finished = {"done", "failed", "cancelled"}
+    jobs = list_jobs()
+    newest_for_release: dict[str, BgJob] = {}
+    for job in jobs:
+        if job.args and job.args[0] == "anime-download":
+            info_hash = argument_value(job.args, "--info-hash")
+            if not info_hash:
+                continue
+            current = newest_for_release.get(info_hash)
+            if current is None or job.started_at > current.started_at:
+                newest_for_release[info_hash] = job
+
+    def superseded(job: BgJob) -> bool:
+        if not job.args or job.args[0] != "anime-download":
+            return False
+        newest = newest_for_release.get(argument_value(job.args, "--info-hash") or "")
+        return newest is not None and newest.id != job.id
+
+    def old(job: BgJob) -> bool:
+        ended = job.finished_at or job.updated_at or job.started_at
+        if now - ended < older_than_days * 86400:
+            return False
+        return not (job.status == "done" and job.kind in {"movie", "show"})
+
+    archive = jobs_root().parent / "jobs_archive"
+    moved = 0
+    for job in jobs:
+        if job.status not in finished or job.id in keep_ids:
+            continue
+        if not (superseded(job) or old(job)):
+            continue
+        if dry_run:
+            moved += 1
+            continue
+        try:
+            archive.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(job.dir), str(archive / job.id))
+        except OSError:
+            continue
+        _JOB_CACHE.pop(str(job.dir), None)
+        moved += 1
+    return moved
 
 
 def argument_value(args: list[str], option: str) -> str | None:
