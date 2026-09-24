@@ -1736,19 +1736,12 @@ def create_app() -> Any:
             root = Path(get_settings().transfer.anime_shows_dir)
             entries: list[dict] = []
             if root.exists():
-                for path in root.rglob("*"):
-                    if not path.is_file() or path.suffix.casefold() not in {
-                        ".mkv",
-                        ".mp4",
-                        ".m4v",
-                        ".avi",
-                        ".webm",
-                    }:
-                        continue
+                from bankai.web.anime_library import walk_videos
+
+                for path, stat in walk_videos(root):
                     try:
-                        stat = path.stat()
                         relative = str(path.relative_to(root))
-                    except OSError:
+                    except ValueError:
                         continue
                     parts = Path(relative).parts
                     entries.append(

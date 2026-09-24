@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 import threading
 import time
 import unicodedata
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import date
@@ -24,6 +26,33 @@ from bankai.torrent.matcher import parse_se
 from bankai.web import anime, discover, erai
 
 _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".webm"}
+
+
+def walk_videos(root: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Every video file under ``root`` with its stat, touching as little as possible.
+
+    The libraries sit on Windows drives reached over 9p, where every stat is a
+    round trip. ``rglob`` plus ``is_file`` plus ``stat`` paid two of them for
+    every entry, subtitles and artwork included: 31 s for the anime library.
+    ``scandir`` already knows which entries are directories, so only video
+    files are stat'ed, once: 5.5 s for the same 3,645 files.
+    """
+    try:
+        entries = os.scandir(root)
+    except OSError:
+        return
+    with entries:
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    yield from walk_videos(Path(entry.path))
+                    continue
+                if os.path.splitext(entry.name)[1].casefold() not in _VIDEO_SUFFIXES:
+                    continue
+                stat = entry.stat()
+            except OSError:
+                continue
+            yield Path(entry.path), stat
 _CACHE: dict[str, tuple[float, dict]] = {}
 _PERSISTENT_CACHE: dict | None = None
 _PERSISTENT_DIRTY = False
@@ -300,15 +329,6 @@ def _save_codec_cache(cache: dict[str, dict]) -> None:
     tmp.replace(path)
 
 
-def _file_identity(path: Path) -> tuple[int, int] | None:
-    """Size and mtime, so a replaced episode is probed again."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return (int(stat.st_size), int(stat.st_mtime))
-
-
 def probe_streams(path: Path) -> dict | None:
     """Video encode and audio languages of one file, in a single probe.
 
@@ -385,12 +405,8 @@ def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
     cache = dict(_load_codec_cache())
     probed = 0
     remaining = 0
-    for path in root.rglob("*"):
-        if path.suffix.casefold() not in _VIDEO_SUFFIXES or not path.is_file():
-            continue
-        identity = _file_identity(path)
-        if identity is None:
-            continue
+    for path, stat in walk_videos(root):
+        identity = (int(stat.st_size), int(stat.st_mtime))
         key = str(path)
         cached = cache.get(key)
         if cached and cached.get("size") == identity[0] and cached.get("mtime") == identity[1]:

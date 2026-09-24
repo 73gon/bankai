@@ -28,9 +28,8 @@ from bankai.web.anime_library import (
     flush_persistent_cache,
     merge_episodes,
     show_metadata,
+    walk_videos,
 )
-
-_VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".webm"}
 
 # Shows and films are resolved concurrently but not without limit: each miss
 # is a provider call, and a first scan of a large library is all misses.
@@ -65,13 +64,10 @@ def _walk(roots: list[str | Path], *, use_cache: bool = True) -> list[dict]:
         root = Path(raw)
         if not root.is_dir():
             continue
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.casefold() not in _VIDEO_SUFFIXES:
-                continue
+        for path, stat in walk_videos(root):
             try:
-                stat = path.stat()
                 relative = path.relative_to(root)
-            except (OSError, ValueError):
+            except ValueError:
                 continue
             parts = relative.parts
             entries.append(
