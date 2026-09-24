@@ -63,6 +63,10 @@ function useSidebarCounts(): Record<string, number | null | undefined> {
   const [counts, setCounts] = useState<Record<string, number | null>>({});
   useEffect(() => {
     let alive = true;
+    let timer = 0;
+    // The next ask waits for the last answer. A fixed interval kept firing
+    // while a slow server was still working, stacking dozens of requests
+    // that each made it slower.
     async function tick() {
       try {
         const result = await api.sidebarCounts();
@@ -70,12 +74,12 @@ function useSidebarCounts(): Record<string, number | null | undefined> {
       } catch {
         /* the row simply shows no numbers */
       }
+      if (alive) timer = window.setTimeout(() => void tick(), 15_000);
     }
     void tick();
-    const timer = window.setInterval(() => void tick(), 15_000);
     return () => {
       alive = false;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, []);
   return counts;
@@ -195,9 +199,18 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
   }
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 30_000);
-    return () => window.clearInterval(timer);
+    let alive = true;
+    let timer = 0;
+    // Chained like the sidebar counts, so a slow answer never piles up.
+    async function tick() {
+      await refresh();
+      if (alive) timer = window.setTimeout(() => void tick(), 30_000);
+    }
+    void tick();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   async function connect() {

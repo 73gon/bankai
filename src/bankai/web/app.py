@@ -2010,6 +2010,9 @@ def create_app() -> Any:
     # ------------------------------------------------------------------
     # Queue / jobs
     # ------------------------------------------------------------------
+    _counts_lock = asyncio.Lock()
+    _counts_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
     @app.get("/api/sidebar/counts")
     async def sidebar_counts() -> dict:
         """Every sidebar badge in one call.
@@ -2019,7 +2022,20 @@ def create_app() -> Any:
         is the one thing that has to stay cheap. The three anime counts share
         a single read. Each count is guarded on its own, so a provider being
         unreachable dims one badge rather than emptying the row.
+
+        Every open tab polls this, so one computation serves them all: callers
+        that arrive while it runs wait for its answer instead of starting their
+        own, and an answer under ten seconds old is handed back as is.
         """
+        async with _counts_lock:
+            cached = _counts_cache["value"]
+            if cached is not None and time.monotonic() - _counts_cache["at"] < 10.0:
+                return cached
+            value = await _compute_sidebar_counts()
+            _counts_cache.update(at=time.monotonic(), value=value)
+            return value
+
+    async def _compute_sidebar_counts() -> dict:
         counts: dict[str, int | None] = {}
 
         def unfinished(rows: list[dict]) -> int:

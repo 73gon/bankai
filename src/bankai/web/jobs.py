@@ -726,11 +726,21 @@ def _display_row(job) -> dict:
     if revision is not None:
         with _ROW_CACHE_LOCK:
             _ROW_CACHE[job_id] = (revision, dict(row))
-            if len(_ROW_CACHE) > 1000:
-                live_ids = {path.parent.name for path in bgjobs.jobs_root().glob("*/meta.json")}
-                for stale_id in set(_ROW_CACHE) - live_ids:
-                    _ROW_CACHE.pop(stale_id, None)
     return row
+
+
+def _prune_row_cache(live_ids: set[str]) -> None:
+    """Drop cached rows for jobs that no longer exist, once per snapshot.
+
+    This used to run inside :func:`_display_row` whenever the cache held more
+    than a thousand rows, globbing every job directory on every miss. With
+    3,900 jobs and a cold cache after a restart that is ~15 million directory
+    reads per snapshot, and the sidebar asked for two of them every 15 s: the
+    whole web UI stopped answering. The snapshot already holds the live ids.
+    """
+    with _ROW_CACHE_LOCK:
+        for stale_id in set(_ROW_CACHE) - live_ids:
+            _ROW_CACHE.pop(stale_id, None)
 
 
 def snapshot(*, anime_only: bool = False) -> list[dict]:
@@ -744,6 +754,8 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
     if context_jobs is None:
         reconcile()
     jobs = context_jobs if context_jobs is not None else bgjobs.list_jobs()
+    if context_jobs is None:
+        _prune_row_cache({str(getattr(job, "id", "")) for job in jobs})
     out: list[dict] = []
     for j in jobs:
         if (
