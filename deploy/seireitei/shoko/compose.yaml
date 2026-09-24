@@ -1,0 +1,32 @@
+# Shoko Server: identifies every anime episode by file hash against AniDB,
+# instead of guessing from folder and file names the way TVDB and AniList
+# matching does. Jellyfin (native on Windows) reads it through the Shokofin
+# plugin at http://127.0.0.1:8111, reached through WSL's localhost forwarding.
+#
+#     cd /home/malik/projects/bankai/deploy/seireitei/shoko
+#     sudo docker compose up -d
+#     sudo docker compose logs -f shoko
+#
+# Web UI: http://seireitei:7005 (tailscale serve -> 127.0.0.1:8111)
+
+services:
+  shoko:
+    image: ghcr.io/shokoanime/server:latest
+    container_name: shoko
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Berlin
+    ports:
+      # Loopback only. Jellyfin reaches it from Windows through WSL's
+      # localhost forwarding, the web UI through tailscale serve.
+      - 127.0.0.1:8111:8111
+    volumes:
+      # Its database, on the WSL disk: SQLite over the 9p mount would be
+      # slow, and a lock there can corrupt it.
+      - /home/malik/.config/shoko:/home/shoko/.shoko
+      # Read-only: Shoko identifies and reports; bankai and Jellyfin own the
+      # files. Its renamer can never move anything with the mount like this.
+      # Same path inside as out, so what Shoko reports matches bankai's view.
+      - /mnt/g/media/shows_anime:/mnt/g/media/shows_anime:ro
+    restart: unless-stopped
