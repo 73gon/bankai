@@ -20,6 +20,17 @@ from bankai.logging import get_logger
 log = get_logger(__name__)
 
 
+def login_succeeded(response: httpx.Response) -> bool:
+    """qBittorrent up to 5.0 answers ``200 Ok.``; 5.1 onwards ``204`` and no body.
+
+    A wrong password is ``200 Fails.`` on the old versions and ``401`` on the
+    new, so neither shape can be mistaken for the other.
+    """
+    if response.status_code == 204:
+        return True
+    return response.status_code == 200 and response.text.strip() == "Ok."
+
+
 @dataclass(frozen=True, slots=True)
 class TorrentStatus:
     hash: str
@@ -75,7 +86,7 @@ class QBittorrentClient:
             data={"username": self._settings.username, "password": self._settings.password},
             headers={"Referer": self._settings.url},
         )
-        if resp.status_code != 200 or resp.text.strip() != "Ok.":
+        if not login_succeeded(resp):
             raise QBittorrentError(f"login failed: {resp.status_code} {resp.text!r}")
         self._logged_in = True
 

@@ -23,6 +23,7 @@ from pathlib import Path
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
+from bankai.torrent.qbittorrent import login_succeeded
 from bankai.web import reasons, updates
 
 log = get_logger(__name__)
@@ -118,7 +119,7 @@ def _fetch_completed_anime_hashes() -> frozenset[str]:
             data={"username": signature[1], "password": signature[2]},
             headers={"Referer": settings.url},
         )
-        if login.status_code != 200 or login.text.strip() != "Ok.":
+        if not login_succeeded(login):
             raise RuntimeError(f"qBittorrent login failed ({login.status_code})")
 
     response = _QBIT_STATUS_CLIENT.get(
@@ -131,7 +132,7 @@ def _fetch_completed_anime_hashes() -> frozenset[str]:
             data={"username": signature[1], "password": signature[2]},
             headers={"Referer": settings.url},
         )
-        if login.status_code != 200 or login.text.strip() != "Ok.":
+        if not login_succeeded(login):
             raise RuntimeError(f"qBittorrent login failed ({login.status_code})")
         response = _QBIT_STATUS_CLIENT.get(
             "/api/v2/torrents/info",
