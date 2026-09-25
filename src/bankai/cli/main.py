@@ -47,6 +47,7 @@ from bankai.backend import (
     transfer_with_rsync,
 )
 from bankai.config import (
+    active_config_path,
     get_settings,
     load_settings,
     reset_settings_cache,
@@ -1396,7 +1397,7 @@ def _interactive_pick_movie(query: str) -> str | None:
 @config_app.command("path")
 def config_path() -> None:
     """Print the active config file path."""
-    console.print(str(user_config_path()))
+    console.print(str(active_config_path()))
 
 
 @config_app.command("list")
@@ -1442,7 +1443,7 @@ def _set_config_value(
     config_file: Path | None = None,
 ) -> tuple[Path, Any]:
     """Set a key in the active TOML config and return the written value."""
-    path = config_file or user_config_path()
+    path = config_file or active_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = _read_toml(path) if path.exists() else {}
     parts = key.split(".")
@@ -1498,7 +1499,7 @@ def shoko_status() -> None:
 @config_app.command("edit")
 def config_edit() -> None:
     """Open the config in $EDITOR."""
-    path = user_config_path()
+    path = active_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text("# bankai config\n", encoding="utf-8")

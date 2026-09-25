@@ -313,6 +313,18 @@ def _config_path() -> Path | None:
     return candidate if candidate.exists() else None
 
 
+def active_config_path() -> Path:
+    """The config file in effect, which is the one every change must go to.
+
+    Writes used to go to the user config path unconditionally. Where the
+    settings actually came from ``config.toml`` in the working directory --
+    the seireitei deployment -- the first save created a user config holding
+    only that one key, and since the user config wins when it exists, the next
+    start would have lost every other setting.
+    """
+    return _config_path() or user_config_path()
+
+
 def user_config_path() -> Path:
     """Default user config location: ``$XDG_CONFIG_HOME/bankai/config.toml``."""
     explicit = os.environ.get("BANKAI_CONFIG")
