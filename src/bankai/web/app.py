@@ -1618,6 +1618,46 @@ def create_app() -> Any:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/api/anime/blacklist/link")
+    async def anime_blacklist_link(req: dict) -> dict:
+        """Tie a blacklist card to its AniDB anime, so its releases are matched by title."""
+        from bankai.web import shoko
+
+        key = str(req.get("key") or "")
+        anidb_id = req.get("anidb_id")
+        if not key or not str(anidb_id or "").isdigit():
+            raise HTTPException(status_code=422, detail="key and anidb_id are required")
+        try:
+            anime = await shoko.anidb_anime(int(anidb_id))
+            return await asyncio.to_thread(erai_mod.link_blacklist, key, anime)
+        except shoko.ShokoError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/anime/anidb/search")
+    async def anime_anidb_search(q: str = Query(..., min_length=1, max_length=200)) -> dict:
+        """AniDB anime by title, through Shoko's local copy of AniDB's title list."""
+        from bankai.web import shoko
+
+        try:
+            return {"items": await shoko.search_anidb(q)}
+        except shoko.ShokoError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/api/anime/anidb/image/{source}/{kind}/{image_id}")
+    async def anime_anidb_image(source: str, kind: str, image_id: str) -> Response:
+        """A Shoko image, fetched with bankai's key so the browser needs none."""
+        from bankai.web import shoko
+
+        if not all(part.isalnum() for part in (source, kind, image_id)):
+            raise HTTPException(status_code=422, detail="invalid image reference")
+        try:
+            content, media_type = await shoko.image(source, kind, image_id)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="image unavailable") from exc
+        return Response(content, media_type=media_type, headers={"Cache-Control": "max-age=86400"})
+
     @app.post("/api/anime/mapping")
     async def anime_mapping_select(req: dict) -> dict:
         title = str(req.get("release_title", "")).strip()
@@ -1717,6 +1757,45 @@ def create_app() -> Any:
             "page": page,
             "page_size": page_size,
         }
+
+    @app.post("/api/anime/library/remove")
+    async def anime_library_remove(req: dict) -> dict:
+        """Delete a show from the library, remove its torrents, and blacklist it.
+
+        The show is looked up here from its card key, never taken as paths from
+        the request: what gets deleted is decided by the library itself.
+        """
+        from bankai.web import library_walk, shoko
+
+        key = str(req.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail="key is required")
+        listing = await anime_library(show=key, include_entries=False, rescan=True)
+        show = next(iter(listing.get("shows") or []), None)
+        if show is None:
+            raise HTTPException(status_code=404, detail="show not found in the library")
+        root = Path(listing["root"])
+        folders = [root / name for name in show.get("folders") or [] if name]
+        source_title = str(show.get("source_title") or show.get("title") or "")
+        anime = None
+        if shoko.configured():
+            with suppress(Exception):
+                anime = shoko.best_match(
+                    await shoko.search_anidb(source_title or show["title"]),
+                    source_title,
+                    str(show.get("title") or ""),
+                )
+        result = await erai_mod.blacklist_show(
+            title=str(show.get("title") or key),
+            source_title=source_title,
+            tvdb_id=show.get("tvdb_id"),
+            folders=folders,
+            anime=anime,
+        )
+        library_walk.mark_stale()
+        if shoko.configured():
+            await shoko.forget_missing_files()
+        return {**result, "anidb_id": (anime or {}).get("anidb_id")}
 
     @app.post("/api/anime/library/upgrade-hevc")
     async def anime_library_upgrade_hevc(req: dict) -> dict:

@@ -200,7 +200,22 @@ export interface AnimeReviewItem {
   seasons?: number[];
   /** The per-season decision keys merged into the card. */
   keys?: string[];
+  /** Blacklist: the AniDB anime the card is linked to, if any. */
+  anidb_id?: number | null;
+  anidb_title?: string | null;
+  linked?: boolean;
   updated_at: number;
+}
+
+export interface AniDBAnime {
+  anidb_id: number;
+  title: string;
+  english_title: string | null;
+  matching_titles: string[];
+  type: string | null;
+  episode_count: number | null;
+  year: number | null;
+  poster_url: string | null;
 }
 export interface AnimeAutomationStatus {
   retry_pending: number;
@@ -773,6 +788,19 @@ export const api = {
     }),
   removeAnimeBlacklist: (key: string) =>
     request<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', {
+      method: 'POST', body: JSON.stringify({ key }),
+    }),
+  /** Tie a blacklist card to its AniDB anime, so releases match by any AniDB title. */
+  linkAnimeBlacklist: (key: string, anidbId: number) =>
+    request<{ ok: boolean; keys: string[]; caught: number }>('/api/anime/blacklist/link', {
+      method: 'POST', body: JSON.stringify({ key, anidb_id: anidbId }),
+    }),
+  /** AniDB anime by title, through Shoko. */
+  anidbSearch: (q: string) =>
+    request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
+  /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
+  removeAnimeLibraryShow: (key: string) =>
+    request<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', {
       method: 'POST', body: JSON.stringify({ key }),
     }),
   upgradeShowToHevc: (tvdbId: number, title: string) =>

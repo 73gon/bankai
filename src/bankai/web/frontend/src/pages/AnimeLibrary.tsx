@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3 } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState, Spinner } from '@/components/ui/empty';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
@@ -137,6 +137,8 @@ export default function AnimeLibrary() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatch, setSearchMatch] = useState<AnimeTVDBMatch | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<AnimeLibraryShow | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     try {
@@ -208,6 +210,28 @@ export default function AnimeLibrary() {
       toast.error(error.message);
     } finally {
       setUpgrading(null);
+    }
+  }
+
+  async function removeShow() {
+    if (!removeTarget) return;
+    setRemoving(true);
+    try {
+      const result = await api.removeAnimeLibraryShow(removeTarget.key);
+      toast.success(
+        removeTarget.title + ' removed and blacklisted — deleted ' + result.deleted_files + ' file'
+        + (result.deleted_files === 1 ? '' : 's')
+        + (result.freed_bytes ? ' (' + formatSize(result.freed_bytes) + ')' : '')
+        + (result.removed_torrents ? ', ' + result.removed_torrents + ' torrent' + (result.removed_torrents === 1 ? '' : 's') : ''),
+      );
+      setRemoveTarget(null);
+      setSelected(null);
+      setSelectedShow(null);
+      await load(true);
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -421,6 +445,9 @@ export default function AnimeLibrary() {
                           {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.avc_count} to HEVC`}
                         </Button>
                       )}
+                      <Button size='sm' variant='destructive' onClick={() => setRemoveTarget(active)} title='Delete this show from disk and never download it again'>
+                        <Trash2 data-icon='inline-start' /> Remove and blacklist
+                      </Button>
                     </div>
                   </div>
                 </div>
@@ -459,6 +486,26 @@ export default function AnimeLibrary() {
           )}
         </DrawerContent>
       </Drawer>
+      {/* Deleting a whole show is not undoable, so it is never one click. */}
+      <Dialog open={Boolean(removeTarget)} onOpenChange={(open) => { if (!open && !removing) setRemoveTarget(null); }}>
+        <DialogContent className='max-w-md'>
+          <DialogHeader>
+            <DialogTitle>Remove {removeTarget?.title}?</DialogTitle>
+            <DialogDescription>
+              This deletes {removeTarget?.downloaded_count ?? 0} episode{removeTarget?.downloaded_count === 1 ? '' : 's'}
+              {removeTarget ? ' (' + formatSize(removeTarget.size) + ')' : ''} from disk, removes its torrents,
+              and blacklists the show so no season of it is downloaded again. It moves to the Blacklist tab,
+              where you can restore it. The deleted files cannot be recovered.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setRemoveTarget(null)} disabled={removing}>Cancel</Button>
+            <Button variant='destructive' onClick={() => void removeShow()} disabled={removing}>
+              <Trash2 data-icon='inline-start' /> {removing ? 'Removing…' : 'Delete and blacklist'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(searchTarget)} onOpenChange={(open) => { if (!open) setSearchTarget(null); }}>
         <DialogContent className='flex h-[90dvh] w-[92vw] max-w-none flex-col overflow-hidden'>
           <DialogHeader>

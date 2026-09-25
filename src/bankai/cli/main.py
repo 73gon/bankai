@@ -75,6 +75,10 @@ metadata_app = typer.Typer(
     name="metadata", help="Inspect metadata providers.", no_args_is_help=True
 )
 web_app = typer.Typer(name="web", help="Run and manage the web UI.", no_args_is_help=True)
+shoko_app = typer.Typer(
+    name="shoko", help="Connect bankai to Shoko Server for AniDB data.", no_args_is_help=True
+)
+app.add_typer(shoko_app, name="shoko")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
 app.add_typer(background_app, name="background")
@@ -1451,6 +1455,44 @@ def _set_config_value(
     _write_toml(path, data)
     reset_settings_cache()
     return path, cur[parts[-1]]
+
+
+@shoko_app.command("login")
+def shoko_login(
+    username: str = typer.Option("Default", "--user", help="Shoko Server username."),
+    url: str = typer.Option("", "--url", help="Shoko Server URL; defaults to shoko.url."),
+) -> None:
+    """Get an API key for bankai from Shoko. Only the key is saved, never the password."""
+    from bankai.web import shoko
+
+    if url:
+        _set_config_value("shoko.url", url)
+    password = typer.prompt(f"Shoko password for {username}", hide_input=True, default="",
+                            show_default=False)
+    try:
+        key = asyncio.run(shoko.login(username, password))
+    except Exception as exc:
+        console.print(f"[red]Shoko login failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    path, _ = _set_config_value("shoko.api_key", key)
+    console.print(f"[green]Connected to Shoko.[/green] API key saved to {path}")
+
+
+@shoko_app.command("status")
+def shoko_status() -> None:
+    """Check that bankai can reach Shoko and search AniDB through it."""
+    from bankai.web import shoko
+
+    if not shoko.configured():
+        console.print("[yellow]Not connected.[/yellow] Run: bankai shoko login")
+        raise typer.Exit(code=1)
+    try:
+        found = asyncio.run(shoko.search_anidb("Frieren", limit=1))
+    except Exception as exc:
+        console.print(f"[red]Shoko unreachable or key rejected:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    sample = found[0]["title"] if found else "no result"
+    console.print(f"[green]Connected.[/green] AniDB search works (Frieren -> {sample})")
 
 
 @config_app.command("edit")

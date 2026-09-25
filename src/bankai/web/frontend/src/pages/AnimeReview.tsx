@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Ban, Check, ExternalLink, Layers, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { Ban, Check, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
+import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -18,7 +20,20 @@ function formatBytes(value: number) {
   return `${(value / 1024 ** index).toFixed(index > 1 ? 2 : 0)} ${units[index]}`;
 }
 
+type View = 'grid' | 'table';
+const BLACKLIST_VIEW_KEY = 'bankai.anime.blacklist.view';
+
+function storedView(): View {
+  try {
+    return localStorage.getItem(BLACKLIST_VIEW_KEY) === 'table' ? 'table' : 'grid';
+  } catch {
+    return 'grid';
+  }
+}
+
 export default function AnimeReview({ blacklist = false }: { blacklist?: boolean }) {
+  const [view, setView] = useState<View>(storedView);
+  const [linkTarget, setLinkTarget] = useState<AnimeReviewItem | null>(null);
   const [items, setItems] = useState<AnimeReviewItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -68,6 +83,26 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   }
 
   useEffect(() => { void load(); }, [blacklist]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(BLACKLIST_VIEW_KEY, view);
+    } catch {
+      /* a remembered view is a convenience */
+    }
+  }, [view]);
+
+  async function link(anime: { anidb_id: number; title: string }) {
+    if (!linkTarget) return;
+    try {
+      const result = await api.linkAnimeBlacklist(linkTarget.key, anime.anidb_id);
+      toast.success('Linked to ' + anime.title + (result.caught ? ' · ' + result.caught + ' more releases blacklisted' : ''));
+      setLinkTarget(null);
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    }
+  }
 
   async function decide(item: AnimeReviewItem, action: 'recheck' | 'allow_german' | 'blacklist') {
     if (!item.info_hash) return;
@@ -145,6 +180,13 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         {!blacklist && <Button variant='secondary' onClick={() => void retryAll()} disabled={Boolean(busy) || items.length === 0}>
           <RefreshCw data-icon='inline-start' /> Recheck everything
         </Button>}
+        {blacklist && (
+          <ToggleGroup label='Blacklist view'>
+            {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
+              <ToggleGroupItem key={value} icon={Icon} label={label} selected={view === value} onClick={() => setView(value)} />
+            ))}
+          </ToggleGroup>
+        )}
       </div>
 
       {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : items.length === 0 ? (
@@ -153,6 +195,50 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           title={blacklist ? 'No blacklisted Anime' : 'Nothing needs review'}
           description={blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}
         />
+      ) : blacklist && view === 'table' ? (
+        <div className='panel overflow-auto'>
+          <table className='w-full min-w-[720px] border-collapse text-sm'>
+            <thead className='sticky top-0 z-10 bg-card'>
+              <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
+                <th className='px-3 py-2.5 font-medium'>Show</th>
+                <th className='px-3 py-2.5 font-medium'>Erai name</th>
+                <th className='px-3 py-2.5 font-medium'>AniDB</th>
+                <th className='px-3 py-2.5 text-right font-medium'>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.key} className='border-b border-border/70 last:border-0'>
+                  <td className='px-3 py-2'>
+                    <div className='flex items-center gap-2.5'>
+                      <AnimePoster url={item.poster_url} title={item.title} className='w-8 shrink-0 rounded' />
+                      <div className='min-w-0'>
+                        <p className='truncate font-medium' title={item.title}>{item.title}</p>
+                        {item.year ? <p className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{item.year}</p> : null}
+                      </div>
+                    </div>
+                  </td>
+                  <td className='px-3 py-2 font-mono text-xs text-muted-foreground'>{item.source_title}</td>
+                  <td className='px-3 py-2'>
+                    {item.linked
+                      ? <a className='text-xs underline underline-offset-4' href={'https://anidb.net/anime/' + item.anidb_id} target='_blank' rel='noreferrer'>{item.anidb_title || 'aid ' + item.anidb_id}</a>
+                      : <Badge variant='warning'>Not linked</Badge>}
+                  </td>
+                  <td className='px-3 py-2'>
+                    <div className='flex justify-end gap-1.5'>
+                      <Button size='sm' variant='secondary' onClick={() => setLinkTarget(item)} disabled={Boolean(busy)}>
+                        <Link2 data-icon='inline-start' /> {item.linked ? 'Relink' : 'Link'}
+                      </Button>
+                      <Button size='sm' variant='secondary' onClick={() => void restore(item)} disabled={busy === item.key}>
+                        <RotateCcw data-icon='inline-start' /> Restore
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <div
           className={cn(
@@ -182,6 +268,20 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       {item.title}{item.year ? ' (' + item.year + ')' : ''}
                     </p>
                   </div>
+                  {blacklist && (
+                    <div className='absolute left-1.5 top-1.5'>
+                      <Button
+                        size='icon'
+                        variant={item.linked ? 'secondary' : 'default'}
+                        title={item.linked ? 'Linked to AniDB: ' + (item.anidb_title || item.anidb_id) + '. Relink' : 'Not recognised: link to AniDB'}
+                        aria-label={(item.linked ? 'Relink ' : 'Link ') + item.title + ' to AniDB'}
+                        onClick={() => setLinkTarget(item)}
+                        disabled={Boolean(busy)}
+                      >
+                        <Link2 />
+                      </Button>
+                    </div>
+                  )}
                   {blacklist && (
                     <div className='absolute right-1.5 top-1.5'>
                       <Button
@@ -277,6 +377,11 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </div>
       )}
       <AnimeMappingDialog title={mappingTitle} onClose={() => setMappingTitle(null)} onSaved={() => void load()} />
+      <AniDBLinkDialog
+        name={linkTarget ? linkTarget.source_title || linkTarget.title : null}
+        onClose={() => setLinkTarget(null)}
+        onPick={link}
+      />
 
       {/* Sixty-three releases would have made one card taller than the page,
           so they open beside it rather than inside it. */}

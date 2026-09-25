@@ -113,6 +113,46 @@ def _policy_tvdb_ids(policies: dict[str, Any] | None = None) -> set[str]:
     }
 
 
+_SHOW_KEYS_CACHE: tuple[tuple, frozenset[str]] | None = None
+
+
+def _policy_show_keys(policies: dict[str, Any] | None = None) -> frozenset[str]:
+    """Every name a blacklisted anime goes by, as show keys.
+
+    The name the user discarded it under, plus -- once it is linked to AniDB
+    -- every main and official title AniDB knows it by. Erai-raws names its
+    releases after AniDB's romaji titles, so this catches a release under any
+    of them with no TVDB mapping at all. Rebuilt only when the blacklist
+    changes: it is asked once per release, thousands of times a cycle.
+    """
+    global _SHOW_KEYS_CACHE
+    rows = policies if policies is not None else _load_policies()
+    signature = tuple(
+        (key, row.get("source_title"), tuple(row.get("anidb_titles") or ()))
+        for key, row in sorted(rows.items())
+        if row.get("mode") == "blacklisted"
+    )
+    if _SHOW_KEYS_CACHE is not None and _SHOW_KEYS_CACHE[0] == signature:
+        return _SHOW_KEYS_CACHE[1]
+    keys: set[str] = set()
+    for key, source_title, titles in signature:
+        keys.add(_show_name_key(str(source_title or key)))
+        keys.update(_show_name_key(str(title)) for title in titles)
+    keys.discard("")
+    frozen = frozenset(keys)
+    _SHOW_KEYS_CACHE = (signature, frozen)
+    return frozen
+
+
+def _title_blacklisted(release_title: str, policies: dict[str, Any] | None = None) -> bool:
+    """Is a release, by its name alone, of an anime the user blacklisted?"""
+    rows = policies if policies is not None else _load_policies()
+    policy = rows.get(_mapping_key(release_title))
+    if policy and policy.get("mode") == "blacklisted":
+        return True
+    return _show_key(release_title) in _policy_show_keys(rows)
+
+
 def _release_tvdb_id(release: dict[str, Any], mappings: dict[str, Any]) -> str | None:
     """Best known TVDB id for a release, without going back to the network.
 
@@ -144,9 +184,7 @@ def _is_blacklisted_release(
     in review. The TVDB id is the same for every season, part and title
     variant, so it is the identity that actually matches intent.
     """
-    key = _mapping_key(str(release.get("title") or ""))
-    policy = policies.get(key)
-    if policy and policy.get("mode") == "blacklisted":
+    if _title_blacklisted(str(release.get("title") or ""), policies):
         return True
     ids = _policy_tvdb_ids(policies) if blacklisted_ids is None else blacklisted_ids
     if not ids:
@@ -318,14 +356,14 @@ def _policy_show_key(key: str, policy: dict[str, Any]) -> str:
     return _show_name_key(str(policy.get("source_title") or key))
 
 
-def blacklist_items() -> list[dict[str, Any]]:
+def blacklist_items(policies: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """One card per blacklisted anime, however many seasons it was discarded for.
 
     Discarding a show writes a decision for each of its seasons, so listing the
     decisions themselves would put the same show here once per season.
     """
     groups: dict[str, dict[str, Any]] = {}
-    for key, value in _load_policies().items():
+    for key, value in (_load_policies() if policies is None else policies).items():
         if value.get("mode") != "blacklisted":
             continue
         show = _policy_show_key(key, value)
@@ -333,8 +371,134 @@ def blacklist_items() -> list[dict[str, Any]]:
         row["keys"].append(key)
         if len(str(value.get("source_title") or "")) < len(str(row.get("source_title") or "")):
             row["source_title"] = value.get("source_title")
-        row["tvdb_id"] = row.get("tvdb_id") or value.get("tvdb_id")
-    return sorted(groups.values(), key=lambda row: str(row.get("source_title", "")).casefold())
+        for field in ("tvdb_id", "anidb_id", "anidb_title", "anidb_poster_url", "english_title"):
+            row[field] = row.get(field) or value.get(field)
+    # Two names of one anime -- romaji and English, or two AniDB titles --
+    # are still one show when they share an AniDB or TVDB id.
+    merged: dict[str, dict[str, Any]] = {}
+    for row in groups.values():
+        identity = (
+            f"anidb:{row['anidb_id']}" if row.get("anidb_id")
+            else f"tvdb:{row['tvdb_id']}" if row.get("tvdb_id")
+            else f"name:{row['key']}"
+        )
+        slot = merged.get(identity)
+        if slot is None:
+            merged[identity] = row
+            continue
+        slot["keys"] = sorted({*slot["keys"], *row["keys"]})
+        if len(str(row.get("source_title") or "")) < len(str(slot.get("source_title") or "")):
+            slot["source_title"] = row.get("source_title")
+        for field in ("tvdb_id", "anidb_id", "anidb_title", "anidb_poster_url", "english_title"):
+            slot[field] = slot.get(field) or row.get(field)
+    for row in merged.values():
+        row["linked"] = bool(row.get("anidb_id"))
+    return sorted(merged.values(), key=lambda row: str(row.get("source_title", "")).casefold())
+
+
+def _blacklist_members(policies: dict[str, Any], key: str) -> set[str]:
+    """Every policy key behind one blacklist card, however it was merged."""
+    for row in blacklist_items(policies):
+        if row["key"] == key or key in row["keys"]:
+            return set(row["keys"])
+    return {key} if key in policies else set()
+
+
+def link_blacklist(key: str, anime: dict[str, Any]) -> dict[str, Any]:
+    """Tie a blacklist card to its AniDB anime.
+
+    From then on every release named after any of the anime's AniDB titles is
+    blacklisted, which is what makes a card that no TVDB search recognised
+    actually match something.
+    """
+    with _STATE_LOCK:
+        policies = _load_policies()
+        members = _blacklist_members(policies, key)
+        if not members:
+            raise ValueError("Blacklisted series was not found")
+        for member in members:
+            policies[member].update(
+                anidb_id=int(anime["anidb_id"]),
+                anidb_title=anime.get("title"),
+                english_title=anime.get("english_title") or policies[member].get("english_title"),
+                anidb_titles=list(anime.get("matching_titles") or []),
+                anidb_poster_url=anime.get("poster_url"),
+                updated_at=time.time(),
+            )
+        _save_policies(policies)
+        # Anything already held that the new titles now cover goes too.
+        state = _load_state()
+        mappings = _load_mappings()
+        ids = _policy_tvdb_ids(policies)
+        caught = 0
+        for row in state.get("releases", {}).values():
+            if row.get("status") in {"held", "queued"} and _is_blacklisted_release(
+                row, policies=policies, mappings=mappings, blacklisted_ids=ids
+            ):
+                row.update(status="blacklisted", reason="Series blacklisted by user")
+                caught += 1
+        if caught:
+            _prune_holds(state)
+            _save_state(state)
+    return {"ok": True, "keys": sorted(members), "caught": caught}
+
+
+async def blacklist_show(
+    *,
+    title: str,
+    source_title: str,
+    tvdb_id: int | str | None,
+    folders: list[Path],
+    anime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Delete a show from the library, remove its torrents, and never fetch it again.
+
+    For a show found in the library rather than in review: there is no held
+    release to decide on, only the folders it occupies and what it is known
+    as. The decision is keyed on its show name, carries its TVDB id and -- when
+    Shoko could identify it -- every AniDB title, so no release of any season
+    of it is admitted again.
+    """
+    name = source_title or title
+    key = _show_name_key(name)
+    if not key:
+        raise ValueError("The show has no name to blacklist it under")
+    with _STATE_LOCK:
+        policies = _load_policies()
+        policies[key] = {
+            "mode": "blacklisted",
+            "source_title": name,
+            "english_title": title,
+            "tvdb_id": str(tvdb_id) if tvdb_id else None,
+            "origin": "library",
+            "updated_at": time.time(),
+        }
+        if anime:
+            policies[key].update(
+                anidb_id=int(anime["anidb_id"]),
+                anidb_title=anime.get("title"),
+                anidb_titles=list(anime.get("matching_titles") or []),
+                anidb_poster_url=anime.get("poster_url"),
+            )
+        _save_policies(policies)
+        state = _load_state()
+        mappings = _load_mappings()
+        ids = _policy_tvdb_ids(policies)
+        requests = _load_retry_requests()
+        for info_hash, row in state.get("releases", {}).items():
+            if row.get("status") not in {"blacklisted", "done", "existing"} and (
+                _is_blacklisted_release(row, policies=policies, mappings=mappings, blacklisted_ids=ids)
+            ):
+                row.update(status="blacklisted", reason="Series blacklisted by user")
+                requests.pop(info_hash, None)
+        # Tracked, it would come back as an empty library card.
+        if tvdb_id:
+            state.get("series", {}).pop(str(tvdb_id), None)
+        _prune_holds(state)
+        _save_retry_requests(requests)
+        _save_state(state)
+    purged = await purge_series(key, english_title=title, delete_files=True, extra_folders=folders)
+    return {"ok": True, "key": key, **purged}
 
 
 def _request_series_retries(state: dict[str, Any], key: str) -> int:
@@ -490,8 +654,32 @@ def series_files(english_title: str) -> list[Path]:
     return found
 
 
+def _strictly_inside(path: Path, roots: list[Path]) -> bool:
+    """Inside a library root and not the root itself.
+
+    _contained_by is true for a root too, and a show folder that resolved to
+    the anime root would take the entire library with it.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            base = root.resolve()
+        except OSError:
+            continue
+        if resolved != base and resolved.is_relative_to(base):
+            return True
+    return False
+
+
 async def purge_series(
-    key: str, *, english_title: str, delete_files: bool
+    key: str,
+    *,
+    english_title: str,
+    delete_files: bool,
+    extra_folders: list[Path] | None = None,
 ) -> dict[str, Any]:
     """Remove a blacklisted series' torrents and, optionally, its episodes.
 
@@ -533,25 +721,34 @@ async def purge_series(
     deleted_files = 0
     freed_bytes = 0
     deleted_folders: list[str] = []
-    if delete_files and english_title:
+    if delete_files and (english_title or extra_folders):
         roots = _series_roots()
-        for folder in series_files(english_title):
-            if not _contained_by(folder, roots):
+        folders: list[Path] = []
+        # The library card's own folders first: it knows every folder the show
+        # was merged from, where a lookup by name finds one.
+        for folder in [*(extra_folders or []), *(series_files(english_title) if english_title else [])]:
+            if folder not in folders and folder.is_dir():
+                folders.append(folder)
+        for folder in folders:
+            if not _strictly_inside(folder, roots):
+                log.warning("Refusing to delete %s: not inside a library root", folder)
                 continue
+            count = size = 0
             for path in folder.rglob("*"):
                 if path.is_file():
                     try:
-                        freed_bytes += path.stat().st_size
-                        deleted_files += 1
+                        size += path.stat().st_size
+                        count += 1
                     except OSError:
                         pass
             try:
                 shutil.rmtree(folder)
-                deleted_folders.append(str(folder))
             except OSError as exc:
                 log.warning("Could not delete %s: %s", folder, exc)
-                deleted_files = 0
-                freed_bytes = 0
+                continue
+            deleted_folders.append(str(folder))
+            deleted_files += count
+            freed_bytes += size
     return {
         "ok": True,
         "key": key,
@@ -805,8 +1002,7 @@ def save_mapping(
 
 
 def _needs_consideration(state: dict[str, Any], entry: anime_mod.NyaaEntry) -> bool:
-    policy = _series_policy(entry.title)
-    if policy and policy.get("mode") == "blacklisted":
+    if _title_blacklisted(entry.title):
         return False
     previous = state["releases"].get(entry.info_hash)
     if previous is None:

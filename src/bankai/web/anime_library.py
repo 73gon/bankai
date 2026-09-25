@@ -808,9 +808,13 @@ async def group_shows(
     source_titles = erai_source_titles(state)
     tracked = state.get("series", {})
 
-    # A tracked show with nothing on disk yet still gets a card.
-    for record in tracked.values():
+    # A tracked show with nothing on disk yet still gets a card -- unless it
+    # was blacklisted, which is how a show removed from the library leaves it.
+    blacklisted_ids = await asyncio.to_thread(erai._policy_tvdb_ids)
+    for tvdb_key, record in tracked.items():
         title = record.get("english_title")
+        if str(record.get("tvdb_id") or tvdb_key) in blacklisted_ids:
+            continue
         if title and _name(title) not in buckets:
             buckets[_name(title)] = {"titles": [title], "files": []}
 
@@ -976,10 +980,17 @@ async def enrich_review_rows(rows: list[dict]) -> list[dict]:
         )
         async with slots:
             metadata = await show_metadata(row["source_title"], saved.get("tvdb_id"))
-        row["title"] = metadata.get("english_title") or row["source_title"]
-        row["tvdb_id"] = metadata.get("tvdb_id") or saved.get("tvdb_id")
+        # A blacklist card linked to AniDB carries its own names and poster,
+        # which stand in wherever TVDB never recognised the show.
+        row["title"] = (
+            metadata.get("english_title")
+            or row.get("english_title")
+            or row.get("anidb_title")
+            or row["source_title"]
+        )
+        row["tvdb_id"] = metadata.get("tvdb_id") or saved.get("tvdb_id") or row.get("tvdb_id")
         row["year"] = metadata.get("year")
-        row["poster_url"] = metadata.get("poster_url")
+        row["poster_url"] = metadata.get("poster_url") or row.get("anidb_poster_url")
 
     await asyncio.gather(*(enrich(row) for row in rows))
     return rows

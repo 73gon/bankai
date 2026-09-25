@@ -136,7 +136,7 @@ def test_a_change_in_the_same_tick_as_the_listing_is_still_found(tmp_path):
     listing can leave the mtime exactly as it was listed with."""
     season = _library(tmp_path)
     library_walk.files([tmp_path])  # listed while every mtime is brand new
-    listed = os.stat(season).st_mtime_ns
+    listed = season.stat().st_mtime_ns
 
     (season / "Frieren - S01E02.mkv").write_bytes(b"x")
     os.utime(season, ns=(listed, listed))  # the tick did not move
