@@ -103,8 +103,11 @@ class QBittorrentClient:
         torrent_url: str | None = None,
         category: str | None = None,
         save_path: Path | None = None,
-    ) -> None:
-        """Add a torrent. Returns once qBittorrent acknowledges the add."""
+    ) -> bool:
+        """Add a torrent. Returns once qBittorrent acknowledges the add.
+
+        ``True`` when it was added, ``False`` when qBittorrent already had it.
+        """
         await self._ensure_login()
         if not magnet and not torrent_url:
             raise ValueError("magnet or torrent_url required")
@@ -124,8 +127,19 @@ class QBittorrentClient:
         elif torrent_url:
             data["urls"] = torrent_url
         resp = await self._client.post("/api/v2/torrents/add", data=data)
+        if resp.status_code == 409:
+            # qBittorrent 5.x answers 409 Conflict for a torrent it already
+            # has, where 4.x answered 200. Treated as an error, every job for a
+            # torrent the release reconciler had re-added failed in its first
+            # second while the download completed anyway: 259 finished
+            # downloads spent all their publish retries on this and were never
+            # moved. The torrent is there, which is all the caller needs; it
+            # follows it by info hash from here.
+            log.info("torrent already in qBittorrent; following the existing one")
+            return False
         if resp.status_code != 200:
             raise QBittorrentError(f"add failed: {resp.status_code} {resp.text!r}")
+        return True
 
     # ---- status ------------------------------------------------------------
 
