@@ -964,7 +964,16 @@ async def enrich_review_rows(rows: list[dict]) -> list[dict]:
     slots = asyncio.Semaphore(6)
 
     async def enrich(row: dict) -> None:
-        saved = mappings.get(row["key"], {})
+        # A card is a whole show, and a TVDB choice is saved per season: any
+        # season's choice identifies the show.
+        saved = next(
+            (
+                mappings[key]
+                for key in (row["key"], *row.get("keys", ()))
+                if mappings.get(key, {}).get("tvdb_id")
+            ),
+            mappings.get(row["key"], {}),
+        )
         async with slots:
             metadata = await show_metadata(row["source_title"], saved.get("tvdb_id"))
         row["title"] = metadata.get("english_title") or row["source_title"]

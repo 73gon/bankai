@@ -140,7 +140,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           <h1 className='font-serif text-3xl font-semibold'>{blacklist ? 'Blacklist' : 'Held for review'}</h1>
           <p className='text-sm text-muted-foreground'>{blacklist
             ? 'Shows here are ignored permanently until you restore them.'
-            : 'One decision applies to every release with the exact same Erai source-show name.'}</p>
+            : 'One card per show. A decision applies to every season of it.'}</p>
         </div>
         {!blacklist && <Button variant='secondary' onClick={() => void retryAll()} disabled={Boolean(busy) || items.length === 0}>
           <RefreshCw data-icon='inline-start' /> Recheck everything
@@ -200,6 +200,11 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
 
                 {!blacklist && (
                   <div className='flex flex-col gap-2 p-2'>
+                    {(item.seasons?.length ?? 0) > 1 && (
+                      <p className='font-mono text-[11px] tabular-nums text-muted-foreground'>
+                        {item.seasons!.map((season) => 'S' + season).join(' · ')}
+                      </p>
+                    )}
                     {reasons.length > 0 && (
                       <p className='line-clamp-2 text-[11px] leading-snug text-warning' title={reasons.join(' · ')}>
                         {reasons.join(' · ')}
@@ -293,8 +298,9 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
               <ul className='flex flex-col gap-1'>
                 {releases.map((release) => (
                   <li key={release.info_hash} className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/40'>
-                    <span className='w-8 shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
-                      {release.episode ?? '—'}
+                    <span className='w-14 shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
+                      {release.season != null ? 'S' + release.season + ' ' : ''}
+                      {release.episode != null ? 'E' + release.episode : '—'}
                     </span>
                     <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={release.title}>
                       {release.title}

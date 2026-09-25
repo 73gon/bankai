@@ -178,6 +178,7 @@ export interface HeldRelease {
   /** The release names German among its own language tags. */
   german_in_title: boolean;
   hevc: boolean;
+  season: number | null;
   episode: number | null;
 }
 
@@ -195,6 +196,10 @@ export interface AnimeReviewItem {
   reason?: string;
   reasons?: string[];
   release_count?: number;
+  /** Seasons held under this one card; a card is a whole show. */
+  seasons?: number[];
+  /** The per-season decision keys merged into the card. */
+  keys?: string[];
   updated_at: number;
 }
 export interface AnimeAutomationStatus {

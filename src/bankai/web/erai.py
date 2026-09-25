@@ -172,7 +172,7 @@ async def _resolve_series_tvdb_id(source_title: str, key: str) -> str | None:
 
 
 def review_items(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Group held releases by stable Erai source-show identity."""
+    """Group held releases into one card per anime, every season of it together."""
     state = _load_state() if state is None else state
     groups: dict[str, dict[str, Any]] = {}
     policies = _load_policies()
@@ -194,27 +194,42 @@ def review_items(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             "title": release["title"],
             "reason": release.get("reason", "Held for review"),
         }
-        key = _mapping_key(item["title"])
-        policy = policies.get(key)
+        policy = policies.get(_mapping_key(item["title"]))
         reason = str(item.get("reason", ""))
         if policy and policy.get("mode") == "blacklisted":
             continue
         if policy and policy.get("mode") == "german_allowed" and "German subtitles" in reason:
             continue
+        key = _show_key(item["title"])
+        source_title = anime_mod.clean_release_title(item["title"])
         row = groups.setdefault(
             key,
             {
                 **item,
                 "release_title": item["title"],
                 "key": key,
-                "source_title": anime_mod.clean_release_title(item["title"]),
+                "source_title": source_title,
                 "release_count": 0,
                 "reasons": [],
+                "seasons": [],
+                "keys": [],
             },
         )
+        member = _mapping_key(item["title"])
+        if member not in row["keys"]:
+            row["keys"].append(member)
+        # The plainest name of the show names the card: "Oshi no Ko" rather
+        # than "Oshi no Ko 2nd Season" when both are held.
+        if len(source_title) < len(row["source_title"]):
+            row["source_title"] = source_title
         row["release_count"] += 1
         if reason and reason not in row["reasons"]:
             row["reasons"].append(reason)
+        season = anime_mod.release_episode_info(item["title"])[0]
+        if season is not None and season not in row["seasons"]:
+            row["seasons"].append(season)
+    for row in groups.values():
+        row["seasons"].sort()
     return sorted(groups.values(), key=lambda row: row["source_title"].casefold())
 
 
@@ -230,7 +245,11 @@ def review_releases(key: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for info_hash, release in state.get("releases", {}).items():
         title = str(release.get("title") or "")
-        if release.get("status") != "held" or not title or _mapping_key(title) != key:
+        if release.get("status") != "held" or not title:
+            continue
+        # The card key is the show; a per-season key still answers for
+        # anything holding one from before the merge.
+        if key not in {_show_key(title), _mapping_key(title)}:
             continue
         saved = release.get("entry") or {}
         rows.append(
@@ -244,10 +263,19 @@ def review_releases(key: str) -> list[dict[str, Any]]:
                 # glance rather than only in the release name.
                 "german_in_title": title_lists_german_subtitles(title),
                 "hevc": _is_hevc_title(title),
+                "season": anime_mod.release_episode_info(title)[0],
                 "episode": anime_mod.release_episode_info(title)[1],
             }
         )
-    rows.sort(key=lambda row: (row["episode"] is None, row["episode"] or 0, row["title"]))
+    rows.sort(
+        key=lambda row: (
+            row["season"] is None,
+            row["season"] or 0,
+            row["episode"] is None,
+            row["episode"] or 0,
+            row["title"],
+        )
+    )
     return rows
 
 
@@ -286,15 +314,27 @@ def mark_series_owned(key: str) -> dict[str, int]:
     return mark_releases_owned([row["info_hash"] for row in review_releases(key)])
 
 
+def _policy_show_key(key: str, policy: dict[str, Any]) -> str:
+    return _show_name_key(str(policy.get("source_title") or key))
+
+
 def blacklist_items() -> list[dict[str, Any]]:
-    return sorted(
-        (
-            {"key": key, **value}
-            for key, value in _load_policies().items()
-            if value.get("mode") == "blacklisted"
-        ),
-        key=lambda row: str(row.get("source_title", "")).casefold(),
-    )
+    """One card per blacklisted anime, however many seasons it was discarded for.
+
+    Discarding a show writes a decision for each of its seasons, so listing the
+    decisions themselves would put the same show here once per season.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    for key, value in _load_policies().items():
+        if value.get("mode") != "blacklisted":
+            continue
+        show = _policy_show_key(key, value)
+        row = groups.setdefault(show, {**value, "key": show, "keys": []})
+        row["keys"].append(key)
+        if len(str(value.get("source_title") or "")) < len(str(row.get("source_title") or "")):
+            row["source_title"] = value.get("source_title")
+        row["tvdb_id"] = row.get("tvdb_id") or value.get("tvdb_id")
+    return sorted(groups.values(), key=lambda row: str(row.get("source_title", "")).casefold())
 
 
 def _request_series_retries(state: dict[str, Any], key: str) -> int:
@@ -332,29 +372,41 @@ async def review_action(info_hash: str, action: str) -> dict[str, Any]:
         if not release or not release.get("title"):
             raise ValueError("Held release was not found")
         title = release["title"]
+        # A card is a whole show, so a decision is too: every season held
+        # under it, each of which carries its own per-season key.
+        titles = {key: title}
+        for row in state.get("releases", {}).values():
+            row_title = str(row.get("title") or "")
+            if (
+                row.get("status") == "held"
+                and row_title
+                and _show_key(row_title) == _show_key(title)
+            ):
+                titles.setdefault(_mapping_key(row_title), row_title)
         policies = _load_policies()
         requested = 0
         blacklisted = 0
         if action == "recheck":
-            requested = _request_series_retries(state, key)
+            requested = sum(_request_series_retries(state, member) for member in titles)
         elif action == "allow_german":
-            policies[key] = {
-                "mode": "german_allowed",
-                "source_title": anime_mod.clean_release_title(title),
-                "updated_at": time.time(),
-            }
+            for member, member_title in titles.items():
+                policies[member] = {
+                    "mode": "german_allowed",
+                    "source_title": anime_mod.clean_release_title(member_title),
+                    "updated_at": time.time(),
+                }
             _save_policies(policies)
-            requested = _request_series_retries(state, key)
+            requested = sum(_request_series_retries(state, member) for member in titles)
         elif action == "blacklist":
-            policies[key] = {
-                "mode": "blacklisted",
-                "source_title": anime_mod.clean_release_title(title),
-                # Recorded so every other season, part and title variant of the
-                # same series is covered. Keying on the title alone left the
-                # other half of a show sitting in review.
-                "tvdb_id": tvdb_id,
-                "updated_at": time.time(),
-            }
+            for member, member_title in titles.items():
+                policies[member] = {
+                    "mode": "blacklisted",
+                    "source_title": anime_mod.clean_release_title(member_title),
+                    # Recorded so every other season, part and title variant of
+                    # the same series is covered, including ones not held yet.
+                    "tvdb_id": tvdb_id,
+                    "updated_at": time.time(),
+                }
             _save_policies(policies)
             mappings = _load_mappings()
             blacklisted_ids = _policy_tvdb_ids(policies)
@@ -385,7 +437,13 @@ async def review_action(info_hash: str, action: str) -> dict[str, Any]:
             raise ValueError("Unknown review action")
     if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
         _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
-    return {"ok": True, "requested": requested, "blacklisted": blacklisted, "key": key}
+    return {
+        "ok": True,
+        "requested": requested,
+        "blacklisted": blacklisted,
+        "key": key,
+        "keys": sorted(titles),
+    }
 
 
 _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".webm"}
@@ -508,16 +566,23 @@ def remove_blacklist(key: str) -> dict[str, Any]:
     global _RETRY_TASK
     with _STATE_LOCK:
         policies = _load_policies()
-        row = policies.get(key)
-        if not row or row.get("mode") != "blacklisted":
+        # A blacklist card is a whole show: restore every season of it.
+        members = {
+            member
+            for member, row in policies.items()
+            if row.get("mode") == "blacklisted"
+            and (member == key or _policy_show_key(member, row) == key)
+        }
+        if not members:
             raise ValueError("Blacklisted series was not found")
-        policies.pop(key)
+        for member in members:
+            policies.pop(member)
         _save_policies(policies)
         state = _load_state()
         for release in state.get("releases", {}).values():
             if (
                 release.get("status") == "blacklisted"
-                and _mapping_key(release.get("title", "")) == key
+                and _mapping_key(release.get("title", "")) in members
             ):
                 release["status"] = "held"
                 release["reason"] = "Blacklist removed; release is ready for a fresh check"
@@ -525,7 +590,7 @@ def remove_blacklist(key: str) -> dict[str, Any]:
                 saved_entry = release.get("entry")
                 if saved_entry:
                     _hold(state, _entry_from_dict(saved_entry), release["reason"])
-        requested = _request_series_retries(state, key)
+        requested = sum(_request_series_retries(state, member) for member in members)
         _save_state(state)
     if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
         _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
@@ -661,6 +726,41 @@ def _mapping_key(release_title: str) -> str:
         else anime_mod.clean_release_title(release_title)
     )
     return " ".join(re.findall(r"\w+", query.casefold(), re.UNICODE))
+
+
+# Whatever says which season, cour or part a release belongs to. Stripped
+# repeatedly, so "Final Season Part 2" goes as well as "Season 2".
+_SHOW_SEASON_SUFFIX = re.compile(
+    r"(?:\s*-)?\s+(?:S\d{1,2}|Season\s+\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s+Season"
+    r"|(?:The\s+)?Final\s+Season|Part\s+\d{1,2}|Cour\s+\d{1,2})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _show_name_key(name: str) -> str:
+    """The identity of an anime across all of its seasons, from a cleaned name."""
+    value = name.strip()
+    while True:
+        stripped = _SHOW_SEASON_SUFFIX.sub("", value).strip()
+        if not stripped or stripped == value:
+            break
+        value = stripped
+    # What clean_release_title leaves of "- The Final Season" once it has
+    # taken the "Final Season" itself.
+    value = re.sub(r"\s*-\s*The$", "", value, flags=re.IGNORECASE) or value
+    return " ".join(re.findall(r"\w+", value.casefold(), re.UNICODE))
+
+
+def _show_key(release_title: str) -> str:
+    """One review card per anime, not per season.
+
+    Cards were grouped by the Erai name of each season, so every season of a
+    show was its own card -- "S2" and "S3", "2nd Season" and "Final Season" --
+    and the same season could split in two when a release name carried "END",
+    "(Repack)" or "(AAC 2.0)" and lost its season marker in parsing. A
+    decision made on one of those cards left the others waiting.
+    """
+    return _show_name_key(anime_mod.clean_release_title(release_title))
 
 
 def _load_mappings() -> dict[str, dict[str, Any]]:
