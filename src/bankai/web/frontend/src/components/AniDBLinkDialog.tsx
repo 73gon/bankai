@@ -85,7 +85,9 @@ export function AniDBLinkDialog({
                       <p className='truncate text-xs text-muted-foreground'>{anime.english_title}</p>
                     )}
                     <p className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
-                      {[anime.type, anime.year, anime.episode_count ? anime.episode_count + ' eps' : null, 'aid ' + anime.anidb_id]
+                      {/* Outside the Shoko collection only the title list is known,
+                          and the type reads "Unknown", which says nothing. */}
+                      {[anime.type === 'Unknown' ? null : anime.type, anime.year, anime.episode_count ? anime.episode_count + ' eps' : null, 'aid ' + anime.anidb_id]
                         .filter(Boolean).join(' · ')}
                     </p>
                   </div>
