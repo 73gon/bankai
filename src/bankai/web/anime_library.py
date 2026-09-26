@@ -772,7 +772,9 @@ def merge_episodes_absolute(
                 "aired": item.aired,
                 "tba": False,
                 "missing": False,
-                "codec": (codecs or {}).get((item.season, item.episode)),
+                # Probed codecs go by the file's own numbers, published ones by TVDB's.
+                "codec": (codecs or {}).get((row["season_number"], number))
+                or (codecs or {}).get((item.season, item.episode)),
                 # By the file's own numbers, before any renumbering for display.
                 "german_dub": bool(german_dubbed and (row["season_number"], number) in german_dubbed),
             }
@@ -805,7 +807,7 @@ def merge_episodes_absolute(
                 "season_number": 1 if flat else (row["season_number"] or 1),
                 "missing": False,
                 "tba": False,
-                "codec": None,
+                "codec": (codecs or {}).get((row["season_number"], number)),
                 "german_dub": bool(german_dubbed and (row["season_number"], number) in german_dubbed),
             }
     if flat:

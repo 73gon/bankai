@@ -70,6 +70,15 @@ def test_read_per_season_the_same_files_look_mostly_missing():
     assert rows[(2, 5)].get("episode_title") is None
 
 
+def test_codecs_probed_by_file_numbers_still_count():
+    files = [_file("Season 02 Chunin Exams", 2, 5)]
+    # Probed codecs use the file's S02E05; TVDB would call it S02E02.
+    merged = anime_library.merge_episodes_absolute(
+        files, _roster(6), ended=True, codecs={(2, 5): "avc"}
+    )
+    assert next(row for row in merged["episodes"] if row["episode"] == 5)["codec"] == "avc"
+
+
 def test_flat_numbering_is_one_list():
     files = [_file("Season 01 Land of Waves", 1, 1), _file("Season 02 Chunin Exams", 2, 3)]
     merged = anime_library.merge_episodes_absolute(files, _roster(4), ended=True, flat=True)

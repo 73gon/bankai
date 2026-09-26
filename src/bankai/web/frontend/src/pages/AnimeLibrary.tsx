@@ -472,7 +472,7 @@ export default function AnimeLibrary() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>
-                            <SelectItem value='season'>Per season (S02E05 = season 2, ep 5)</SelectItem>
+                            <SelectItem value='season'>Per season (S01E05)</SelectItem>
                             <SelectItem value='absolute'>Absolute, seasons are arcs</SelectItem>
                             <SelectItem value='absolute_flat'>Absolute, one list</SelectItem>
                           </SelectGroup>
