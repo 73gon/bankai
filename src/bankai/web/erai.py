@@ -3493,8 +3493,13 @@ _MANUAL_TASK: asyncio.Task | None = None
 _RETRY_TASK: asyncio.Task | None = None
 
 
-def retry_held() -> dict:
-    """Persist one fresh attempt for every held release and return immediately."""
+def retry_held(reason: str | None = None) -> dict:
+    """Persist one fresh attempt for every held release and return immediately.
+
+    ``reason`` limits it to holds whose reason contains that text -- "TVDB",
+    for the releases held only because TVDB could not place them, which the
+    AniDB route now can -- sparing a Nyaa lookup for every other hold.
+    """
     global _RETRY_TASK
     with _STATE_LOCK:
         state = _load_state()
@@ -3504,6 +3509,8 @@ def retry_held() -> dict:
         requested = 0
         for info_hash, release in state["releases"].items():
             if release.get("status") != "held":
+                continue
+            if reason and reason not in str(release.get("reason") or ""):
                 continue
             requests[info_hash] = {
                 "title": release["title"],

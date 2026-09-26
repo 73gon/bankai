@@ -1540,8 +1540,8 @@ def create_app() -> Any:
         return erai_mod.trigger_cycle()
 
     @app.post("/api/anime/automation/retry-held")
-    async def anime_automation_retry_held() -> dict:
-        return erai_mod.retry_held()
+    async def anime_automation_retry_held(reason: str | None = Query(None, max_length=60)) -> dict:
+        return erai_mod.retry_held(reason)
 
     @app.get("/api/anime/review")
     async def anime_review() -> dict:
@@ -1786,6 +1786,22 @@ def create_app() -> Any:
             "page": page,
             "page_size": page_size,
         }
+
+    @app.post("/api/anime/library/numbering")
+    async def anime_library_numbering(req: dict) -> dict:
+        """How a show's episode numbers are read: per season, or absolute across arcs."""
+        from bankai.web.anime_library import save_numbering
+
+        key = str(req.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail="key is required")
+        try:
+            await asyncio.to_thread(
+                save_numbering, key=key, tvdb_id=req.get("tvdb_id"), mode=str(req.get("mode") or "")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ok": True, "key": key, "mode": req.get("mode")}
 
     @app.post("/api/anime/library/remove")
     async def anime_library_remove(req: dict) -> dict:

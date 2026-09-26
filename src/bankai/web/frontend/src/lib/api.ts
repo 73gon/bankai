@@ -287,7 +287,11 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 /** The three kinds of root the server library scans. */
 export type ServerDirKind = 'movie' | 'show' | 'anime';
 
+export type EpisodeNumbering = 'season' | 'absolute' | 'absolute_flat';
+
 export interface AnimeLibraryShow {
+  /** How this show's file numbers are read: per season, or absolute across arcs. */
+  numbering?: EpisodeNumbering;
   /** AVC episodes an upgrade could actually replace (dubs are excluded). */
   avc_count?: number;
   hevc_count?: number;
@@ -803,6 +807,11 @@ export const api = {
   /** AniDB anime by title, through Shoko. */
   anidbSearch: (q: string) =>
     request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
+  /** How a show's episode numbers are read; kept per show. */
+  setAnimeNumbering: (key: string, tvdbId: number | null, mode: EpisodeNumbering) =>
+    request<{ ok: boolean }>('/api/anime/library/numbering', {
+      method: 'POST', body: JSON.stringify({ key, tvdb_id: tvdbId, mode }),
+    }),
   /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
   removeAnimeLibraryShow: (key: string) =>
     request<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', {

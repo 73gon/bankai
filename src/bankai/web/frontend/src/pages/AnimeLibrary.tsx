@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch } from '@/lib/api';
+import { api, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -213,6 +214,16 @@ export default function AnimeLibrary() {
     }
   }
 
+  async function setNumbering(show: AnimeLibraryShow, mode: EpisodeNumbering) {
+    try {
+      await api.setAnimeNumbering(show.key, show.tvdb_id ?? null, mode);
+      await openShow(show.key);
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    }
+  }
+
   async function removeShow() {
     if (!removeTarget) return;
     setRemoving(true);
@@ -294,6 +305,16 @@ export default function AnimeLibrary() {
 
   const active = selectedShow;
   const seasons = active ? Array.from(new Set(active.episodes.map((episode) => episode.season_number))).sort((a, b) => (a ?? -1) - (b ?? -1)) : [];
+  // Read absolutely, a season tab is one of the user's own arc folders: named after it.
+  const seasonLabel = (season: number | null) => {
+    if (season === null) return 'Other files';
+    if (active?.numbering === 'absolute_flat') return 'All episodes';
+    if (active?.numbering === 'absolute') {
+      const folder = active.episodes.find((episode) => episode.season_number === season)?.season;
+      if (folder) return folder;
+    }
+    return season === 0 ? 'Specials' : 'Season ' + season;
+  };
 
   return (
     <div className='flex min-h-0 flex-1 flex-col gap-5'>
@@ -417,7 +438,7 @@ export default function AnimeLibrary() {
       )}
 
       <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); } }}>
-        <DrawerContent aria-describedby={undefined}>
+        <DrawerContent aria-describedby={undefined} className='md:w-3/4'>
           {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner /></div>}
           {active && (
             <>
@@ -445,6 +466,18 @@ export default function AnimeLibrary() {
                           {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.avc_count} to HEVC`}
                         </Button>
                       )}
+                      <Select value={active.numbering ?? 'season'} onValueChange={(value) => void setNumbering(active, value as EpisodeNumbering)}>
+                        <SelectTrigger data-size='sm' className='w-60' aria-label='How episode numbers are read' title='How this show&apos;s episode numbers are read'>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value='season'>Per season (S02E05 = season 2, ep 5)</SelectItem>
+                            <SelectItem value='absolute'>Absolute, seasons are arcs</SelectItem>
+                            <SelectItem value='absolute_flat'>Absolute, one list</SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
                       <Button size='sm' variant='destructive' onClick={() => setRemoveTarget(active)} title='Delete this show from disk and never download it again'>
                         <Trash2 data-icon='inline-start' /> Remove and blacklist
                       </Button>
@@ -454,7 +487,7 @@ export default function AnimeLibrary() {
               </DrawerHeader>
               <Tabs key={active.key} defaultValue={String(seasons[0])} className='flex min-h-0 flex-1 flex-col'>
                 <TabsList className='flex h-auto flex-wrap justify-start px-5 pt-3'>
-                  {seasons.map((season) => <TabsTrigger key={String(season)} value={String(season)}>{season === null ? 'Other files' : season === 0 ? 'Specials' : 'Season ' + season}</TabsTrigger>)}
+                  {seasons.map((season) => <TabsTrigger key={String(season)} value={String(season)}>{seasonLabel(season)}</TabsTrigger>)}
                 </TabsList>
                 {seasons.map((season) => (
                   <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>

@@ -440,7 +440,7 @@ def test_retry_held_endpoint_returns_scheduled_count(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "bankai.web.erai.retry_held", lambda: {"requested": 14, "retry_pending": 14}
+        "bankai.web.erai.retry_held", lambda reason=None: {"requested": 14, "retry_pending": 14}
     )
     response = client.post("/api/anime/automation/retry-held")
     assert response.status_code == 200

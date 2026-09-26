@@ -665,6 +665,177 @@ def merge_episodes(
     }
 
 
+NUMBERING_MODES = ("season", "absolute", "absolute_flat")
+
+
+def _prefs_path() -> Path:
+    return erai._state_path().with_name("anime_library_prefs.json")
+
+
+def load_prefs() -> dict[str, dict]:
+    try:
+        value = json.loads(_prefs_path().read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def numbering_for(prefs: dict[str, dict], *, tvdb_id: object, key: str) -> str:
+    """The episode numbering chosen for a show: by its TVDB id, else its card key."""
+    row = prefs.get(f"tvdb:{tvdb_id}") if tvdb_id else None
+    row = row or prefs.get(f"key:{key}") or {}
+    mode = row.get("numbering")
+    return mode if mode in NUMBERING_MODES else "season"
+
+
+def save_numbering(*, key: str, tvdb_id: object, mode: str) -> None:
+    if mode not in NUMBERING_MODES:
+        raise ValueError(f"numbering must be one of {', '.join(NUMBERING_MODES)}")
+    prefs = load_prefs()
+    for name in ([f"tvdb:{tvdb_id}"] if tvdb_id else []) + [f"key:{key}"]:
+        if mode == "season":
+            prefs.pop(name, None)  # the default needs no entry
+        else:
+            prefs[name] = {"numbering": mode}
+    path = _prefs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def merge_episodes_absolute(
+    files: list[dict],
+    roster: list,
+    *,
+    ended: bool,
+    flat: bool = False,
+    codecs: dict[tuple[int, int], str] | None = None,
+    german_dubbed: set[tuple[int, int]] | None = None,
+) -> dict:
+    """merge_episodes for a show whose file numbers count through the whole show.
+
+    Naruto, Bleach, One Piece: kept in season folders that are the user's own
+    arcs, while each file's number is the absolute one -- "Season 02/Naruto -
+    S02E20" is episode 20 overall. Reading that as season 2, episode 20 matched
+    nothing, so the whole show looked missing. Files are matched to TVDB by
+    absolute number; the tabs are the arc folders (or one list, ``flat``), and
+    a missing episode goes to the arc whose range it falls in.
+    """
+    regular = sorted(
+        (item for item in roster if item.season >= 1 and item.episode >= 1),
+        key=lambda item: (item.season, item.episode),
+    )
+    by_absolute = {}
+    for ordinal, item in enumerate(regular, start=1):
+        # Some TVDB series omit absoluteNumber; the default order is still one.
+        by_absolute.setdefault(item.absolute_number or ordinal, item)
+
+    present: dict[int, dict] = {}
+    others: list[dict] = []
+    for row in files:
+        number = row["episode"]
+        if number is None:
+            others.append(row)
+        elif number not in present or present[number]["staged"]:
+            present[number] = row
+
+    arcs: dict[int, tuple[int, int]] = {}
+    folder_names: dict[int, str] = {}
+    for number, row in present.items():
+        arc = row["season_number"] if row["season_number"] is not None else 1
+        low, high = arcs.get(arc, (number, number))
+        arcs[arc] = (min(low, number), max(high, number))
+        folder_names.setdefault(arc, str(row.get("season") or f"Season {arc:02d}"))
+
+    def arc_for(number: int) -> int:
+        if flat or not arcs:
+            return 1
+        for arc, (low, high) in sorted(arcs.items()):
+            if low <= number <= high:
+                return arc
+        following = [arc for arc, (low, _high) in sorted(arcs.items()) if low > number]
+        return following[0] if following else max(arcs)
+
+    today = date.today().isoformat()
+    rows: dict[int, dict] = {}
+    for number, item in by_absolute.items():
+        future = bool(item.aired and item.aired[:10] > today)
+        tba = future or (not item.aired and not ended)
+        arc = arc_for(number)
+        if number in present:
+            row = present[number]
+            rows[number] = {
+                **row,
+                "season_number": 1 if flat else (row["season_number"] if row["season_number"] is not None else 1),
+                "episode_title": item.name,
+                "aired": item.aired,
+                "tba": False,
+                "missing": False,
+                "codec": (codecs or {}).get((item.season, item.episode)),
+                # By the file's own numbers, before any renumbering for display.
+                "german_dub": bool(german_dubbed and (row["season_number"], number) in german_dubbed),
+            }
+        else:
+            rows[number] = {
+                "path": "",
+                "rel_path": "",
+                "name": item.name or "TBA",
+                "episode_title": item.name,
+                "series": "",
+                "season": "All episodes" if flat else folder_names.get(arc, f"Season {arc:02d}"),
+                "season_number": arc,
+                "episode": number,
+                "size": 0,
+                "mtime": 0,
+                "staged": False,
+                "stage": "missing",
+                "transfer_status": "idle",
+                "aired": item.aired,
+                "tba": tba,
+                "missing": True,
+                "codec": None,
+                "german_dub": False,
+            }
+    for number, row in present.items():
+        # Beyond what TVDB lists yet: still downloaded, still shown.
+        if number not in rows:
+            rows[number] = {
+                **row,
+                "season_number": 1 if flat else (row["season_number"] or 1),
+                "missing": False,
+                "tba": False,
+                "codec": None,
+                "german_dub": bool(german_dubbed and (row["season_number"], number) in german_dubbed),
+            }
+    if flat:
+        for row in rows.values():
+            row["season"] = "All episodes"
+    counted = list(rows.values())
+    downloaded = sum(not row.get("missing", False) and not row["staged"] for row in counted)
+    outstanding = [row for row in counted if row.get("missing", False) or row["staged"]]
+    future_only = outstanding and all(row.get("tba", False) for row in outstanding)
+    state = (
+        "empty" if downloaded == 0
+        else "upcoming" if future_only
+        else "partial" if outstanding
+        else "complete"
+    )
+    if not roster and downloaded:
+        state = "unknown"
+    return {
+        "episodes": sorted(
+            [*rows.values(), *others],
+            key=lambda row: (row["season_number"] or 0, row["episode"] or 0, row["name"]),
+        ),
+        "downloaded_count": downloaded,
+        "total_count": len(counted),
+        "completion_state": state,
+        "finished": ended and state == "complete",
+        "metadata_available": bool(roster),
+    }
+
+
 async def search_episode(tvdb_id: int, season: int, episode: int, query: str | None = None) -> dict:
     """Search scene names in reverse, then verify every result's TVDB target."""
     from dataclasses import replace
@@ -809,6 +980,7 @@ async def group_shows(
     codecs_by_series = codec_index(state)
     source_titles = erai_source_titles(state)
     tracked = state.get("series", {})
+    prefs = await asyncio.to_thread(load_prefs)
 
     # A tracked show with nothing on disk yet still gets a card -- unless it
     # was blacklisted, which is how a show removed from the library leaves it.
@@ -880,13 +1052,21 @@ async def group_shows(
             **await asyncio.to_thread(probed_codecs, files),
         }
         dubbed = await asyncio.to_thread(german_dubbed_episodes, files)
-        merged_episodes = merge_episodes(
-            files,
-            roster,
-            ended=str(metadata.get("status", "")).casefold() == "ended",
-            codecs=codecs,
-            german_dubbed=dubbed,
-        )
+        numbering = numbering_for(prefs, tvdb_id=tvdb_id, key=title)
+        ended = str(metadata.get("status", "")).casefold() == "ended"
+        if numbering == "season":
+            merged_episodes = merge_episodes(
+                files, roster, ended=ended, codecs=codecs, german_dubbed=dubbed
+            )
+        else:
+            merged_episodes = merge_episodes_absolute(
+                files,
+                roster,
+                ended=ended,
+                flat=numbering == "absolute_flat",
+                codecs=codecs,
+                german_dubbed=dubbed,
+            )
         result = {
             "key": title,
             # Every folder behind this one card, so the page can ask for the
@@ -913,6 +1093,7 @@ async def group_shows(
                 1 for row in merged_episodes["episodes"] if row.get("german_dub")
             ),
             "tvdb_id": tvdb_id,
+            "numbering": numbering,
             "year": metadata.get("year"),
             "poster_url": metadata.get("poster_url"),
             "episode_count": len(files),
