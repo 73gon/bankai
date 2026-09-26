@@ -90,17 +90,56 @@ def test_an_erai_language_tag_is_ignored(table):
 
 
 def test_a_name_two_anime_share_is_held_not_guessed(table):
+    """Two main titles that differ only in punctuation: nothing to choose by."""
     titles = ET.fromstring(
         """<animetitles>
-  <anime aid="1"><title xml:lang="x-jat" type="main">Hataraku Maou-sama!!</title></anime>
-  <anime aid="2"><title xml:lang="x-jat" type="main">Hataraku Maou-sama!! (2023)</title>
-    <title xml:lang="x-jat" type="syn">Hataraku Maou-sama!!</title></anime>
+  <anime aid="1"><title xml:lang="x-jat" type="main">Hataraku Maou-sama!</title></anime>
+  <anime aid="2"><title xml:lang="x-jat" type="main">Hataraku Maou-sama!!</title></anime>
 </animetitles>"""
     )
     resolution = anidb.resolve_in(anidb.build_index(titles, None), "Hataraku Maou-sama!!")
     assert resolution.anime is None
     assert resolution.candidates == [1, 2]
     assert "ambiguous" in resolution.error
+
+
+def test_the_newer_marker_forms_and_near_spellings():
+    titles = ET.fromstring(
+        """<animetitles>
+  <anime aid="1"><title xml:lang="x-jat" type="main">Spy x Family</title></anime>
+  <anime aid="2"><title xml:lang="x-jat" type="main">Spy x Family (2022)</title></anime>
+  <anime aid="3"><title xml:lang="x-jat" type="main">Diamond no Ace</title></anime>
+  <anime aid="4"><title xml:lang="x-jat" type="main">Diamond no Ace (2019)</title></anime>
+  <anime aid="5"><title xml:lang="x-jat" type="main">Ore dake Level Up na Ken</title></anime>
+  <anime aid="6"><title xml:lang="x-jat" type="main">Ore dake Level Up na Ken (2025)</title></anime>
+  <anime aid="7"><title xml:lang="x-jat" type="main">Kumo desu ga, Nanika?</title></anime>
+  <anime aid="8"><title xml:lang="x-jat" type="main">Mao</title></anime>
+  <anime aid="9"><title xml:lang="x-jat" type="main">Rikujou Boueitai Mao-chan</title>
+    <title xml:lang="x-jat" type="short">Mao</title></anime>
+</animetitles>"""
+    )
+    records = ET.fromstring(
+        """<anime-list>
+  <anime anidbid="1" tvdbid="10" defaulttvdbseason="1" episodeoffset="0"/>
+  <anime anidbid="2" tvdbid="10" defaulttvdbseason="1" episodeoffset="12"/>
+  <anime anidbid="3" tvdbid="20" defaulttvdbseason="1" episodeoffset="0"/>
+  <anime anidbid="4" tvdbid="20" defaulttvdbseason="2" episodeoffset="0"/>
+  <anime anidbid="5" tvdbid="30" defaulttvdbseason="1" episodeoffset="0"/>
+  <anime anidbid="6" tvdbid="30" defaulttvdbseason="2" episodeoffset="0"/>
+</anime-list>"""
+    )
+    table = anidb.build_index(titles, records)
+
+    # "Cour 2" is the second part of the season.
+    assert anidb.resolve_in(table, "Spy x Family Cour 2").anime.aid == 2
+    # Ordinals written out.
+    assert anidb.resolve_in(table, "Diamond no Ace Second Season").anime.aid == 4
+    # A season marker followed by a subtitle.
+    assert anidb.resolve_in(table, "Ore dake Level Up na Ken Season 2: Arise from the Shadow").anime.aid == 6
+    # One word apart only in spacing.
+    assert anidb.resolve_in(table, "Kumo Desu ga, Nani ka").anime.aid == 7
+    # A main title wins over another show's short name.
+    assert anidb.resolve_in(table, "Mao").anime.aid == 8
 
 
 def test_a_title_anidb_does_not_have_says_so(table):

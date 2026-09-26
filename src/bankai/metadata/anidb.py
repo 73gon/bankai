@@ -21,15 +21,22 @@ from typing import Any
 
 from bankai.metadata import anime_mapping
 
-_MATCHING_TYPES = {"main", "official", "syn", "short"}
+# Main and official titles decide first; synonyms and short names only when
+# they do not. "Mao" is a show's main title and another show's short name.
+_PRIMARY_TYPES = {"main", "official"}
+_SECONDARY_TYPES = {"syn", "short"}
+_MATCHING_TYPES = _PRIMARY_TYPES | _SECONDARY_TYPES
+_SPELLED = {"second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7}
 
-# "Season 3", "3rd Season", "S3", "Final Season", each optionally followed by a
-# "Part N"; or a bare "Part N" for a split cour.
+# "Season 3", "3rd Season", "Third Season", "S3", "Final Season", each
+# optionally followed by a "Part N"; or a bare "Part N" / "Cour N".
 _SEASON_MARKER = re.compile(
     r"^(?P<base>.+?)\s+(?:(?:S|Season\s*)(?P<season>\d{1,2})"
-    r"|(?P<nth>\d{1,2})(?:st|nd|rd|th)\s+Season|(?P<final>Final\s+Season))"
-    r"(?:\s+Part\s+(?P<part>\d))?$"
-    r"|^(?P<base_only>.+?)\s+Part\s+(?P<part_only>\d)$",
+    r"|(?P<nth>\d{1,2})(?:st|nd|rd|th)\s+Season"
+    r"|(?P<spelled>Second|Third|Fourth|Fifth|Sixth|Seventh)\s+Season"
+    r"|(?P<final>Final\s+Season))"
+    r"(?:\s+(?:Part|Cour)\s+(?P<part>\d))?$"
+    r"|^(?P<base_only>.+?)\s+(?:Part|Cour)\s+(?P<part_only>\d)$",
     re.IGNORECASE,
 )
 # Erai tags the same show once per audio language: "Dragon Raja (CA)".
@@ -50,6 +57,11 @@ def loose(value: str) -> str:
     for long, short in (("ou", "o"), ("uu", "u"), ("oo", "o"), ("aa", "a"), ("ii", "i"), ("ee", "e")):
         joined = joined.replace(long, short)
     return joined
+
+
+def compact(value: str) -> str:
+    """loose() without spaces: "Nani ka" and "Nanika" are one word apart."""
+    return loose(value).replace(" ", "")
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,8 @@ class _Index:
     exact: dict[str, set[int]]
     loose: dict[str, set[int]]
     by_tvdb: dict[int, list[AniDBAnime]]
+    primary: dict[str, set[int]] = field(default_factory=dict)
+    compact: dict[str, set[int]] = field(default_factory=dict)
 
 
 _INDEX: tuple[tuple[int, int], _Index] | None = None
@@ -99,7 +113,9 @@ def build_index(titles: Any, records: Any) -> _Index:
             mapping[int(aid)] = record
     anime: dict[int, AniDBAnime] = {}
     exact: dict[str, set[int]] = defaultdict(set)
+    primary: dict[str, set[int]] = defaultdict(set)
     loose_keys: dict[str, set[int]] = defaultdict(set)
+    compact_keys: dict[str, set[int]] = defaultdict(set)
     for node in titles if titles is not None else []:
         aid = int(node.get("aid"))
         main = english = None
@@ -118,6 +134,9 @@ def build_index(titles: Any, records: Any) -> _Index:
                 names.append(text)
                 exact[normalise(text)].add(aid)
                 loose_keys[loose(text)].add(aid)
+                compact_keys[compact(text)].add(aid)
+                if kind in _PRIMARY_TYPES:
+                    primary[normalise(text)].add(aid)
         record = mapping.get(aid)
         tvdb = record.get("tvdbid") if record is not None else None
         anime[aid] = AniDBAnime(
@@ -133,9 +152,16 @@ def build_index(titles: Any, records: Any) -> _Index:
     for entry in anime.values():
         if entry.tvdb_id:
             by_tvdb[entry.tvdb_id].append(entry)
-    exact.pop("", None)
-    loose_keys.pop("", None)
-    return _Index(anime=anime, exact=dict(exact), loose=dict(loose_keys), by_tvdb=dict(by_tvdb))
+    for table in (exact, primary, loose_keys, compact_keys):
+        table.pop("", None)
+    return _Index(
+        anime=anime,
+        exact=dict(exact),
+        loose=dict(loose_keys),
+        by_tvdb=dict(by_tvdb),
+        primary=dict(primary),
+        compact=dict(compact_keys),
+    )
 
 
 async def index() -> _Index | None:
@@ -165,23 +191,40 @@ def _names(name: str) -> list[str]:
 
 
 def resolve_in(table: _Index, name: str) -> Resolution:
-    """Which AniDB anime an Erai show name is; pure, over a built index."""
+    """Which AniDB anime an Erai show name is; pure, over a built index.
+
+    Strictest first, each level only when it finds exactly one anime: main
+    and official titles, then synonyms too, then romanisation-insensitive,
+    then without spaces, then a sequel traced by its season number.
+    """
     names = _names(name)
-    for lookup, method in ((table.exact, "exact"), (table.loose, "loose")):
-        key = normalise if lookup is table.exact else loose
-        seen: set[int] = set()
+    ambiguous: set[int] = set()
+    levels = (
+        (table.primary, normalise, "exact"),
+        (table.exact, normalise, "exact"),
+        (table.loose, loose, "loose"),
+        (table.compact, compact, "loose"),
+    )
+    for lookup, key, method in levels:
         for variant in names:
             hits = lookup.get(key(variant), set())
-            seen |= hits
             if len(hits) == 1:
                 aid = next(iter(hits))
                 return Resolution(table.anime[aid], method if variant == names[0] else "split")
-        if len(seen) > 1:
-            return Resolution(
-                candidates=sorted(seen),
-                error="AniDB match is ambiguous: " + ", ".join(table.anime[a].title for a in sorted(seen)[:4]),
-            )
-    return _resolve_season(table, names[0])
+            if len(hits) > 1 and not ambiguous:
+                ambiguous = set(hits)
+    seasonal = _resolve_season(table, names[0])
+    if seasonal.anime is None and ":" in names[0]:
+        # "Ore dake Level Up na Ken Season 2: Arise from the Shadow": the
+        # season marker sits before a subtitle.
+        seasonal = _resolve_season(table, names[0].rsplit(":", 1)[0])
+    if seasonal.anime is not None or not ambiguous:
+        return seasonal
+    return Resolution(
+        candidates=sorted(ambiguous),
+        error="AniDB match is ambiguous: "
+        + ", ".join(table.anime[a].title for a in sorted(ambiguous)[:4]),
+    )
 
 
 def _resolve_season(table: _Index, name: str) -> Resolution:
@@ -197,7 +240,12 @@ def _resolve_season(table: _Index, name: str) -> Resolution:
         return Resolution(error="No AniDB anime has this title")
     base = match["base"] or match["base_only"]
     part = int(match["part"] or match["part_only"] or 1)
-    bases = table.exact.get(normalise(base)) or table.loose.get(loose(base)) or set()
+    bases = (
+        table.primary.get(normalise(base))
+        or table.exact.get(normalise(base))
+        or table.loose.get(loose(base))
+        or set()
+    )
     shows = {table.anime[aid].tvdb_id for aid in bases if table.anime[aid].tvdb_id}
     if len(shows) != 1:
         return Resolution(error="No AniDB anime has this title, and its season cannot be traced")
@@ -207,6 +255,8 @@ def _resolve_season(table: _Index, name: str) -> Resolution:
         season = str(max(seasons)) if seasons else None
     elif match["season"] or match["nth"]:
         season = str(int(match["season"] or match["nth"]))
+    elif match["spelled"]:
+        season = str(_SPELLED[match["spelled"].casefold()])
     else:
         # A bare "Part N" continues whichever season the base name is.
         own = [table.anime[aid].tvdb_season for aid in bases if table.anime[aid].tvdb_season]
