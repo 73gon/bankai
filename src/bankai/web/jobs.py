@@ -449,6 +449,23 @@ _JOB_ARCHIVE_SECONDS = 3600.0
 _SHOKO_LINK_SECONDS = 600.0
 
 
+async def _refresh_library() -> None:
+    """Keep the library tree current, and tell Shoko when the anime side changed.
+
+    Shoko cannot notice new, moved or removed files on the Windows drive by
+    itself, so a change seen here -- a download, a file added by hand, a
+    renamed folder -- is what triggers its scan.
+    """
+    from pathlib import Path
+
+    from bankai.web import library_walk, shoko_link
+
+    changed = await asyncio.to_thread(library_walk.refresh_all)
+    anime_root = str(Path(get_settings().transfer.anime_shows_dir))
+    if anime_root in changed and await shoko_link.scan_import_folder():
+        log.info("Anime library changed; asked Shoko to scan it")
+
+
 def _archive_jobs() -> int:
     from bankai.web import erai
 
@@ -504,9 +521,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
             next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
             if walk_task is not None and walk_task.exception() is not None:
                 log.warning("library walk refresh failed: %s", walk_task.exception())
-            from bankai.web import library_walk
-
-            walk_task = asyncio.ensure_future(asyncio.to_thread(library_walk.refresh_all))
+            walk_task = asyncio.ensure_future(_refresh_library())
         if time.monotonic() >= next_release_pass:
             next_release_pass = time.monotonic() + _RELEASE_RECONCILE_SECONDS
             try:

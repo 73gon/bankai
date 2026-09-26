@@ -243,11 +243,22 @@ def files(roots: list[str | Path], *, rescan: bool = False) -> list[dict]:
     return out
 
 
-def refresh_all() -> int:
+def _contents(tree: dict[str, Any] | None) -> frozenset:
+    """What a tree holds: every video by path, size and mtime."""
+    return frozenset(
+        (directory, name, size, mtime)
+        for directory, node in ((tree or {}).get("dirs") or {}).items()
+        for name, size, mtime in node["files"]
+    )
+
+
+def refresh_all() -> set[str]:
     """Check every root in use against the disk; for the scheduler.
 
-    Returns how many roots were refreshed. Roots nobody has asked for are not
-    walked: which ones matter is decided by the pages and settings in use.
+    Returns the roots whose videos changed -- added, removed, renamed, moved
+    or rewritten -- since the last look. A re-listing that finds the same
+    files, like the hourly full walk, is not a change. Roots nobody has asked
+    for are not walked: which ones matter is decided by the pages in use.
     """
     _load()
     now = time.time()
@@ -255,14 +266,18 @@ def refresh_all() -> int:
         for stale in [r for r, t in _TREES.items() if now - t.get("used_at", now) >= UNUSED_SECONDS]:
             _TREES.pop(stale)
         roots = list(_TREES)
+    changed: set[str] = set()
     for root in roots:
         with _root_lock(root):
             with _LOCK:
-                full_at = (_TREES.get(root) or {}).get("full_at", 0.0)
-            _refresh(root, full=now - full_at >= FULL_WALK_SECONDS)
+                before = _TREES.get(root)
+                full_at = (before or {}).get("full_at", 0.0)
+            after = _refresh(root, full=now - full_at >= FULL_WALK_SECONDS)
+            if _contents(before) != _contents(after):
+                changed.add(root)
     if roots:
         _save()
-    return len(roots)
+    return changed
 
 
 def forget() -> None:

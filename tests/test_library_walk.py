@@ -127,7 +127,7 @@ def test_a_root_nobody_reads_any_more_is_dropped(tmp_path, monkeypatch):
     library_walk.files([tmp_path])
     library_walk._TREES[str(tmp_path)]["used_at"] = time.time() - library_walk.UNUSED_SECONDS - 1
 
-    assert library_walk.refresh_all() == 0
+    assert library_walk.refresh_all() == set()
     assert str(tmp_path) not in library_walk._TREES
 
 
@@ -143,3 +143,27 @@ def test_a_change_in_the_same_tick_as_the_listing_is_still_found(tmp_path):
 
     library_walk.refresh_all()
     assert "Frieren - S01E02.mkv" in _names([tmp_path])
+
+
+def test_a_refresh_reports_the_roots_whose_videos_changed(tmp_path):
+    """What tells Shoko to scan: nothing else lets it see changes on the drive."""
+    season = _library(tmp_path)
+    _age(tmp_path)
+    library_walk.files([tmp_path])
+
+    assert library_walk.refresh_all() == set()
+
+    (season / "Frieren - S01E02.mkv").write_bytes(b"x")
+    _bump(season)
+    assert library_walk.refresh_all() == {str(tmp_path)}
+    # Seen once; the next round with nothing new reports nothing.
+    assert library_walk.refresh_all() == set()
+
+
+def test_a_full_relisting_that_finds_the_same_files_is_not_a_change(tmp_path, monkeypatch):
+    _library(tmp_path)
+    _age(tmp_path)
+    library_walk.files([tmp_path])
+    monkeypatch.setattr(library_walk, "FULL_WALK_SECONDS", 0)
+
+    assert library_walk.refresh_all() == set()

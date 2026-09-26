@@ -112,3 +112,23 @@ def test_only_anidb_releases_bankai_published_are_touched(world):
         }
     }
     assert shoko_link._candidates(state) == []
+
+
+@pytest.mark.parametrize(("changed", "scans"), [("anime", 1), ("movies", 0), (None, 0)])
+def test_a_change_in_the_anime_library_is_what_makes_shoko_scan(monkeypatch, tmp_path, changed, scans):
+    from bankai.web import jobs, library_walk
+
+    anime_root = tmp_path / "shows_anime"
+    roots = {"anime": str(anime_root), "movies": str(tmp_path / "movies")}
+    settings = Settings(transfer={"anime_shows_dir": str(anime_root)})
+    monkeypatch.setattr(jobs, "get_settings", lambda: settings)
+    monkeypatch.setattr(library_walk, "refresh_all", lambda: {roots[changed]} if changed else set())
+    calls: list[bool] = []
+
+    async def scan():
+        calls.append(True)
+        return True
+
+    monkeypatch.setattr(shoko_link, "scan_import_folder", scan)
+    asyncio.run(jobs._refresh_library())
+    assert len(calls) == scans

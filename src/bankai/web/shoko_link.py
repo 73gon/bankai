@@ -61,6 +61,23 @@ async def _import_folder_id() -> int | None:
     return None
 
 
+async def scan_import_folder() -> bool:
+    """Have Shoko look at the anime library for new, moved or removed files.
+
+    Shoko cannot watch it itself: folder watching rests on Linux file
+    notifications, which do not cross the 9p mount the library sits on, and
+    Shoko has no timed scan. bankai already notices every change through the
+    library tree, so it asks for a scan exactly when one happened.
+    """
+    if not shoko.configured():
+        return False
+    folder = await _import_folder_id()
+    if folder is None:
+        return False
+    await shoko._send("GET", f"/api/v3/ImportFolder/{folder}/Scan")
+    return True
+
+
 async def link_published(state: dict[str, Any]) -> dict[str, int]:
     """One round of linking; marks each release it has settled.
 
@@ -116,7 +133,5 @@ async def link_published(state: dict[str, Any]) -> dict[str, int]:
             log.warning("Could not link %s in Shoko: %s", relative, exc)
             tally["failed"] += 1
     if rescan:
-        folder = await _import_folder_id()
-        if folder is not None:
-            await shoko._send("GET", f"/api/v3/ImportFolder/{folder}/Scan")
+        await scan_import_folder()
     return tally
