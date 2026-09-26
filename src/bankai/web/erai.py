@@ -1068,6 +1068,45 @@ def _verified_automation_hashes() -> set[str]:
     return verified
 
 
+# Holding a download slot without moving. qBittorrent's "don't count slow
+# torrents" does not cover these: a torrent that never received metadata, or
+# one with nobody to download from, still takes a slot.
+_STUCK_STATES = {"stalledDL", "metaDL"}
+_STUCK_SECONDS = 6 * 3600
+
+
+async def _rotate_stuck_torrents(
+    state: dict[str, Any], qbit: Any, torrents: list[Any], *, now: float | None = None
+) -> int:
+    """Send downloads that have sat in a slot for hours doing nothing to the back.
+
+    Twenty dead swarms -- one old show nobody seeds -- held every active slot
+    for two days while 477 queued downloads with seeders waited behind them.
+    Nothing is removed: each gets another turn once the queue comes round.
+    qBittorrent does not say when a torrent left the queue, so bankai notes
+    when it first saw one stuck and counts from there.
+    """
+    now = time.time() if now is None else now
+    stuck = {torrent.hash: torrent for torrent in torrents if torrent.state in _STUCK_STATES}
+    # Only what is stuck right now is remembered; one that moved starts over.
+    seen = {
+        info_hash: since
+        for info_hash, since in state.get("stuck_since", {}).items()
+        if info_hash in stuck
+    }
+    rotate = []
+    for info_hash, torrent in stuck.items():
+        since = seen.setdefault(info_hash, now)
+        if now - since >= _STUCK_SECONDS and torrent.last_activity < since:
+            rotate.append(info_hash)
+    if rotate:
+        await qbit.bottom_priority(rotate)
+        seen = {info_hash: since for info_hash, since in seen.items() if info_hash not in rotate}
+        log.info("[anime] %d stuck download(s) moved to the back of the queue", len(rotate))
+    state["stuck_since"] = seen
+    return len(rotate)
+
+
 async def _cleanup_verified_torrents(qbit: Any, torrents: list[Any]) -> int:
     """Remove only completed Erai downloads with a verified final publication."""
 
@@ -2786,6 +2825,10 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                             category=settings.qbittorrent.category
                         )
                 state["last_cleanup_count"] = cleaned
+                try:
+                    await _rotate_stuck_torrents(state, qbit, torrents)
+                except Exception as exc:
+                    log.warning("[anime] could not rotate stuck downloads: %s", exc)
                 download_free_bytes = await qbit.free_space_bytes()
                 state["download_free_space_gib"] = (
                     round(download_free_bytes / _GIB, 1)

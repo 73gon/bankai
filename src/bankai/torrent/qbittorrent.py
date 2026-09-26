@@ -48,6 +48,7 @@ class TorrentStatus:
     seeds_total: int = 0
     peers_total: int = 0
     added_on: int = 0
+    last_activity: int = 0
 
 
 _DONE_STATES = {"uploading", "stalledUP", "queuedUP", "pausedUP", "forcedUP", "checkingUP"}
@@ -211,6 +212,14 @@ class QBittorrentClient:
         )
         response.raise_for_status()
 
+    async def bottom_priority(self, hashes: list[str]) -> None:
+        """Send torrents to the back of the download queue."""
+        await self._ensure_login()
+        response = await self._client.post(
+            "/api/v2/torrents/bottomPrio", data={"hashes": "|".join(hashes)}
+        )
+        response.raise_for_status()
+
     async def force_start(self, torrent_hash: str, *, enabled: bool) -> None:
         """Let an active Bankai worker bypass blocked qBittorrent queue slots."""
         await self._ensure_login()
@@ -286,4 +295,5 @@ def _to_status(row: dict[str, Any]) -> TorrentStatus:
         seeds_total=int(row.get("num_complete") or 0),
         peers_total=int(row.get("num_incomplete") or 0),
         added_on=int(row.get("added_on") or 0),
+        last_activity=max(0, int(row.get("last_activity") or 0)),
     )
