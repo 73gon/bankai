@@ -59,6 +59,7 @@ export function AniDBLinkDialog({
         <DialogHeader>
           <DialogTitle>Link to AniDB</DialogTitle>
           <DialogDescription>
+            Search by romaji or English title, or paste an AniDB id or anidb.net link.
             Every release named after any of the anime&apos;s AniDB titles is matched from then on.
           </DialogDescription>
         </DialogHeader>
@@ -66,7 +67,7 @@ export function AniDBLinkDialog({
           className='flex items-center gap-2'
           onSubmit={(event) => { event.preventDefault(); void search(query); }}
         >
-          <Input aria-label='Search AniDB' value={query} onChange={(event) => setQuery(event.target.value)} className='flex-1' />
+          <Input aria-label='Search AniDB' placeholder='Title, AniDB id or anidb.net link' value={query} onChange={(event) => setQuery(event.target.value)} className='flex-1' />
           <Button type='submit' variant='secondary' size='icon' aria-label='Search AniDB' disabled={searching}><Search /></Button>
         </form>
         <div className='min-h-0 flex-1 overflow-y-auto'>
@@ -81,8 +82,8 @@ export function AniDBLinkDialog({
                   <AnimePoster url={anime.poster_url} title={anime.title} className='w-10 shrink-0 rounded' />
                   <div className='min-w-0 flex-1'>
                     <p className='truncate text-sm font-medium' title={anime.title}>{anime.title}</p>
-                    {anime.english_title && anime.english_title !== anime.title && (
-                      <p className='truncate text-xs text-muted-foreground'>{anime.english_title}</p>
+                    {anime.english_title && anime.english_title.toLocaleLowerCase() !== anime.title.toLocaleLowerCase() && (
+                      <p className='truncate text-xs text-muted-foreground' title='English title'>{anime.english_title}</p>
                     )}
                     <p className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
                       {/* Outside the Shoko collection only the title list is known,

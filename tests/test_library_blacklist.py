@@ -172,6 +172,40 @@ def test_search_is_exact_first_and_fuzzy_only_as_the_fallback(monkeypatch):
     assert [c["fuzzy"] for c in calls] == ["false", "true"]
 
 
+def test_an_english_synonym_stands_in_where_anidb_has_no_official_english_title():
+    row = {
+        "ID": 2736,
+        "Title": "Some Display Title",
+        "Titles": [
+            {"Name": "One Piece: Taose! Kaizoku Ganzack", "Language": "x-jat", "Type": "Main"},
+            {"Name": "One Piece: Defeat the Pirate Ganzack!", "Language": "en", "Type": "Synonym"},
+        ],
+    }
+    anime = shoko._anime(row)
+    # The romaji main title, not Shoko's display title.
+    assert anime["title"] == "One Piece: Taose! Kaizoku Ganzack"
+    assert anime["english_title"] == "One Piece: Defeat the Pirate Ganzack!"
+    # A synonym is shown, never matched on.
+    assert "One Piece: Defeat the Pirate Ganzack!" not in anime["matching_titles"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["17617", " aid 17617 ", "aid:17617", "https://anidb.net/anime/17617", "https://anidb.net/perl-bin/animedb.pl?show=anime&aid=17617"],
+)
+def test_an_anidb_id_or_link_is_looked_up_by_id(monkeypatch, query):
+    calls: list[dict] = []
+
+    async def fake_get(path, /, **params):
+        calls.append(params)
+        return {"List": [{"ID": 17617, "Title": "Sousou no Frieren", "Titles": []}]}
+
+    monkeypatch.setattr(shoko, "_get", fake_get)
+    found = asyncio.run(shoko.search_anidb(query))
+    assert [row["anidb_id"] for row in found] == [17617]
+    assert calls[0]["searchById"] == "true" and calls[0]["query"] == "17617"
+
+
 def test_a_poster_shoko_never_downloaded_is_not_offered():
     """For an anime outside the collection Shoko holds no file and answers 404."""
     assert shoko.poster_path({"ID": 17617, "Source": "AniDB", "Type": "Poster", "RelativeFilepath": None}) is None

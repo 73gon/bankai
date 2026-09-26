@@ -8,6 +8,7 @@ So for anime identity bankai asks Shoko.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -21,6 +22,7 @@ log = get_logger(__name__)
 # synonyms ("AoT", "Monster") would blacklist or match whatever else happens
 # to share them.
 _MATCHING_TITLE_TYPES = {"main", "official"}
+_ANIDB_ID = re.compile(r"^\s*(?:aid\s*[:=]?\s*)?(\d{1,6})\s*$|anidb\.net/(?:anime/|.*[?&]aid=)(\d{1,6})", re.I)
 
 
 class ShokoError(RuntimeError):
@@ -100,22 +102,29 @@ def poster_path(image: dict[str, Any] | None) -> str | None:
     return f"/api/anime/anidb/image/{image['Source']}/{image['Type']}/{image['ID']}"
 
 
+def _titled(titles: list[dict[str, Any]], kind: str, language: str | None = None) -> str | None:
+    for title in titles:
+        if str(title.get("Type") or "").casefold() != kind:
+            continue
+        if language is not None and str(title.get("Language") or "").casefold() != language:
+            continue
+        if title.get("Name"):
+            return str(title["Name"])
+    return None
+
+
 def _anime(row: dict[str, Any]) -> dict[str, Any]:
     titles = row.get("Titles") or []
-    english = next(
-        (
-            title["Name"]
-            for title in titles
-            if str(title.get("Language") or "").casefold() == "en"
-            and str(title.get("Type") or "").casefold() in _MATCHING_TITLE_TYPES
-        ),
-        None,
-    )
+    # Many anime have no official English title on AniDB, only an English
+    # synonym -- the One Piece specials, for one -- and showed romaji alone.
+    english = _titled(titles, "official", "en") or _titled(titles, "synonym", "en")
     air_date = str(row.get("AirDate") or "")
     return {
         "anidb_id": int(row["ID"]),
         # AniDB's main title is the romaji one Erai-raws names releases after.
-        "title": row.get("Title") or english or "",
+        # Shoko's own "Title" follows its display language, so for anime in
+        # the collection it can be the English one instead.
+        "title": _titled(titles, "main") or row.get("Title") or english or "",
         "english_title": english,
         "matching_titles": sorted(
             {
@@ -161,6 +170,11 @@ async def search_anidb(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
     query = query.strip()
     if not query:
         return []
+    # An AniDB id, as a number, "aid 12345" or a pasted anidb.net link.
+    by_id = _ANIDB_ID.search(query)
+    if by_id:
+        aid = by_id.group(1) or by_id.group(2)
+        return [_anime(row) for row in await _search(aid, fuzzy=False, limit=5, by_id=True)]
     rows = await _search(query, fuzzy=False, limit=limit)
     if not rows:
         rows = await _search(query, fuzzy=True, limit=limit)
