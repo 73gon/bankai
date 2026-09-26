@@ -1,9 +1,12 @@
-"""One review card per anime, every season of it merged."""
+"""Review and blacklist cards are AniDB entries; the name keys still serve older decisions."""
 
 from __future__ import annotations
 
+from xml.etree import ElementTree as ET
+
 import pytest
 
+from bankai.metadata import anidb
 from bankai.web import erai
 
 
@@ -56,18 +59,38 @@ def test_different_shows_stay_apart():
     )
 
 
+TITLES = ET.fromstring(
+    """<animetitles>
+  <anime aid="17449"><title xml:lang="x-jat" type="main">"Oshi no Ko"</title></anime>
+  <anime aid="18086"><title xml:lang="x-jat" type="main">"Oshi no Ko" (2024)</title>
+    <title xml:lang="en" type="official">Oshi no Ko Season 2</title></anime>
+  <anime aid="16000"><title xml:lang="x-jat" type="main">Spy x Family</title></anime>
+</animetitles>"""
+)
+RECORDS = ET.fromstring(
+    """<anime-list>
+  <anime anidbid="17449" tvdbid="421069" defaulttvdbseason="1" episodeoffset="0"/>
+  <anime anidbid="18086" tvdbid="421069" defaulttvdbseason="2" episodeoffset="0"/>
+</anime-list>"""
+)
+
+
 @pytest.fixture()
 def held(monkeypatch):
-    """Held releases of two seasons of one show and one other show."""
+    """Held releases of two seasons of one show, one other show, one unknown name."""
     releases = {
         "a" * 40: {"status": "held", "title": "[Erai-raws] Oshi no Ko - 03 [1080p][HEVC]", "reason": "No German subtitles"},
         "b" * 40: {"status": "held", "title": "[Erai-raws] Oshi no Ko 2nd Season - 01 [1080p][HEVC]", "reason": "No German subtitles"},
-        "c" * 40: {"status": "held", "title": "[Erai-raws] Oshi no Ko 2nd Season - 02 [1080p][HEVC]", "reason": "TVDB match is ambiguous"},
+        "c" * 40: {"status": "held", "title": "[Erai-raws] Oshi no Ko 2nd Season - 02 (Repack) [1080p][HEVC]", "reason": "No German subtitles"},
         "d" * 40: {"status": "held", "title": "[Erai-raws] Spy x Family - 01 [1080p][HEVC]", "reason": "No German subtitles"},
+        "e" * 40: {"status": "held", "title": "[Erai-raws] Nobody Knows This One - 01 [1080p][HEVC]", "reason": "No AniDB anime has this title"},
     }
     state = {"releases": releases, "held": []}
     policies: dict = {}
     saved: dict = {"retries": {}}
+    table = anidb.build_index(TITLES, RECORDS)
+    monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
+    monkeypatch.setattr(erai, "_SHOW_KEYS_CACHE", None)
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
     monkeypatch.setattr(erai, "_load_policies", lambda: policies)
@@ -76,75 +99,87 @@ def held(monkeypatch):
     monkeypatch.setattr(erai, "_load_retry_requests", lambda: saved["retries"])
     monkeypatch.setattr(erai, "_save_retry_requests", lambda value: saved.update(retries=value))
     monkeypatch.setattr(erai, "_catalog_entries", lambda state: {})
-    return {"state": state, "policies": policies, "saved": saved}
-
-
-def test_two_seasons_are_one_card(held):
-    cards = erai.review_items(held["state"])
-
-    assert [card["source_title"] for card in cards] == ["Oshi no Ko", "Spy x Family"]
-    oshi = cards[0]
-    assert oshi["release_count"] == 3
-    assert oshi["seasons"] == [2]
-    assert set(oshi["reasons"]) == {"No German subtitles", "TVDB match is ambiguous"}
-    assert len(oshi["keys"]) == 2
-
-
-def test_the_card_lists_every_season_s_releases(held):
-    key = erai.review_items(held["state"])[0]["key"]
-    rows = erai.review_releases(key)
-    # Season-less first episode last, the numbered season in order.
-    assert [(row["season"], row["episode"]) for row in rows] == [(2, 1), (2, 2), (None, 3)]
-
-
-def test_a_decision_on_the_card_covers_every_season(held, monkeypatch):
-    import asyncio
 
     async def no_cycle(**kwargs):
         return None
 
-    # The decision schedules a retry cycle; that is the automation's business.
     monkeypatch.setattr(erai, "run_cycle", no_cycle)
+    return {"state": state, "policies": policies, "table": table}
+
+
+def test_each_season_is_its_own_card_as_anidb_splits_them(held):
+    cards = {card["key"]: card for card in erai.review_items(held["state"], held["table"])}
+
+    assert set(cards) == {"anidb:17449", "anidb:18086", "anidb:16000", erai._mapping_key("[Erai-raws] Nobody Knows This One - 01 [1080p]")}
+    assert cards["anidb:17449"]["release_count"] == 1
+    # A "(Repack)" variant lands on its season's card, not one of its own.
+    assert cards["anidb:18086"]["release_count"] == 2
+    assert cards["anidb:18086"]["anidb_title"] == '"Oshi no Ko" (2024)'
+    assert cards["anidb:18086"]["english_title"] == "Oshi no Ko Season 2"
+
+
+def test_the_card_lists_its_entry_s_releases_only(held):
+    rows = erai.review_releases("anidb:18086")
+    assert [row["episode"] for row in rows] == [1, 2]
+
+
+def test_discarding_a_season_blocks_that_anidb_entry_only(held):
+    import asyncio
+
+    asyncio.run(erai.review_action("b" * 40, "blacklist"))
+
+    assert list(held["policies"]) == ["anidb:18086"]
+    assert held["policies"]["anidb:18086"]["anidb_id"] == 18086
+    releases = held["state"]["releases"]
+    assert releases["b" * 40]["status"] == "blacklisted"
+    assert releases["c" * 40]["status"] == "blacklisted"
+    # Season 1 is an AniDB entry of its own and stays in review.
+    assert releases["a" * 40]["status"] == "held"
+
+
+def test_a_decision_on_the_card_covers_every_release_of_the_entry(held):
+    import asyncio
+
     asyncio.run(erai.review_action("b" * 40, "allow_german"))
 
-    assert {row["mode"] for row in held["policies"].values()} == {"german_allowed"}
+    # Both Erai names of season 2, and nothing of season 1 or Spy x Family.
     assert set(held["policies"]) == {
-        erai._mapping_key("[Erai-raws] Oshi no Ko - 03 [1080p][HEVC]"),
         erai._mapping_key("[Erai-raws] Oshi no Ko 2nd Season - 01 [1080p][HEVC]"),
+        erai._mapping_key("[Erai-raws] Oshi no Ko 2nd Season - 02 (Repack) [1080p][HEVC]"),
     }
-    # Spy x Family is another show and was not touched.
-    assert erai._mapping_key("[Erai-raws] Spy x Family - 01 [1080p][HEVC]") not in held["policies"]
 
 
-def test_a_show_discarded_across_seasons_is_one_blacklist_card(held):
+def test_one_entry_blocked_twice_is_one_blacklist_card(held):
     held["policies"].update(
         {
-            "oshi no ko": {"mode": "blacklisted", "source_title": "Oshi no Ko"},
-            "oshi no ko 2nd season": {"mode": "blacklisted", "source_title": "Oshi no Ko 2nd Season"},
-            "spy x family": {"mode": "blacklisted", "source_title": "Spy x Family"},
+            "anidb:18086": {"mode": "blacklisted", "anidb_id": 18086, "anidb_title": '"Oshi no Ko" (2024)'},
+            "oshi no ko 2nd season": {"mode": "blacklisted", "anidb_id": 18086, "source_title": "Oshi no Ko 2nd Season"},
+            "anidb:17449": {"mode": "blacklisted", "anidb_id": 17449, "anidb_title": '"Oshi no Ko"'},
         }
     )
-    cards = erai.blacklist_items()
+    cards = {card["key"]: card for card in erai.blacklist_items()}
+    assert set(cards) == {"anidb:18086", "anidb:17449"}
+    assert sorted(cards["anidb:18086"]["keys"]) == ["anidb:18086", "oshi no ko 2nd season"]
 
-    assert [card["source_title"] for card in cards] == ["Oshi no Ko", "Spy x Family"]
-    assert sorted(cards[0]["keys"]) == ["oshi no ko", "oshi no ko 2nd season"]
 
-
-def test_restoring_the_card_restores_every_season(held, monkeypatch):
-    policies = {
-        "oshi no ko": {"mode": "blacklisted", "source_title": "Oshi no Ko"},
-        "oshi no ko 2nd season": {"mode": "blacklisted", "source_title": "Oshi no Ko 2nd Season"},
-        "spy x family": {"mode": "blacklisted", "source_title": "Spy x Family"},
-    }
-    saved: list[dict] = []
-    monkeypatch.setattr(erai, "_load_policies", lambda: dict(policies))
-    monkeypatch.setattr(erai, "_save_policies", lambda value: saved.append(dict(value)))
-    # The app calls this inside its event loop, where the retry cycle it
-    # schedules can run; here there are no held releases to retry anyway.
+def test_restoring_an_entry_brings_back_its_releases_only(held, monkeypatch):
+    held["policies"].update(
+        {
+            "anidb:18086": {"mode": "blacklisted", "anidb_id": 18086},
+            "anidb:17449": {"mode": "blacklisted", "anidb_id": 17449},
+        }
+    )
+    releases = held["state"]["releases"]
+    for info_hash in ("a" * 40, "b" * 40):
+        releases[info_hash]["status"] = "blacklisted"
+    monkeypatch.setattr(erai, "_hold", lambda state, entry, reason: None)
     monkeypatch.setattr(erai, "_request_series_retries", lambda state, key: 0)
+    popped = []
+    real_save = erai._save_policies
+    monkeypatch.setattr(erai, "_save_policies", lambda value: popped.append(sorted(value)) or real_save(value))
 
-    key = erai.blacklist_items()[0]["key"]
-    erai.remove_blacklist(key)
+    erai.remove_blacklist("anidb:18086")
 
-    # Both seasons came off the blacklist; the other show stayed on it.
-    assert list(saved[-1]) == ["spy x family"]
+    assert releases["b" * 40]["status"] == "held"
+    assert releases["a" * 40]["status"] == "blacklisted"
+    assert popped[-1] == ["anidb:17449"]

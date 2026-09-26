@@ -176,6 +176,11 @@ async def index() -> _Index | None:
     return _INDEX[1]
 
 
+def cached_index() -> _Index | None:
+    """The index as last built, without loading anything; for sync callers."""
+    return _INDEX[1] if _INDEX is not None else None
+
+
 async def anime(aid: int) -> AniDBAnime | None:
     table = await index()
     return table.anime.get(int(aid)) if table else None

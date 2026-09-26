@@ -1545,9 +1545,14 @@ def create_app() -> Any:
 
     @app.get("/api/anime/review")
     async def anime_review() -> dict:
+        from bankai.metadata import anidb
         from bankai.web.anime_library import enrich_review_rows
 
-        rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.review_items))
+        # Cards are AniDB entries; the title index has to be loaded to tell.
+        table = await anidb.index()
+        rows = await enrich_review_rows(
+            await asyncio.to_thread(erai_mod.review_items, None, table)
+        )
         return {"items": rows}
 
     @app.post("/api/anime/review/owned")
@@ -1575,27 +1580,34 @@ def create_app() -> Any:
         Deleting published episodes is destructive and deliberately separate
         from blacklisting, so it only happens when delete_files is asked for.
         """
-        from bankai.web.anime_library import show_metadata
+        from bankai.web import library_walk
 
         delete_files = bool(req.get("delete_files"))
+        try:
+            card = await erai_mod.review_card(info_hash)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if delete_files and not card.startswith("anidb:"):
+            # One card is one season, and without its AniDB entry there is no
+            # telling which files of the show folder are that season's.
+            raise HTTPException(
+                status_code=422,
+                detail="Choose this show's AniDB anime first, so only its own files are deleted",
+            )
         try:
             decision = await erai_mod.review_action(info_hash, "blacklist")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        key = str(decision.get("key") or "")
-        english_title = ""
-        if delete_files:
-            saved = (await asyncio.to_thread(erai_mod._load_mappings)).get(key) or {}
-            metadata = await show_metadata(
-                (await asyncio.to_thread(erai_mod._load_policies)).get(key, {}).get(
-                    "source_title", ""
-                ),
-                saved.get("tvdb_id"),
-            )
-            english_title = str((metadata or {}).get("english_title") or "")
-        purged = await erai_mod.purge_series(
-            key, english_title=english_title, delete_files=delete_files
+        files = (
+            await asyncio.to_thread(erai_mod.entry_files, int(card.split(":", 1)[1]))
+            if delete_files
+            else []
         )
+        purged = await erai_mod.purge_series(
+            card, english_title="", delete_files=delete_files, extra_files=files
+        )
+        if files:
+            library_walk.mark_stale()
         return {**decision, **purged}
 
     @app.get("/api/anime/review/{key}/releases")
@@ -2130,6 +2142,10 @@ def create_app() -> Any:
         with suppress(Exception):
             state = await asyncio.to_thread(erai_mod._load_state)
         if state is not None:
+            with suppress(Exception):
+                from bankai.metadata import anidb
+
+                await anidb.index()  # review counts cards, which are AniDB entries
             with suppress(Exception):
                 rows = await asyncio.to_thread(webjobs.anime_snapshot)
                 rows = [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows, state)]

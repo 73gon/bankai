@@ -189,7 +189,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           <h1 className='font-serif text-3xl font-semibold'>{blacklist ? 'Blacklist' : 'Held for review'}</h1>
           <p className='text-sm text-muted-foreground'>{blacklist
             ? 'Shows here are ignored permanently until you restore them.'
-            : 'One card per show. A decision applies to every season of it.'}</p>
+            : 'One card per AniDB entry, which is one season or cour. A decision applies to that entry only.'}</p>
         </div>
         {!blacklist && <Button variant='secondary' onClick={() => void retryAll()} disabled={Boolean(busy) || items.length === 0}>
           <RefreshCw data-icon='inline-start' /> Recheck everything
@@ -385,7 +385,12 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={Boolean(busy)}>
                         <Ban data-icon='inline-start' /> Discard
                       </Button>
-                      <Button variant='destructive' onClick={() => setPurgeTarget(item)} disabled={Boolean(busy)}>
+                      <Button
+                        variant='destructive'
+                        onClick={() => setPurgeTarget(item)}
+                        disabled={Boolean(busy) || !item.anidb_id}
+                        title={item.anidb_id ? undefined : 'Choose the AniDB anime first, so only its own files are deleted'}
+                      >
                         <Trash2 data-icon='inline-start' /> Discard and delete
                       </Button>
 

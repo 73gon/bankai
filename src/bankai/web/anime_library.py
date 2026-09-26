@@ -981,17 +981,17 @@ async def enrich_review_rows(rows: list[dict]) -> list[dict]:
             mappings.get(row["key"], {}),
         )
         async with slots:
-            metadata = await show_metadata(row["source_title"], saved.get("tvdb_id"))
-        # A blacklist card linked to AniDB carries its own names and poster,
-        # which stand in wherever TVDB never recognised the show.
-        row["title"] = (
-            metadata.get("english_title")
-            or row.get("english_title")
-            or row.get("anidb_title")
-            or row["source_title"]
-        )
+            metadata = await show_metadata(
+                row["source_title"], saved.get("tvdb_id") or row.get("tvdb_id")
+            )
+        if row.get("anidb_id"):
+            # One AniDB entry: its own name. TVDB names the whole show, the
+            # same for every season, so it only lends the cover here.
+            row["title"] = row.get("english_title") or row.get("anidb_title") or row["source_title"]
+        else:
+            row["title"] = metadata.get("english_title") or row["source_title"]
+            row["year"] = metadata.get("year")
         row["tvdb_id"] = metadata.get("tvdb_id") or saved.get("tvdb_id") or row.get("tvdb_id")
-        row["year"] = metadata.get("year")
         row["poster_url"] = metadata.get("poster_url") or row.get("anidb_poster_url")
 
     await asyncio.gather(*(enrich(row) for row in rows))

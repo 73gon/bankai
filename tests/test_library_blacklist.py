@@ -40,14 +40,21 @@ FRIEREN = {
 
 def test_a_release_under_another_anidb_title_is_blacklisted(store):
     """Erai names releases after AniDB's romaji title; the card may carry another."""
-    store["policies"]["frieren beyond journey s end"] = {
+    store["policies"]["anidb:17617"] = {
         "mode": "blacklisted",
+        "anidb_id": 17617,
         "source_title": "Frieren: Beyond Journey's End",
         "anidb_titles": FRIEREN["matching_titles"],
     }
     assert erai._title_blacklisted("[Erai-raws] Sousou no Frieren - 03 [1080p][HEVC]")
-    assert erai._title_blacklisted("[Erai-raws] Sousou no Frieren 2nd Season - 01 [1080p]")
+    # The second season is an AniDB entry of its own and is not blocked with it.
+    assert not erai._title_blacklisted("[Erai-raws] Sousou no Frieren 2nd Season - 01 [1080p]")
     assert not erai._title_blacklisted("[Erai-raws] Spy x Family - 01 [1080p]")
+
+
+def test_a_decision_from_before_anidb_entries_still_blocks_the_whole_show(store):
+    store["policies"]["sousou no frieren"] = {"mode": "blacklisted", "source_title": "Sousou no Frieren"}
+    assert erai._title_blacklisted("[Erai-raws] Sousou no Frieren 2nd Season - 01 [1080p]")
 
 
 def test_two_names_of_one_anime_are_one_blacklist_card(store):
@@ -95,6 +102,30 @@ def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatc
         async def aclose(self): ...
 
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", NoQbit)
+    from xml.etree import ElementTree as ET
+
+    from bankai.metadata import anidb
+
+    table = anidb.build_index(
+        ET.fromstring(
+            """<animetitles>
+  <anime aid="17617"><title xml:lang="x-jat" type="main">Sousou no Frieren</title></anime>
+  <anime aid="18886"><title xml:lang="x-jat" type="main">Sousou no Frieren (2026)</title></anime>
+</animetitles>"""
+        ),
+        ET.fromstring(
+            """<anime-list>
+  <anime anidbid="17617" tvdbid="424536" defaulttvdbseason="1" episodeoffset="0"/>
+  <anime anidbid="18886" tvdbid="424536" defaulttvdbseason="2" episodeoffset="0"/>
+</anime-list>"""
+        ),
+    )
+
+    async def index():
+        return table
+
+    monkeypatch.setattr(anidb, "index", index)
+    monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
 
     result = asyncio.run(
         erai.blacklist_show(
@@ -108,7 +139,10 @@ def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatc
 
     assert not folder.exists()
     assert result["deleted_files"] == 1
-    assert store["policies"]["sousou no frieren"]["anidb_id"] == 17617
+    # The whole show was removed, so each of its AniDB entries is blocked --
+    # each its own blacklist card, restorable on its own.
+    assert {key for key in store["policies"]} == {"anidb:17617", "anidb:18886"}
+    assert result["entries"] == [17617, 18886]
     assert store["state"]["releases"]["b" * 40]["status"] == "blacklisted"
     # Tracked, it would have come back as an empty library card.
     assert "424536" not in store["state"]["series"]
@@ -218,3 +252,50 @@ def test_best_match_needs_one_exact_title():
     ]
     assert shoko.best_match(results, "Sousou no Frieren")["anidb_id"] == 1
     assert shoko.best_match(results, "Nothing like it") is None
+
+
+def test_discard_and_delete_takes_only_the_entry_s_own_episodes(store, monkeypatch):
+    """A show folder holds every season; one AniDB entry's files are only its own."""
+    from xml.etree import ElementTree as ET
+
+    from bankai.metadata import anidb
+
+    table = anidb.build_index(
+        ET.fromstring(
+            """<animetitles>
+  <anime aid="1"><title xml:lang="x-jat" type="main">Dr. Stone: Science Future</title></anime>
+  <anime aid="2"><title xml:lang="x-jat" type="main">Dr. Stone: Science Future (2025)</title></anime>
+</animetitles>"""
+        ),
+        ET.fromstring(
+            """<anime-list>
+  <anime anidbid="1" tvdbid="99" defaulttvdbseason="4" episodeoffset="0"/>
+  <anime anidbid="2" tvdbid="99" defaulttvdbseason="4" episodeoffset="12"/>
+</anime-list>"""
+        ),
+    )
+    monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
+    from bankai.config import Settings
+
+    monkeypatch.setattr(erai, "get_settings", lambda: Settings(transfer={"anime_shows_dir": str(store["root"])}))
+    store["state"]["series"]["99"] = {"english_title": "Dr. Stone"}
+    season = store["root"] / "Dr. Stone" / "Season 04"
+    season.mkdir(parents=True)
+    for number in range(1, 25):
+        (season / f"Dr. Stone - S04E{number:02d}.mkv").write_bytes(b"x")
+    (store["root"] / "Dr. Stone" / "Season 03").mkdir()
+    (store["root"] / "Dr. Stone" / "Season 03" / "Dr. Stone - S03E13.mkv").write_bytes(b"x")
+    own = store["root"] / "Dr. Stone Science Future (2025)"
+    own.mkdir()
+    (own / "Dr. Stone Science Future (2025) - 25.mkv").write_bytes(b"x")
+    monkeypatch.setattr(
+        "bankai.backend.transfer._existing_show_folder",
+        lambda name, cache, roots=None: store["root"] / "Dr. Stone",
+    )
+
+    picked = sorted(path.name for path in erai.entry_files(2))
+
+    # Part 2 of season 4 is episodes 13-24 there, plus its own folder.
+    assert picked == sorted(
+        [f"Dr. Stone - S04E{n:02d}.mkv" for n in range(13, 25)] + ["Dr. Stone Science Future (2025) - 25.mkv"]
+    )

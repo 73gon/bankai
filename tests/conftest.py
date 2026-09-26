@@ -4,7 +4,22 @@ from __future__ import annotations
 
 import pytest
 
+from bankai.metadata import anidb
 from bankai.web import library_walk
+
+
+@pytest.fixture(autouse=True)
+def _no_anidb_download(monkeypatch):
+    """The AniDB title index is AniDB's and Anime-Lists' files; never fetched in a test.
+
+    Tests that need one build it from small XML with anidb.build_index.
+    """
+
+    async def no_index():
+        return None
+
+    monkeypatch.setattr(anidb, "index", no_index)
+    monkeypatch.setattr(anidb, "_INDEX", None)
 
 
 @pytest.fixture(autouse=True)

@@ -458,7 +458,7 @@ def test_anime_review_and_blacklist_actions(client, monkeypatch):
             "updated_at": 1,
         }
     ]
-    monkeypatch.setattr("bankai.web.erai.review_items", lambda: review)
+    monkeypatch.setattr("bankai.web.erai.review_items", lambda *args: review)
     monkeypatch.setattr("bankai.web.erai.blacklist_items", lambda: review)
     monkeypatch.setattr(
         "bankai.web.anime_library.enrich_review_rows",
