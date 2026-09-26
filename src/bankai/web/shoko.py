@@ -68,8 +68,15 @@ async def login(username: str, password: str, *, device: str = "bankai") -> str:
 
 
 def poster_path(image: dict[str, Any] | None) -> str | None:
-    """bankai's own URL for a Shoko image, which needs the API key to fetch."""
+    """bankai's own URL for a Shoko image, which needs the API key to fetch.
+
+    Only for an image Shoko has actually downloaded. Search results carry a
+    poster record for every anime, but for one outside the collection there
+    is no file behind it (no RelativeFilepath) and Shoko answers 404.
+    """
     if not image or not image.get("ID") or not image.get("Source") or not image.get("Type"):
+        return None
+    if not image.get("RelativeFilepath"):
         return None
     return f"/api/anime/anidb/image/{image['Source']}/{image['Type']}/{image['ID']}"
 

@@ -136,7 +136,7 @@ def test_shoko_results_keep_only_titles_worth_matching():
             {"Name": "Frieren", "Language": "en", "Type": "Short"},
             {"Name": "葬送のフリーレン", "Language": "ja", "Type": "Official"},
         ],
-        "Poster": {"ID": 5, "Source": "AniDB", "Type": "Poster"},
+        "Poster": {"ID": 5, "Source": "AniDB", "Type": "Poster", "RelativeFilepath": "AniDB/5.jpg"},
     }
     anime = shoko._anime(row)
     assert anime["anidb_id"] == 17617
@@ -170,6 +170,11 @@ def test_search_is_exact_first_and_fuzzy_only_as_the_fallback(monkeypatch):
     calls.clear()
     assert [row["anidb_id"] for row in asyncio.run(shoko.search_anidb("Friern"))] == [1]
     assert [c["fuzzy"] for c in calls] == ["false", "true"]
+
+
+def test_a_poster_shoko_never_downloaded_is_not_offered():
+    """For an anime outside the collection Shoko holds no file and answers 404."""
+    assert shoko.poster_path({"ID": 17617, "Source": "AniDB", "Type": "Poster", "RelativeFilepath": None}) is None
 
 
 def test_best_match_needs_one_exact_title():
