@@ -2307,11 +2307,13 @@ def anime_download(
     magnet_uri: str = typer.Option(..., "--magnet-uri"),
     info_hash: str = typer.Option(..., "--info-hash"),
     media_kind: str = typer.Option(..., "--kind", help="show | movie"),
-    tvdb_id: int = typer.Option(..., "--tvdb-id"),
+    tvdb_id: int = typer.Option(0, "--tvdb-id"),
     english_title: str = typer.Option(..., "--english-title"),
     year: int | None = typer.Option(None, "--year"),
     season: int | None = typer.Option(None, "--season"),
     episode: int | None = typer.Option(None, "--episode"),
+    anidb_id: int | None = typer.Option(None, "--anidb-id"),
+    anidb_title: str | None = typer.Option(None, "--anidb-title"),
     require_german_subtitles: bool = typer.Option(False, "--require-german-subtitles"),
     replace_existing: bool = typer.Option(False, "--replace-existing"),
     cleanup_torrent: bool = typer.Option(False, "--cleanup-torrent"),
@@ -2322,6 +2324,9 @@ def anime_download(
 
     if not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url):
         console.print("[red]anime downloads only accept nyaa.si sources[/red]")
+        raise typer.Exit(code=1)
+    if not anidb_id and not tvdb_id:
+        console.print("[red]an anime download needs --anidb-id or --tvdb-id[/red]")
         raise typer.Exit(code=1)
 
     async def go() -> None:
@@ -2338,6 +2343,8 @@ def anime_download(
                 year=year,
                 season_override=season,
                 episode_override=episode,
+                anidb_id=anidb_id,
+                anidb_title=anidb_title,
                 require_german_subtitles=require_german_subtitles,
                 cleanup_torrent=cleanup_torrent,
                 replace_existing=replace_existing,

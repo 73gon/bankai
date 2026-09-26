@@ -21,6 +21,15 @@ from bankai.web.anime import AnimeTVDBMatch, NyaaEntry
 from bankai.web.jobs import PendingJob
 
 
+@pytest.fixture(autouse=True)
+def _tvdb_identity(monkeypatch):
+    """These tests cover the TVDB identification route, behind anime.identity.
+
+    The AniDB route, the default, is covered in test_anidb_admission.py.
+    """
+    monkeypatch.setattr(erai, "_anidb_identity", lambda: False)
+
+
 def entry(
     title: str = "[Erai-raws] Test Show - 01 [1080p][MultiSub]", number: int = 1
 ) -> NyaaEntry:

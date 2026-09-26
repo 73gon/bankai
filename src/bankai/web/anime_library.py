@@ -557,6 +557,8 @@ def erai_source_titles(state: dict | None = None) -> dict[str, str]:
     titles: dict[str, str] = {}
     for canonical, row in state.get("canonical", {}).items():
         tvdb_id = str(canonical).split("|")[0]
+        if tvdb_id.startswith("anidb:"):
+            continue  # keyed by AniDB, not a TVDB series
         release = releases.get(str(row.get("info_hash") or ""))
         if not release:
             continue

@@ -117,6 +117,17 @@ def render_movie_path(
     return library / "Movies" / folder / filename
 
 
+def render_anidb_episode_path(*, library: Path, title: str, episode: int) -> Path:
+    """``Shows/<AniDB title>/<AniDB title> - 05.mkv``: one folder per AniDB entry.
+
+    No season folder: an AniDB entry is one season or cour already, and the
+    folder name is its main title, which AniDB keeps unique by adding the year
+    to remakes and sequels.
+    """
+    folder = sanitise(title)
+    return library / "Shows" / folder / sanitise(f"{folder} - {episode:02d}.mkv")
+
+
 def render_episode_path(
     *,
     library: Path,

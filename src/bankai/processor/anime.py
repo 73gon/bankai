@@ -22,7 +22,11 @@ from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.metadata.tvdb import TVDBClient, TVDBEpisode
-from bankai.processor.naming import render_episode_path, render_movie_path
+from bankai.processor.naming import (
+    render_anidb_episode_path,
+    render_episode_path,
+    render_movie_path,
+)
 from bankai.torrent import actions as torrent_actions
 from bankai.torrent.matcher import find_video_files, parse_se, pick_movie_file
 from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError, TorrentStatus
@@ -144,6 +148,51 @@ def episode_identity(
         item = regular[number - 1]
         return EpisodeIdentity(item.season, item.episode, item.name)
     return EpisodeIdentity(1, number)
+
+
+def anidb_episode_number(filename: str, *, episode_override: int | None = None) -> int | None:
+    """The AniDB episode a file is: its own number, as Erai numbers per AniDB entry."""
+    if episode_override is not None:
+        return episode_override
+    match = _ANIME_EPISODE.search(Path(filename).stem)
+    return int(match.group("episode")) if match else None
+
+
+def _organize_anidb(
+    sources: list[Path],
+    *,
+    title: str,
+    episode_override: int | None,
+    library: Path,
+    require_german_subtitles: bool,
+    replace_existing: bool,
+) -> list[Path]:
+    """Stage each video under its AniDB folder, with no TVDB lookup at all."""
+    if episode_override is not None and len(sources) != 1:
+        raise RuntimeError(
+            "a manual episode override requires a torrent containing exactly one video file"
+        )
+    outputs: list[Path] = []
+    total = max(1, len(sources))
+    for index, source in enumerate(sources):
+        if require_german_subtitles:
+            _require_german_subtitles(source)
+        episode = anidb_episode_number(source.name, episode_override=episode_override)
+        if episode is None:
+            log.warning("[anime] skipped file with no episode number: %s", source.name)
+            continue
+        destination = render_anidb_episode_path(
+            library=library, title=title, episode=episode
+        ).with_suffix(source.suffix.casefold())
+        _copy_with_sidecars(
+            source,
+            destination,
+            start_percent=index / total * 100.0,
+            end_percent=(index + 1) / total * 100.0,
+            replace=replace_existing,
+        )
+        outputs.append(destination)
+    return outputs
 
 
 def _mapped_path(raw: str) -> Path:
@@ -337,6 +386,8 @@ async def download_anime(
     year: int | None,
     season_override: int | None = None,
     episode_override: int | None = None,
+    anidb_id: int | None = None,
+    anidb_title: str | None = None,
     require_german_subtitles: bool = False,
     cleanup_torrent: bool = False,
     replace_existing: bool = False,
@@ -398,9 +449,7 @@ async def download_anime(
         if background_id:
             torrent_actions.clear_active_torrent(background_id)
 
-        log.info(
-            'BANKAI_STAGE step=2 total=%d key=organize label="Organize with TVDB"', total_steps
-        )
+        log.info('BANKAI_STAGE step=2 total=%d key=organize label="Organize"', total_steps)
         root = _download_root(status)
         outputs: list[Path] = []
         output = settings.output
@@ -421,6 +470,17 @@ async def download_anime(
             ).with_suffix(source.suffix.casefold())
             _copy_with_sidecars(source, destination, replace=replace_existing)
             outputs.append(destination)
+        elif anidb_id:
+            outputs.extend(
+                _organize_anidb(
+                    find_video_files(root),
+                    title=anidb_title or english_title,
+                    episode_override=episode_override,
+                    library=output.directory,
+                    require_german_subtitles=require_german_subtitles,
+                    replace_existing=replace_existing,
+                )
+            )
         else:
             tvdb_episodes = await _tvdb_episode_map(tvdb_id)
             sources = find_video_files(root)
@@ -534,7 +594,8 @@ async def download_anime(
         return {
             "final_path": str(outputs[0]),
             "paths": [str(path) for path in outputs],
-            "tvdb_id": tvdb_id,
+            "tvdb_id": tvdb_id or None,
+            "anidb_id": anidb_id,
             "torrent_hash": torrent_hash,
         }
     finally:

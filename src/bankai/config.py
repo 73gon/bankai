@@ -107,6 +107,10 @@ class AnimeAutomationSettings(BaseModel):
     """Safety and scheduling policy for autonomous Erai-raws ingestion."""
 
     enabled: bool = False
+    # What a release is identified as. "anidb": an AniDB anime and the
+    # release's own episode number, filed one folder per AniDB entry. "tvdb":
+    # the former TVDB series/season/episode route, kept to switch back to.
+    identity: Literal["anidb", "tvdb"] = "anidb"
     rss_url: str = "https://nyaa.si/?page=rss&u=Erai-raws&c=1_2"
     poll_interval_seconds: int = Field(default=900, ge=60)
     settle_minutes: int = Field(default=30, ge=0)

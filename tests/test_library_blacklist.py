@@ -152,7 +152,7 @@ def test_search_is_exact_first_and_fuzzy_only_as_the_fallback(monkeypatch):
     """Fuzzy pads results with loose neighbours; exact answers when it can."""
     calls: list[dict] = []
 
-    async def fake_get(path, **params):
+    async def fake_get(path, /, **params):
         calls.append(params)
         if params["fuzzy"] == "false" and params["query"] == "Frieren":
             return {"List": [{"ID": 17617, "Title": "Sousou no Frieren", "Titles": []}]}

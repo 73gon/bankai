@@ -445,6 +445,8 @@ _LIBRARY_WALK_SECONDS = 60.0
 # Superseded and month-old finished jobs are moved out of the jobs directory,
 # which every snapshot visits; see bgjobs.archive_finished_jobs.
 _JOB_ARCHIVE_SECONDS = 3600.0
+# How often Shoko is told which AniDB episode each newly published file is.
+_SHOKO_LINK_SECONDS = 600.0
 
 
 def _archive_jobs() -> int:
@@ -469,7 +471,17 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
     next_archive_pass = 0.0
+    next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS
+    link_task: asyncio.Future | None = None
     while True:
+        # Also off to the side: Shoko calls, and AniDB behind them, are slow.
+        if time.monotonic() >= next_link_pass and (link_task is None or link_task.done()):
+            next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS
+            if link_task is not None and link_task.exception() is not None:
+                log.warning("Shoko linking failed: %s", link_task.exception())
+            from bankai.web import erai as erai_links
+
+            link_task = asyncio.ensure_future(erai_links.link_in_shoko())
         if time.monotonic() >= next_archive_pass:
             next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
             try:

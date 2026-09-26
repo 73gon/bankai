@@ -41,15 +41,34 @@ def _client(timeout: float = 15.0) -> httpx.AsyncClient:
     )
 
 
-async def _get(path: str, **params: Any) -> Any:
+async def _get(endpoint: str, /, **params: Any) -> Any:
+    # Positional-only: Shoko has a query parameter called "path" of its own.
     if not configured():
         raise ShokoError("Shoko is not connected; run `bankai shoko login` on the server")
     async with _client() as client:
-        response = await client.get(path, params={k: v for k, v in params.items() if v is not None})
+        response = await client.get(endpoint, params={k: v for k, v in params.items() if v is not None})
     if response.status_code == 401:
         raise ShokoError("Shoko rejected bankai's API key; run `bankai shoko login` again")
     response.raise_for_status()
     return response.json() if response.content else None
+
+
+async def _send(method: str, endpoint: str, /, *, json_body: Any = None, **params: Any) -> Any:
+    if not configured():
+        raise ShokoError("Shoko is not connected; run `bankai shoko login` on the server")
+    async with _client() as client:
+        response = await client.request(
+            method,
+            endpoint,
+            json=json_body,
+            params={k: v for k, v in params.items() if v is not None},
+        )
+    if response.status_code == 404:
+        return None
+    if response.status_code == 401:
+        raise ShokoError("Shoko rejected bankai's API key; run `bankai shoko login` again")
+    response.raise_for_status()
+    return response.json() if response.content else True
 
 
 async def login(username: str, password: str, *, device: str = "bankai") -> str:

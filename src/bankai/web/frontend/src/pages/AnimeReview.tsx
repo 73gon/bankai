@@ -34,6 +34,8 @@ function storedView(): View {
 export default function AnimeReview({ blacklist = false }: { blacklist?: boolean }) {
   const [view, setView] = useState<View>(storedView);
   const [linkTarget, setLinkTarget] = useState<AnimeReviewItem | null>(null);
+  // A held show whose AniDB anime the user picks, for review rather than the blacklist.
+  const [anidbFor, setAnidbFor] = useState<AnimeReviewItem | null>(null);
   const [items, setItems] = useState<AnimeReviewItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -91,6 +93,18 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       /* a remembered view is a convenience */
     }
   }, [view]);
+
+  async function chooseAnidb(anime: { anidb_id: number; title: string }) {
+    if (!anidbFor?.release_title) return;
+    try {
+      const result = await api.saveAnidbMapping(anidbFor.release_title, anime.anidb_id);
+      toast.success(anidbFor.source_title + ' is ' + anime.title + ' · ' + result.requested + ' releases rechecking');
+      setAnidbFor(null);
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    }
+  }
 
   async function link(anime: { anidb_id: number; title: string }) {
     if (!linkTarget) return;
@@ -254,6 +268,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             const reasons = (item.reasons || [item.reason]).filter(Boolean) as string[];
             const german = reasons.some((reason) => reason.includes('German subtitles'));
             const tvdb = reasons.some((reason) => reason.includes('TVDB'));
+            const anidb = reasons.some((reason) => reason.includes('AniDB'));
             const count = item.release_count || 1;
             return (
               <Card key={item.key} className='flex flex-col overflow-hidden'>
@@ -345,6 +360,17 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <Check data-icon='inline-start' /> Already downloaded
                       </Button>
 
+                      {anidb && item.release_title && (
+                        <Button
+                          variant='outline'
+                          className='col-span-2'
+                          onClick={() => setAnidbFor(item)}
+                          disabled={Boolean(busy)}
+                        >
+                          <Search data-icon='inline-start' /> Choose AniDB anime
+                        </Button>
+                      )}
+
                       {tvdb && item.release_title && (
                         <Button
                           variant='outline'
@@ -381,6 +407,11 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         name={linkTarget ? linkTarget.source_title || linkTarget.title : null}
         onClose={() => setLinkTarget(null)}
         onPick={link}
+      />
+      <AniDBLinkDialog
+        name={anidbFor ? anidbFor.source_title || anidbFor.title : null}
+        onClose={() => setAnidbFor(null)}
+        onPick={chooseAnidb}
       />
 
       {/* Sixty-three releases would have made one card taller than the page,

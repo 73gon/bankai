@@ -795,6 +795,11 @@ export const api = {
     request<{ ok: boolean; keys: string[]; caught: number }>('/api/anime/blacklist/link', {
       method: 'POST', body: JSON.stringify({ key, anidb_id: anidbId }),
     }),
+  /** Remember which AniDB anime a held show name is; its releases are rechecked. */
+  saveAnidbMapping: (releaseTitle: string, anidbId: number) =>
+    request<{ ok: boolean; requested: number; title: string }>('/api/anime/mapping/anidb', {
+      method: 'POST', body: JSON.stringify({ release_title: releaseTitle, anidb_id: anidbId }),
+    }),
   /** AniDB anime by title, through Shoko. */
   anidbSearch: (q: string) =>
     request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),

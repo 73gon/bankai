@@ -1635,6 +1635,23 @@ def create_app() -> Any:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/api/anime/mapping/anidb")
+    async def anime_mapping_anidb(req: dict) -> dict:
+        """Remember which AniDB anime a held show name is, and recheck its releases."""
+        from bankai.web import shoko
+
+        release_title = str(req.get("release_title") or "").strip()
+        anidb_id = req.get("anidb_id")
+        if not release_title or not str(anidb_id or "").isdigit():
+            raise HTTPException(status_code=422, detail="release_title and anidb_id are required")
+        try:
+            anime = await shoko.anidb_anime(int(anidb_id))
+        except shoko.ShokoError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        key = await asyncio.to_thread(erai_mod.save_anidb_mapping, release_title, anime)
+        requested = await asyncio.to_thread(erai_mod.retry_series, release_title)
+        return {"ok": True, "key": key, "requested": requested, "title": anime.get("title")}
+
     @app.get("/api/anime/anidb/search")
     async def anime_anidb_search(q: str = Query(..., min_length=1, max_length=200)) -> dict:
         """AniDB anime by title, through Shoko's local copy of AniDB's title list."""
