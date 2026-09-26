@@ -103,7 +103,12 @@ async def link_published(state: dict[str, Any]) -> dict[str, int]:
             await shoko._send(
                 "POST",
                 f"/api/v3/File/{file['ID']}/LinkFromSeries",
-                json_body={"SeriesID": series["IDs"]["ID"], "RangeStart": str(episode)},
+                # A one-episode range; Shoko requires both ends.
+                json_body={
+                    "SeriesID": series["IDs"]["ID"],
+                    "RangeStart": str(episode),
+                    "RangeEnd": str(episode),
+                },
             )
             release["shoko_linked"] = True
             tally["linked"] += 1

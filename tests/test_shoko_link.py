@@ -62,7 +62,12 @@ def test_an_unidentified_file_is_linked_to_its_anidb_episode(world):
     tally = asyncio.run(shoko_link.link_published(state))
 
     assert tally["linked"] == 1
-    assert ("POST", "/api/v3/File/39/LinkFromSeries", {"SeriesID": 11, "RangeStart": "5"}) in world["calls"]
+    # Shoko requires both ends of the range, even for one episode.
+    assert (
+        "POST",
+        "/api/v3/File/39/LinkFromSeries",
+        {"SeriesID": 11, "RangeStart": "5", "RangeEnd": "5"},
+    ) in world["calls"]
     assert state["releases"]["a" * 40]["shoko_linked"] is True
 
 
