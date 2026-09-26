@@ -520,7 +520,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
         if time.monotonic() >= next_walk_pass and (walk_task is None or walk_task.done()):
             next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
             if walk_task is not None and walk_task.exception() is not None:
-                log.warning("library walk refresh failed: %s", walk_task.exception())
+                log.warning("library walk refresh failed: %r", walk_task.exception())
             walk_task = asyncio.ensure_future(_refresh_library())
         if time.monotonic() >= next_release_pass:
             next_release_pass = time.monotonic() + _RELEASE_RECONCILE_SECONDS

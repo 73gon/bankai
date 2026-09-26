@@ -15,6 +15,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.web import shoko
@@ -74,7 +76,12 @@ async def scan_import_folder() -> bool:
     folder = await _import_folder_id()
     if folder is None:
         return False
-    await shoko._send("GET", f"/api/v3/ImportFolder/{folder}/Scan")
+    try:
+        await shoko._send("GET", f"/api/v3/ImportFolder/{folder}/Scan")
+    except httpx.ReadTimeout:
+        # Shoko walks the folder before it answers, which over 9p outlasts the
+        # timeout. The request arrived; the scan is running.
+        log.info("Shoko is still scanning the anime library")
     return True
 
 

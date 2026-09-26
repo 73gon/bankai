@@ -132,3 +132,22 @@ def test_a_change_in_the_anime_library_is_what_makes_shoko_scan(monkeypatch, tmp
     monkeypatch.setattr(shoko_link, "scan_import_folder", scan)
     asyncio.run(jobs._refresh_library())
     assert len(calls) == scans
+
+
+def test_a_scan_shoko_is_still_running_counts_as_requested(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from bankai.web import shoko, shoko_link
+
+    async def folder():
+        return 1
+
+    async def slow(*args, **kwargs):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(shoko, "configured", lambda: True)
+    monkeypatch.setattr(shoko_link, "_import_folder_id", folder)
+    monkeypatch.setattr(shoko, "_send", slow)
+    assert asyncio.run(shoko_link.scan_import_folder()) is True
