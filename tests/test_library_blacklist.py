@@ -148,6 +148,30 @@ def test_shoko_results_keep_only_titles_worth_matching():
     assert anime["poster_url"] == "/api/anime/anidb/image/AniDB/Poster/5"
 
 
+def test_search_is_exact_first_and_fuzzy_only_as_the_fallback(monkeypatch):
+    """Fuzzy pads results with loose neighbours; exact answers when it can."""
+    calls: list[dict] = []
+
+    async def fake_get(path, **params):
+        calls.append(params)
+        if params["fuzzy"] == "false" and params["query"] == "Frieren":
+            return {"List": [{"ID": 17617, "Title": "Sousou no Frieren", "Titles": []}]}
+        if params["fuzzy"] == "true":
+            return {"List": [{"ID": 1, "Title": "Friern Typo Match", "Titles": []}]}
+        return {"List": []}
+
+    monkeypatch.setattr(shoko, "_get", fake_get)
+    found = asyncio.run(shoko.search_anidb("Frieren"))
+    assert [row["anidb_id"] for row in found] == [17617]
+    assert [c["fuzzy"] for c in calls] == ["false"]
+    # AniDB's whole title list, not only what the Shoko collection holds.
+    assert calls[0]["local"] == "false"
+
+    calls.clear()
+    assert [row["anidb_id"] for row in asyncio.run(shoko.search_anidb("Friern"))] == [1]
+    assert [c["fuzzy"] for c in calls] == ["false", "true"]
+
+
 def test_best_match_needs_one_exact_title():
     results = [
         {"anidb_id": 1, "matching_titles": ["Sousou no Frieren"]},

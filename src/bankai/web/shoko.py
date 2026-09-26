@@ -107,24 +107,38 @@ def _anime(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def search_anidb(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
-    """AniDB anime by title, from Shoko's local copy of AniDB's title list.
-
-    Local means anime outside the collection are found too, without Shoko
-    spending an AniDB request on each search.
-    """
-    if not query.strip():
-        return []
+async def _search(query: str, *, fuzzy: bool, limit: int, by_id: bool = False) -> list[dict]:
     result = await _get(
         "/api/v3/Series/AniDB/Search",
-        query=query.strip(),
-        local="true",
+        query=query,
+        # Not local: "local" is only what is already in the Shoko collection,
+        # a few series early on, and fuzzy matching then returned the nearest
+        # of those -- "Frieren" came back as Kanojo, Okarishimasu. The full
+        # AniDB title list is what Shoko keeps for exactly this.
+        local="false",
         includeTitles="true",
-        fuzzy="true",
+        fuzzy="true" if fuzzy else "false",
+        searchById="true" if by_id else "false",
         pageSize=limit,
     )
     rows = result.get("List") if isinstance(result, dict) else result
-    return [_anime(row) for row in rows or [] if row.get("ID")]
+    return [row for row in rows or [] if row.get("ID")]
+
+
+async def search_anidb(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    """AniDB anime by title, across AniDB's full title list.
+
+    Exact first: fuzzy matching pads the answer with loose neighbours ("Uma
+    no Friends" for Frieren), so it is only the fallback for a typo that
+    finds nothing otherwise.
+    """
+    query = query.strip()
+    if not query:
+        return []
+    rows = await _search(query, fuzzy=False, limit=limit)
+    if not rows:
+        rows = await _search(query, fuzzy=True, limit=limit)
+    return [_anime(row) for row in rows]
 
 
 async def anidb_anime(anidb_id: int) -> dict[str, Any]:
@@ -133,16 +147,7 @@ async def anidb_anime(anidb_id: int) -> dict[str, Any]:
     Not /Series/AniDB/{id}: that only answers for anime already in the Shoko
     collection, and a show being blacklisted is usually one that is not.
     """
-    result = await _get(
-        "/api/v3/Series/AniDB/Search",
-        query=str(int(anidb_id)),
-        searchById="true",
-        local="true",
-        includeTitles="true",
-        pageSize=5,
-    )
-    rows = result.get("List") if isinstance(result, dict) else result
-    for row in rows or []:
+    for row in await _search(str(int(anidb_id)), fuzzy=False, limit=5, by_id=True):
         if int(row.get("ID") or 0) == int(anidb_id):
             return _anime(row)
     raise ShokoError(f"AniDB has no anime {anidb_id}")
