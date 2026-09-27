@@ -450,6 +450,68 @@ _JOB_ARCHIVE_SECONDS = 3600.0
 _SHOKO_LINK_SECONDS = 600.0
 
 
+# The scheduler's periodic passes as the dashboard shows them: what each does,
+# when it is next due and whether one is running right now.
+_PASS_LABELS: dict[str, tuple[str, float]] = {
+    "release_reconcile": ("Publish finished downloads", _RELEASE_RECONCILE_SECONDS),
+    "library_walk": ("Check the libraries for changes", _LIBRARY_WALK_SECONDS),
+    "codec_sweep": ("Identify episode encodes", _CODEC_SWEEP_SECONDS),
+    "shoko_link": ("Link new episodes in Shoko", _SHOKO_LINK_SECONDS),
+    "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
+}
+_PASSES: dict[str, dict] = {}
+
+
+def _pass_due(name: str, next_monotonic: float) -> None:
+    row = _PASSES.setdefault(name, {"running": False, "last_run": None, "task": None})
+    row["due_at"] = time.time() + max(0.0, next_monotonic - time.monotonic())
+
+
+@contextmanager
+def _pass_running(name: str) -> Iterator[None]:
+    row = _PASSES.setdefault(name, {"running": False, "last_run": None, "task": None})
+    row["running"] = True
+    row["last_run"] = time.time()
+    try:
+        yield
+    finally:
+        row["running"] = False
+
+
+def _pass_task(name: str, task: asyncio.Future) -> None:
+    row = _PASSES.setdefault(name, {"running": False, "last_run": None, "task": None})
+    row["task"] = task
+    row["last_run"] = time.time()
+
+
+def scheduled_passes() -> list[dict]:
+    """Every periodic pass: its label, interval, next due time and whether it runs now."""
+    out = []
+    for name, (label, every) in _PASS_LABELS.items():
+        row = _PASSES.get(name, {})
+        task = row.get("task")
+        out.append(
+            {
+                "name": name,
+                "label": label,
+                "every_seconds": every,
+                "due_at": row.get("due_at"),
+                "last_run": row.get("last_run"),
+                "running": bool(row.get("running") or (task is not None and not task.done())),
+            }
+        )
+    return out
+
+
+def running_operations() -> list[dict]:
+    """Transfers, repacks and torrent replacements running now: their own lane."""
+    return [
+        {"id": job.id, "kind": job.kind, "title": job.title, "started_at": job.started_at}
+        for job in bgjobs.list_jobs()
+        if job.status == "running" and _is_operation(job.kind, getattr(job, "args", None))
+    ]
+
+
 async def _refresh_library() -> None:
     """Keep the library tree current, and tell Shoko when the anime side changed.
 
@@ -491,19 +553,25 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_archive_pass = 0.0
     next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS
     link_task: asyncio.Future | None = None
+    _pass_due("library_walk", next_walk_pass)
+    _pass_due("shoko_link", next_link_pass)
     while True:
         # Also off to the side: Shoko calls, and AniDB behind them, are slow.
         if time.monotonic() >= next_link_pass and (link_task is None or link_task.done()):
             next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS
+            _pass_due("shoko_link", next_link_pass)
             if link_task is not None and link_task.exception() is not None:
                 log.warning("Shoko linking failed: %s", link_task.exception())
             from bankai.web import erai as erai_links
 
             link_task = asyncio.ensure_future(erai_links.link_in_shoko())
+            _pass_task("shoko_link", link_task)
         if time.monotonic() >= next_archive_pass:
             next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
+            _pass_due("job_archive", next_archive_pass)
             try:
-                moved = await asyncio.to_thread(_archive_jobs)
+                with _pass_running("job_archive"):
+                    moved = await asyncio.to_thread(_archive_jobs)
                 if moved:
                     log.info("Archived %d finished job(s) nobody needs any more", moved)
             except asyncio.CancelledError:
@@ -520,31 +588,37 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
         # dispatching queued work must not wait for it.
         if time.monotonic() >= next_walk_pass and (walk_task is None or walk_task.done()):
             next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
+            _pass_due("library_walk", next_walk_pass)
             if walk_task is not None and walk_task.exception() is not None:
                 log.warning("library walk refresh failed: %r", walk_task.exception())
             walk_task = asyncio.ensure_future(_refresh_library())
+            _pass_task("library_walk", walk_task)
         if time.monotonic() >= next_release_pass:
             next_release_pass = time.monotonic() + _RELEASE_RECONCILE_SECONDS
+            _pass_due("release_reconcile", next_release_pass)
             try:
                 from bankai.web import erai
 
-                await erai.reconcile_releases()
+                with _pass_running("release_reconcile"):
+                    await erai.reconcile_releases()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.warning("release reconciliation failed: %s", exc)
         if time.monotonic() >= next_codec_pass:
             next_codec_pass = time.monotonic() + _CODEC_SWEEP_SECONDS
+            _pass_due("codec_sweep", next_codec_pass)
             try:
                 from pathlib import Path
 
                 from bankai.web import anime_library
 
-                result = await asyncio.to_thread(
-                    anime_library.sweep_codecs,
-                    Path(get_settings().transfer.anime_shows_dir),
-                    limit=_CODEC_SWEEP_BATCH,
-                )
+                with _pass_running("codec_sweep"):
+                    result = await asyncio.to_thread(
+                        anime_library.sweep_codecs,
+                        Path(get_settings().transfer.anime_shows_dir),
+                        limit=_CODEC_SWEEP_BATCH,
+                    )
                 if result["probed"]:
                     log.info(
                         "Identified the encode of %d episode(s); %d still unidentified",

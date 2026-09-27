@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import Dashboard from '@/pages/Dashboard';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
 import Library from '@/pages/Library';
@@ -48,7 +49,13 @@ const SYSTEM_NAV = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
+// Above both libraries: what the whole machine is doing.
+const TOP_NAV: Array<{ to: string; label: string; icon: typeof LayoutDashboard; count?: string }> = [
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+];
+
 const NAV_GROUPS = [
+  { label: '', items: TOP_NAV },
   { label: 'Movies & Shows', items: MAS_NAV },
   { label: 'Anime', items: ANIME_NAV },
   { label: '', items: SYSTEM_NAV },
@@ -441,7 +448,8 @@ export default function App() {
         <main className='min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-6'>
           <div className='h-full w-full animate-fade-in'>
             <Routes>
-              <Route path='/' element={<Navigate to='/mas/discover' replace />} />
+              <Route path='/' element={<Navigate to='/dashboard' replace />} />
+          <Route path='/dashboard' element={<Dashboard />} />
 
               {/* Movies & shows. */}
               <Route path='/mas' element={<Navigate to='/mas/discover' replace />} />

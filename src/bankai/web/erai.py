@@ -2869,6 +2869,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             return status(state=state, running=False)
         headers = {"User-Agent": settings.scraper.user_agent}
         enqueued = 0
+        _set_activity("Checking qBittorrent and free space")
         qbit = None
         roster_token = _ROSTERS.set({})
         admission_token = _ADMISSION.set(None)
@@ -2919,9 +2920,13 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             async with httpx.AsyncClient(
                 headers=headers, timeout=30, follow_redirects=True
             ) as client:
+                _set_activity("Gathering held releases to check again")
                 retries = await _retry_candidates(state, client)
+                if not retries_only:
+                    _set_activity("Reading the Erai-raws feed")
                 rss = [] if retries_only else await _fetch_rss(client)
                 if not retries_only:
+                    _set_activity("Indexing the Nyaa catalogue")
                     try:
                         await _crawl_backfill(state, client)
                         state["backfill"]["error"] = None
@@ -2942,9 +2947,13 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                     current = fresh.get(key)
                     if current is None or _rank(entry) > _rank(current):
                         fresh[key] = entry
+                if not retries_only:
+                    _set_activity("Ordering the backlog")
                 normal = [] if retries_only else await _ordered_candidates(state, fresh, client)
                 candidates = list({item.info_hash: item for item in [*retries, *normal]}.values())
                 inspected = 0
+                # The loop stops at this many checks, or earlier at its enqueue cap.
+                budget = min(len(candidates), max(100, policy.max_enqueues_per_cycle * 3))
                 for entry in candidates:
                     if enqueued >= policy.max_enqueues_per_cycle or inspected >= max(
                         100, policy.max_enqueues_per_cycle * 3
@@ -2958,6 +2967,13 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                     if admission is not None and admission["remaining"] <= 0:
                         break
                     inspected += 1
+                    _set_activity(
+                        "Checking releases",
+                        done=inspected,
+                        total=budget,
+                        current=entry.title,
+                        enqueued=enqueued,
+                    )
                     if free_space_gib() is None or free_space_gib() <= policy.min_free_space_gib:
                         break
                     previous = dict(state["releases"].get(entry.info_hash, {}))
@@ -2976,6 +2992,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                     if inspected % 10 == 0:
                         _save_state(state)
                 if prefill:
+                    _set_activity("Swapping queued AVC episodes for HEVC")
                     upgraded = await _upgrade_to_hevc(
                         state, client, limit=policy.max_hevc_upgrades_per_cycle
                     )
@@ -2989,6 +3006,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             state["last_error"] = f"{type(exc).__name__}: {exc}"
             log.warning("Erai automation cycle failed: %s", exc)
         finally:
+            _set_activity(None)
             _ROSTERS.reset(roster_token)
             _ADMISSION.reset(admission_token)
             if qbit is not None:
@@ -3648,6 +3666,65 @@ _HEARTBEAT_SECONDS = 10.0
 _HEARTBEAT_STALE_SECONDS = 180.0
 
 
+# What the cycle is doing right now, for the dashboard: a phase, and while it
+# goes through releases, how far it is and which one it is on.
+_ACTIVITY: dict[str, Any] = {}
+# When the next scheduled cycle starts (wall clock), wherever cycles run.
+_NEXT_CYCLE_AT: float | None = None
+_LAST_ACTIVITY_BEAT = 0.0
+
+
+def _set_activity(phase: str | None, **detail: Any) -> None:
+    global _LAST_ACTIVITY_BEAT
+    if phase is None:
+        _ACTIVITY.clear()
+    else:
+        started = _ACTIVITY.get("cycle_started_at") or time.time()
+        _ACTIVITY.clear()
+        _ACTIVITY.update({"phase": phase, "cycle_started_at": started, **detail})
+    # The web process learns of it from the heartbeat; not more than every 2 s.
+    if _IS_WORKER and time.monotonic() - _LAST_ACTIVITY_BEAT >= 2.0:
+        _LAST_ACTIVITY_BEAT = time.monotonic()
+        _write_heartbeat()
+
+
+def _write_heartbeat(*, stopped: bool = False) -> None:
+    with suppress(OSError):
+        _write_json(
+            _heartbeat_path(),
+            {
+                "pid": os.getpid(),
+                "running": False if stopped else _CYCLE_LOCK.locked(),
+                "activity": {} if stopped else dict(_ACTIVITY),
+                "next_cycle_at": None if stopped else _NEXT_CYCLE_AT,
+                "updated_at": 0 if stopped else time.time(),
+                **({"stopped": True} if stopped else {}),
+            },
+        )
+
+
+def automation_activity() -> dict[str, Any]:
+    """What the automation is doing, wherever it runs; for the dashboard."""
+    if _delegated():
+        beat = _worker_heartbeat()
+        if beat is None:
+            return {"mode": "worker", "alive": False, "running": False, "activity": {}}
+        return {
+            "mode": "worker",
+            "alive": True,
+            "running": bool(beat.get("running")),
+            "activity": beat.get("activity") or {},
+            "next_cycle_at": beat.get("next_cycle_at"),
+        }
+    return {
+        "mode": "inline",
+        "alive": True,
+        "running": _CYCLE_LOCK.locked(),
+        "activity": dict(_ACTIVITY),
+        "next_cycle_at": _NEXT_CYCLE_AT,
+    }
+
+
 def _delegated() -> bool:
     """Does a separate worker process run the cycle, rather than this one?"""
     if _IS_WORKER:
@@ -3733,7 +3810,7 @@ def trigger_cycle() -> dict:
 
 
 async def scheduler() -> None:
-    global _STOP
+    global _STOP, _NEXT_CYCLE_AT
     _STOP = asyncio.Event()
     if _delegated():
         log.info("Anime automation runs in its own worker process")
@@ -3746,6 +3823,7 @@ async def scheduler() -> None:
         except Exception as exc:
             log.warning("Erai scheduler failed: %s", exc)
         timeout = max(60, get_settings().anime.poll_interval_seconds)
+        _NEXT_CYCLE_AT = time.time() + timeout
         with suppress(TimeoutError):
             await asyncio.wait_for(_STOP.wait(), timeout=timeout)
 
@@ -3758,18 +3836,14 @@ async def worker(*, poll_seconds: float = 2.0) -> None:
     re-read when the config file changes, since the web process is where they
     are edited.
     """
-    global _IS_WORKER, _STOP, _WORKER_CYCLE
+    global _IS_WORKER, _STOP, _WORKER_CYCLE, _NEXT_CYCLE_AT
     from bankai.config import active_config_path, reset_settings_cache
 
     _IS_WORKER = True
     _STOP = asyncio.Event()
 
     def beat() -> None:
-        with suppress(OSError):
-            _write_json(
-                _heartbeat_path(),
-                {"pid": os.getpid(), "running": _CYCLE_LOCK.locked(), "updated_at": time.time()},
-            )
+        _write_heartbeat()
 
     async def heartbeat() -> None:
         while not _STOP.is_set():
@@ -3815,9 +3889,10 @@ async def worker(*, poll_seconds: float = 2.0) -> None:
                     beat_task.cancel()
                     beat()
                 if scheduled:
-                    next_scheduled = time.monotonic() + max(
-                        60, get_settings().anime.poll_interval_seconds
-                    )
+                    interval = max(60, get_settings().anime.poll_interval_seconds)
+                    next_scheduled = time.monotonic() + interval
+                    _NEXT_CYCLE_AT = time.time() + interval
+                    beat()
                 continue
             with suppress(TimeoutError):
                 await asyncio.wait_for(_STOP.wait(), timeout=poll_seconds)
@@ -3826,11 +3901,7 @@ async def worker(*, poll_seconds: float = 2.0) -> None:
         pulse.cancel()
         with suppress(asyncio.CancelledError):
             await pulse
-        with suppress(OSError):
-            _write_json(
-                _heartbeat_path(),
-                {"pid": os.getpid(), "running": False, "stopped": True, "updated_at": 0},
-            )
+        _write_heartbeat(stopped=True)
         log.info("Anime automation worker stopped")
 
 

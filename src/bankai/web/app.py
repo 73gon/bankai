@@ -2298,6 +2298,111 @@ def create_app() -> Any:
             counts["qbittorrent"] = len((await snaps["qbittorrent"].get()).value["items"])
         return {"counts": counts}
 
+    # -- Dashboard ---------------------------------------------------------
+
+    async def _dashboard_recent() -> dict:
+        """The latest arrivals in both libraries, with their cards' posters and titles."""
+        from bankai.web import dashboard, library_walk
+
+        s = get_settings()
+
+        def cards_by_folder(cards: list[dict]) -> dict[str, dict]:
+            return {folder: card for card in cards for folder in card.get("folders") or []}
+
+        anime_cards: dict[str, dict] = {}
+        with suppress(Exception):
+            anime_cards = cards_by_folder((await snaps["anime_library"].get()).value["shows"])
+        mas_movies: dict[str, dict] = {}
+        mas_shows: dict[str, dict] = {}
+        with suppress(Exception):
+            mas = (await snaps["mas_library"].get()).value
+            mas_movies = cards_by_folder(mas["movies"])
+            mas_shows = cards_by_folder(mas["shows"])
+
+        def gather() -> dict:
+            anime = library_walk.files([s.transfer.anime_shows_dir])
+            movies = library_walk.files(list(s.web.server_movie_dirs))
+            shows = library_walk.files(list(s.web.server_show_dirs))
+            mas_rows = [
+                *dashboard.recent_additions(movies, mas_movies, kind="movie", href="/mas/library"),
+                *dashboard.recent_additions(shows, mas_shows, kind="show", href="/mas/library"),
+            ]
+            return {
+                "mas": sorted(mas_rows, key=lambda row: -row["added_at"])[: dashboard.RECENT_LIMIT],
+                "anime": dashboard.recent_additions(
+                    anime, anime_cards, kind="show", href="/a/library"
+                ),
+            }
+
+        return await asyncio.to_thread(gather)
+
+    snaps.add(
+        "dashboard_recent",
+        _dashboard_recent,
+        inputs=lambda: _mas_inputs(),
+        tags={"anime", "mas"},
+        min_interval=10.0,
+        max_age=600.0,
+        encode=False,
+    )
+
+    async def _qbit_preferences() -> dict:
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        async with QBittorrentClient() as client:
+            return await client.preferences()
+
+    snaps.add(
+        "qbit_preferences", _qbit_preferences, tags={"qbit"},
+        min_interval=60.0, max_age=300.0, encode=False,
+    )
+
+    async def _dashboard_payload() -> dict:
+        from bankai.web import dashboard
+
+        mas_rows = await asyncio.to_thread(webjobs.snapshot)
+        anime_rows = (await snaps["anime_queue_rows"].get()).value
+        torrents = None
+        with suppress(Exception):
+            torrents = (await snaps["qbittorrent"].get()).value["items"]
+        preferences: dict = {}
+        with suppress(Exception):
+            preferences = (await snaps["qbit_preferences"].get()).value
+        retry_pending = None
+        with suppress(Exception):
+            retry_pending = (await snaps["anime_automation"].get()).value.get("retry_pending")
+        recent: dict = {"mas": [], "anime": []}
+        with suppress(Exception):
+            recent = (await snaps["dashboard_recent"].get()).value
+        s = get_settings()
+        slots = preferences.get("max_active_downloads")
+        return dashboard.build(
+            mas_rows=mas_rows,
+            anime_rows=anime_rows,
+            operations=await asyncio.to_thread(webjobs.running_operations),
+            automation=await asyncio.to_thread(erai_mod.automation_activity),
+            passes=webjobs.scheduled_passes(),
+            torrents=torrents,
+            download_slots=int(slots) if isinstance(slots, int) and slots > 0 else None,
+            pipeline_slots=s.web.max_concurrent_jobs,
+            publish_slots=s.anime.max_concurrent_transfers,
+            retry_pending=retry_pending,
+            recent=recent,
+        )
+
+    snaps.add(
+        "dashboard",
+        _dashboard_payload,
+        tags={"anime", "qbit", "movies", "mas"},
+        min_interval=1.0,
+        max_age=3.0,
+    )
+
+    @app.get("/api/dashboard", response_model=None)
+    async def dashboard_view(request: Request):
+        """Workers and what each is doing, what is due, and what arrived lately."""
+        return snapshots_mod.response(await snaps["dashboard"].get(), request)
+
     # Built from the others, so it can afford to be rebuilt often.
     snaps.add(
         "sidebar_counts",

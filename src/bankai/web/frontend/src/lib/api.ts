@@ -78,6 +78,7 @@ export function recall<T>(path: string): T | undefined {
 
 /** The requests whose answers pages start from; see ``recall``. */
 export const pagePaths = {
+  dashboard: '/api/dashboard',
   qbittorrent: '/api/qbittorrent/torrents',
   animeReview: '/api/anime/review',
   animeBlacklist: '/api/anime/blacklist',
@@ -107,6 +108,80 @@ async function remembering<T>(path: string): Promise<T> {
   const value = await request<T>(path);
   remember(path, value);
   return value;
+}
+
+// ---- Dashboard ----------------------------------------------------------
+
+export interface DashboardTask {
+  title: string;
+  detail: string | null;
+  percent: number | null;
+  started_at: number | null;
+  href: string | null;
+}
+
+export interface DashboardWorker {
+  id: string;
+  name: string;
+  busy: boolean;
+  task: DashboardTask | null;
+}
+
+export interface DashboardLane {
+  key: string;
+  label: string;
+  description: string;
+  /** null: no limit (transfers), or unknown (qBittorrent unreachable). */
+  capacity: number | null;
+  busy: number;
+  workers: DashboardWorker[];
+  /** "down" when the lane's worker is not reporting. */
+  state: string | null;
+}
+
+export interface DashboardDueItem {
+  title: string;
+  detail?: string | null;
+  /** When it is due (scheduled work), or how long it has waited (queued work). */
+  due_at?: number | null;
+  since?: number | null;
+  position?: number | null;
+  count?: number | null;
+  running?: boolean;
+  href?: string | null;
+}
+
+export interface DashboardDueGroup {
+  lane: string;
+  label: string;
+  items: DashboardDueItem[];
+  more: number;
+}
+
+export interface DashboardRecent {
+  key: string;
+  title: string;
+  poster_url: string | null;
+  kind: 'movie' | 'show';
+  href: string;
+  added_at: number;
+  count: number;
+  episode_label: string | null;
+}
+
+export interface Dashboard {
+  generated_at: number;
+  summary: {
+    workers_total: number;
+    workers_busy: number;
+    due_total: number;
+    downloading: number;
+    download_speed: number;
+    automation: 'running' | 'idle' | 'down';
+  };
+  lanes: DashboardLane[];
+  due: DashboardDueGroup[];
+  recent: { mas: DashboardRecent[]; anime: DashboardRecent[] };
 }
 
 export interface HealthResponse {
@@ -887,6 +962,7 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ tvdb_id: tvdbId, title }) },
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
+  dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
   sidebarCounts: () => remembering<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts),
   /** `rescan` checks the library against the disk first instead of the held tree. */
   animeLibrary: async (rescan = false) => {

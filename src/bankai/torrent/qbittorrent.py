@@ -212,6 +212,13 @@ class QBittorrentClient:
         )
         response.raise_for_status()
 
+    async def preferences(self) -> dict[str, Any]:
+        """qBittorrent's settings, such as its queue limits."""
+        await self._ensure_login()
+        response = await self._client.get("/api/v2/app/preferences")
+        response.raise_for_status()
+        return dict(response.json())
+
     async def bottom_priority(self, hashes: list[str]) -> None:
         """Send torrents to the back of the download queue."""
         await self._ensure_login()
