@@ -569,6 +569,21 @@
     inset 0 1px 0 var(--control-highlight),
     0 4px 16px rgb(0 0 0 / 0.04);
 }
+/* A page's table runs the full width of the content, unframed: no card, no
+   panel. It reaches into main's side padding (px-4, md:px-6) and gives that
+   back as the outer cells' padding, so the text still lines up with the page. */
+.table-bleed {
+  --page-gutter: 1rem;
+  margin-inline: calc(-1 * var(--page-gutter));
+  border-top: 1px solid var(--border);
+}
+@media (width >= 48rem) {
+  .table-bleed { --page-gutter: 1.5rem; }
+}
+.table-bleed :is(th, td):first-child { padding-left: var(--page-gutter); }
+.table-bleed :is(th, td):last-child { padding-right: var(--page-gutter); }
+.table-bleed thead { background: var(--background); }
+
 /* The raised treatment on something that is not a control: the wordmark tile. */
 .raised {
   background-color: var(--control-surface);

@@ -10,6 +10,7 @@ ambiguity.
 from __future__ import annotations
 
 import asyncio
+import functools
 import html
 import json
 import re
@@ -1162,6 +1163,7 @@ async def _retry_candidates(state: dict[str, Any], client: httpx.AsyncClient) ->
     return sorted(candidates, key=_episode_order)
 
 
+@functools.lru_cache(maxsize=65536)
 def _mapping_key(release_title: str) -> str:
     structured = anime_mod.deconstruct_release(release_title)
     query = (
@@ -2752,8 +2754,13 @@ async def _ordered_candidates(
     # Named AniDB parts share one TVDB parent. Order by published season and
     # offset rather than alphabetically sorting "Kashin" before "Ketsubetsu".
     part_keys = {}
-    for title in {_mapping_key(entry.title) for entry in by_hash.values()}:
-        sample = next(entry for entry in by_hash.values() if _mapping_key(entry.title) == title)
+    # One sample per show, found in one pass: searching every release again
+    # for each show's first was quadratic, and over a catalogue of tens of
+    # thousands it held the event loop -- and so every page -- for minutes.
+    samples: dict[str, anime_mod.NyaaEntry] = {}
+    for entry in by_hash.values():
+        samples.setdefault(_mapping_key(entry.title), entry)
+    for title, sample in samples.items():
         parts = await anime_mapping.anidb_parts(anime_mod.clean_release_title(sample.title))
         if len(parts) == 1 and (parts[0].record.get("defaulttvdbseason") or "").isdigit():
             part = parts[0]

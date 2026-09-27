@@ -361,7 +361,7 @@ export default function QBittorrent() {
       ) : visible.length === 0 ? (
         <EmptyState icon={Download} title={query ? 'No matching downloads' : 'No torrents'} description={query ? 'Try another filter.' : 'qBittorrent has no downloads yet.'} />
       ) : (
-        <div className='panel min-h-0 flex-1 overflow-auto'>
+        <div className='table-bleed min-h-0 flex-1 overflow-auto'>
           <table className='w-full min-w-[1180px] border-collapse text-sm'>
             <thead className='sticky top-0 z-10 bg-card text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
               <tr className='border-b border-border'>

@@ -375,7 +375,7 @@ export default function AnimeLibrary() {
         </div>
         </div>
       ) : (
-        <div className='panel min-h-0 flex-1 overflow-auto'>
+        <div className='table-bleed min-h-0 flex-1 overflow-auto'>
           <table className='w-full min-w-[820px] border-collapse text-sm'>
             <thead className='sticky top-0 z-10 bg-card'>
               <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>

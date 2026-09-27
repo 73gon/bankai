@@ -210,7 +210,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           description={blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}
         />
       ) : blacklist && view === 'table' ? (
-        <div className='panel overflow-auto'>
+        <div className='table-bleed overflow-auto'>
           <table className='w-full min-w-[720px] border-collapse text-sm'>
             <thead className='sticky top-0 z-10 bg-card'>
               <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>

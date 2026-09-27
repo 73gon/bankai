@@ -280,7 +280,7 @@ export default function AnimeQueue() {
         </ToggleGroup>
       </div>
 
-      <div className='panel min-h-0 flex-1 overflow-auto'>
+      <div className='table-bleed min-h-0 flex-1 overflow-auto'>
         <div className='min-w-full'>
           {loading && jobs.length === 0 ? (
             <div className='flex min-h-40 items-center justify-center'><Spinner /></div>

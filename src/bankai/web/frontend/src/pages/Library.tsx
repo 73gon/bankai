@@ -1583,7 +1583,7 @@ export default function Library() {
       ) : filtered.length === 0 ? (
         <EmptyState icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
       ) : (
-        <div ref={tableScrollRef} className='min-h-0 flex-1 overflow-auto rounded-lg border'>
+        <div ref={tableScrollRef} className='table-bleed min-h-0 flex-1 overflow-auto'>
           <table className='w-full text-sm'>
             <thead className='sticky top-0 z-10 bg-card text-left text-xs uppercase tracking-wide text-foreground'>
               <tr>

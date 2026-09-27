@@ -121,7 +121,7 @@ export default function MasLibrary() {
       );
     }
     return (
-      <div className='overflow-x-auto'>
+      <div className='table-bleed overflow-x-auto'>
         <table className='w-full border-collapse text-sm'>
           <thead>
             <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>

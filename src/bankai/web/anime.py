@@ -8,6 +8,7 @@ when uploader-description filtering is requested.
 from __future__ import annotations
 
 import asyncio
+import functools
 import html
 import re
 import time
@@ -95,6 +96,9 @@ def split_filter_terms(raw: str | None) -> list[str]:
     return [term.strip().casefold() for term in re.split(r"[,;\n]+", raw) if term.strip()]
 
 
+# Pure functions of a release name, asked about the same tens of thousands
+# of catalogue names every cycle.
+@functools.lru_cache(maxsize=65536)
 def deconstruct_release(title: str) -> tuple[str, int] | None:
     """Split the final ' - episode [tags]' suffix, retaining numeric title parts."""
     value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
@@ -108,6 +112,7 @@ def deconstruct_release(title: str) -> tuple[str, int] | None:
     return None
 
 
+@functools.lru_cache(maxsize=65536)
 def release_part(title: str) -> tuple[str, int | None]:
     """Keep a terminal Part N separate from the title used to find TVDB."""
     structured = deconstruct_release(title)
