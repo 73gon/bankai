@@ -236,3 +236,14 @@ def test_review_cards_show_their_own_entrys_cover(monkeypatch):
     ]
     asyncio.run(anime_library.enrich_review_rows(rows))
     assert [row["poster_url"] for row in rows] == ["cover:15449", "cover:17765", "tvdb-poster"]
+
+
+def test_a_batch_torrent_is_numbered_file_by_file(tmp_path):
+    from bankai.processor import anime as processor
+
+    one = [tmp_path / "Show - 05.mkv"]
+    batch = [tmp_path / f"Show - {n:02d}.mkv" for n in range(1, 13)]
+    assert processor.batch_override(5, one) == 5
+    assert processor.batch_override(1, batch) is None
+    assert processor.batch_override(None, batch) is None
+    assert [processor.anidb_episode_number(path.name) for path in batch[:3]] == [1, 2, 3]

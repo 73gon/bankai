@@ -150,6 +150,21 @@ def episode_identity(
     return EpisodeIdentity(1, number)
 
 
+def batch_override(episode_override: int | None, sources: list[Path]) -> int | None:
+    """The episode override to apply, which a batch torrent does not take.
+
+    Releases are queued with their own episode number -- a batch, a whole
+    season in one torrent ("Show - 01 ~ 12"), under its first. One number
+    cannot be every file, so publishing refused it, five times, and thirteen
+    finished seasons sat in qBittorrent as failed. Erai names each file of a
+    batch by its own episode, so each is numbered by its name instead.
+    """
+    if episode_override is not None and len(sources) > 1:
+        log.info("[anime] batch of %d files: each numbered by its own name", len(sources))
+        return None
+    return episode_override
+
+
 def anidb_episode_number(filename: str, *, episode_override: int | None = None) -> int | None:
     """The AniDB episode a file is: its own number, as Erai numbers per AniDB entry."""
     if episode_override is not None:
@@ -471,11 +486,12 @@ async def download_anime(
             _copy_with_sidecars(source, destination, replace=replace_existing)
             outputs.append(destination)
         elif anidb_id:
+            sources = find_video_files(root)
             outputs.extend(
                 _organize_anidb(
-                    find_video_files(root),
+                    sources,
                     title=anidb_title or english_title,
-                    episode_override=episode_override,
+                    episode_override=batch_override(episode_override, sources),
                     library=output.directory,
                     require_german_subtitles=require_german_subtitles,
                     replace_existing=replace_existing,
@@ -484,6 +500,7 @@ async def download_anime(
         else:
             tvdb_episodes = await _tvdb_episode_map(tvdb_id)
             sources = find_video_files(root)
+            episode_override = batch_override(episode_override, sources)
             if episode_override is not None and len(sources) != 1:
                 raise RuntimeError(
                     "a manual episode override requires a torrent containing exactly one video file"
