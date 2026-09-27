@@ -1563,6 +1563,18 @@ def create_app() -> Any:
 
         return snapshots_mod.file_stamps(paths)
 
+    def _jobs_stamp() -> tuple:
+        """Every job's latest write: a job rewrites its own directory as it runs."""
+        from bankai.cli import bgjobs
+
+        newest, count = 0, 0
+        with suppress(OSError), os.scandir(bgjobs.jobs_root()) as entries:
+            for entry in entries:
+                with suppress(OSError):
+                    newest = max(newest, entry.stat(follow_symlinks=False).st_mtime_ns)
+                    count += 1
+        return (count, newest)
+
     _anime_inputs = _anime_state_files(
         "erai_series_policies.json",
         "erai_mappings.json",
@@ -1799,6 +1811,8 @@ def create_app() -> Any:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Episode search failed: {exc}") from exc
 
+    _queue_files = _anime_state_files("web_pending.json")
+
     async def _anime_queue_rows() -> list[dict]:
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
         # Most releases are waiting on qBittorrent and deliberately have no
@@ -1811,10 +1825,12 @@ def create_app() -> Any:
     snaps.add(
         "anime_queue_rows",
         _anime_queue_rows,
-        inputs=_anime_state_files("web_pending.json"),
+        inputs=lambda: (_queue_files(), _jobs_stamp()),
         tags={"anime", "qbit"},
         min_interval=2.0,
-        max_age=4.0,
+        # Rebuilt when the state or a job changes; a full build is seconds of
+        # work, so not on a timer faster than that.
+        max_age=60.0,
         encode=False,
     )
 
@@ -2974,7 +2990,7 @@ def create_app() -> Any:
     def _titles_inputs() -> tuple:
         from bankai.web import library_walk
 
-        return (library_walk.generation(), _titles_files())
+        return (library_walk.generation(), _titles_files(), _jobs_stamp())
 
     _titles_files = _anime_state_files("review.json", "web_pending.json")
     snaps.add(
@@ -2983,7 +2999,7 @@ def create_app() -> Any:
         inputs=_titles_inputs,
         tags={"movies"},
         min_interval=1.0,
-        max_age=3.0,
+        max_age=30.0,
     )
 
     @app.get("/api/titles", response_model=None)
@@ -3123,7 +3139,7 @@ def create_app() -> Any:
         _qbittorrent_payload,
         tags={"qbit"},
         min_interval=1.0,
-        max_age=2.0,
+        max_age=3.0,
         # A last list older than this is not passed off as current.
         max_stale=15.0,
     )
