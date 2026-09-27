@@ -339,35 +339,36 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         {reasons.join(' · ')}
                       </p>
                     )}
-                    <div className='grid grid-cols-2 gap-1.5'>
+                    <div className='grid grid-cols-2 gap-1.5 [&>button]:min-w-0'>
                       {/* Nyaa, AniDB when the card knows its entry, then Recheck. */}
                       <div className='col-span-2 flex gap-1.5'>
                         {item.detail_url && (
-                          <Button asChild variant='outline' className='min-w-0 flex-1'>
-                            <a href={item.detail_url} target='_blank' rel='noreferrer'>
-                              <ExternalLink data-icon='inline-start' /> Nyaa
+                          <Button asChild variant='outline' className='min-w-0 flex-1 px-1.5 text-xs'>
+                            <a href={item.detail_url} target='_blank' rel='noreferrer' title='The release on Nyaa'>
+                              Nyaa
                             </a>
                           </Button>
                         )}
                         {item.anidb_id && (
-                          <Button asChild variant='outline' className='min-w-0 flex-1'>
+                          <Button asChild variant='outline' className='min-w-0 flex-1 px-1.5 text-xs'>
                             <a
                               href={'https://anidb.net/anime/' + item.anidb_id}
                               target='_blank'
                               rel='noreferrer'
                               title={'On AniDB: ' + (item.anidb_title || 'aid ' + item.anidb_id)}
                             >
-                              <ExternalLink data-icon='inline-start' /> AniDB
+                              AniDB
                             </a>
                           </Button>
                         )}
                         <Button
                           variant='secondary'
-                          className='min-w-0 flex-1'
+                          className='min-w-0 flex-1 px-1.5 text-xs'
                           onClick={() => void decide(item, 'recheck')}
                           disabled={Boolean(busy)}
+                          title='Check these releases again'
                         >
-                          <RefreshCw data-icon='inline-start' /> Recheck
+                          Recheck
                         </Button>
                       </div>
 
@@ -377,7 +378,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                           onClick={() => void decide(item, 'allow_german')}
                           disabled={Boolean(busy)}
                         >
-                          <ShieldCheck data-icon='inline-start' /> Allow
+                          <ShieldCheck data-icon='inline-start' /> <span className='truncate'>Allow</span>
                         </Button>
                       )}
                       <Button
@@ -386,7 +387,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         onClick={() => void markOwned({ key: item.key }, item.title)}
                         disabled={Boolean(busy)}
                       >
-                        <Check data-icon='inline-start' /> Already downloaded
+                        <Check data-icon='inline-start' /> <span className='truncate'>Already downloaded</span>
                       </Button>
 
                       {anidb && item.release_title && (
@@ -412,7 +413,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       )}
 
                       <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={Boolean(busy)}>
-                        <Ban data-icon='inline-start' /> Discard
+                        <Ban data-icon='inline-start' /> <span className='truncate'>Discard</span>
                       </Button>
                       <Button
                         variant='destructive'
@@ -420,7 +421,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         disabled={Boolean(busy) || !item.anidb_id}
                         title={item.anidb_id ? undefined : 'Choose the AniDB anime first, so only its own files are deleted'}
                       >
-                        <Trash2 data-icon='inline-start' /> Discard and delete
+                        <Trash2 data-icon='inline-start' /> <span className='truncate'>Discard and delete</span>
                       </Button>
 
                       {count > 1 && (
@@ -510,7 +511,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           <DialogFooter>
             <Button variant='secondary' disabled={busy !== null} onClick={() => setPurgeTarget(null)}>Cancel</Button>
             <Button variant='destructive' disabled={busy !== null} onClick={() => void confirmPurge()}>
-              <Trash2 data-icon='inline-start' /> Discard and delete
+              <Trash2 data-icon='inline-start' /> <span className='truncate'>Discard and delete</span>
             </Button>
           </DialogFooter>
         </DialogContent>
