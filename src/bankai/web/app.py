@@ -1619,7 +1619,7 @@ def create_app() -> Any:
 
     snaps.add(
         "anime_review", _review_payload, inputs=_anime_inputs, tags={"anime"},
-        min_interval=15.0, max_age=600.0,
+        min_interval=30.0, max_age=600.0,
     )
 
     @app.get("/api/anime/review", response_model=None)
@@ -1695,7 +1695,7 @@ def create_app() -> Any:
 
     snaps.add(
         "anime_blacklist", _blacklist_payload, inputs=_anime_inputs, tags={"anime"},
-        min_interval=15.0, max_age=600.0,
+        min_interval=30.0, max_age=600.0,
     )
 
     @app.get("/api/anime/blacklist", response_model=None)
@@ -2050,7 +2050,10 @@ def create_app() -> Any:
         _anime_library_payload,
         inputs=_anime_library_inputs,
         tags={"anime"},
-        min_interval=20.0,
+        # The worker rewrites the release state every few seconds while it
+        # runs, and the grid barely depends on it: a new episode may take
+        # two minutes to show. Changes made on the page show at once.
+        min_interval=120.0,
         max_age=600.0,
     )
 
