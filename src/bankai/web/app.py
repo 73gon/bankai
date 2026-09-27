@@ -4335,18 +4335,24 @@ def create_app() -> Any:
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
+        # The page names the hash-named bundles, so the page itself must never
+        # be served from the browser's cache: a deploy then showed the old
+        # build until a hard refresh. The bundles can be cached for good.
+        def page() -> Any:
+            return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
         @app.get("/")
         def index() -> Any:
-            return FileResponse(STATIC_DIR / "index.html")
+            return page()
 
         @app.get("/{full_path:path}")
         def spa_fallback(full_path: str) -> Any:
             if full_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="not found")
             candidate = STATIC_DIR / full_path
-            if candidate.is_file():
+            if candidate.is_file() and candidate.name != "index.html":
                 return FileResponse(candidate)
-            return FileResponse(STATIC_DIR / "index.html")
+            return page()
     else:
 
         @app.get("/")

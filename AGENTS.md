@@ -232,10 +232,11 @@ ssh keller "Get-Content C:\bankai\logs\web.log -Tail 50"
 Restarting `bankai-web` terminates all detached child jobs (nssm job object).
 **Always confirm no job is running before deploying.**
 
-### Frontend requires a hard-refresh
+### Frontend after a deploy
 
-The SPA bundles are hash-named. After deploy the browser must hard-refresh
-(`Ctrl+Shift+R`) to load the new JS/CSS.
+The SPA bundles are hash-named and `index.html` is served with
+`Cache-Control: no-cache`, so a normal reload picks up a new build. (Before
+that header, a hard refresh was needed once more after this change.)
 
 ### Rate-limited Prowlarr indexers
 
