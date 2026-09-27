@@ -311,6 +311,11 @@ export default function AnimeLibrary() {
   const seasonLabel = (season: number | null) => {
     if (season === null) return 'Other files';
     if (active?.numbering === 'absolute_flat') return 'All episodes';
+    // An AniDB card's tabs are its entries or its season folders, each named.
+    if (active?.numbering === 'anidb') {
+      const label = active.episodes.find((episode) => episode.season_number === season)?.season;
+      if (label) return label;
+    }
     if (active?.numbering === 'absolute') {
       const folder = active.episodes.find((episode) => episode.season_number === season)?.season;
       if (folder) return folder;
@@ -457,6 +462,7 @@ export default function AnimeLibrary() {
                     <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
                       {active.tvdb_id && <Button asChild variant='secondary' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
+                      {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
                       {Boolean(active.avc_count) && (
                         <Button
                           size='sm'
@@ -468,7 +474,7 @@ export default function AnimeLibrary() {
                           {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.avc_count} to HEVC`}
                         </Button>
                       )}
-                      <Select value={active.numbering ?? 'season'} onValueChange={(value) => void setNumbering(active, value as EpisodeNumbering)}>
+                      {active.numbering !== 'anidb' && <Select value={active.numbering ?? 'season'} onValueChange={(value) => void setNumbering(active, value as EpisodeNumbering)}>
                         <SelectTrigger data-size='sm' className='w-60' aria-label='How episode numbers are read' title='How this show&apos;s episode numbers are read'>
                           <SelectValue />
                         </SelectTrigger>
@@ -479,7 +485,7 @@ export default function AnimeLibrary() {
                             <SelectItem value='absolute_flat'>Absolute, one list</SelectItem>
                           </SelectGroup>
                         </SelectContent>
-                      </Select>
+                      </Select>}
                       <Button size='sm' variant='destructive' onClick={() => setRemoveTarget(active)} title='Delete this show from disk and never download it again'>
                         <Trash2 data-icon='inline-start' /> Remove and blacklist
                       </Button>
@@ -507,7 +513,7 @@ export default function AnimeLibrary() {
                               </div>
                             </td>
                             <td className='px-3 py-2.5 text-right font-mono text-xs tabular-nums'>{entry.missing ? '—' : formatSize(entry.size)}</td>
-                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={!active.tvdb_id} aria-label='Search for a release' title='Search for a release' onClick={() => void searchMissing(active, entry)}><Search /></Button> : entry.staged ? (
+                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={!active.tvdb_id || active.numbering === 'anidb'} aria-label='Search for a release' title={active.numbering === 'anidb' ? 'Searching by AniDB episode is not available yet' : 'Search for a release'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : entry.staged ? (
                               <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>
                             ) : <Badge variant='success'>In library</Badge>}</td>
                           </tr>

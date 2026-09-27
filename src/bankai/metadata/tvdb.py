@@ -120,7 +120,8 @@ class TVDBClient:
                 extended = details.json().get("data") or {}
                 genres = {
                     str(genre.get("name", "")).casefold()
-                    for genre in extended.get("genres", []) if isinstance(genre, dict)
+                    # TVDB answers "genres": null for some records.
+                    for genre in extended.get("genres") or [] if isinstance(genre, dict)
                 }
                 if "anime" not in genres:
                     continue

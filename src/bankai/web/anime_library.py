@@ -223,10 +223,15 @@ def _search_title(title: str) -> str:
     return _SEASON_SUFFIX.sub("", stripped).strip() or stripped
 
 
-async def show_metadata(title: str, tvdb_id: int | None = None, kind: str = "show") -> dict:
+async def show_metadata(
+    title: str, tvdb_id: int | None = None, kind: str = "show", *, anime_only: bool = True
+) -> dict:
     # The kind is part of the key: a film and a series can share a name, and
-    # the movie library must not be handed the series' artwork.
+    # the movie library must not be handed the series' artwork. So is whether
+    # the search was limited to anime.
     key = f"id:{tvdb_id}" if tvdb_id else f"{kind}:{_name(title)}"
+    if not tvdb_id and not anime_only:
+        key = "all:" + key
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < 900:
         return hit[1]
@@ -236,19 +241,21 @@ async def show_metadata(title: str, tvdb_id: int | None = None, kind: str = "sho
     if saved is not None and isinstance(saved[0], dict):
         _CACHE[key] = (time.time(), saved[0])
         if saved[1] >= _PERSISTENT_TTL_SECONDS:
-            _refresh_later(key, lambda: _fetch_metadata(key, title, tvdb_id, kind))
+            _refresh_later(key, lambda: _fetch_metadata(key, title, tvdb_id, kind, anime_only))
         return saved[0]
     miss = _persistent_entry(f"miss:v1:{key}")
     if miss is not None and miss[1] < _MISS_TTL_SECONDS:
         _CACHE[key] = (time.time(), {})
         return {}
-    return await _fetch_metadata(key, title, tvdb_id, kind)
+    return await _fetch_metadata(key, title, tvdb_id, kind, anime_only)
 
 
-async def _fetch_metadata(key: str, title: str, tvdb_id: int | None, kind: str) -> dict:
+async def _fetch_metadata(
+    key: str, title: str, tvdb_id: int | None, kind: str, anime_only: bool = True
+) -> dict:
     """Ask the provider, and remember the answer -- but never an outage."""
     try:
-        metadata = await _lookup_metadata(title, tvdb_id, kind)
+        metadata = await _lookup_metadata(title, tvdb_id, kind, anime_only)
     except Exception:
         # Library browsing remains available during provider outages, on
         # whatever was saved before; a failure is held only in memory, and
@@ -274,14 +281,16 @@ async def _fetch_metadata(key: str, title: str, tvdb_id: int | None, kind: str) 
     return metadata
 
 
-async def _lookup_metadata(title: str, tvdb_id: int | None, kind: str) -> dict:
+async def _lookup_metadata(title: str, tvdb_id: int | None, kind: str, anime_only: bool = True) -> dict:
     """The provider's answer; ``{}`` when it has no match, raising when it failed."""
     if not discover.is_configured():
         raise RuntimeError("TVDB is not configured")
     if tvdb_id:
         return asdict(await anime.series_metadata(tvdb_id))
+    if not anime_only:
+        return await _lookup_any_title(title, kind)
     query = _search_title(title)
-    candidates = await anime.tvdb_candidates(query, raise_errors=True)
+    candidates = await anime.tvdb_candidates(query, raise_errors=True, anime_only=anime_only)
     exact = [
         item
         for item in candidates
@@ -294,6 +303,41 @@ async def _lookup_metadata(title: str, tvdb_id: int | None, kind: str) -> dict:
         }
     ]
     return asdict(exact[0]) if len(exact) == 1 else {}
+
+
+_FOLDER_YEAR = re.compile(r"\((\d{4})\)\s*$")
+
+
+async def _lookup_any_title(title: str, kind: str) -> dict:
+    """A film or series of any genre, for the Movies & Shows library.
+
+    One TVDB search, the one the Discover page makes, which brings the cover
+    with it. The anime search this library used before filtered on TVDB's
+    anime genre, so almost none of its films was found. A folder's year
+    tells remakes apart: "Passengers (2016)", not the 2008 film.
+    """
+    query = _search_title(title)
+    results = await discover.search(query, kind=kind, limit=10)
+    wanted = _name(query)
+    exact = [item for item in results if item.kind == kind and _name(item.name) == wanted]
+    year = _FOLDER_YEAR.search(title)
+    if year and len(exact) != 1:
+        # Several of that name, or none exactly ("RoboCop" for "Robocop"):
+        # the year decides, among titles that at least contain the name.
+        pool = exact or [item for item in results if item.kind == kind and wanted in _name(item.name)]
+        dated = [item for item in pool if item.year == int(year[1])]
+        exact = dated if len(dated) == 1 else exact
+    if len(exact) != 1:
+        return {}
+    item = exact[0]
+    return {
+        "tvdb_id": item.tvdb_id,
+        "english_title": item.name,
+        "year": item.year,
+        "poster_url": item.poster_url,
+        "kind": kind,
+        "status": item.status,
+    }
 
 
 def known_ids() -> dict[str, int]:
@@ -950,12 +994,202 @@ def _folder_tvdb_id(root: Path, titles: list[str]) -> int | None:
     return None
 
 
+# -- AniDB identity in the library ---------------------------------------------
+#
+# A card is one AniDB entry, or the several entries one folder holds (Bleach:
+# Thousand-Year Blood War keeps its four cours as season folders). TVDB made
+# Bleach and its sequel one series of 416 episodes; AniDB makes Bleach 366,
+# and each cour its own entry. Which entry a file is comes from Shoko's link
+# for it, else from its season folder's name ("Season 02 - Sennen Kessen Hen -
+# Ketsubetsu Tan"), else from the show folder's name. Each entry's episode
+# list comes from Shoko, else from the slice of TVDB that Anime-Lists says is
+# that entry.
+
+# "Season 02 - Sennen Kessen Hen - Ketsubetsu Tan" -> the entry's own title.
+_SEASON_FOLDER = re.compile(r"^\s*Season\s*\d+\s*[-–:]\s*(?P<title>.+?)\s*$", re.IGNORECASE)
+
+
+def _resolve_name(table: Any, names: list[str], memo: dict[str, int | None]) -> int | None:
+    from bankai.metadata import anidb
+
+    for name in names:
+        name = name.strip()
+        if not name:
+            continue
+        if name not in memo:
+            resolution = anidb.resolve_in(table, name)
+            memo[name] = resolution.anime.aid if resolution.anime else None
+        if memo[name] is not None:
+            return memo[name]
+    return None
+
+
+def assign_entries(files: list[dict], *, catalog: Any, table: Any) -> None:
+    """Set each file's ``anidb_id`` and, when Shoko linked it, ``anidb_episode``."""
+    memo: dict[str, int | None] = {}
+    for row in files:
+        links = catalog.files.get(str(row.get("path"))) if catalog is not None else None
+        if links:
+            row["anidb_id"], row["anidb_episode"] = links[0]
+            continue
+        row["anidb_episode"] = None
+        row["anidb_id"] = None
+        if table is None:
+            continue
+        folder = str(row.get("series") or "")
+        season = _SEASON_FOLDER.match(str(row.get("season") or ""))
+        if season:
+            base = re.split(r"\s+-\s+|:\s*", folder, maxsplit=1)[0]
+            # The season folder may carry only the part after the show's name.
+            row["anidb_id"] = _resolve_name(
+                table, [season["title"], f"{base} {season['title']}", f"{folder} {season['title']}"], memo
+            )
+        if row["anidb_id"] is None:
+            row["anidb_id"] = _resolve_name(table, [folder], memo)
+
+
+def anidb_episode_of(row: dict, anime: Any) -> int | None:
+    """The file's episode number within its AniDB entry.
+
+    Shoko's link says it outright. Otherwise the number in the file name is
+    taken as the entry's own, unless it counts through a TVDB season the
+    entry only starts partway into: TYBW's second cour is TVDB S17E14-26,
+    AniDB episodes 1-13.
+    """
+    if row.get("anidb_episode"):
+        return int(row["anidb_episode"])
+    season, episode = row.get("season_number"), row.get("episode")
+    if episode is None:
+        return None
+    tvdb_season = getattr(anime, "tvdb_season", None) or ""
+    offset = int(getattr(anime, "tvdb_offset", 0) or 0)
+    if offset and tvdb_season.isdigit() and season == int(tvdb_season) and episode > offset:
+        return episode - offset
+    return episode
+
+
+def tvdb_slice(anime: Any, roster: list, family: list) -> list:
+    """The TVDB episodes that are one AniDB entry, numbered as AniDB numbers them."""
+    from bankai.web.shoko_catalog import EntryEpisode
+
+    regular = sorted(
+        (item for item in roster if item.season >= 1 and item.episode >= 1),
+        key=lambda item: (item.season, item.episode),
+    )
+    season = str(anime.tvdb_season or "")
+    if season.isdigit() and int(season) >= 1:
+        number, start = int(season), int(anime.tvdb_offset or 0)
+        # Up to where the next entry on the same TVDB season begins.
+        later = sorted(
+            int(other.tvdb_offset or 0)
+            for other in family
+            if str(other.tvdb_season or "") == season and int(other.tvdb_offset or 0) > start
+        )
+        end = later[0] if later else None
+        return [
+            EntryEpisode(item.episode - start, item.name, item.aired)
+            for item in regular
+            if item.season == number and item.episode > start and (end is None or item.episode <= end)
+        ]
+    if season == "a":
+        # Numbered through the whole show, less the seasons that are other entries.
+        claimed = {
+            int(other.tvdb_season)
+            for other in family
+            if other.aid != anime.aid and str(other.tvdb_season or "").isdigit() and int(other.tvdb_season) >= 1
+        }
+        kept = [item for item in regular if item.season not in claimed]
+        return [EntryEpisode(n, item.name, item.aired) for n, item in enumerate(kept, start=1)]
+    return []
+
+
+def merge_episodes_anidb(
+    rows: list[dict],
+    entries: list[tuple[int, str, list | None]],
+    *,
+    codecs: dict[tuple[int, int], str] | None = None,
+    german_dubbed: set[tuple[int, int]] | None = None,
+) -> dict:
+    """Episodes of a card made of AniDB entries; ``rows`` are prepared by the caller.
+
+    One entry: tabs are the season folders it is kept in (Bleach's arcs), as
+    with absolute numbering. Several: one tab per entry, each counted
+    against its own episode list. ``entries`` are (aid, tab label, episode
+    list or None when unknown), in display order.
+    """
+    today = date.today().isoformat()
+
+    def aired_out(roster: list | None) -> bool:
+        return bool(roster) and all(ep.aired and ep.aired[:10] <= today for ep in roster)
+
+    if len(entries) == 1:
+        _aid, _label, roster = entries[0]
+        items = [
+            TVDBEpisode(season=1, episode=ep.number, absolute_number=ep.number, name=ep.title, aired=ep.aired)
+            for ep in roster or []
+        ]
+        merged = merge_episodes_absolute(
+            rows, items, ended=aired_out(roster), codecs=codecs, german_dubbed=german_dubbed
+        )
+        merged["metadata_available"] = roster is not None and bool(roster)
+        return merged
+    items = [
+        TVDBEpisode(season=index, episode=ep.number, name=ep.title, aired=ep.aired)
+        for index, (_aid, _label, roster) in enumerate(entries, start=1)
+        for ep in roster or []
+    ]
+    merged = merge_episodes(
+        rows,
+        items,
+        ended=all(aired_out(roster) for _aid, _label, roster in entries),
+        codecs=codecs,
+        german_dubbed=german_dubbed,
+    )
+    labels = {index: label for index, (_aid, label, _roster) in enumerate(entries, start=1)}
+    for row in merged["episodes"]:
+        if row.get("season_number") in labels:
+            row["season"] = labels[row["season_number"]]
+    merged["metadata_available"] = any(roster for _aid, _label, roster in entries)
+    return merged
+
+
+def prepare_anidb_rows(files: list[dict], order: list[int], table: Any) -> list[dict]:
+    """Copies of a card's files, numbered for merge_episodes_anidb.
+
+    One entry: season_number is the season folder's place, episode the AniDB
+    number. Several: season_number is the entry's place. A file whose entry is
+    not among them lands in "Other files".
+    """
+    place = {aid: index for index, aid in enumerate(order, start=1)}
+    anime = getattr(table, "anime", {}) if table is not None else {}
+    single = len(order) == 1
+    folders = sorted({str(row.get("season") or "") for row in files})
+    folder_place = {name: index for index, name in enumerate(folders, start=1)}
+    prepared = []
+    for row in files:
+        aid = row.get("anidb_id")
+        number = anidb_episode_of(row, anime.get(aid)) if aid in place else None
+        if number is None:
+            prepared.append({**row, "season_number": None, "episode": None})
+            continue
+        prepared.append(
+            {
+                **row,
+                "season_number": folder_place[str(row.get("season") or "")] if single else place[aid],
+                "season": row.get("season") or "Episodes",
+                "episode": number,
+            }
+        )
+    return prepared
+
+
 async def group_shows(
     entries: list[dict],
     root: Path,
     *,
     include_episodes: bool = True,
     only_key: str | None = None,
+    catalog: Any = None,
 ) -> list[dict]:
     """One card per show, however many folders and spellings it arrived under.
 
@@ -965,9 +1199,19 @@ async def group_shows(
     add an empty card for a tracked title; it never merged two real folders.
 
     Identity is now decided twice. The normalised name catches the pairs that
-    differ in punctuation or a trailing year, and the TVDB id catches the
-    pairs that share no spelling at all.
+    differ in punctuation or a trailing year, and the AniDB entry (else the
+    TVDB id) catches the pairs that share no spelling at all. Folders of
+    different AniDB entries stay apart even when TVDB calls them one series:
+    Bleach and its sequel. ``catalog`` is Shoko's (see shoko_catalog).
     """
+    from collections import Counter
+
+    from bankai.metadata import anidb as anidb_mod
+    from bankai.metadata import anidb_art
+
+    table = None
+    with suppress(Exception):
+        table = await anidb_mod.index()
     buckets: dict[str, dict] = {}
     for entry in entries:
         season, episode = parse_se(entry["name"]) or (None, None)
@@ -975,6 +1219,12 @@ async def group_shows(
         if entry["series"] not in bucket["titles"]:
             bucket["titles"].append(entry["series"])
         bucket["files"].append({**entry, "season_number": season, "episode": episode})
+    await asyncio.to_thread(
+        assign_entries,
+        [row for bucket in buckets.values() for row in bucket["files"]],
+        catalog=catalog,
+        table=table,
+    )
 
     ids = await asyncio.to_thread(known_ids)
     # One read of the release state for the whole page, not one per show: it
@@ -1014,24 +1264,91 @@ async def group_shows(
     identified = await asyncio.gather(*(identify(n, b) for n, b in buckets.items()))
 
     # Second pass. Two folders can normalise differently and still be one
-    # series; the TVDB id is what says so. Without an id there is nothing
-    # better than the name, so those stay separate rather than guess.
+    # show; their AniDB entry is what says so, or failing that the TVDB id.
+    # Without either there is nothing better than the name, so those stay
+    # separate rather than guess.
     merged: dict[object, dict] = {}
+    placeholders = []
     for item in identified:
-        identity = item["tvdb_id"] or f"name:{item['name']}"
+        if not item["files"]:
+            placeholders.append(item)  # a tracked show with nothing on disk yet
+            continue
+        aids = Counter(row["anidb_id"] for row in item["files"] if row.get("anidb_id"))
+        # The entry most of its files are; a tie goes to the older entry.
+        primary = min(aids, key=lambda aid: (-aids[aid], aid)) if aids else None
+        identity = f"anidb:{primary}" if primary else item["tvdb_id"] or f"name:{item['name']}"
         slot = merged.setdefault(
             identity,
-            {"titles": [], "files": [], "tvdb_id": item["tvdb_id"], "metadata": {}},
+            {"titles": [], "files": [], "tvdb_id": item["tvdb_id"], "metadata": {}, "aids": Counter()},
         )
         slot["titles"].extend(item["titles"])
         slot["files"].extend(item["files"])
+        slot["aids"].update(aids)
         if item["metadata"] and not slot["metadata"]:
             slot["metadata"] = item["metadata"]
+    covered = {slot["tvdb_id"] for slot in merged.values() if slot["tvdb_id"]}
+    for item in placeholders:
+        if item["tvdb_id"] and item["tvdb_id"] in covered:
+            continue
+        merged.setdefault(
+            item["tvdb_id"] or f"name:{item['name']}",
+            {
+                "titles": item["titles"],
+                "files": [],
+                "tvdb_id": item["tvdb_id"],
+                "metadata": item["metadata"],
+                "aids": Counter(),
+            },
+        )
     for slot in merged.values():
         slot["titles"] = sorted(dict.fromkeys(slot["titles"]))
+        # Not TVDB's name for an AniDB card: TVDB calls Bleach and its sequel
+        # both "Bleach", and the key must tell the two cards apart.
         slot["key"] = _display_title(
-            slot["titles"], str(slot["metadata"].get("english_title") or "")
+            slot["titles"],
+            "" if slot["aids"] else str(slot["metadata"].get("english_title") or ""),
         )
+    known = getattr(table, "anime", {}) if table is not None else {}
+
+    async def anidb_card(slot: dict, show_roster: list) -> dict:
+        """The AniDB entries behind a card: display order, episode lists, tab labels."""
+        aids = list(slot["aids"])
+        rosters: dict[int, list | None] = {}
+        for aid in aids:
+            entry = catalog.entries.get(aid) if catalog is not None else None
+            if entry is not None and entry.episodes:
+                rosters[aid] = list(entry.episodes)
+                continue
+            anime = known.get(aid)
+            if anime is None or not anime.tvdb_id:
+                rosters[aid] = None
+                continue
+            roster = show_roster if anime.tvdb_id == slot["tvdb_id"] else []
+            if not roster and discover.is_configured():
+                with suppress(Exception):
+                    roster = await episode_roster(anime.tvdb_id)
+            family = table.by_tvdb.get(anime.tvdb_id, []) if table is not None else []
+            rosters[aid] = tvdb_slice(anime, roster or [], family) or None
+
+        def first_aired(aid: int) -> str:
+            dates = [ep.aired for ep in rosters.get(aid) or [] if ep.aired]
+            return min(dates) if dates else "9999"
+
+        def folders_of(aid: int) -> set[str]:
+            return {str(row.get("season") or "") for row in slot["files"] if row.get("anidb_id") == aid}
+
+        order = sorted(aids, key=lambda aid: (first_aired(aid), min(folders_of(aid), default=""), aid))
+        labels = {}
+        for aid in order:
+            folders = folders_of(aid) - {""}
+            entry = catalog.entries.get(aid) if catalog is not None else None
+            anime = known.get(aid)
+            name = (entry.title if entry else None) or (
+                (anime.english_title or anime.title) if anime else f"AniDB {aid}"
+            )
+            # A cour kept in its own season folder is labelled by that folder.
+            labels[aid] = next(iter(folders)) if len(order) > 1 and len(folders) == 1 else name
+        return {"order": order, "rosters": rosters, "labels": labels}
 
     if only_key is not None:
         wanted = _name(only_key)
@@ -1050,37 +1367,72 @@ async def group_shows(
         if tvdb_id and discover.is_configured():
             with suppress(Exception):
                 roster = await episode_roster(tvdb_id)
-        codecs = {
-            **codecs_by_series.get(str(tvdb_id), {}),
-            **await asyncio.to_thread(probed_codecs, files),
-        }
-        dubbed = await asyncio.to_thread(german_dubbed_episodes, files)
-        numbering = numbering_for(prefs, tvdb_id=tvdb_id, key=title)
-        ended = str(metadata.get("status", "")).casefold() == "ended"
-        if numbering == "season":
-            merged_episodes = merge_episodes(
-                files, roster, ended=ended, codecs=codecs, german_dubbed=dubbed
-            )
-        else:
-            merged_episodes = merge_episodes_absolute(
-                files,
-                roster,
-                ended=ended,
-                flat=numbering == "absolute_flat",
+        card = await anidb_card(slot, roster) if slot["aids"] else None
+        if card is not None:
+            rows = prepare_anidb_rows(files, card["order"], table)
+            # Keyed as the rows are numbered: the tab, then the AniDB episode.
+            codecs = await asyncio.to_thread(probed_codecs, rows)
+            dubbed = await asyncio.to_thread(german_dubbed_episodes, rows)
+            merged_episodes = merge_episodes_anidb(
+                rows,
+                [(aid, card["labels"][aid], card["rosters"][aid]) for aid in card["order"]],
                 codecs=codecs,
                 german_dubbed=dubbed,
             )
+            numbering = "anidb"
+        else:
+            codecs = {
+                **codecs_by_series.get(str(tvdb_id), {}),
+                **await asyncio.to_thread(probed_codecs, files),
+            }
+            dubbed = await asyncio.to_thread(german_dubbed_episodes, files)
+            numbering = numbering_for(prefs, tvdb_id=tvdb_id, key=title)
+            ended = str(metadata.get("status", "")).casefold() == "ended"
+            if numbering == "season":
+                merged_episodes = merge_episodes(
+                    files, roster, ended=ended, codecs=codecs, german_dubbed=dubbed
+                )
+            else:
+                merged_episodes = merge_episodes_absolute(
+                    files,
+                    roster,
+                    ended=ended,
+                    flat=numbering == "absolute_flat",
+                    codecs=codecs,
+                    german_dubbed=dubbed,
+                )
+        display_title = str(metadata.get("english_title") or title)
+        source_title = await second_name(tvdb_id, display_title, source_titles.get(str(tvdb_id), ""))
+        poster_url = metadata.get("poster_url")
+        year = metadata.get("year")
+        anidb_id = None
+        if card is not None:
+            # The first entry names the card and lends it its cover: AniDB's
+            # own, from Shoko or else anime-offline-database, before TVDB's,
+            # which is the same for every season of a show.
+            anidb_id = card["order"][0]
+            entry = catalog.entries.get(anidb_id) if catalog is not None else None
+            anime = known.get(anidb_id)
+            display_title = (
+                (entry.title if entry else None)
+                or ((anime.english_title or anime.title) if anime else None)
+                or display_title
+            )
+            if anime is not None and anime.title != display_title:
+                source_title = anime.title
+            poster_url = (entry.poster_url if entry else None) or anidb_art.cover(anidb_id) or poster_url
+            aired = [ep.aired for ep in card["rosters"].get(anidb_id) or [] if ep.aired]
+            if aired:
+                year = int(min(aired)[:4])
         result = {
             "key": title,
             # Every folder behind this one card, so the page can ask for the
             # right files back after two of them were merged.
             "folders": slot["titles"],
-            "title": metadata.get("english_title") or title,
-            "source_title": await second_name(
-                tvdb_id,
-                str(metadata.get("english_title") or title),
-                source_titles.get(str(tvdb_id), ""),
-            ),
+            "title": display_title,
+            "source_title": source_title,
+            "anidb_id": anidb_id,
+            "anidb_ids": card["order"] if card is not None else [],
             "avc_count": sum(
                 1
                 for row in merged_episodes["episodes"]
@@ -1097,8 +1449,8 @@ async def group_shows(
             ),
             "tvdb_id": tvdb_id,
             "numbering": numbering,
-            "year": metadata.get("year"),
-            "poster_url": metadata.get("poster_url"),
+            "year": year,
+            "poster_url": poster_url,
             "episode_count": len(files),
             "season_count": len(
                 {
@@ -1148,8 +1500,15 @@ async def queue_covers(rows: list[dict]) -> list[dict]:
     return rows
 
 
-async def enrich_review_rows(rows: list[dict]) -> list[dict]:
-    """Attach canonical artwork without making the policy ledger provider-dependent."""
+async def enrich_review_rows(rows: list[dict], catalog: Any = None) -> list[dict]:
+    """Attach canonical artwork without making the policy ledger provider-dependent.
+
+    A card that is one AniDB entry shows that entry's cover -- from Shoko, else
+    anime-offline-database -- since TVDB has one poster for every season of a
+    show. ``catalog`` is Shoko's (see shoko_catalog), when it can be read.
+    """
+    from bankai.metadata import anidb_art
+
     mappings = await asyncio.to_thread(erai._load_mappings)
     slots = asyncio.Semaphore(6)
 
@@ -1176,7 +1535,11 @@ async def enrich_review_rows(rows: list[dict]) -> list[dict]:
             row["title"] = metadata.get("english_title") or row["source_title"]
             row["year"] = metadata.get("year")
         row["tvdb_id"] = metadata.get("tvdb_id") or saved.get("tvdb_id") or row.get("tvdb_id")
-        row["poster_url"] = metadata.get("poster_url") or row.get("anidb_poster_url")
+        anidb_cover = None
+        if str(row.get("anidb_id") or "").isdigit():
+            entry = catalog.entries.get(int(row["anidb_id"])) if catalog is not None else None
+            anidb_cover = (entry.poster_url if entry else None) or anidb_art.cover(row["anidb_id"])
+        row["poster_url"] = anidb_cover or metadata.get("poster_url") or row.get("anidb_poster_url")
 
     await asyncio.gather(*(enrich(row) for row in rows))
     return rows

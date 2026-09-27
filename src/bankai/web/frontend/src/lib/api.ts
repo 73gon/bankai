@@ -124,6 +124,8 @@ export interface DashboardWorker {
   id: string;
   name: string;
   busy: boolean;
+  /** Running outside the lane's limit (qBittorrent's slow torrents). */
+  extra?: boolean;
   task: DashboardTask | null;
 }
 
@@ -137,6 +139,7 @@ export interface DashboardLane {
   workers: DashboardWorker[];
   /** "down" when the lane's worker is not reporting. */
   state: string | null;
+  note?: string | null;
 }
 
 export interface DashboardDueItem {
@@ -162,7 +165,7 @@ export interface DashboardRecent {
   key: string;
   title: string;
   poster_url: string | null;
-  kind: 'movie' | 'show';
+  kind: 'movie' | 'show' | 'episode';
   href: string;
   added_at: number;
   count: number;
@@ -181,7 +184,7 @@ export interface Dashboard {
   };
   lanes: DashboardLane[];
   due: DashboardDueGroup[];
-  recent: { mas: DashboardRecent[]; anime: DashboardRecent[] };
+  recent: { mas: DashboardRecent[]; anime: DashboardRecent[]; anime_episodes?: DashboardRecent[] };
 }
 
 export interface HealthResponse {
@@ -433,10 +436,15 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 export type ServerDirKind = 'movie' | 'show' | 'anime';
 
 export type EpisodeNumbering = 'season' | 'absolute' | 'absolute_flat';
+/** How a card's episodes are laid out: as chosen, or by its AniDB entries (not a choice). */
+export type CardNumbering = EpisodeNumbering | 'anidb';
 
 export interface AnimeLibraryShow {
   /** How this show's file numbers are read: per season, or absolute across arcs. */
-  numbering?: EpisodeNumbering;
+  numbering?: CardNumbering;
+  /** The AniDB entry the card is (the first, when a folder holds several). */
+  anidb_id?: number | null;
+  anidb_ids?: number[];
   /** AVC episodes an upgrade could actually replace (dubs are excluded). */
   avc_count?: number;
   hevc_count?: number;

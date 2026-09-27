@@ -291,7 +291,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                     </p>
                   </div>
                   {blacklist && (
-                    <div className='absolute left-1.5 top-1.5'>
+                    <div className='absolute left-1.5 top-1.5 flex gap-1'>
                       <Button
                         size='icon'
                         variant={item.linked ? 'secondary' : 'default'}
@@ -302,6 +302,13 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       >
                         <Link2 />
                       </Button>
+                      {item.anidb_id && (
+                        <Button asChild size='icon' variant='secondary' title={'On AniDB: ' + (item.anidb_title || 'aid ' + item.anidb_id)}>
+                          <a href={'https://anidb.net/anime/' + item.anidb_id} target='_blank' rel='noreferrer' aria-label={item.title + ' on AniDB'}>
+                            <ExternalLink />
+                          </a>
+                        </Button>
+                      )}
                     </div>
                   )}
                   {blacklist && (
@@ -333,21 +340,36 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       </p>
                     )}
                     <div className='grid grid-cols-2 gap-1.5'>
-                      {item.detail_url && (
-                        <Button asChild variant='outline'>
-                          <a href={item.detail_url} target='_blank' rel='noreferrer'>
-                            <ExternalLink data-icon='inline-start' /> Nyaa
-                          </a>
+                      {/* Nyaa, AniDB when the card knows its entry, then Recheck. */}
+                      <div className='col-span-2 flex gap-1.5'>
+                        {item.detail_url && (
+                          <Button asChild variant='outline' className='min-w-0 flex-1'>
+                            <a href={item.detail_url} target='_blank' rel='noreferrer'>
+                              <ExternalLink data-icon='inline-start' /> Nyaa
+                            </a>
+                          </Button>
+                        )}
+                        {item.anidb_id && (
+                          <Button asChild variant='outline' className='min-w-0 flex-1'>
+                            <a
+                              href={'https://anidb.net/anime/' + item.anidb_id}
+                              target='_blank'
+                              rel='noreferrer'
+                              title={'On AniDB: ' + (item.anidb_title || 'aid ' + item.anidb_id)}
+                            >
+                              <ExternalLink data-icon='inline-start' /> AniDB
+                            </a>
+                          </Button>
+                        )}
+                        <Button
+                          variant='secondary'
+                          className='min-w-0 flex-1'
+                          onClick={() => void decide(item, 'recheck')}
+                          disabled={Boolean(busy)}
+                        >
+                          <RefreshCw data-icon='inline-start' /> Recheck
                         </Button>
-                      )}
-                      <Button
-                        variant='secondary'
-                        className={cn(!item.detail_url && 'col-span-2')}
-                        onClick={() => void decide(item, 'recheck')}
-                        disabled={Boolean(busy)}
-                      >
-                        <RefreshCw data-icon='inline-start' /> Recheck
-                      </Button>
+                      </div>
 
                       {german && (
                         <Button

@@ -356,22 +356,24 @@ async def series_metadata(tvdb_id: int) -> AnimeTVDBMatch:
 
 
 async def tvdb_candidates(
-    query: str, *, limit: int = 8, raise_errors: bool = False
+    query: str, *, limit: int = 8, raise_errors: bool = False, anime_only: bool = True
 ) -> list[AnimeTVDBMatch]:
-    """TVDB matches for an anime title.
+    """TVDB matches for an anime title -- or, without ``anime_only``, any title.
 
     A failed search returns ``[]`` like a search that found nothing, unless
     ``raise_errors``: callers that cache the answer have to tell the two apart,
-    or an outage is remembered as "no such show".
+    or an outage is remembered as "no such show". The Movies & Shows library
+    searches without ``anime_only``: filtered to TVDB's anime genre, "Eyes
+    Wide Shut" was never found and its card had no cover.
     """
     clean = query.strip()
     if not clean or not discover.is_configured():
         return []
-    cache_key = _normalise(clean)
+    cache_key = _normalise(clean) if anime_only else "all:" + _normalise(clean)
     hit = _TVDB_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < _CACHE_TTL:
         return hit[1][:limit]
-    mapped_ids = await anime_mapping.mapped_series_ids(clean)
+    mapped_ids = await anime_mapping.mapped_series_ids(clean) if anime_only else []
     mapped = []
     for tvdb_id in mapped_ids:
         try:
@@ -394,28 +396,28 @@ async def tvdb_candidates(
                 clean,
                 kind=MediaKind.EPISODE,
                 limit=8,
-                anime_only=True,
+                anime_only=anime_only,
                 search_language="eng",
             ),
             client.search_aliases(
                 clean,
                 kind=MediaKind.EPISODE,
                 limit=8,
-                anime_only=True,
+                anime_only=anime_only,
                 search_language="jpn",
             ),
             client.search_aliases(
                 clean,
                 kind=MediaKind.MOVIE,
                 limit=8,
-                anime_only=True,
+                anime_only=anime_only,
                 search_language="eng",
             ),
             client.search_aliases(
                 clean,
                 kind=MediaKind.MOVIE,
                 limit=8,
-                anime_only=True,
+                anime_only=anime_only,
                 search_language="jpn",
             ),
         )

@@ -152,5 +152,34 @@ def test_the_dashboard_endpoint_answers(tmp_path, monkeypatch):
         body = client.get("/api/dashboard").json()
     assert {lane["key"] for lane in body["lanes"]} >= {"pipelines", "publishing", "automation"}
     assert body["summary"]["workers_total"] >= 3
-    assert set(body["recent"]) == {"mas", "anime"}
+    assert set(body["recent"]) == {"mas", "anime", "anime_episodes"}
     reset_settings_cache()
+
+
+def test_slow_torrents_run_outside_qbittorrents_slots():
+    board = _build(
+        download_slots=2,
+        slow_threshold=50 * 1024,
+        torrents=[
+            {"hash": "1", "name": "fast", "state": "downloading", "dlspeed": 5_000_000},
+            {"hash": "2", "name": "stalled", "state": "stalledDL", "dlspeed": 0},
+            {"hash": "3", "name": "crawling", "state": "downloading", "dlspeed": 10},
+        ],
+    )
+    lane = _lane(board, "downloads")
+    assert [worker["name"] for worker in lane["workers"]] == ["Slot 1", "Slot 2", "Slow", "Slow"]
+    assert lane["busy"] == 1  # only "fast" takes a slot
+    assert lane["note"].startswith("+2 slow")
+    assert board["summary"]["workers_total"] == sum(
+        len([w for w in other["workers"] if not w.get("extra")]) for other in board["lanes"]
+    )
+
+
+def test_recent_episodes_are_one_row_each():
+    files = [
+        _file("Frieren", "Frieren - S01E05.mkv", NOW - 10),
+        _file("Frieren", "Frieren - S01E04.mkv", NOW - 20),
+    ]
+    rows = dashboard.recent_episodes(files, {}, href="/a/library")
+    assert [row["episode_label"] for row in rows] == ["S01E05", "S01E04"]
+    assert rows[0]["kind"] == "episode"

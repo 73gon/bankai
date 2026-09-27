@@ -74,7 +74,8 @@ def _bucket(entries: list[dict]) -> dict[str, dict]:
 async def _resolve(title: str, kind: str) -> dict:
     """Artwork and identity for one title, or an empty dict."""
     with suppress(Exception):
-        return await show_metadata(title, None, kind=kind)
+        # Any title, not only anime: this is the Movies & Shows library.
+        return await show_metadata(title, None, kind=kind, anime_only=False)
     return {}
 
 

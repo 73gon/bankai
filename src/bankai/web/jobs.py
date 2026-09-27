@@ -448,6 +448,8 @@ _LIBRARY_WALK_SECONDS = 60.0
 _JOB_ARCHIVE_SECONDS = 3600.0
 # How often Shoko is told which AniDB episode each newly published file is.
 _SHOKO_LINK_SECONDS = 600.0
+# How often to see whether AniDB's cover art map is due its weekly refresh.
+_ANIDB_ART_SECONDS = 6 * 3600.0
 
 
 # The scheduler's periodic passes as the dashboard shows them: what each does,
@@ -458,6 +460,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "codec_sweep": ("Identify episode encodes", _CODEC_SWEEP_SECONDS),
     "shoko_link": ("Link new episodes in Shoko", _SHOKO_LINK_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
+    "anidb_art": ("Refresh AniDB cover art", _ANIDB_ART_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
 
@@ -553,9 +556,19 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_archive_pass = 0.0
     next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS
     link_task: asyncio.Future | None = None
+    next_art_pass = time.monotonic() + 30.0
+    art_task: asyncio.Future | None = None
     _pass_due("library_walk", next_walk_pass)
     _pass_due("shoko_link", next_link_pass)
+    _pass_due("anidb_art", next_art_pass)
     while True:
+        if time.monotonic() >= next_art_pass and (art_task is None or art_task.done()):
+            next_art_pass = time.monotonic() + _ANIDB_ART_SECONDS
+            _pass_due("anidb_art", next_art_pass)
+            from bankai.metadata import anidb_art
+
+            art_task = asyncio.ensure_future(anidb_art.refresh())
+            _pass_task("anidb_art", art_task)
         # Also off to the side: Shoko calls, and AniDB behind them, are slow.
         if time.monotonic() >= next_link_pass and (link_task is None or link_task.done()):
             next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS

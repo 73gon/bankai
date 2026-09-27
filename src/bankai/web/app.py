@@ -1582,6 +1582,43 @@ def create_app() -> Any:
         "anime_tvdb_cache.json",
     )
 
+    # What Shoko knows: which AniDB entry and episode each file is, and each
+    # entry's episode list and cover. ~10 s to read, so refreshed every few
+    # minutes rather than per page, and not invalidated by the pages' own
+    # changes, which it does not depend on.
+    async def _shoko_catalog_payload() -> Any:
+        from bankai.web import shoko_catalog
+
+        return await shoko_catalog.fetch() or shoko_catalog.Catalog()
+
+    snaps.add(
+        "shoko_catalog",
+        _shoko_catalog_payload,
+        inputs=lambda: _library_generation(),
+        min_interval=300.0,
+        max_age=900.0,
+        encode=False,
+    )
+
+    def _library_generation() -> int:
+        from bankai.web import library_walk
+
+        return library_walk.generation()
+
+    async def _catalog() -> Any:
+        """Shoko's catalogue, or None while Shoko cannot be read."""
+        with suppress(Exception):
+            return (await snaps["shoko_catalog"].get()).value
+        return None
+
+    def _covers_stamp() -> tuple:
+        from bankai.metadata import anidb_art
+
+        try:
+            return (anidb_art._store().stat().st_mtime_ns,)
+        except OSError:
+            return (None,)
+
     async def _automation_payload() -> dict:
         return await asyncio.to_thread(erai_mod.status)
 
@@ -1613,12 +1650,16 @@ def create_app() -> Any:
         # Cards are AniDB entries; the title index has to be loaded to tell.
         table = await anidb.index()
         rows = await enrich_review_rows(
-            await asyncio.to_thread(erai_mod.review_items, None, table)
+            await asyncio.to_thread(erai_mod.review_items, None, table), await _catalog()
         )
         return {"items": rows}
 
+    def _review_inputs() -> tuple:
+        # Covers come from Shoko's catalogue and anime-offline-database too.
+        return (_anime_inputs(), snaps["shoko_catalog"].built_at, _covers_stamp())
+
     snaps.add(
-        "anime_review", _review_payload, inputs=_anime_inputs, tags={"anime"},
+        "anime_review", _review_payload, inputs=_review_inputs, tags={"anime"},
         min_interval=30.0, max_age=600.0,
     )
 
@@ -1690,11 +1731,13 @@ def create_app() -> Any:
     async def _blacklist_payload() -> dict:
         from bankai.web.anime_library import enrich_review_rows
 
-        rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.blacklist_items))
+        rows = await enrich_review_rows(
+            await asyncio.to_thread(erai_mod.blacklist_items), await _catalog()
+        )
         return {"items": rows}
 
     snaps.add(
-        "anime_blacklist", _blacklist_payload, inputs=_anime_inputs, tags={"anime"},
+        "anime_blacklist", _blacklist_payload, inputs=_review_inputs, tags={"anime"},
         min_interval=30.0, max_age=600.0,
     )
 
@@ -2033,6 +2076,7 @@ def create_app() -> Any:
             root,
             include_episodes=show is not None,
             only_key=show,
+            catalog=await _catalog(),
         )
         # One show can span several folders, so its entries are the ones
         # belonging to any folder behind the card rather than to its name.
@@ -2049,7 +2093,12 @@ def create_app() -> Any:
     def _anime_library_inputs() -> tuple:
         from bankai.web import library_walk
 
-        return (library_walk.generation(), _anime_library_files())
+        return (
+            library_walk.generation(),
+            _anime_library_files(),
+            snaps["shoko_catalog"].built_at,
+            _covers_stamp(),
+        )
 
     _anime_library_files = _anime_state_files(
         "erai_series_policies.json",
@@ -2332,6 +2381,8 @@ def create_app() -> Any:
                 "anime": dashboard.recent_additions(
                     anime, anime_cards, kind="show", href="/a/library"
                 ),
+                # The same, one row per episode, for the page's Episodes view.
+                "anime_episodes": dashboard.recent_episodes(anime, anime_cards, href="/a/library"),
             }
 
         return await asyncio.to_thread(gather)
@@ -2371,11 +2422,17 @@ def create_app() -> Any:
         retry_pending = None
         with suppress(Exception):
             retry_pending = (await snaps["anime_automation"].get()).value.get("retry_pending")
-        recent: dict = {"mas": [], "anime": []}
+        recent: dict = {"mas": [], "anime": [], "anime_episodes": []}
         with suppress(Exception):
             recent = (await snaps["dashboard_recent"].get()).value
         s = get_settings()
         slots = preferences.get("max_active_downloads")
+        threshold = preferences.get("slow_torrent_dl_rate_threshold")  # KiB/s
+        slow_threshold = (
+            float(threshold) * 1024
+            if preferences.get("dont_count_slow_torrents") and isinstance(threshold, (int, float))
+            else None
+        )
         return dashboard.build(
             mas_rows=mas_rows,
             anime_rows=anime_rows,
@@ -2384,6 +2441,7 @@ def create_app() -> Any:
             passes=webjobs.scheduled_passes(),
             torrents=torrents,
             download_slots=int(slots) if isinstance(slots, int) and slots > 0 else None,
+            slow_threshold=slow_threshold,
             pipeline_slots=s.web.max_concurrent_jobs,
             publish_slots=s.anime.max_concurrent_transfers,
             retry_pending=retry_pending,

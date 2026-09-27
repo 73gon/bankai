@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, Clock, Download, Film, Sparkles, Users } from 'lucide-react';
+import { Activity, Clock, Download, Film, Layers, ListVideo, Sparkles, Users } from 'lucide-react';
 
 import { AnimePoster } from '@/components/AnimePoster';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Meter } from '@/components/ui/meter';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import {
   api,
   pagePaths,
@@ -53,13 +54,7 @@ function Stat({ icon: Icon, label, value, hint, tone }: { icon: typeof Users; la
   );
 }
 
-// A lane shows this many workers; qBittorrent alone can have twenty.
-const SHOWN_WORKERS = 6;
-
 function LaneCard({ lane }: { lane: DashboardLane }) {
-  const shown = lane.workers.slice(0, SHOWN_WORKERS);
-  const hidden = lane.workers.slice(SHOWN_WORKERS);
-  const hiddenBusy = hidden.filter((worker) => worker.busy).length;
   const down = lane.state === 'down';
   const capacity = lane.capacity ?? lane.workers.length;
   return (
@@ -68,6 +63,7 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
         <div className='min-w-0'>
           <CardTitle className='text-base'>{lane.label}</CardTitle>
           <CardDescription className='mt-1'>{lane.description}</CardDescription>
+          {lane.note && <p className='mt-1 text-xs text-warning'>{lane.note}</p>}
         </div>
         {down ? (
           <Badge variant='destructive' className='shrink-0 whitespace-nowrap'>Not reporting</Badge>
@@ -77,9 +73,10 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
           </Badge>
         )}
       </CardHeader>
-      <CardContent className='flex flex-col gap-2 pt-0'>
+      {/* Scrolls: qBittorrent alone can run twenty. */}
+      <CardContent className='flex max-h-80 flex-col gap-2 overflow-y-auto pt-0'>
         {lane.workers.length === 0 && <p className='text-sm text-muted-foreground'>{down ? 'qBittorrent could not be reached.' : 'Nothing running.'}</p>}
-        {shown.map((worker) => {
+        {lane.workers.map((worker) => {
           const task = worker.task;
           const body = (
             <div
@@ -89,7 +86,7 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
               )}
             >
               <div className='flex items-center gap-2 text-sm'>
-                <span className={cn('size-1.5 shrink-0 rounded-full', worker.busy ? 'bg-success' : 'bg-muted-foreground/40')} aria-hidden='true' />
+                <span className={cn('size-1.5 shrink-0 rounded-full', worker.extra ? 'bg-warning' : worker.busy ? 'bg-success' : 'bg-muted-foreground/40')} aria-hidden='true' />
                 <span className='shrink-0 text-xs text-muted-foreground'>{worker.name}</span>
                 <span className={cn('min-w-0 flex-1 truncate', worker.busy ? 'text-foreground' : 'text-muted-foreground')} title={task?.title}>
                   {task?.title ?? 'Idle'}
@@ -117,14 +114,7 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
             <div key={worker.id}>{body}</div>
           );
         })}
-        {hidden.length > 0 && (
-          <Link
-            to={hidden.find((worker) => worker.task?.href)?.task?.href ?? '/'}
-            className='rounded-md px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/[0.07] hover:text-foreground'
-          >
-            {hidden.length} more{hiddenBusy ? `, ${hiddenBusy} busy` : ''}
-          </Link>
-        )}
+
       </CardContent>
     </Card>
   );
@@ -137,14 +127,15 @@ function DueWhen({ item }: { item: DashboardDueItem }) {
   return <span className='text-xs text-muted-foreground'>—</span>;
 }
 
-function RecentList({ title, icon: Icon, rows, empty }: { title: string; icon: typeof Film; rows: DashboardRecent[]; empty: string }) {
+function RecentList({ title, icon: Icon, rows, empty, action }: { title: string; icon: typeof Film; rows: DashboardRecent[]; empty: string; action?: React.ReactNode }) {
   return (
     <Card className='flex flex-col'>
       <CardHeader className='flex flex-row items-center gap-2 pb-3'>
         <Icon className='size-4 text-muted-foreground' />
         <CardTitle className='text-base'>{title}</CardTitle>
+        {action && <div className='ml-auto'>{action}</div>}
       </CardHeader>
-      <CardContent className='flex flex-col gap-1 pt-0'>
+      <CardContent className='flex max-h-[28rem] flex-col gap-1 overflow-y-auto pt-0'>
         {rows.length === 0 && <p className='text-sm text-muted-foreground'>{empty}</p>}
         {rows.map((row) => (
           <Link
@@ -158,6 +149,8 @@ function RecentList({ title, icon: Icon, rows, empty }: { title: string; icon: t
               <p className='truncate text-xs text-muted-foreground'>
                 {row.kind === 'movie'
                   ? 'Movie'
+                  : row.kind === 'episode'
+                  ? row.episode_label
                   : [row.episode_label, row.count > 1 ? `${row.count} new episodes` : row.episode_label ? null : 'New episode']
                       .filter(Boolean)
                       .join(' · ')}
@@ -171,10 +164,28 @@ function RecentList({ title, icon: Icon, rows, empty }: { title: string; icon: t
   );
 }
 
+const ANIME_VIEW_KEY = 'bankai:dashboard:recent-anime';
+
 export default function Dashboard() {
   // Started from the last answer this browser saw, refreshed straight after.
   const [data, setData] = useState<DashboardData | undefined>(() => recall<DashboardData>(pagePaths.dashboard));
   const [, setTick] = useState(0);
+  // Anime arrivals one row per episode, or grouped into their series; remembered.
+  const [animeView, setAnimeView] = useState<'episodes' | 'series'>(() => {
+    try {
+      return localStorage.getItem(ANIME_VIEW_KEY) === 'episodes' ? 'episodes' : 'series';
+    } catch {
+      return 'series';
+    }
+  });
+  function chooseAnimeView(view: 'episodes' | 'series') {
+    setAnimeView(view);
+    try {
+      localStorage.setItem(ANIME_VIEW_KEY, view);
+    } catch {
+      /* a remembered view is a convenience */
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -248,9 +259,9 @@ export default function Dashboard() {
 
           <section className='flex flex-col gap-3'>
             <h2 className='font-serif text-xl font-semibold'>Up next</h2>
-            <div className='table-bleed overflow-x-auto'>
+            <div className='table-bleed max-h-[28rem] overflow-auto'>
               <table className='w-full min-w-[720px] border-collapse text-sm'>
-                <thead className='bg-card'>
+                <thead className='sticky top-0 z-10 bg-card'>
                   <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
                     <th className='px-3 py-2.5 font-medium'>Lane</th>
                     <th className='px-3 py-2.5 font-medium'>Task</th>
@@ -288,7 +299,18 @@ export default function Dashboard() {
             <h2 className='font-serif text-xl font-semibold'>Recently added</h2>
             <div className='grid gap-3 lg:grid-cols-2'>
               <RecentList title='Movies & Shows' icon={Film} rows={data.recent.mas} empty='Nothing new in the Movies & Shows library.' />
-              <RecentList title='Anime' icon={Sparkles} rows={data.recent.anime} empty='Nothing new in the anime library.' />
+              <RecentList
+                title='Anime'
+                icon={Sparkles}
+                rows={animeView === 'episodes' ? data.recent.anime_episodes ?? [] : data.recent.anime}
+                empty='Nothing new in the anime library.'
+                action={
+                  <ToggleGroup label='Recently added anime as'>
+                    <ToggleGroupItem icon={ListVideo} label='Episodes' selected={animeView === 'episodes'} onClick={() => chooseAnimeView('episodes')} />
+                    <ToggleGroupItem icon={Layers} label='Series' selected={animeView === 'series'} onClick={() => chooseAnimeView('series')} />
+                  </ToggleGroup>
+                }
+              />
             </div>
           </section>
         </>

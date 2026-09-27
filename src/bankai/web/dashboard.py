@@ -28,8 +28,10 @@ from bankai.torrent.matcher import parse_se
 # a single addition: "Frieren -- 4 new episodes", not four rows.
 RECENT_WINDOW_SECONDS = 3 * 86400
 RECENT_LIMIT = 12
-# Each lane's list of what is due stops here, with a count of the rest.
-DUE_LIMIT = 8
+# Each lane's list of what is due stops here, with a count of the rest. The
+# page scrolls it, so this only keeps the answer to a sensible size.
+DUE_LIMIT = 50
+RECENT_EPISODES_LIMIT = 40
 _RUNNING = {"running", "stopped"}
 # States in which qBittorrent holds a torrent in one of its download slots.
 _DOWNLOADING = {"downloading", "forcedDL", "metaDL", "forcedMetaDL", "stalledDL"}
@@ -88,15 +90,19 @@ def _lane(
     *,
     capacity: int | None,
     state: str | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     return {
         "key": key,
         "label": label,
         "description": description,
         "capacity": capacity,
-        "busy": sum(1 for worker in workers if worker["busy"]),
+        # Workers outside the lane's limit (qBittorrent's slow torrents) are
+        # shown but not counted against it.
+        "busy": sum(1 for worker in workers if worker["busy"] and not worker.get("extra")),
         "workers": workers,
         "state": state,
+        "note": note,
     }
 
 
@@ -123,6 +129,7 @@ def build(
     passes: list[dict],
     torrents: list[dict] | None,
     download_slots: int | None,
+    slow_threshold: float | None = None,
     pipeline_slots: int,
     publish_slots: int,
     retry_pending: int | None,
@@ -232,8 +239,18 @@ def build(
         (row for row in torrents or [] if row.get("state") in _DOWNLOADING),
         key=lambda row: -float(row.get("dlspeed") or 0),
     )
-    download_tasks = [
-        _task(
+
+    def slow(row: dict) -> bool:
+        # With "don't count slow torrents" on, qBittorrent lets a torrent that
+        # is stalled, fetching metadata or crawling below the threshold run
+        # without taking a slot -- which is how 18 run under a limit of 10.
+        return slow_threshold is not None and (
+            row.get("state") in {"stalledDL", "metaDL", "forcedMetaDL"}
+            or float(row.get("dlspeed") or 0) < slow_threshold
+        )
+
+    def download_task(row: dict) -> dict:
+        return _task(
             str(row.get("name") or row.get("hash")),
             detail=(
                 "Fetching metadata"
@@ -246,17 +263,30 @@ def build(
             started_at=row.get("added_on"),
             href="/qbittorrent",
         )
-        for row in downloading
+
+    counted = [download_task(row) for row in downloading if not slow(row)]
+    uncounted = [row for row in downloading if slow(row)]
+    download_workers = (
+        _slots("download", "Slot", download_slots or len(counted), counted)
+        if download_slots or counted
+        else []
+    ) + [
+        {"id": f"slow-{row.get('hash')}", "name": "Slow", "busy": True, "extra": True, "task": download_task(row)}
+        for row in uncounted
     ]
     downloads = _lane(
         "downloads",
         "qBittorrent",
         "Active download slots; the rest of its queue waits for one.",
-        _slots("download", "Slot", download_slots or len(download_tasks), download_tasks)
-        if download_slots or download_tasks
-        else [],
+        download_workers,
         capacity=download_slots,
         state=None if torrents is not None else "down",
+        note=(
+            f"+{len(uncounted)} slow, outside the slots: qBittorrent does not count "
+            "stalled or slow torrents against its limit"
+            if uncounted
+            else None
+        ),
     )
 
     lanes = [pipelines, publishing, transfers, automation_lane, scheduler, downloads]
@@ -347,7 +377,9 @@ def build(
     due.append(_group("scheduled", "Scheduled", scheduled, limit=len(scheduled)))
 
     # -- Summary -------------------------------------------------------------
-    total_workers = sum(len(lane["workers"]) for lane in lanes)
+    total_workers = sum(
+        sum(1 for worker in lane["workers"] if not worker.get("extra")) for lane in lanes
+    )
     busy_workers = sum(lane["busy"] for lane in lanes)
     return {
         "generated_at": now,
@@ -427,6 +459,35 @@ def recent_additions(
         group["episode_label"] = _episode_label(episodes)
         out.append(group)
     return sorted(out, key=lambda row: -row["added_at"])
+
+
+def recent_episodes(
+    files: Iterable[dict],
+    cards: dict[str, dict],
+    *,
+    href: str,
+    limit: int = RECENT_EPISODES_LIMIT,
+) -> list[dict]:
+    """The newest episode files, one row each, newest first."""
+    newest = sorted(files, key=lambda row: -float(row.get("mtime") or 0))[:limit]
+    out = []
+    for entry in newest:
+        folder = str(entry.get("series") or "")
+        card = cards.get(folder) or {}
+        identity = parse_se(str(entry.get("name") or ""))
+        out.append(
+            {
+                "key": str(entry.get("path") or entry.get("name")),
+                "title": card.get("title") or folder,
+                "poster_url": card.get("poster_url"),
+                "kind": "episode",
+                "href": href,
+                "added_at": float(entry.get("mtime") or 0),
+                "count": 1,
+                "episode_label": _episode_label([identity]) if identity else str(entry.get("name") or ""),
+            }
+        )
+    return out
 
 
 def _episode_label(episodes: list[tuple[int, int]]) -> str | None:
