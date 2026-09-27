@@ -53,7 +53,13 @@ function Stat({ icon: Icon, label, value, hint, tone }: { icon: typeof Users; la
   );
 }
 
+// A lane shows this many workers; qBittorrent alone can have twenty.
+const SHOWN_WORKERS = 6;
+
 function LaneCard({ lane }: { lane: DashboardLane }) {
+  const shown = lane.workers.slice(0, SHOWN_WORKERS);
+  const hidden = lane.workers.slice(SHOWN_WORKERS);
+  const hiddenBusy = hidden.filter((worker) => worker.busy).length;
   const down = lane.state === 'down';
   const capacity = lane.capacity ?? lane.workers.length;
   return (
@@ -64,16 +70,16 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
           <CardDescription className='mt-1'>{lane.description}</CardDescription>
         </div>
         {down ? (
-          <Badge variant='destructive'>Not reporting</Badge>
+          <Badge variant='destructive' className='shrink-0 whitespace-nowrap'>Not reporting</Badge>
         ) : (
-          <Badge variant={lane.busy ? 'success' : 'muted'} title={lane.capacity === null ? 'No fixed limit' : undefined}>
+          <Badge variant={lane.busy ? 'success' : 'muted'} className='shrink-0 whitespace-nowrap' title={lane.capacity === null ? 'No fixed limit' : undefined}>
             {lane.busy} / {lane.capacity === null ? (capacity || '∞') : capacity} busy
           </Badge>
         )}
       </CardHeader>
       <CardContent className='flex flex-col gap-2 pt-0'>
         {lane.workers.length === 0 && <p className='text-sm text-muted-foreground'>{down ? 'qBittorrent could not be reached.' : 'Nothing running.'}</p>}
-        {lane.workers.map((worker) => {
+        {shown.map((worker) => {
           const task = worker.task;
           const body = (
             <div
@@ -111,6 +117,14 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
             <div key={worker.id}>{body}</div>
           );
         })}
+        {hidden.length > 0 && (
+          <Link
+            to={hidden.find((worker) => worker.task?.href)?.task?.href ?? '/'}
+            className='rounded-md px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/[0.07] hover:text-foreground'
+          >
+            {hidden.length} more{hiddenBusy ? `, ${hiddenBusy} busy` : ''}
+          </Link>
+        )}
       </CardContent>
     </Card>
   );
