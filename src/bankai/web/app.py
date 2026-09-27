@@ -1812,6 +1812,8 @@ def create_app() -> Any:
             raise HTTPException(status_code=502, detail=f"Episode search failed: {exc}") from exc
 
     _queue_files = _anime_state_files("web_pending.json")
+    # view -> (built_at of the rows it was cut from, the answer)
+    _queue_pages: dict[tuple, tuple[float, dict]] = {}
 
     async def _anime_queue_rows() -> list[dict]:
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
@@ -1846,8 +1848,15 @@ def create_app() -> Any:
     ) -> dict:
         from bankai.web.anime_library import queue_covers
 
+        snapshot = await snaps["anime_queue_rows"].get()
+        # The page polls the same view every few seconds: its answer holds
+        # until the rows under it are rebuilt.
+        view = (page, page_size, include_done, q, status, sort, direction)
+        held = _queue_pages.get(view)
+        if held is not None and held[0] == snapshot.built_at:
+            return held[1]
         # A copy: the rows are shared with every other request.
-        rows = list((await snaps["anime_queue_rows"].get()).value)
+        rows = list(snapshot.value)
         # Sorted here rather than in the browser: the page is a slice of the
         # whole queue, so sorting what arrived would only order the slice.
         sorter = _QUEUE_SORTERS.get(str(sort or ""))
@@ -1878,13 +1887,17 @@ def create_app() -> Any:
         start = page * page_size
         # Copies again: queue_covers writes the posters into the rows it gets.
         visible = [dict(row) for row in rows[start : start + page_size]]
-        return {
+        result = {
             "jobs": await queue_covers(visible),
             "total": len(rows),
             "counts": counts,
             "page": page,
             "page_size": page_size,
         }
+        if len(_queue_pages) >= 64:
+            _queue_pages.clear()
+        _queue_pages[view] = (snapshot.built_at, result)
+        return result
 
     @app.post("/api/anime/library/numbering")
     async def anime_library_numbering(req: dict) -> dict:
