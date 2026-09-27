@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -52,7 +53,7 @@ def _load() -> dict:
 def _save(data: dict) -> None:
     global _LOAD_CACHE
     p = _store()
-    tmp = p.with_suffix(".tmp")
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data))
     tmp.replace(p)
     try:

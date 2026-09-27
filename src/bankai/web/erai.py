@@ -13,6 +13,7 @@ import asyncio
 import functools
 import html
 import json
+import os
 import re
 import shutil
 import threading
@@ -42,7 +43,60 @@ from bankai.web import updates
 log = get_logger(__name__)
 _NYAA_BASE = "https://nyaa.si"
 _RSS_URL = f"{_NYAA_BASE}/?page=rss&u=Erai-raws&c=1_2"
-_STATE_LOCK = threading.RLock()
+class _StateLock:
+    """The release state's lock, held across processes as well as threads.
+
+    The automation cycle can run in a worker process of its own (see
+    ``_delegated``) while the web process answers the review and blacklist
+    buttons, and both read, change and write the same files: a thread lock
+    alone would let one side's write drop the other's. Re-entrant, like the
+    RLock it wraps; only the outermost hold takes the file lock, since a
+    second flock of the same file from this process would wait on itself.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._depth = 0
+        self._handle: Any = None
+
+    def __enter__(self) -> _StateLock:
+        self._lock.acquire()
+        self._depth += 1
+        if self._depth == 1:
+            try:
+                self._handle = _lock_file()
+            except BaseException:
+                self._depth -= 1
+                self._lock.release()
+                raise
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._depth -= 1
+        if self._depth == 0 and self._handle is not None:
+            handle, self._handle = self._handle, None
+            with suppress(OSError):
+                handle.close()  # closing releases the flock
+        self._lock.release()
+
+
+def _lock_file() -> Any:
+    try:
+        import fcntl
+    except ImportError:  # Windows: one process there, the thread lock is enough
+        return None
+    path = _state_path().with_name("erai_state.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")  # held open until __exit__
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
+_STATE_LOCK = _StateLock()
 _CYCLE_LOCK = asyncio.Lock()
 _STOP = asyncio.Event()
 _GIB = 1024**3
@@ -74,7 +128,7 @@ def _save_retry_requests(requests: dict[str, dict]) -> None:
     with _STATE_LOCK:
         path = _state_path().with_name("erai_retry_requests.json")
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(requests, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
 
@@ -96,7 +150,7 @@ def _save_policies(rows: dict[str, dict[str, Any]]) -> None:
     with _STATE_LOCK:
         path = _policy_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
 
@@ -623,7 +677,6 @@ def _request_series_retries(state: dict[str, Any], key: str) -> int:
 
 async def review_action(info_hash: str, action: str) -> dict[str, Any]:
     """Persist a series decision and schedule the affected releases immediately."""
-    global _RETRY_TASK
     with _STATE_LOCK:
         release = (_load_state().get("releases", {}) or {}).get(info_hash)
     if not release or not release.get("title"):
@@ -707,8 +760,8 @@ async def review_action(info_hash: str, action: str) -> dict[str, Any]:
             blacklisted = len(matched)
         else:
             raise ValueError("Unknown review action")
-    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
-        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    if requested:
+        _start_retry_cycle()
     return {
         "ok": True,
         "requested": requested,
@@ -961,7 +1014,6 @@ async def purge_series(
 
 
 def remove_blacklist(key: str) -> dict[str, Any]:
-    global _RETRY_TASK
     with _STATE_LOCK:
         policies = _load_policies()
         # Everything behind the one card: one AniDB entry, or -- for a decision
@@ -998,18 +1050,17 @@ def remove_blacklist(key: str) -> dict[str, Any]:
                 _hold(state, _entry_from_dict(saved_entry), release["reason"])
         requested = sum(_request_series_retries(state, member) for member in restored)
         _save_state(state)
-    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
-        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    if requested:
+        _start_retry_cycle()
     return {"ok": True, "requested": requested}
 
 
 def retry_series(release_title: str) -> int:
-    global _RETRY_TASK
     with _STATE_LOCK:
         state = _load_state()
         requested = _request_series_retries(state, _mapping_key(release_title))
-    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
-        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    if requested:
+        _start_retry_cycle()
     return requested
 
 
@@ -1245,7 +1296,7 @@ def save_mapping(
         mappings[key] = {**asdict(match), **episode_mapping}
         path = _state_path().with_name("erai_mappings.json")
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(mappings, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
 
@@ -1294,7 +1345,7 @@ def save_anidb_mapping(release_title: str, anime: dict[str, Any], *, episode_off
         }
         path = _state_path().with_name("erai_mappings.json")
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(mappings, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
     return key
@@ -1396,8 +1447,12 @@ def _save_state(state: dict[str, Any]) -> None:
     with _STATE_LOCK:
         path = _state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        # Compact: indented, the file was 25 MB and took 0.46 s to read back
+        # -- on every page, every cycle step. Compact it is 20 MB and 0.25 s.
+        tmp.write_text(
+            json.dumps(state, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+        )
         tmp.replace(path)
 
 
@@ -3475,6 +3530,8 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
     download_free = download_free_space_gib(state)
     if not policy.enabled:
         pause_reason = "Automation is disabled"
+    elif _delegated() and _worker_heartbeat() is None:
+        pause_reason = "The automation worker is not running (bankai-automation)"
     elif not get_settings().metadata.tvdb_enabled or not get_settings().metadata.tvdb_api_key:
         pause_reason = "TVDB is not configured"
     elif free is None:
@@ -3496,7 +3553,7 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
     backfill = state["backfill"]
     return {
         "enabled": policy.enabled,
-        "running": _CYCLE_LOCK.locked() if running is None else running,
+        "running": _cycle_running() if running is None else running,
         "paused": pause_reason is not None,
         "pause_reason": pause_reason,
         "free_space_gib": round(free, 1) if free is not None else None,
@@ -3550,7 +3607,6 @@ def retry_held(reason: str | None = None) -> dict:
     for the releases held only because TVDB could not place them, which the
     AniDB route now can -- sparing a Nyaa lookup for every other hold.
     """
-    global _RETRY_TASK
     with _STATE_LOCK:
         state = _load_state()
         catalog = _catalog_entries(state)
@@ -3571,15 +3627,107 @@ def retry_held(reason: str | None = None) -> dict:
                 anime_mod._DETAIL_CACHE.pop(detail_url, None)
             requested += 1
         _save_retry_requests(requests)
-    if requested and (_RETRY_TASK is None or _RETRY_TASK.done()):
-        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+    if requested:
+        _start_retry_cycle()
     return {**status(), "requested": requested}
+
+
+# -- Where the cycle runs ------------------------------------------------------
+#
+# By default in the web process, as tasks on its event loop. With
+# BANKAI_ANIME_WORKER=external the web process leaves it to `bankai anime
+# worker`, a process of its own: a cycle is CPU-heavy for minutes at a time,
+# and on the web's loop every page waited for it -- 0.8 s for /api/health at
+# its worst. The web side then asks for cycles through a request file and
+# reads what the worker is doing from its heartbeat file.
+
+_IS_WORKER = False
+_WORKER_CYCLE: asyncio.Task | None = None
+_HEARTBEAT_SECONDS = 10.0
+# A worker not heard from in this long is taken to be down.
+_HEARTBEAT_STALE_SECONDS = 180.0
+
+
+def _delegated() -> bool:
+    """Does a separate worker process run the cycle, rather than this one?"""
+    if _IS_WORKER:
+        return False
+    return os.environ.get("BANKAI_ANIME_WORKER", "").strip().casefold() == "external"
+
+
+def _cycle_request_path() -> Path:
+    return _state_path().with_name("erai_cycle_request.json")
+
+
+def _heartbeat_path() -> Path:
+    return _state_path().with_name("erai_worker.json")
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(value), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _request_cycle(*, retries_only: bool) -> None:
+    """Ask the worker for a cycle. A full one wins over a retries-only one."""
+    with _STATE_LOCK:
+        pending = _read_json(_cycle_request_path())
+        if pending is not None:
+            retries_only = retries_only and bool(pending.get("retries_only", True))
+        _write_json(
+            _cycle_request_path(), {"retries_only": retries_only, "requested_at": time.time()}
+        )
+
+
+def _take_cycle_request() -> dict[str, Any] | None:
+    with _STATE_LOCK:
+        request = _read_json(_cycle_request_path())
+        if request is not None:
+            with suppress(OSError):
+                _cycle_request_path().unlink()
+        return request
+
+
+def _worker_heartbeat() -> dict[str, Any] | None:
+    """The worker's last report, or None when it has not reported lately."""
+    beat = _read_json(_heartbeat_path())
+    if beat is None:
+        return None
+    if time.time() - float(beat.get("updated_at") or 0) > _HEARTBEAT_STALE_SECONDS:
+        return None
+    return beat
+
+
+def _cycle_running() -> bool:
+    if _delegated():
+        return bool((_worker_heartbeat() or {}).get("running"))
+    return _CYCLE_LOCK.locked()
+
+
+def _start_retry_cycle() -> None:
+    global _RETRY_TASK
+    if _delegated():
+        _request_cycle(retries_only=True)
+    elif _RETRY_TASK is None or _RETRY_TASK.done():
+        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
 
 
 def trigger_cycle() -> dict:
     """Start a potentially long backlog check without keeping an HTTP request open."""
     global _MANUAL_TASK
-    if not _CYCLE_LOCK.locked() and (_MANUAL_TASK is None or _MANUAL_TASK.done()):
+    if _delegated():
+        _request_cycle(retries_only=False)
+    elif not _CYCLE_LOCK.locked() and (_MANUAL_TASK is None or _MANUAL_TASK.done()):
         _MANUAL_TASK = asyncio.create_task(run_cycle(prefill=True))
     return status(running=True)
 
@@ -3587,6 +3735,9 @@ def trigger_cycle() -> dict:
 async def scheduler() -> None:
     global _STOP
     _STOP = asyncio.Event()
+    if _delegated():
+        log.info("Anime automation runs in its own worker process")
+        return
     while not _STOP.is_set():
         try:
             await run_cycle(prefill=True)
@@ -3597,6 +3748,97 @@ async def scheduler() -> None:
         timeout = max(60, get_settings().anime.poll_interval_seconds)
         with suppress(TimeoutError):
             await asyncio.wait_for(_STOP.wait(), timeout=timeout)
+
+
+async def worker(*, poll_seconds: float = 2.0) -> None:
+    """Run the automation cycle as a process of its own: `bankai anime worker`.
+
+    Scheduled cycles every poll interval, plus whatever the web process asks
+    for through the request file, checked every ``poll_seconds``. Settings are
+    re-read when the config file changes, since the web process is where they
+    are edited.
+    """
+    global _IS_WORKER, _STOP, _WORKER_CYCLE
+    from bankai.config import active_config_path, reset_settings_cache
+
+    _IS_WORKER = True
+    _STOP = asyncio.Event()
+
+    def beat() -> None:
+        with suppress(OSError):
+            _write_json(
+                _heartbeat_path(),
+                {"pid": os.getpid(), "running": _CYCLE_LOCK.locked(), "updated_at": time.time()},
+            )
+
+    async def heartbeat() -> None:
+        while not _STOP.is_set():
+            beat()
+            with suppress(TimeoutError):
+                await asyncio.wait_for(_STOP.wait(), timeout=_HEARTBEAT_SECONDS)
+
+    def config_stamp() -> float:
+        try:
+            return active_config_path().stat().st_mtime
+        except OSError:
+            return 0.0
+
+    stamp = config_stamp()
+    pulse = asyncio.create_task(heartbeat())
+    next_scheduled = 0.0  # a first cycle straight away, as the web process did
+    log.info("Anime automation worker started (pid %d)", os.getpid())
+    try:
+        while not _STOP.is_set():
+            if (current := config_stamp()) != stamp:
+                stamp = current
+                reset_settings_cache()
+                log.info("Settings changed; reloaded")
+            request = _take_cycle_request()
+            scheduled = time.monotonic() >= next_scheduled
+            if request is not None or scheduled:
+                retries_only = (
+                    not scheduled and request is not None and bool(request.get("retries_only"))
+                )
+                beat_task = asyncio.get_running_loop().call_later(0.5, beat)
+                _WORKER_CYCLE = asyncio.create_task(
+                    run_cycle(prefill=True, retries_only=retries_only)
+                )
+                try:
+                    await _WORKER_CYCLE
+                except asyncio.CancelledError:
+                    if _STOP.is_set():
+                        break  # stop_worker cancelled it
+                    raise
+                except Exception as exc:
+                    log.warning("Erai worker cycle failed: %s", exc)
+                finally:
+                    beat_task.cancel()
+                    beat()
+                if scheduled:
+                    next_scheduled = time.monotonic() + max(
+                        60, get_settings().anime.poll_interval_seconds
+                    )
+                continue
+            with suppress(TimeoutError):
+                await asyncio.wait_for(_STOP.wait(), timeout=poll_seconds)
+    finally:
+        _STOP.set()
+        pulse.cancel()
+        with suppress(asyncio.CancelledError):
+            await pulse
+        with suppress(OSError):
+            _write_json(
+                _heartbeat_path(),
+                {"pid": os.getpid(), "running": False, "stopped": True, "updated_at": 0},
+            )
+        log.info("Anime automation worker stopped")
+
+
+def stop_worker() -> None:
+    """Stop the worker, cancelling a cycle in progress rather than waiting it out."""
+    _STOP.set()
+    if _WORKER_CYCLE is not None and not _WORKER_CYCLE.done():
+        _WORKER_CYCLE.cancel()
 
 
 async def shutdown() -> None:

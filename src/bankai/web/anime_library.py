@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 import threading
@@ -114,7 +115,7 @@ def flush_persistent_cache() -> None:
             return
         path = _persistent_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(_persistent_data(), ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
         _PERSISTENT_DIRTY = False
@@ -377,7 +378,7 @@ def _load_codec_cache() -> dict[str, dict]:
 def _save_codec_cache(cache: dict[str, dict]) -> None:
     path = _codec_cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(cache), encoding="utf-8")
     tmp.replace(path)
 
@@ -699,7 +700,7 @@ def save_numbering(*, key: str, tvdb_id: object, mode: str) -> None:
             prefs[name] = {"numbering": mode}
     path = _prefs_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
     tmp.replace(path)
 

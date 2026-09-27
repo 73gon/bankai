@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
 import uuid
@@ -216,7 +217,7 @@ def _load_pending() -> list[PendingJob]:
 def _save_pending(items: list[PendingJob]) -> None:
     p = _pending_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps([asdict(i) for i in items], indent=2))
     tmp.replace(p)
 

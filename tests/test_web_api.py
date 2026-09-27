@@ -856,6 +856,9 @@ def test_titles_library_uses_file_creation_and_modification_times(
     replacement.write_bytes(b"repacked movie")
     replacement.replace(movie)
     os.utime(movie, (stat.st_mtime + 60, stat.st_mtime + 60))
+    # The answer is kept ready and refreshed within seconds; stand in for
+    # those seconds passing rather than sleeping through them.
+    client.app.state.snapshots["titles"].invalidate()
     second = client.get("/api/titles")
     second_row = second.json()["rows"][0]
     assert second_row["created_at"] == pytest.approx(row["created_at"])

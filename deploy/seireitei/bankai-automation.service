@@ -1,0 +1,27 @@
+[Unit]
+# The anime automation cycle, apart from the web UI.
+#
+# A cycle is minutes of CPU work. Run on the web server's event loop, every
+# page waited for it; here it has a process of its own. bankai-web is started
+# with BANKAI_ANIME_WORKER=external so it leaves the cycle to this unit, and
+# asks it for cycles (Retry, Run now) through a request file in the state
+# directory. Restarting either one leaves the other running.
+Description=bankai anime automation worker
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=malik
+WorkingDirectory=/home/malik/projects/bankai
+Environment=HOME=/home/malik
+Environment=PATH=/home/malik/projects/bankai/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/malik/projects/bankai/.venv/bin/bankai anime worker
+Restart=on-failure
+RestartSec=10
+# SIGTERM cancels a cycle in progress; this is its time to unwind.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

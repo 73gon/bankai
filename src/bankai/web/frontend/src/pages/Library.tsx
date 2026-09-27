@@ -30,7 +30,7 @@ import {
   MoreHorizontal,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
+import { api, pagePaths, recall, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -45,7 +45,8 @@ import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitl
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
-let queueRowsCache: TitleRow[] | null = null;
+// After a reload, the last answer this browser saw -- stale, so refreshed at once.
+let queueRowsCache: TitleRow[] | null = recall<{ rows: TitleRow[] }>(pagePaths.titles)?.rows ?? null;
 let queueRowsCachedAt = 0;
 
 // --- ANSI colour rendering for job logs -----------------------------------

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, CircleStop, Play, RefreshCw, RotateCcw, Search, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type Job } from '@/lib/api';
+import { animeQueuePath, api, recall, type AnimeQueuePage, type Job } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { EmptyState, Spinner } from '@/components/ui/empty';
@@ -101,17 +101,21 @@ const STATUS_ORDER = [
   'cancelled',
 ];
 
+// The first view -- page one, nothing filtered -- as the page opens with it.
+const firstView = () => recall<AnimeQueuePage>(animeQueuePath(0, 100, false, { q: '', status: 'all' }));
+
 export default function AnimeQueue() {
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [total, setTotal] = useState(0);
-  const [counts, setCounts] = useState<Record<string, number>>({});
+  // Started from the last answer this browser saw, refreshed straight after.
+  const [jobs, setJobs] = useState<Job[]>(() => firstView()?.jobs ?? []);
+  const [total, setTotal] = useState(() => firstView()?.total ?? 0);
+  const [counts, setCounts] = useState<Record<string, number>>(() => firstView()?.counts ?? {});
   const [page, setPage] = useState(0);
   const [showCompleted, setShowCompleted] = useState(false);
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('all');
   const [sort, setSort] = useState<SortState<QueueSortKey> | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => firstView() === undefined);
   const [busy, setBusy] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const pageSize = 100;
@@ -141,14 +145,20 @@ export default function AnimeQueue() {
   }
 
   const load = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
+    const filters = { q: search, status, sort: sort?.key, dir: sort?.dir };
+    if (!silent) {
+      // A view seen before shows at once; only an unseen one waits behind a spinner.
+      const held = recall<AnimeQueuePage>(animeQueuePath(page, pageSize, showCompleted, filters));
+      if (held) {
+        setJobs(held.jobs);
+        setTotal(held.total);
+        setCounts(held.counts ?? {});
+      } else {
+        setLoading(true);
+      }
+    }
     try {
-      const result = await api.animeQueue(page, pageSize, showCompleted, {
-        q: search,
-        status,
-        sort: sort?.key,
-        dir: sort?.dir,
-      });
+      const result = await api.animeQueue(page, pageSize, showCompleted, filters);
       setJobs(result.jobs);
       setTotal(result.total);
       setCounts(result.counts ?? {});

@@ -104,7 +104,7 @@ tests/                       pytest — always target 107 pass
 | Repo / venv  | `/home/malik/projects/bankai` , `.venv` installed as `.[web]`         |
 | Config       | `/home/malik/projects/bankai/config.toml`                             |
 | State        | `/home/malik/.local/state/bankai/`                                    |
-| Services     | `systemctl {status,restart} bankai-web` / `qbittorrent`               |
+| Services     | `systemctl {status,restart} bankai-web` / `bankai-automation` / `qbittorrent` |
 | Logs         | `journalctl -u bankai-web -f`                                         |
 | Listens      | bankai `127.0.0.1:3003`, qBittorrent `127.0.0.1:8080`                 |
 | Reachable    | `http://seireitei:7003` , qBittorrent `http://seireitei:7004`         |
@@ -113,6 +113,19 @@ tests/                       pytest — always target 107 pass
 | Media roots  | `/mnt/g/media/{movies,shows,shows_anime}` — 9p, measured 88.9 MB/s    |
 | Boot         | Windows task "Seireitei WSL Server" starts the distro and holds it open |
 | Setup        | `deploy/seireitei/setup.sh` (idempotent, run as root)                 |
+
+**Two processes.** `bankai-web` serves the UI; `bankai-automation` (`bankai anime
+worker`) runs the anime automation cycle. The web unit sets
+`BANKAI_ANIME_WORKER=external`, so it never runs the cycle itself: its Retry /
+Run-now buttons write `erai_cycle_request.json`, and the worker's status comes
+from its heartbeat `erai_worker.json`, both in the state directory. Without the
+variable (tests, Windows) the web process runs the cycle as before. The two
+share the release state under a file lock (`erai_state.lock`).
+
+**Tabs answer from snapshots** (`web/snapshots.py`): each tab's response is
+kept built and gzipped, rebuilt in the background when its input files change,
+and invalidated by any successful non-GET `/api/` request so the page's next
+load waits for fresh data. A new tab endpoint that is slow should be a snapshot.
 
 Downloads sit on G:, not on ext4 inside the image. The image lives on C:,
 grows with everything written into it and never shrinks back, and reports its
@@ -183,7 +196,7 @@ git push origin main
 
 # 4. Deploy to keller (now WSL under systemd, not the Windows service)
 ssh keller "wsl -d seireitei -- git -C /home/malik/projects/bankai pull --ff-only"
-ssh keller "wsl -d seireitei -u root -- systemctl restart bankai-web"
+ssh keller "wsl -d seireitei -u root -- systemctl restart bankai-web bankai-automation"
 ssh keller "wsl -d seireitei -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3003/api/health"
 # Expected output: 200
 

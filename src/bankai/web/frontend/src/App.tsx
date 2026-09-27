@@ -3,7 +3,7 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { api, type UpdateStatus, type VpnStatus } from '@/lib/api';
+import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -59,8 +59,42 @@ const NAV_GROUPS = [
  *  A badge per endpoint would mean several reads of a large state file every
  *  tick, on every page. A count that fails to arrive simply has no badge.
  */
+/**
+ * Fetch each main tab's answer once, a few seconds after the app opens, so the
+ * first visit to a tab this session is as quick as a return to it. One at a
+ * time and only once: the server keeps these ready, so each is a cheap read.
+ */
+function usePrefetchTabs(): void {
+  useEffect(() => {
+    let alive = true;
+    const timer = window.setTimeout(async () => {
+      const tabs: Array<() => Promise<unknown>> = [
+        () => api.animeLibrary(),
+        () => api.animeQueue(0, 100, false, { q: '', status: 'all' }),
+        () => api.animeReview(),
+        () => api.animeBlacklist(),
+        () => api.qbittorrentTorrents(),
+        () => api.titles(),
+        () => api.masLibrary(true),
+      ];
+      for (const fetchTab of tabs) {
+        if (!alive) return;
+        try {
+          await fetchTab();
+        } catch {
+          /* a tab that cannot be fetched now simply loads when opened */
+        }
+      }
+    }, 3_000);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, []);
+}
+
 function useSidebarCounts(): Record<string, number | null | undefined> {
-  const [counts, setCounts] = useState<Record<string, number | null>>({});
+  const [counts, setCounts] = useState<Record<string, number | null>>(() => recall<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts)?.counts ?? {});
   useEffect(() => {
     let alive = true;
     let timer = 0;
@@ -283,6 +317,7 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
 export default function App() {
   const [collapsed, setCollapsed] = useSidebarState();
   const counts = useSidebarCounts();
+  usePrefetchTabs();
   useEffect(() => {
     const pointer = () => { document.documentElement.dataset.inputMethod = 'pointer'; };
     const keyboard = () => { document.documentElement.dataset.inputMethod = 'keyboard'; };

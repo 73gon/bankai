@@ -79,6 +79,8 @@ web_app = typer.Typer(name="web", help="Run and manage the web UI.", no_args_is_
 shoko_app = typer.Typer(
     name="shoko", help="Connect bankai to Shoko Server for AniDB data.", no_args_is_help=True
 )
+anime_app = typer.Typer(name="anime", help="Anime automation.", no_args_is_help=True)
+app.add_typer(anime_app, name="anime")
 app.add_typer(shoko_app, name="shoko")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
@@ -1703,6 +1705,29 @@ def web_serve(
     from bankai.web.server import run_server
 
     run_server(host=host, port=port)
+
+
+@anime_app.command("worker")
+def anime_worker() -> None:
+    """Run the anime automation cycle in the foreground, apart from the web UI.
+
+    For a bankai-web started with BANKAI_ANIME_WORKER=external, which then
+    leaves the cycle to this process instead of running it on its own loop.
+    """
+    import asyncio
+    import signal
+    from contextlib import suppress
+
+    from bankai.web import erai
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with suppress(NotImplementedError):  # Windows
+                loop.add_signal_handler(sig, erai.stop_worker)
+        await erai.worker()
+
+    asyncio.run(main())
 
 
 @web_app.command("install-service")

@@ -20,7 +20,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type QBittorrentItem } from '@/lib/api';
+import { api, pagePaths, recall, type QBittorrentItem } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -152,11 +152,12 @@ const FIRST_DIRECTION: Record<SortKey, 'asc' | 'desc'> = {
 };
 
 export default function QBittorrent() {
-  const [items, setItems] = useState<QBittorrentItem[]>([]);
+  // Started from the last answer this browser saw, refreshed straight after.
+  const [items, setItems] = useState<QBittorrentItem[]>(() => recall<{ items: QBittorrentItem[] }>(pagePaths.qbittorrent)?.items ?? []);
   const [query, setQuery] = useState('');
   const [statuses, setStatuses] = useState<Set<string>>(new Set());
   const [sort, setSort] = useState<Sort | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => recall(pagePaths.qbittorrent) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contextTorrent, setContextTorrent] = useState<QBittorrentItem | null>(null);

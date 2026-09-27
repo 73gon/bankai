@@ -39,6 +39,76 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// ---- Remembered answers -------------------------------------------------
+// The last answer to each page's main request, so coming back to a tab shows
+// it at once while a fresh one loads behind it. Held in memory for tab
+// switches and, where it fits, in localStorage so a reload starts from it too.
+const REMEMBER_PREFIX = 'bankai:answer:';
+// localStorage holds about five million characters per site; no one answer
+// may take a third of that.
+const REMEMBER_MAX_CHARS = 1_500_000;
+const remembered = new Map<string, unknown>();
+
+function remember(path: string, value: unknown): void {
+  remembered.set(path, value);
+  try {
+    const text = JSON.stringify(value);
+    if (text.length <= REMEMBER_MAX_CHARS) localStorage.setItem(REMEMBER_PREFIX + path, text);
+    else localStorage.removeItem(REMEMBER_PREFIX + path);
+  } catch {
+    /* storage full or unavailable: memory alone still serves tab switches */
+  }
+}
+
+/** The last answer to a GET of ``path``, if this browser has one. */
+export function recall<T>(path: string): T | undefined {
+  if (remembered.has(path)) return remembered.get(path) as T;
+  try {
+    const text = localStorage.getItem(REMEMBER_PREFIX + path);
+    if (text) {
+      const value = JSON.parse(text) as T;
+      remembered.set(path, value);
+      return value;
+    }
+  } catch {
+    /* unreadable: as if never stored */
+  }
+  return undefined;
+}
+
+/** The requests whose answers pages start from; see ``recall``. */
+export const pagePaths = {
+  qbittorrent: '/api/qbittorrent/torrents',
+  animeReview: '/api/anime/review',
+  animeBlacklist: '/api/anime/blacklist',
+  animeLibrary: '/api/anime/library',
+  animeAutomation: '/api/anime/automation',
+  sidebarCounts: '/api/sidebar/counts',
+  titles: '/api/titles',
+  masLibrary: '/api/mas/library?include_episodes=true&rescan=false',
+} as const;
+
+export function animeQueuePath(page = 0, pageSize = 100, includeDone = false, filters: AnimeQueueFilters = {}): string {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+    include_done: String(includeDone),
+  });
+  if (filters.q?.trim()) params.set('q', filters.q.trim());
+  if (filters.status && filters.status !== 'all') params.set('status', filters.status);
+  if (filters.sort) {
+    params.set('sort', filters.sort);
+    params.set('direction', filters.dir ?? 'desc');
+  }
+  return `/api/anime/queue?${params}`;
+}
+
+async function remembering<T>(path: string): Promise<T> {
+  const value = await request<T>(path);
+  remember(path, value);
+  return value;
+}
+
 export interface HealthResponse {
   status: string;
   version: string;
@@ -670,7 +740,7 @@ export const api = {
   filmpalastDetails: (url: string) =>
     request<FilmpalastDetails>(`/api/filmpalast/detail?url=${encodeURIComponent(url)}`),
   qbittorrentTorrents: () =>
-    request<{ items: QBittorrentItem[] }>('/api/qbittorrent/torrents'),
+    remembering<{ items: QBittorrentItem[] }>(pagePaths.qbittorrent),
   qbittorrentStart: (hash: string) =>
     request<{ ok: boolean }>(`/api/qbittorrent/torrents/${encodeURIComponent(hash)}/start`, { method: 'POST' }),
   qbittorrentStop: (hash: string) =>
@@ -753,20 +823,8 @@ export const api = {
     ),
 
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
-  animeQueue: (page = 0, pageSize = 100, includeDone = false, filters: AnimeQueueFilters = {}) => {
-    const params = new URLSearchParams({
-      page: String(page),
-      page_size: String(pageSize),
-      include_done: String(includeDone),
-    });
-    if (filters.q?.trim()) params.set('q', filters.q.trim());
-    if (filters.status && filters.status !== 'all') params.set('status', filters.status);
-    if (filters.sort) {
-      params.set('sort', filters.sort);
-      params.set('direction', filters.dir ?? 'desc');
-    }
-    return request<AnimeQueuePage>(`/api/anime/queue?${params}`);
-  },
+  animeQueue: (page = 0, pageSize = 100, includeDone = false, filters: AnimeQueueFilters = {}) =>
+    remembering<AnimeQueuePage>(animeQueuePath(page, pageSize, includeDone, filters)),
   animeEpisodeSearch: (tvdbId: number, season: number, episode: number, q?: string) => {
     const params = new URLSearchParams({ tvdb_id: String(tvdbId), season: String(season), episode: String(episode) });
     if (q) params.set('q', q);
@@ -780,8 +838,8 @@ export const api = {
     request<{ ok: boolean; cleared: number }>('/api/anime/review/owned', {
       method: 'POST', body: JSON.stringify(payload),
     }),
-  animeReview: () => request<{ items: AnimeReviewItem[] }>('/api/anime/review'),
-  animeBlacklist: () => request<{ items: AnimeReviewItem[] }>('/api/anime/blacklist'),
+  animeReview: () => remembering<{ items: AnimeReviewItem[] }>(pagePaths.animeReview),
+  animeBlacklist: () => remembering<{ items: AnimeReviewItem[] }>(pagePaths.animeBlacklist),
   reviewAnime: (infoHash: string, action: 'recheck' | 'allow_german' | 'blacklist') =>
     request<{ ok: boolean; requested: number; blacklisted?: number }>('/api/anime/review/' + infoHash, {
       method: 'POST', body: JSON.stringify({ action }),
@@ -829,17 +887,20 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ tvdb_id: tvdbId, title }) },
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
-  sidebarCounts: () => request<{ counts: Record<string, number | null> }>('/api/sidebar/counts'),
+  sidebarCounts: () => remembering<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts),
   /** `rescan` checks the library against the disk first instead of the held tree. */
-  animeLibrary: (rescan = false) =>
-    request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>(
-      `/api/anime/library${rescan ? '?rescan=true' : ''}`,
-    ),
+  animeLibrary: async (rescan = false) => {
+    type Library = { root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] };
+    if (!rescan) return remembering<Library>(pagePaths.animeLibrary);
+    const fresh = await request<Library>('/api/anime/library?rescan=true');
+    remember(pagePaths.animeLibrary, fresh);
+    return fresh;
+  },
   animeLibraryShow: (key: string) =>
     request<{ root: string; entries: AnimeLibraryEntry[]; shows: AnimeLibraryShow[] }>(
       `/api/anime/library?show=${encodeURIComponent(key)}`,
     ),
-  animeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation'),
+  animeAutomation: () => remembering<AnimeAutomationStatus>(pagePaths.animeAutomation),
   runAnimeAutomation: () => request<AnimeAutomationStatus>('/api/anime/automation/run', { method: 'POST' }),
   retryHeldAnime: () => request<AnimeAutomationStatus & { requested: number }>('/api/anime/automation/retry-held', { method: 'POST' }),
   queueMovie: (body: { title: string; german?: string; url?: string; site?: string; year?: number }) =>
@@ -872,7 +933,7 @@ export const api = {
   jobLog: (id: string) => request<{ id: string; status: string; log: string }>(`/api/jobs/${id}/log`),
 
   library: () => request<{ entries: LibraryEntry[]; library: string }>('/api/library'),
-  titles: () => request<{ rows: TitleRow[]; library: string }>('/api/titles'),
+  titles: () => remembering<{ rows: TitleRow[]; library: string }>(pagePaths.titles),
   redoTitle: (path: string) =>
     request<{ redo: any; title: string; fresh: boolean; stages: string[] }>('/api/titles/redo', {
       method: 'POST',
@@ -934,10 +995,12 @@ export const api = {
       body: JSON.stringify({ paths }),
     }),
 
-  masLibrary: (includeEpisodes = false, rescan = false) =>
-    request<{ movies: MasMovie[]; shows: MasShow[] }>(
-      `/api/mas/library?include_episodes=${includeEpisodes}&rescan=${rescan}`,
-    ),
+  masLibrary: async (includeEpisodes = false, rescan = false) => {
+    type Library = { movies: MasMovie[]; shows: MasShow[] };
+    const fresh = await request<Library>(`/api/mas/library?include_episodes=${includeEpisodes}&rescan=${rescan}`);
+    if (includeEpisodes) remember(pagePaths.masLibrary, fresh);
+    return fresh;
+  },
   serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[]; anime: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
 
   serverShow: (path: string) => request<{ path: string; seasons: ServerSeason[] }>(`/api/server/show?path=${encodeURIComponent(path)}`),

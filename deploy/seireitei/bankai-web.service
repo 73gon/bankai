@@ -17,6 +17,8 @@ User=malik
 WorkingDirectory=/home/malik/projects/bankai
 Environment=HOME=/home/malik
 Environment=PATH=/home/malik/projects/bankai/.venv/bin:/usr/local/bin:/usr/bin:/bin
+# The anime automation cycle runs in bankai-automation.service, not here.
+Environment=BANKAI_ANIME_WORKER=external
 # Bound to loopback on purpose. Reaching it from anywhere else is tailscale
 # serve's job, which is how 7001-7003 already work; listening publicly here
 # would put a second, unauthenticated door on the same app.

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Ban, Check, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
+import { api, pagePaths, recall, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
 import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
@@ -36,8 +36,10 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   const [linkTarget, setLinkTarget] = useState<AnimeReviewItem | null>(null);
   // A held show whose AniDB anime the user picks, for review rather than the blacklist.
   const [anidbFor, setAnidbFor] = useState<AnimeReviewItem | null>(null);
-  const [items, setItems] = useState<AnimeReviewItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const listPath = blacklist ? pagePaths.animeBlacklist : pagePaths.animeReview;
+  // Started from the last answer this browser saw, refreshed straight after.
+  const [items, setItems] = useState<AnimeReviewItem[]>(() => recall<{ items: AnimeReviewItem[] }>(listPath)?.items ?? []);
+  const [loading, setLoading] = useState(() => recall(listPath) === undefined);
   const [busy, setBusy] = useState<string | null>(null);
   const [mappingTitle, setMappingTitle] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<AnimeReviewItem | null>(null);
@@ -74,7 +76,6 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   }
 
   async function load() {
-    setLoading(true);
     try {
       setItems((blacklist ? await api.animeBlacklist() : await api.animeReview()).items);
     } catch (error: any) {
@@ -84,7 +85,13 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     }
   }
 
-  useEffect(() => { void load(); }, [blacklist]);
+  useEffect(() => {
+    // Review and blacklist share this page: switching shows the other's held answer first.
+    const held = recall<{ items: AnimeReviewItem[] }>(listPath);
+    setItems(held?.items ?? []);
+    setLoading(held === undefined);
+    void load();
+  }, [blacklist]);
 
   useEffect(() => {
     try {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Film, Tv, RefreshCw, Search, LayoutGrid, Rows3, ExternalLink, HardDrive } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type MasMovie, type MasShow } from '@/lib/api';
+import { api, pagePaths, recall, type MasMovie, type MasShow } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -66,9 +66,11 @@ function PosterCard({ row, onOpen }: { row: Row; onOpen: () => void }) {
 }
 
 export default function MasLibrary() {
-  const [movies, setMovies] = useState<MasMovie[]>([]);
-  const [shows, setShows] = useState<MasShow[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Started from the last answer this browser saw, refreshed straight after.
+  const [movies, setMovies] = useState<MasMovie[]>(() => recall<{ movies: MasMovie[] }>(pagePaths.masLibrary)?.movies ?? []);
+  const [shows, setShows] = useState<MasShow[]>(() => recall<{ shows: MasShow[] }>(pagePaths.masLibrary)?.shows ?? []);
+  // Only a spinner with nothing to show: otherwise the held answer stays up while it refreshes.
+  const [loading, setLoading] = useState(() => recall(pagePaths.masLibrary) === undefined);
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>(storedView);
   const [selected, setSelected] = useState<Row | null>(null);
@@ -82,7 +84,7 @@ export default function MasLibrary() {
   }, [view]);
 
   async function load(rescan = false) {
-    setLoading(true);
+    if (rescan) setLoading(true);
     try {
       // Episodes come with the page: the drawer opens on a row already held,
       // and a second round trip per click is slower than one larger answer.

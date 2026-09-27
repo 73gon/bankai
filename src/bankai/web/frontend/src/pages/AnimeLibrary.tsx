@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
+import { api, pagePaths, recall, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -121,15 +121,17 @@ function Progress({ show }: { show: AnimeLibraryShow }) {
 }
 
 export default function AnimeLibrary() {
-  const [shows, setShows] = useState<AnimeLibraryShow[]>([]);
-  const [root, setRoot] = useState('');
+  // Started from the last answer this browser saw, refreshed straight after.
+  const [shows, setShows] = useState<AnimeLibraryShow[]>(() => recall<{ shows: AnimeLibraryShow[] }>(pagePaths.animeLibrary)?.shows ?? []);
+  const [root, setRoot] = useState(() => recall<{ root: string }>(pagePaths.animeLibrary)?.root ?? '');
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>(storedView);
   const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedShow, setSelectedShow] = useState<AnimeLibraryShow | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [loading, setLoading] = useState(true);
+  // Only a spinner with nothing to show: otherwise the held answer stays up while it refreshes.
+  const [loading, setLoading] = useState(() => recall(pagePaths.animeLibrary) === undefined);
   const [transferring, setTransferring] = useState<string | null>(null);
   const [upgrading, setUpgrading] = useState<string | null>(null);
   const [searchTarget, setSearchTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
@@ -150,7 +152,7 @@ export default function AnimeLibrary() {
   }, [view]);
 
   async function load(rescan = false) {
-    setLoading(true);
+    if (rescan) setLoading(true);
     try {
       const result = await api.animeLibrary(rescan);
       setShows(result.shows);

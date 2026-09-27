@@ -30,3 +30,10 @@ def _isolated_library_walk(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(library_walk, "_TREES", {})
     monkeypatch.setattr(library_walk, "_STALE", set())
     monkeypatch.setattr(library_walk, "_LOADED", False)
+
+
+@pytest.fixture(autouse=True)
+def _no_snapshot_warming(monkeypatch):
+    """The web app's background warming would build every tab in each test's app."""
+    monkeypatch.setenv("BANKAI_WARM_SNAPSHOTS", "0")
+    monkeypatch.delenv("BANKAI_ANIME_WORKER", raising=False)

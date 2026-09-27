@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import os
 import re
 import subprocess
 import sys
@@ -19,13 +20,14 @@ import threading
 import time
 import uuid
 from array import array
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
 from bankai import __version__
@@ -819,7 +821,7 @@ def _review_transfer_kind(path: Path, state: review_mod.ReviewState) -> str:
 def create_app() -> Any:
     from contextlib import asynccontextmanager
 
-    from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import (
         FileResponse,
@@ -837,6 +839,7 @@ def create_app() -> Any:
         migration_task: asyncio.Task | None = None
         erai_task: asyncio.Task | None = None
         queue_task: asyncio.Task | None = None
+        snapshot_task: asyncio.Task | None = None
         try:
             import anyio.to_thread
 
@@ -864,6 +867,14 @@ def create_app() -> Any:
                     )
             erai_task = asyncio.create_task(erai_mod.scheduler())
             queue_task = asyncio.create_task(webjobs.scheduler())
+            if os.environ.get("BANKAI_WARM_SNAPSHOTS", "1") != "0":
+                registry = _app.state.snapshots
+
+                async def keep_ready() -> None:
+                    await registry.warm()
+                    await registry.refresher()
+
+                snapshot_task = asyncio.create_task(keep_ready())
         except Exception:
             pass
         try:
@@ -875,6 +886,10 @@ def create_app() -> Any:
                 with suppress(Exception):
                     await migration_task
             await availability_mod.shutdown()
+            if snapshot_task is not None:
+                snapshot_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await snapshot_task
             await erai_mod.shutdown()
             if queue_task is not None:
                 queue_task.cancel()
@@ -898,6 +913,14 @@ def create_app() -> Any:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    from bankai.web import compression as compression_mod
+    from bankai.web import snapshots as snapshots_mod
+
+    # Each tab's answer, kept ready; see bankai.web.snapshots.
+    snaps = snapshots_mod.Registry()
+    app.state.snapshots = snaps
+    app.add_middleware(snapshots_mod.InvalidateOnWrite, registry=snaps)
+    app.add_middleware(compression_mod.GzipJson)
 
     # Queue/library membership is used by both catalogue pages.  Computing it
     # used to parse every historical job log for every Search/Discover request.
@@ -1531,9 +1554,37 @@ def create_app() -> Any:
             "aliases": result.aliases,
         }
 
-    @app.get("/api/anime/automation")
-    def anime_automation_status() -> dict:
-        return erai_mod.status()
+    def _anime_state_files(*names: str) -> Callable[[], tuple]:
+        """Inputs of the anime snapshots: the automation's files in the state directory."""
+
+        def paths() -> list[Path]:
+            base = erai_mod._state_path()
+            return [base, *(base.with_name(name) for name in names)]
+
+        return snapshots_mod.file_stamps(paths)
+
+    _anime_inputs = _anime_state_files(
+        "erai_series_policies.json",
+        "erai_mappings.json",
+        "erai_retry_requests.json",
+        "anime_tvdb_cache.json",
+    )
+
+    async def _automation_payload() -> dict:
+        return await asyncio.to_thread(erai_mod.status)
+
+    snaps.add(
+        "anime_automation",
+        _automation_payload,
+        inputs=_anime_state_files("erai_worker.json"),
+        tags={"anime"},
+        min_interval=2.0,
+        max_age=10.0,
+    )
+
+    @app.get("/api/anime/automation", response_model=None)
+    async def anime_automation_status(request: Request):
+        return snapshots_mod.response(await snaps["anime_automation"].get(), request)
 
     @app.post("/api/anime/automation/run")
     async def anime_automation_run() -> dict:
@@ -1543,8 +1594,7 @@ def create_app() -> Any:
     async def anime_automation_retry_held(reason: str | None = Query(None, max_length=60)) -> dict:
         return erai_mod.retry_held(reason)
 
-    @app.get("/api/anime/review")
-    async def anime_review() -> dict:
+    async def _review_payload() -> dict:
         from bankai.metadata import anidb
         from bankai.web.anime_library import enrich_review_rows
 
@@ -1554,6 +1604,15 @@ def create_app() -> Any:
             await asyncio.to_thread(erai_mod.review_items, None, table)
         )
         return {"items": rows}
+
+    snaps.add(
+        "anime_review", _review_payload, inputs=_anime_inputs, tags={"anime"},
+        min_interval=15.0, max_age=600.0,
+    )
+
+    @app.get("/api/anime/review", response_model=None)
+    async def anime_review(request: Request):
+        return snapshots_mod.response(await snaps["anime_review"].get(), request)
 
     @app.post("/api/anime/review/owned")
     async def anime_review_mark_owned(req: dict) -> dict:
@@ -1616,12 +1675,20 @@ def create_app() -> Any:
         rows = await asyncio.to_thread(erai_mod.review_releases, key)
         return {"items": rows}
 
-    @app.get("/api/anime/blacklist")
-    async def anime_blacklist() -> dict:
+    async def _blacklist_payload() -> dict:
         from bankai.web.anime_library import enrich_review_rows
 
         rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.blacklist_items))
         return {"items": rows}
+
+    snaps.add(
+        "anime_blacklist", _blacklist_payload, inputs=_anime_inputs, tags={"anime"},
+        min_interval=15.0, max_age=600.0,
+    )
+
+    @app.get("/api/anime/blacklist", response_model=None)
+    async def anime_blacklist(request: Request):
+        return snapshots_mod.response(await snaps["anime_blacklist"].get(), request)
 
     @app.post("/api/anime/blacklist/remove")
     async def anime_blacklist_remove(req: dict) -> dict:
@@ -1732,6 +1799,25 @@ def create_app() -> Any:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Episode search failed: {exc}") from exc
 
+    async def _anime_queue_rows() -> list[dict]:
+        rows = await asyncio.to_thread(webjobs.anime_snapshot)
+        # Most releases are waiting on qBittorrent and deliberately have no
+        # bankai job, so the queue has to show them from the release table or
+        # the backlog would be invisible.
+        return [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows)]
+
+    # The whole queue, before any page's search, sort or slice. Kept as rows,
+    # not an encoded answer, since each request cuts its own page from it.
+    snaps.add(
+        "anime_queue_rows",
+        _anime_queue_rows,
+        inputs=_anime_state_files("web_pending.json"),
+        tags={"anime", "qbit"},
+        min_interval=2.0,
+        max_age=4.0,
+        encode=False,
+    )
+
     @app.get("/api/anime/queue")
     async def anime_queue(
         page: int = Query(0, ge=0),
@@ -1742,14 +1828,10 @@ def create_app() -> Any:
         sort: str | None = None,
         direction: str = "desc",
     ) -> dict:
-        from bankai.web import erai as erai_mod
         from bankai.web.anime_library import queue_covers
 
-        rows = await asyncio.to_thread(webjobs.anime_snapshot)
-        # Most releases are waiting on qBittorrent and deliberately have no
-        # bankai job, so the queue has to show them from the release table or
-        # the backlog would be invisible.
-        rows = [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows)]
+        # A copy: the rows are shared with every other request.
+        rows = list((await snaps["anime_queue_rows"].get()).value)
         # Sorted here rather than in the browser: the page is a slice of the
         # whole queue, so sorting what arrived would only order the slice.
         sorter = _QUEUE_SORTERS.get(str(sort or ""))
@@ -1778,7 +1860,8 @@ def create_app() -> Any:
                 if str(row.get("phase") or row.get("status") or "").casefold() == wanted
             ]
         start = page * page_size
-        visible = rows[start : start + page_size]
+        # Copies again: queue_covers writes the posters into the rows it gets.
+        visible = [dict(row) for row in rows[start : start + page_size]]
         return {
             "jobs": await queue_covers(visible),
             "total": len(rows),
@@ -1815,7 +1898,7 @@ def create_app() -> Any:
         key = str(req.get("key") or "").strip()
         if not key:
             raise HTTPException(status_code=422, detail="key is required")
-        listing = await anime_library(show=key, include_entries=False, rescan=True)
+        listing = await _anime_library_payload(show=key, include_entries=False, rescan=True)
         show = next(iter(listing.get("shows") or []), None)
         if show is None:
             raise HTTPException(status_code=404, detail="show not found in the library")
@@ -1854,9 +1937,26 @@ def create_app() -> Any:
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    @app.get("/api/anime/library")
+    @app.get("/api/anime/library", response_model=None)
     async def anime_library(
-        show: str | None = None, include_entries: bool = False, rescan: bool = False
+        request: Request,
+        show: str | None = None,
+        include_entries: bool = False,
+        rescan: bool = False,
+    ):
+        # The grid everyone opens is the ready answer; one show's drawer, the
+        # raw entries and a Rescan are worked out on the spot.
+        if show is None and not include_entries and not rescan:
+            return snapshots_mod.response(await snaps["anime_library"].get(), request)
+        result = await _anime_library_payload(
+            show=show, include_entries=include_entries, rescan=rescan
+        )
+        if rescan and show is None:
+            snaps["anime_library"].invalidate()
+        return result
+
+    async def _anime_library_payload(
+        *, show: str | None = None, include_entries: bool = False, rescan: bool = False
     ) -> dict:
         def scan() -> tuple[Path, list[dict]]:
             root = Path(get_settings().transfer.anime_shows_dir)
@@ -1916,6 +2016,27 @@ def create_app() -> Any:
             else []
         )
         return {"root": str(root), "entries": visible_entries, "shows": shows}
+
+    def _anime_library_inputs() -> tuple:
+        from bankai.web import library_walk
+
+        return (library_walk.generation(), _anime_library_files())
+
+    _anime_library_files = _anime_state_files(
+        "erai_series_policies.json",
+        "anime_tvdb_cache.json",
+        "anime_codecs.json",
+        "anime_library_prefs.json",
+        "review.json",
+    )
+    snaps.add(
+        "anime_library",
+        _anime_library_payload,
+        inputs=_anime_library_inputs,
+        tags={"anime"},
+        min_interval=20.0,
+        max_age=600.0,
+    )
 
     @app.get("/api/anime/tvdb")
     async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
@@ -2116,32 +2237,14 @@ def create_app() -> Any:
     # ------------------------------------------------------------------
     # Queue / jobs
     # ------------------------------------------------------------------
-    _counts_lock = asyncio.Lock()
-    _counts_cache: dict[str, Any] = {"at": 0.0, "value": None}
-
-    @app.get("/api/sidebar/counts")
-    async def sidebar_counts() -> dict:
-        """Every sidebar badge in one call.
-
-        Five badges polling five endpoints would be five reads of a fourteen
-        megabyte state file per tick, and the sidebar is on every page, so it
-        is the one thing that has to stay cheap. The three anime counts share
-        a single read. Each count is guarded on its own, so a provider being
-        unreachable dims one badge rather than emptying the row.
-
-        Every open tab polls this, so one computation serves them all: callers
-        that arrive while it runs wait for its answer instead of starting their
-        own, and an answer under ten seconds old is handed back as is.
-        """
-        async with _counts_lock:
-            cached = _counts_cache["value"]
-            if cached is not None and time.monotonic() - _counts_cache["at"] < 10.0:
-                return cached
-            value = await _compute_sidebar_counts()
-            _counts_cache.update(at=time.monotonic(), value=value)
-            return value
-
     async def _compute_sidebar_counts() -> dict:
+        """Every sidebar badge, counted from the other tabs' ready answers.
+
+        The sidebar is on every page and every open tab polls it, so it must
+        stay cheap: it used to re-read the whole release state for three of
+        its counts. Each count is guarded on its own, so a provider being
+        unreachable dims one badge rather than emptying the row.
+        """
         counts: dict[str, int | None] = {}
 
         def unfinished(rows: list[dict]) -> int:
@@ -2153,32 +2256,29 @@ def create_app() -> Any:
 
         with suppress(Exception):
             counts["mas_queue"] = unfinished(await asyncio.to_thread(webjobs.snapshot))
-
-        state = None
         with suppress(Exception):
-            state = await asyncio.to_thread(erai_mod._load_state)
-        if state is not None:
-            with suppress(Exception):
-                from bankai.metadata import anidb
-
-                await anidb.index()  # review counts cards, which are AniDB entries
-            with suppress(Exception):
-                rows = await asyncio.to_thread(webjobs.anime_snapshot)
-                rows = [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows, state)]
-                counts["anime_queue"] = unfinished(rows)
-            with suppress(Exception):
-                counts["anime_review"] = len(
-                    await asyncio.to_thread(erai_mod.review_items, state)
-                )
+            counts["anime_queue"] = unfinished((await snaps["anime_queue_rows"].get()).value)
         with suppress(Exception):
-            counts["anime_blacklist"] = len(await asyncio.to_thread(erai_mod.blacklist_items))
+            counts["anime_review"] = len((await snaps["anime_review"].get()).value["items"])
         with suppress(Exception):
-            from bankai.torrent.qbittorrent import QBittorrentClient
-
-            async with QBittorrentClient() as client:
-                counts["qbittorrent"] = len(await client.list_torrents())
-
+            counts["anime_blacklist"] = len((await snaps["anime_blacklist"].get()).value["items"])
+        with suppress(Exception):
+            counts["qbittorrent"] = len((await snaps["qbittorrent"].get()).value["items"])
         return {"counts": counts}
+
+    # Built from the others, so it can afford to be rebuilt often.
+    snaps.add(
+        "sidebar_counts",
+        _compute_sidebar_counts,
+        tags={"anime", "qbit", "movies", "mas"},
+        min_interval=3.0,
+        max_age=5.0,
+    )
+
+    @app.get("/api/sidebar/counts", response_model=None)
+    async def sidebar_counts(request: Request):
+        """Every sidebar badge in one call; see _compute_sidebar_counts."""
+        return snapshots_mod.response(await snaps["sidebar_counts"].get(), request)
 
     @app.get("/api/queue")
     def queue_list() -> dict:
@@ -2871,8 +2971,26 @@ def create_app() -> Any:
             )
         return {"rows": rows, "library": str(get_settings().output.directory)}
 
-    @app.get("/api/titles")
-    def titles_list() -> dict:
+    def _titles_inputs() -> tuple:
+        from bankai.web import library_walk
+
+        return (library_walk.generation(), _titles_files())
+
+    _titles_files = _anime_state_files("review.json", "web_pending.json")
+    snaps.add(
+        "titles",
+        lambda: asyncio.to_thread(_titles_payload),
+        inputs=_titles_inputs,
+        tags={"movies"},
+        min_interval=1.0,
+        max_age=3.0,
+    )
+
+    @app.get("/api/titles", response_model=None)
+    async def titles_list(request: Request):
+        return snapshots_mod.response(await snaps["titles"].get(), request)
+
+    def _titles_payload() -> dict:
         nonlocal titles_cache_revision, titles_cache_value
 
         entries = media_mod.scan_library()
@@ -2958,9 +3076,19 @@ def create_app() -> Any:
             "stages": ["extract", "torrent", "sync", "remux"],
         }
 
-    @app.get("/api/qbittorrent/torrents")
-    async def qbittorrent_torrents() -> dict:
-        """Return every torrent visible to the configured qBittorrent user."""
+    @app.get("/api/qbittorrent/torrents", response_model=None)
+    async def qbittorrent_torrents(request: Request):
+        """Every torrent visible to the configured qBittorrent user, at most ~2 s old."""
+        try:
+            snapshot = await snaps["qbittorrent"].get()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="qBittorrent could not be reached. Check its connection settings.",
+            ) from exc
+        return snapshots_mod.response(snapshot, request)
+
+    async def _qbittorrent_payload() -> dict:
         from bankai.torrent.qbittorrent import QBittorrentClient
 
         try:
@@ -2968,10 +3096,7 @@ def create_app() -> Any:
                 torrents = await client.list_torrents()
         except Exception as exc:
             log.warning("qBittorrent listing failed: %s", exc)
-            raise HTTPException(
-                status_code=502,
-                detail="qBittorrent could not be reached. Check its connection settings.",
-            ) from exc
+            raise
         return {
             "items": [
                 {
@@ -2992,6 +3117,16 @@ def create_app() -> Any:
                 for torrent in torrents
             ]
         }
+
+    snaps.add(
+        "qbittorrent",
+        _qbittorrent_payload,
+        tags={"qbit"},
+        min_interval=1.0,
+        max_age=2.0,
+        # A last list older than this is not passed off as current.
+        max_stale=15.0,
+    )
 
     def _qbittorrent_hash(raw: str) -> str:
         torrent_hash = raw.strip().casefold()
@@ -3699,13 +3834,7 @@ def create_app() -> Any:
     # ------------------------------------------------------------------
     # Server page (media-server contents)
     # ------------------------------------------------------------------
-    @app.get("/api/mas/library")
-    async def mas_library(include_episodes: bool = False, rescan: bool = False) -> dict:
-        """The Movies & Shows library, as cards, over the configured roots.
-
-        Its own roots, not the anime ones: the server library below it scans
-        all three, this one deliberately scans two.
-        """
+    async def _mas_library_payload(*, include_episodes: bool = True, rescan: bool = False) -> dict:
         from bankai.web import mas_library as mas
 
         s = get_settings()
@@ -3715,6 +3844,35 @@ def create_app() -> Any:
             include_episodes=include_episodes,
             rescan=rescan,
         )
+
+    def _mas_inputs() -> tuple:
+        from bankai.web import library_walk
+
+        return (library_walk.generation(),)
+
+    # The page asks with its episodes, so that is the answer kept ready.
+    snaps.add(
+        "mas_library",
+        _mas_library_payload,
+        inputs=_mas_inputs,
+        tags={"mas"},
+        min_interval=10.0,
+        max_age=600.0,
+    )
+
+    @app.get("/api/mas/library", response_model=None)
+    async def mas_library(request: Request, include_episodes: bool = False, rescan: bool = False):
+        """The Movies & Shows library, as cards, over the configured roots.
+
+        Its own roots, not the anime ones: the server library below it scans
+        all three, this one deliberately scans two.
+        """
+        if include_episodes and not rescan:
+            return snapshots_mod.response(await snaps["mas_library"].get(), request)
+        result = await _mas_library_payload(include_episodes=include_episodes, rescan=rescan)
+        if rescan:
+            snaps["mas_library"].invalidate()
+        return result
 
     @app.get("/api/server/contents")
     def server_contents(rescan: bool = Query(False)) -> dict:

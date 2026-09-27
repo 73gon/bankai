@@ -51,6 +51,20 @@ _LOCK = threading.RLock()
 _ROOT_LOCKS: dict[str, threading.Lock] = {}
 _LOADED = False
 _STALE: set[str] = set()
+# Bumped whenever a held tree may have changed, so what is built from the
+# trees -- the pages' ready answers -- knows to be rebuilt.
+_GENERATION = 0
+
+
+def generation() -> int:
+    """A number that changes whenever any held tree may have."""
+    return _GENERATION
+
+
+def _bump() -> None:
+    global _GENERATION
+    with _LOCK:
+        _GENERATION += 1
 
 
 def _store_path() -> Path:
@@ -188,6 +202,7 @@ def _tree(root: str, *, rescan: bool) -> dict[str, Any]:
             tree = _refresh(root, full=tree is None)
             with _LOCK:
                 _STALE.discard(root)
+            _bump()
             _save()
     return tree
 
@@ -201,6 +216,7 @@ def mark_stale() -> None:
     """
     with _LOCK:
         _STALE.update(_TREES)
+    _bump()
 
 
 def directories(root: str | Path, *, rescan: bool = False) -> dict[str, dict]:
@@ -275,6 +291,8 @@ def refresh_all() -> set[str]:
             after = _refresh(root, full=now - full_at >= FULL_WALK_SECONDS)
             if _contents(before) != _contents(after):
                 changed.add(root)
+    if changed:
+        _bump()
     if roots:
         _save()
     return changed
@@ -286,4 +304,5 @@ def forget() -> None:
     with _LOCK:
         _TREES.clear()
         _LOADED = True
+    _bump()
     _save()
