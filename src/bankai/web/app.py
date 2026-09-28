@@ -770,6 +770,14 @@ def _validate_setting_value(key: str, value: Any) -> Any:
             raise ValueError("at least one directory is required")
         return paths
 
+    if key == "anime.erai_feed_token":
+        # Pasted as the whole feed link from the show page, or just the token.
+        raw = str(value or "").strip()
+        found = re.search(r"token=([0-9A-Za-z]+)", raw)
+        token = found[1] if found else raw
+        if token and not re.fullmatch(r"[0-9A-Za-z]{16,128}", token):
+            raise ValueError("paste a feed link from erai-raws.info, or the token= part of one")
+        return token
     if key.startswith("anime."):
         field = key.removeprefix("anime.")
         data = get_settings().anime.model_dump()

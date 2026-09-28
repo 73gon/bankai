@@ -122,7 +122,7 @@ export default function AnimeErai() {
         <EmptyState
           icon={Subtitles}
           title='Connect your Erai-raws account'
-          description='Copy the token= part of any feed link on erai-raws.info (a show page, under its RSS links) into Anime Settings as "Erai-raws feed token". Only the token is stored.'
+          description='On any show page on erai-raws.info, right-click FHD under RSS Links, copy the link and paste it into Anime Settings as "Erai-raws feed token". bankai keeps only the token from it.'
           action={<Button asChild><Link to='/a/settings'>Open Anime Settings</Link></Button>}
         />
       ) : (

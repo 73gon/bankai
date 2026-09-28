@@ -87,3 +87,13 @@ def test_held_releases_are_settled_by_erai_raws(store, monkeypatch):
     assert releases["1" * 40]["reason"] == "Erai-raws lists no German subtitles"
     assert releases["3" * 40]["reason"] == reason  # Erai-raws has not said
     assert set(erai._load_retry_requests()) == {"84b20ca269c0e67680bac521b13c699cc3d031c1"}
+
+
+def test_the_whole_feed_link_can_be_pasted_as_the_token():
+    from bankai.web.app import _validate_setting_value
+
+    link = "https://www.erai-raws.info/anime-list/x/feed/?token=0123456789abcdef0123456789abcdef&res=1080p&type=torrent"
+    assert _validate_setting_value("anime.erai_feed_token", link) == "0123456789abcdef0123456789abcdef"
+    assert _validate_setting_value("anime.erai_feed_token", " 0123456789abcdef0123456789abcdef ") == "0123456789abcdef0123456789abcdef"
+    with pytest.raises(ValueError):
+        _validate_setting_value("anime.erai_feed_token", "not a token!")
