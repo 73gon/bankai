@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
@@ -141,7 +141,8 @@ export default function AnimeLibrary() {
   const [searchMatch, setSearchMatch] = useState<AnimeTVDBMatch | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<AnimeLibraryShow | null>(null);
-  const [removing, setRemoving] = useState(false);
+  // Shows being removed in the background: kept off the page until done.
+  const removing = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     try {
@@ -155,7 +156,7 @@ export default function AnimeLibrary() {
     if (rescan) setLoading(true);
     try {
       const result = await api.animeLibrary(rescan);
-      setShows(result.shows);
+      setShows(result.shows.filter((show) => !removing.current.has(show.key)));
       setRoot(result.root);
     } catch (error: any) {
       toast.error(error.message);
@@ -227,24 +228,29 @@ export default function AnimeLibrary() {
   }
 
   async function removeShow() {
-    if (!removeTarget) return;
-    setRemoving(true);
+    const target = removeTarget;
+    if (!target) return;
+    // Off the page at once; deleting runs in the background, where the
+    // Dashboard shows it under "Your actions".
+    removing.current.add(target.key);
+    setShows((current) => current.filter((show) => show.key !== target.key));
+    setRemoveTarget(null);
+    setSelected(null);
+    setSelectedShow(null);
+    toast.info('Removing ' + target.title + ' in the background…');
     try {
-      const result = await api.removeAnimeLibraryShow(removeTarget.key);
+      const result = await api.removeAnimeLibraryShow(target.key, target.title);
       toast.success(
-        removeTarget.title + ' removed and blacklisted — deleted ' + result.deleted_files + ' file'
+        target.title + ' removed and blacklisted — deleted ' + result.deleted_files + ' file'
         + (result.deleted_files === 1 ? '' : 's')
         + (result.freed_bytes ? ' (' + formatSize(result.freed_bytes) + ')' : '')
         + (result.removed_torrents ? ', ' + result.removed_torrents + ' torrent' + (result.removed_torrents === 1 ? '' : 's') : ''),
       );
-      setRemoveTarget(null);
-      setSelected(null);
-      setSelectedShow(null);
-      await load(true);
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setRemoving(false);
+      removing.current.delete(target.key);
+      void load();
     }
   }
 
@@ -528,7 +534,7 @@ export default function AnimeLibrary() {
         </DrawerContent>
       </Drawer>
       {/* Deleting a whole show is not undoable, so it is never one click. */}
-      <Dialog open={Boolean(removeTarget)} onOpenChange={(open) => { if (!open && !removing) setRemoveTarget(null); }}>
+      <Dialog open={Boolean(removeTarget)} onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}>
         <DialogContent className='max-w-md'>
           <DialogHeader>
             <DialogTitle>Remove {removeTarget?.title}?</DialogTitle>
@@ -540,9 +546,9 @@ export default function AnimeLibrary() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant='secondary' onClick={() => setRemoveTarget(null)} disabled={removing}>Cancel</Button>
-            <Button variant='destructive' onClick={() => void removeShow()} disabled={removing}>
-              <Trash2 data-icon='inline-start' /> {removing ? 'Removing…' : 'Delete and blacklist'}
+            <Button variant='secondary' onClick={() => setRemoveTarget(null)}>Cancel</Button>
+            <Button variant='destructive' onClick={() => void removeShow()}>
+              <Trash2 data-icon='inline-start' /> Delete and blacklist
             </Button>
           </DialogFooter>
         </DialogContent>

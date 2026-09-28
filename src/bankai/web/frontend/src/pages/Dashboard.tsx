@@ -86,7 +86,7 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
               )}
             >
               <div className='flex items-center gap-2 text-sm'>
-                <span className={cn('size-1.5 shrink-0 rounded-full', worker.extra ? 'bg-warning' : worker.busy ? 'bg-success' : 'bg-muted-foreground/40')} aria-hidden='true' />
+                <span className={cn('size-1.5 shrink-0 rounded-full', worker.name === 'Failed' ? 'bg-destructive' : worker.extra && worker.busy ? 'bg-warning' : worker.busy ? 'bg-success' : 'bg-muted-foreground/40')} aria-hidden='true' />
                 <span className='shrink-0 text-xs text-muted-foreground'>{worker.name}</span>
                 <span className={cn('min-w-0 flex-1 truncate', worker.busy ? 'text-foreground' : 'text-muted-foreground')} title={task?.title}>
                   {task?.title ?? 'Idle'}

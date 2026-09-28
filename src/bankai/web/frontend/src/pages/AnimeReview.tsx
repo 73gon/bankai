@@ -91,7 +91,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     markBusy(key, true);
     if (payload.key) dropCard(payload.key);
     try {
-      const result = await api.markAnimeOwned(payload);
+      const result = await api.markAnimeOwned(payload, label);
       toast.success('Dismissed ' + result.cleared + ' release' + (result.cleared === 1 ? '' : 's') + ' of ' + label);
       setReleasesFor(null);
     } catch (error: any) {
@@ -159,7 +159,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     // on the server in the background.
     if (action === 'blacklist') dropCard(item.key);
     try {
-      const result = await api.reviewAnime(item.info_hash, action);
+      const result = await api.reviewAnime(item.info_hash, action, item.title);
       toast.success(action === 'blacklist'
         ? 'Discarded ' + item.title + (result.blacklisted ? ' (' + result.blacklisted + ' releases)' : '')
         : result.requested + ' releases scheduled for a fresh check');
@@ -178,7 +178,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     dropCard(target.key);
     toast.info('Discarding ' + target.title + ' and deleting its files…');
     try {
-      const result = await api.purgeAnimeSeries(target.info_hash, true);
+      const result = await api.purgeAnimeSeries(target.info_hash, true, target.title);
       toast.success(
         'Discarded ' + target.title + ' — removed ' + result.deleted_files + ' file'
         + (result.deleted_files === 1 ? '' : 's')
@@ -197,7 +197,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     markBusy(item.key, true);
     dropCard(item.key);
     try {
-      const result = await api.removeAnimeBlacklist(item.key);
+      const result = await api.removeAnimeBlacklist(item.key, item.title);
       toast.success('Restored ' + item.title + '; ' + result.requested + ' releases scheduled');
     } catch (error: any) {
       toast.error(error.message);

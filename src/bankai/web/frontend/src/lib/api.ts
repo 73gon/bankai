@@ -229,6 +229,38 @@ export interface Dashboard {
   recent: { mas: DashboardRecent[]; anime: DashboardRecent[]; anime_episodes?: DashboardRecent[] };
 }
 
+// ---- Background actions -------------------------------------------------
+
+export interface ActionStatus {
+  id: string;
+  kind: string;
+  title: string;
+  detail: string | null;
+  status: 'running' | 'done' | 'failed';
+  started_at: number;
+  finished_at: number | null;
+  result: any;
+  error: string | null;
+}
+
+/**
+ * POST an action to run in the background, then follow it until it is done.
+ * The server answers at once; the page stays usable, the Dashboard shows it
+ * under "Your actions", and this resolves with its result (or throws its error).
+ */
+async function runAction<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const started = await request<{ action_id: string }>(path, {
+    method: 'POST',
+    body: JSON.stringify({ ...body, background: true }),
+  });
+  for (;;) {
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    const action = await request<ActionStatus>('/api/actions/' + started.action_id);
+    if (action.status === 'done') return action.result as T;
+    if (action.status === 'failed') throw new Error(action.error || 'The action failed');
+  }
+}
+
 export interface HealthResponse {
   status: string;
   version: string;
@@ -854,7 +886,12 @@ export const api = {
   // single Bankai process created 50-100 avoidable backend requests per page.
   // Retain the proxy only for legacy/non-HTTPS artwork URLs.
   posterUrl: (url: string) =>
-    url.includes('filmpalast.to/') || !url.startsWith('https://')
+    // bankai's own images (AniDB covers through Shoko) load as they are: sent
+    // through the poster proxy, which fetches only http(s) addresses, every
+    // card with a Shoko cover showed the placeholder.
+    url.startsWith('/')
+      ? url
+      : url.includes('filmpalast.to/') || !url.startsWith('https://')
       ? `/api/discover/poster?url=${encodeURIComponent(url)}`
       : url,
 
@@ -959,24 +996,16 @@ export const api = {
     request('/api/anime/mapping', { method: 'POST', body: JSON.stringify({ release_title: releaseTitle, tvdb_id: tvdbId, season, episode_offset: episodeOffset }) }),
   animeReviewReleases: (key: string) =>
     request<{ items: HeldRelease[] }>('/api/anime/review/' + encodeURIComponent(key) + '/releases'),
-  markAnimeOwned: (payload: { key?: string; info_hashes?: string[] }) =>
-    request<{ ok: boolean; cleared: number }>('/api/anime/review/owned', {
-      method: 'POST', body: JSON.stringify(payload),
-    }),
+  markAnimeOwned: (payload: { key?: string; info_hashes?: string[] }, label = '') =>
+    runAction<{ ok: boolean; cleared: number }>('/api/anime/review/owned', { ...payload, label }),
   animeReview: () => remembering<{ items: AnimeReviewItem[] }>(pagePaths.animeReview),
   animeBlacklist: () => remembering<{ items: AnimeReviewItem[] }>(pagePaths.animeBlacklist),
-  reviewAnime: (infoHash: string, action: 'recheck' | 'allow_german' | 'blacklist') =>
-    request<{ ok: boolean; requested: number; blacklisted?: number }>('/api/anime/review/' + infoHash, {
-      method: 'POST', body: JSON.stringify({ action }),
-    }),
-  purgeAnimeSeries: (infoHash: string, deleteFiles: boolean) =>
-    request<PurgeResult>('/api/anime/review/' + infoHash + '/purge', {
-      method: 'POST', body: JSON.stringify({ delete_files: deleteFiles }),
-    }),
-  removeAnimeBlacklist: (key: string) =>
-    request<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', {
-      method: 'POST', body: JSON.stringify({ key }),
-    }),
+  reviewAnime: (infoHash: string, action: 'recheck' | 'allow_german' | 'blacklist', label = '') =>
+    runAction<{ ok: boolean; requested: number; blacklisted?: number }>('/api/anime/review/' + infoHash, { action, label }),
+  purgeAnimeSeries: (infoHash: string, deleteFiles: boolean, label = '') =>
+    runAction<PurgeResult>('/api/anime/review/' + infoHash + '/purge', { delete_files: deleteFiles, label }),
+  removeAnimeBlacklist: (key: string, label = '') =>
+    runAction<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', { key, label }),
   /** Tie a blacklist card to its AniDB anime, so releases match by any AniDB title. */
   linkAnimeBlacklist: (key: string, anidbId: number) =>
     request<{ ok: boolean; keys: string[]; caught: number }>('/api/anime/blacklist/link', {
@@ -996,10 +1025,8 @@ export const api = {
       method: 'POST', body: JSON.stringify({ key, tvdb_id: tvdbId, mode }),
     }),
   /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
-  removeAnimeLibraryShow: (key: string) =>
-    request<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', {
-      method: 'POST', body: JSON.stringify({ key }),
-    }),
+  removeAnimeLibraryShow: (key: string, label = '') =>
+    runAction<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', { key, label }),
   upgradeShowToHevc: (tvdbId: number, title: string) =>
     request<{
       ok: boolean;

@@ -1677,23 +1677,90 @@ def create_app() -> Any:
     async def anime_review(request: Request):
         return snapshots_mod.response(await snaps["anime_review"].get(), request)
 
+    # -- The user's actions, run in the background ---------------------------
+
+    async def _run_action(
+        req: dict, *, kind: str, title: str, path: str, work: Callable[[Any], Any]
+    ) -> dict:
+        """Start ``work`` as a background action; see bankai.web.actions.
+
+        With ``"background": true`` -- what the pages send -- the answer is the
+        action's id, at once. Otherwise the request waits and answers with the
+        result, as these endpoints always did. The pages it touches are
+        invalidated when it is done rather than when it started.
+        """
+        from bankai.web import actions as actions_mod
+
+        action = actions_mod.start(
+            kind, title, work, on_done=lambda: snaps.invalidate(snapshots_mod.write_tags(path))
+        )
+        if req.get("background"):
+            return {"action_id": action.id, "status": action.status}
+        await actions_mod.wait(action)
+        if action.status == "failed":
+            raise HTTPException(status_code=422, detail=action.error or "the action failed")
+        return action.result or {}
+
+    @app.get("/api/actions")
+    async def actions_list() -> dict:
+        """What the user started that is running, and what finished lately."""
+        from bankai.web import actions as actions_mod
+
+        return {"items": actions_mod.listing()}
+
+    @app.get("/api/actions/{action_id}")
+    async def actions_get(action_id: str) -> dict:
+        from bankai.web import actions as actions_mod
+
+        action = actions_mod.get(action_id)
+        if action is None:
+            raise HTTPException(status_code=404, detail="no such action")
+        return action.as_dict()
+
+    def _label(req: dict, fallback: str) -> str:
+        return str(req.get("label") or fallback).strip()[:120]
+
     @app.post("/api/anime/review/owned")
     async def anime_review_mark_owned(req: dict) -> dict:
         """Dismiss held releases already present in the library."""
         hashes = req.get("info_hashes")
         key = str(req.get("key") or "")
         if isinstance(hashes, list) and hashes:
-            return await asyncio.to_thread(erai_mod.mark_releases_owned, [str(h) for h in hashes])
-        if key:
-            return await asyncio.to_thread(erai_mod.mark_series_owned, key)
-        raise HTTPException(status_code=422, detail="info_hashes or key is required")
+            wanted = [str(h) for h in hashes]
+
+            async def owned(action: Any) -> dict:
+                return await asyncio.to_thread(erai_mod.mark_releases_owned, wanted)
+
+        elif key:
+
+            async def owned(action: Any) -> dict:
+                return await asyncio.to_thread(erai_mod.mark_series_owned, key)
+
+        else:
+            raise HTTPException(status_code=422, detail="info_hashes or key is required")
+        return await _run_action(
+            req, kind="owned", title="Already downloaded: " + _label(req, key or "release"),
+            path="/api/anime/review/owned", work=owned,
+        )
+
+    _REVIEW_VERBS = {"blacklist": "Discard", "recheck": "Recheck", "allow_german": "Allow"}
 
     @app.post("/api/anime/review/{info_hash}")
     async def anime_review_action(info_hash: str, req: dict) -> dict:
-        try:
-            return await erai_mod.review_action(info_hash, str(req.get("action", "")))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        action_name = str(req.get("action", ""))
+        if action_name not in _REVIEW_VERBS:
+            raise HTTPException(status_code=422, detail="Unknown review action")
+
+        async def decide(action: Any) -> dict:
+            return await erai_mod.review_action(info_hash, action_name)
+
+        return await _run_action(
+            req,
+            kind="review",
+            title=_REVIEW_VERBS[action_name] + ": " + _label(req, "review card"),
+            path=f"/api/anime/review/{info_hash}",
+            work=decide,
+        )
 
     @app.post("/api/anime/review/{info_hash}/purge")
     async def anime_review_purge(info_hash: str, req: dict) -> dict:
@@ -1716,21 +1783,29 @@ def create_app() -> Any:
                 status_code=422,
                 detail="Choose this show's AniDB anime first, so only its own files are deleted",
             )
-        try:
+
+        async def purge(action: Any) -> dict:
+            action.detail = "Discarding its releases"
             decision = await erai_mod.review_action(info_hash, "blacklist")
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        files = (
-            await asyncio.to_thread(erai_mod.entry_files, int(card.split(":", 1)[1]))
-            if delete_files
-            else []
+            files: list = []
+            if delete_files:
+                action.detail = "Finding its files"
+                files = await asyncio.to_thread(erai_mod.entry_files, int(card.split(":", 1)[1]))
+            action.detail = "Removing torrents" + (f" and {len(files)} files" if files else "")
+            purged = await erai_mod.purge_series(
+                card, english_title="", delete_files=delete_files, extra_files=files
+            )
+            if files:
+                library_walk.mark_stale()
+            return {**decision, **purged}
+
+        return await _run_action(
+            req,
+            kind="purge",
+            title=("Discard and delete: " if delete_files else "Discard: ") + _label(req, card),
+            path=f"/api/anime/review/{info_hash}/purge",
+            work=purge,
         )
-        purged = await erai_mod.purge_series(
-            card, english_title="", delete_files=delete_files, extra_files=files
-        )
-        if files:
-            library_walk.mark_stale()
-        return {**decision, **purged}
 
     @app.get("/api/anime/review/{key}/releases")
     async def anime_review_releases(key: str) -> dict:
@@ -1757,16 +1832,19 @@ def create_app() -> Any:
 
     @app.post("/api/anime/blacklist/remove")
     async def anime_blacklist_remove(req: dict) -> dict:
-        try:
+        key = str(req.get("key", ""))
+
+        async def restore(action: Any) -> dict:
             # In a thread: it rewrites the release state, seconds on the event loop.
-            result = await asyncio.to_thread(
-                erai_mod.remove_blacklist, str(req.get("key", "")), schedule=False
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if result.get("requested"):
-            erai_mod._start_retry_cycle()
-        return result
+            result = await asyncio.to_thread(erai_mod.remove_blacklist, key, schedule=False)
+            if result.get("requested"):
+                erai_mod._start_retry_cycle()
+            return result
+
+        return await _run_action(
+            req, kind="restore", title="Restore: " + _label(req, key),
+            path="/api/anime/blacklist/remove", work=restore,
+        )
 
     @app.post("/api/anime/blacklist/link")
     async def anime_blacklist_link(req: dict) -> dict:
@@ -1986,32 +2064,46 @@ def create_app() -> Any:
         key = str(req.get("key") or "").strip()
         if not key:
             raise HTTPException(status_code=422, detail="key is required")
-        listing = await _anime_library_payload(show=key, include_entries=False, rescan=True)
-        show = next(iter(listing.get("shows") or []), None)
-        if show is None:
-            raise HTTPException(status_code=404, detail="show not found in the library")
-        root = Path(listing["root"])
-        folders = [root / name for name in show.get("folders") or [] if name]
-        source_title = str(show.get("source_title") or show.get("title") or "")
-        anime = None
-        if shoko.configured():
-            with suppress(Exception):
-                anime = shoko.best_match(
-                    await shoko.search_anidb(source_title or show["title"]),
-                    source_title,
-                    str(show.get("title") or ""),
-                )
-        result = await erai_mod.blacklist_show(
-            title=str(show.get("title") or key),
-            source_title=source_title,
-            tvdb_id=show.get("tvdb_id"),
-            folders=folders,
-            anime=anime,
+
+        async def remove(action: Any) -> dict:
+            action.detail = "Finding the show's folders"
+            listing = await _anime_library_payload(show=key, include_entries=False, rescan=True)
+            show = next(iter(listing.get("shows") or []), None)
+            if show is None:
+                raise ValueError("show not found in the library")
+            root = Path(listing["root"])
+            folders = [root / name for name in show.get("folders") or [] if name]
+            source_title = str(show.get("source_title") or show.get("title") or "")
+            anime = None
+            if shoko.configured():
+                action.detail = "Finding it on AniDB"
+                with suppress(Exception):
+                    anime = shoko.best_match(
+                        await shoko.search_anidb(source_title or show["title"]),
+                        source_title,
+                        str(show.get("title") or ""),
+                    )
+            action.detail = f"Blacklisting it and deleting {len(folders)} folder" + (
+                "" if len(folders) == 1 else "s"
+            )
+            result = await erai_mod.blacklist_show(
+                title=str(show.get("title") or key),
+                source_title=source_title,
+                tvdb_id=show.get("tvdb_id"),
+                folders=folders,
+                anime=anime,
+            )
+            library_walk.mark_stale()
+            if shoko.configured():
+                action.detail = "Telling Shoko"
+                with suppress(Exception):
+                    await shoko.forget_missing_files()
+            return {**result, "anidb_id": (anime or {}).get("anidb_id")}
+
+        return await _run_action(
+            req, kind="remove", title="Remove and blacklist: " + _label(req, key),
+            path="/api/anime/library/remove", work=remove,
         )
-        library_walk.mark_stale()
-        if shoko.configured():
-            await shoko.forget_missing_files()
-        return {**result, "anidb_id": (anime or {}).get("anidb_id")}
 
     @app.post("/api/anime/library/upgrade-hevc")
     async def anime_library_upgrade_hevc(req: dict) -> dict:
@@ -2543,7 +2635,10 @@ def create_app() -> Any:
             if preferences.get("dont_count_slow_torrents") and isinstance(threshold, (int, float))
             else None
         )
+        from bankai.web import actions as actions_mod
+
         return dashboard.build(
+            actions=actions_mod.listing(),
             mas_rows=mas_rows,
             anime_rows=anime_rows,
             operations=await asyncio.to_thread(webjobs.running_operations),

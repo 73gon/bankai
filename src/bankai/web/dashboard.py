@@ -134,9 +134,38 @@ def build(
     publish_slots: int,
     retry_pending: int | None,
     recent: dict[str, Any],
+    actions: list[dict] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
+
+    # -- The user's own actions ---------------------------------------------
+    # Discard, delete, Restore, Remove: running in the background, and the
+    # outcome of those finished lately (shown, not counted as workers).
+    mine = []
+    for row in actions or []:
+        running = row.get("status") == "running"
+        failed = row.get("status") == "failed"
+        mine.append(
+            {
+                "id": f"action-{row['id']}",
+                "name": "Running" if running else "Failed" if failed else "Done",
+                "busy": running,
+                "extra": not running,
+                "task": _task(
+                    str(row.get("title") or row.get("kind") or "Action"),
+                    detail=row.get("detail") if running else (row.get("error") if failed else _outcome(row.get("result"))),
+                    started_at=row.get("started_at") if running else row.get("finished_at"),
+                ),
+            }
+        )
+    actions_lane = _lane(
+        "actions",
+        "Your actions",
+        "Discard, delete, restore and remove, finishing in the background.",
+        mine,
+        capacity=None,
+    )
 
     # -- Pipelines -----------------------------------------------------------
     pipeline_jobs = [
@@ -289,7 +318,7 @@ def build(
         ),
     )
 
-    lanes = [pipelines, publishing, transfers, automation_lane, scheduler, downloads]
+    lanes = [actions_lane, pipelines, publishing, transfers, automation_lane, scheduler, downloads]
 
     # -- Due -----------------------------------------------------------------
     queued_jobs = sorted(
@@ -395,6 +424,24 @@ def build(
         "due": due,
         "recent": recent,
     }
+
+
+def _outcome(result: dict | None) -> str | None:
+    """A finished action's result in a few words: what it removed or scheduled."""
+    if not result:
+        return None
+    parts = []
+    for key, label in (
+        ("blacklisted", "releases blacklisted"),
+        ("requested", "releases to check again"),
+        ("cleared", "releases dismissed"),
+        ("removed_torrents", "torrents removed"),
+        ("deleted_files", "files deleted"),
+    ):
+        value = result.get(key)
+        if value:
+            parts.append(f"{value} {label}")
+    return ", ".join(parts) or None
 
 
 def _interval(seconds: float) -> str:
