@@ -282,3 +282,42 @@ def test_an_episode_under_another_folder_name_is_on_disk(monkeypatch, tmp_path):
         assert not erai._anidb_episode_on_disk(table.anime[14107], 3)
     finally:
         erai._DISK_INDEX.reset(token)
+
+
+def test_a_batch_release_name_reads_like_its_first_episode():
+    assert erai._erai_identity_name("[Erai-raws] Date A Live V - 01 ~ 12 [1080p CR WEBRip HEVC AAC][MultiSub]") == (
+        "Date A Live V",
+        1,
+    )
+    assert erai._erai_identity_name("[Erai-raws] Date A Live V - 05 [1080p][HEVC]") == ("Date A Live V", 5)
+    assert erai._erai_identity_name("[Erai-raws] Date A Live V [1080p]") is None
+    # Admission still reads a batch as no single episode.
+    assert erai._erai_name_episode("[Erai-raws] Date A Live V - 01 ~ 12 [1080p]") is None
+
+
+def test_tvdb_era_holds_are_read_again_on_anidb(tmp_path, monkeypatch):
+    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai_automation.json")
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    state = erai._default_state()
+    held = {
+        "a" * 40: "[Erai-raws] Bleach - 05 [1080p][HEVC]",
+        "b" * 40: "[Erai-raws] Bleach - 250 [1080p][HEVC]",
+        "c" * 40: "[Erai-raws] Nobody Knows This - 01 [1080p][HEVC]",
+        "d" * 40: "[Erai-raws] Bleach: Sennen Kessen Hen - 01 ~ 13 [1080p][HEVC][BATCH]",
+    }
+    for info_hash, title in held.items():
+        state["releases"][info_hash] = {"status": "held", "title": title, "reason": "No confident TVDB match"}
+    state["releases"]["e" * 40] = {"status": "held", "title": "x", "reason": "German subtitles not listed"}
+    erai._save_state(state)
+    monkeypatch.setattr(erai, "_anidb_episode_on_disk", lambda anime, episode: (anime.aid, episode) == (2369, 5))
+
+    counts = erai.reclassify_tvdb_holds(TABLE)
+
+    releases = erai._load_state()["releases"]
+    assert counts == {"existing": 1, "identified": 2, "unmatched": 1}
+    assert releases["a" * 40]["status"] == "existing"
+    assert releases["b" * 40]["reason"].startswith("Identified on AniDB as Bleach")
+    assert releases["c" * 40]["reason"] == "No AniDB anime matches this title"
+    # A batch is identified by its name, and waits for its recheck.
+    assert releases["d" * 40]["reason"].startswith("Identified on AniDB as Bleach: Sennen Kessen Hen")
+    assert releases["e" * 40]["reason"] == "German subtitles not listed"

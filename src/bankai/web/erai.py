@@ -231,7 +231,7 @@ def _release_anidb_id(
     if canonical.startswith("anidb:"):
         head = canonical.split("|", 1)[0].split(":", 1)[1]
         return int(head) if head.isdigit() else None
-    parsed = _erai_name_episode(release_title)
+    parsed = _erai_identity_name(release_title)
     if parsed is None:
         return None
     saved = (mappings if mappings is not None else _load_mappings()).get(
@@ -263,7 +263,7 @@ def _title_blacklisted(
     shows, exact = _policy_show_keys(rows)
     if _show_key(release_title) in shows:
         return True
-    parsed = _erai_name_episode(release_title)
+    parsed = _erai_identity_name(release_title)
     if parsed and anidb_mod.normalise(parsed[0]) in exact:
         return True
     blocked = _policy_anidb_ids(rows)
@@ -1842,14 +1842,41 @@ _ERAI_EPISODE = re.compile(
 )
 
 
+# A batch, a whole season in one torrent: "Date A Live V - 01 ~ 12 [1080p]".
+_ERAI_BATCH = re.compile(
+    r"^(?P<name>.+?)\s+-\s+(?P<episode>\d{1,4})\s*~\s*\d{1,4}(?:v\d+)?(?:\s+END)?"
+    r"(?:\s*\([^)]*\))*\s*(?:\[[^\]]*\]\s*)*$",
+    re.IGNORECASE,
+)
+
+
+def _erai_value(title: str) -> str:
+    value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
+    return re.sub(r"\.(?:mkv|mp4|avi|m4v|mov|ts|webm)$", "", value, flags=re.IGNORECASE)
+
+
 def _erai_name_episode(title: str) -> tuple[str, int] | None:
     """The show name and episode number of a single-episode Erai release."""
-    value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
-    value = re.sub(r"\.(?:mkv|mp4|avi|m4v|mov|ts|webm)$", "", value, flags=re.IGNORECASE)
-    match = _ERAI_EPISODE.match(value)
+    match = _ERAI_EPISODE.match(_erai_value(title))
     if not match:
         return None
     return match["name"].strip(), int(match["episode"])
+
+
+def _erai_identity_name(title: str) -> tuple[str, int] | None:
+    """The show name of any Erai release, a batch included, and its first episode.
+
+    For telling which AniDB entry a release is, not which episode: a batch
+    read as its first episode would be skipped whenever episode 1 is on disk.
+    Unread, a season released whole never found its entry -- five seasons of
+    Date A Live showed in review as five identical cards under TVDB's one
+    name and poster, and could not be blacklisted per entry.
+    """
+    return _erai_name_episode(title) or (
+        (match["name"].strip(), int(match["episode"]))
+        if (match := _ERAI_BATCH.match(_erai_value(title)))
+        else None
+    )
 
 
 async def _resolve_anidb(
@@ -3150,6 +3177,56 @@ def _torrent_phase(torrent: Any) -> str:
     if "downloading" in state_name or "forceddl" in state_name or "metadl" in state_name:
         return "downloading"
     return "queued"
+
+
+def reclassify_tvdb_holds(table: Any = None) -> dict[str, int]:
+    """Read the holds left from the TVDB days again, on AniDB; no network.
+
+    Releases held before the switch to AniDB still said "No confident TVDB
+    match" and the like, and would only be read again by a recheck -- which
+    waits for download space, since it can end in a download. Telling which
+    AniDB entry a release is needs neither: the title index is on disk. A
+    release already in the library, under any folder name, stops being held;
+    one found on AniDB says so and waits for its recheck; one AniDB does not
+    know asks for its anime to be chosen, as a hold from the AniDB route does.
+    """
+    table = table if table is not None else anidb_mod.cached_index()
+    counts = {"existing": 0, "identified": 0, "unmatched": 0}
+    if table is None:
+        return counts
+    with _STATE_LOCK:
+        state = _load_state()
+        mappings = _load_mappings()
+        token = _DISK_INDEX.set({})
+        try:
+            for release in state["releases"].values():
+                if release.get("status") != "held" or "TVDB" not in str(release.get("reason") or ""):
+                    continue
+                title = str(release.get("title") or "")
+                aid = _release_anidb_id(title, mappings=mappings, table=table)
+                anime = table.anime.get(aid) if aid else None
+                if anime is None:
+                    release["reason"] = "No AniDB anime matches this title"
+                    counts["unmatched"] += 1
+                    continue
+                single = _erai_name_episode(title)
+                if single is not None:
+                    settled, number = anidb_mod.settle_episode(table, anime, single[1])
+                    if _anidb_episode_on_disk(settled, number):
+                        release["status"] = "existing"
+                        release["reason"] = "Already in the library"
+                        release["updated_at"] = time.time()
+                        counts["existing"] += 1
+                        continue
+                release["reason"] = (
+                    f"Identified on AniDB as {anime.title}; waiting to be checked again"
+                )
+                counts["identified"] += 1
+        finally:
+            _DISK_INDEX.reset(token)
+        _prune_holds(state)
+        _save_state(state)
+    return counts
 
 
 def reconcile_stale_holds() -> dict[str, int]:
