@@ -2193,6 +2193,13 @@ def create_app() -> Any:
             catalog=await _catalog(),
         )
         erai_mod.mark_blacklisted_shows(shows)
+        # A blacklisted show with nothing on disk is just a list of episodes
+        # that will never come; the card is kept only while files remain.
+        shows = [
+            row
+            for row in shows
+            if not row.get("blacklisted") or row.get("downloaded_count") or row.get("staged_count")
+        ]
         # One show can span several folders, so its entries are the ones
         # belonging to any folder behind the card rather than to its name.
         folders = {name for row in shows for name in row.get("folders", [])}
