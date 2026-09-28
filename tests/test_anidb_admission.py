@@ -135,7 +135,7 @@ def test_an_episode_already_filed_under_its_anidb_folder_is_existing(world):
 def test_an_episode_in_the_old_tvdb_folder_is_existing(world, monkeypatch):
     world["state"]["series"]["424536"] = {"english_title": "Frieren"}
     monkeypatch.setattr(
-        erai, "_episode_on_disk", lambda title, season, episode: (title, season, episode) == ("Frieren", 1, 5)
+        erai, "_episode_on_disk", lambda title, season, episode, tvdb_id=None: (title, season, episode) == ("Frieren", 1, 5)
     )
     item = release("[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC][MultiSub]")
 

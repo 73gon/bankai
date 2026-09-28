@@ -340,6 +340,33 @@ async def _lookup_any_title(title: str, kind: str) -> dict:
     }
 
 
+def folder_tvdb_ids(folders: set[str] | list[str], root: Path) -> dict[str, int]:
+    """Each show folder's TVDB id, as far as it is already known; no provider calls.
+
+    From the ids bankai recorded itself, a tvshow.nfo, or the metadata the
+    library page cached under the folder's name. The cache is read from disk
+    each time: the automation worker is a process of its own, and the page,
+    in the web process, is what fills it.
+    """
+    try:
+        saved = json.loads(_persistent_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    ids = known_ids()
+    found: dict[str, int] = {}
+    for folder in folders:
+        name = _name(folder)
+        tvdb_id = ids.get(name) or _nfo_id(root / folder)
+        if not tvdb_id:
+            hit = saved.get(f"metadata:v2:show:{name}") if isinstance(saved, dict) else None
+            value = hit.get("value") if isinstance(hit, dict) else None
+            if isinstance(value, dict) and str(value.get("tvdb_id") or "").isdigit():
+                tvdb_id = int(value["tvdb_id"])
+        if tvdb_id:
+            found[folder] = int(tvdb_id)
+    return found
+
+
 def known_ids() -> dict[str, int]:
     state = erai._load_state()
     ids = {}

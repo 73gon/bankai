@@ -1883,8 +1883,62 @@ def _anidb_folder(anime: anidb_mod.AniDBAnime) -> str:
     return sanitise(anime.title)
 
 
+def _library_identities() -> dict[str, dict]:
+    """Every episode in the anime library, by what it is rather than where it is.
+
+    The on-disk checks used to look in the one folder a release would be filed
+    under, found by name -- "Kimetsu no Yaiba" for the AniDB route, "Demon
+    Slayer: Kimetsu no Yaiba" for the TVDB one -- and a show kept under any
+    other name, "Demon Slayer", was not there to either: 56 of its episodes
+    were downloaded again into a second folder. Here each file is placed by
+    its AniDB entry (season folder or show folder name, as the library page
+    does) and by its folder's TVDB id. Built once per cycle.
+    """
+    cache = _DISK_INDEX.get()
+    if cache is None:
+        cache = {}
+        _DISK_INDEX.set(cache)
+    if "identities" in cache:
+        return cache["identities"]
+    from bankai.torrent.matcher import parse_se
+    from bankai.web import anime_library, library_walk
+
+    index: dict[str, dict] = {"tvdb": {}, "anidb": {}}
+    root = Path(get_settings().transfer.anime_shows_dir)
+    try:
+        # Checked against the disk: in the automation worker nothing else
+        # keeps the held tree current.
+        files = library_walk.files([root], rescan=True)
+    except OSError:
+        files = []
+    rows = []
+    for entry in files:
+        season, episode = parse_se(str(entry.get("name") or "")) or (None, None)
+        rows.append({**entry, "season_number": season, "episode": episode})
+    table = anidb_mod.cached_index()
+    anime_library.assign_entries(rows, catalog=None, table=table)
+    folder_ids = anime_library.folder_tvdb_ids({str(row["series"]) for row in rows}, root)
+    for row in rows:
+        tvdb_id = folder_ids.get(str(row["series"]))
+        if tvdb_id and row["season_number"] is not None and row["episode"] is not None:
+            index["tvdb"].setdefault(tvdb_id, set()).add((row["season_number"], row["episode"]))
+        aid = row.get("anidb_id")
+        if aid and table is not None:
+            number = anime_library.anidb_episode_of(row, table.anime.get(aid))
+            if number:
+                index["anidb"].setdefault(int(aid), set()).add(number)
+    cache["identities"] = index
+    return index
+
+
 def _anidb_episode_on_disk(anime: anidb_mod.AniDBAnime, episode: int) -> bool:
-    """Is this episode already filed under its AniDB folder?"""
+    """Is this episode already in the library, under whatever folder name?"""
+    identities = _library_identities()
+    if episode in identities["anidb"].get(int(anime.aid), set()):
+        return True
+    legacy = anidb_mod.legacy_tvdb_episode(anime, episode)
+    if legacy and (legacy[1], legacy[2]) in identities["tvdb"].get(legacy[0], set()):
+        return True
     folder = Path(get_settings().transfer.anime_shows_dir) / _anidb_folder(anime)
     cache = _DISK_INDEX.get()
     key = f"anidb:{anime.aid}"
@@ -1995,7 +2049,7 @@ async def _admit_anidb(
         else ""
     )
     if _anidb_episode_on_disk(anime, episode) or (
-        legacy and legacy_title and _episode_on_disk(legacy_title, legacy[1], legacy[2])
+        legacy and _episode_on_disk(legacy_title, legacy[1], legacy[2], tvdb_id=legacy[0])
     ):
         state["releases"][entry.info_hash] = {
             "status": "existing",
@@ -2035,7 +2089,9 @@ async def _admit_tvdb(
             "canonical": canonical,
         }
         return None
-    if _episode_on_disk(match.english_title, identity.season, identity.episode):
+    if _episode_on_disk(
+        match.english_title, identity.season, identity.episode, tvdb_id=match.tvdb_id
+    ):
         state["releases"][entry.info_hash] = {
             "status": "existing",
             "title": entry.title,
@@ -2091,16 +2147,21 @@ async def _german_alternative(
     return None
 
 
-def _episode_on_disk(english_title: str, season: int, episode: int) -> bool:
+def _episode_on_disk(
+    english_title: str, season: int, episode: int, tvdb_id: int | None = None
+) -> bool:
     """Is this episode already in the library?
 
-    Cached for the cycle: a season pack asks the same question for every
-    episode it contains, and the answer is one directory walk over a slow
-    library disk.
+    In any folder of the same TVDB series, when ``tvdb_id`` is given; else in
+    the folder found by name. Cached for the cycle: a season pack asks the
+    same question for every episode it contains, and the answer is one
+    directory walk over a slow library disk.
     """
     from bankai.backend.transfer import _existing_show_folder
     from bankai.torrent.matcher import parse_se
 
+    if tvdb_id and (season, episode) in _library_identities()["tvdb"].get(int(tvdb_id), set()):
+        return True
     if not english_title:
         return False
     cache = _DISK_INDEX.get()
@@ -2873,6 +2934,8 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
         qbit = None
         roster_token = _ROSTERS.set({})
         admission_token = _ADMISSION.set(None)
+        # A fresh look at the library each cycle; see _library_identities.
+        disk_token = _DISK_INDEX.set({})
         try:
             if prefill:
                 from bankai.torrent.qbittorrent import QBittorrentClient
@@ -3009,6 +3072,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             _set_activity(None)
             _ROSTERS.reset(roster_token)
             _ADMISSION.reset(admission_token)
+            _DISK_INDEX.reset(disk_token)
             if qbit is not None:
                 await qbit.aclose()
         _save_state(state)
@@ -3306,6 +3370,15 @@ async def _readd_torrent(qbit: Any, info_hash: str, release: dict[str, Any]) -> 
 
 async def reconcile_releases() -> dict[str, int]:
     """Advance every tracked release one step. Safe to call on a timer."""
+    # Its own look at the library, not one left over from an earlier pass.
+    token = _DISK_INDEX.set({})
+    try:
+        return await _reconcile_releases()
+    finally:
+        _DISK_INDEX.reset(token)
+
+
+async def _reconcile_releases() -> dict[str, int]:
     from bankai.cli import bgjobs
     from bankai.torrent.qbittorrent import QBittorrentClient
 

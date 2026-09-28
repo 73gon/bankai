@@ -247,3 +247,38 @@ def test_a_batch_torrent_is_numbered_file_by_file(tmp_path):
     assert processor.batch_override(1, batch) is None
     assert processor.batch_override(None, batch) is None
     assert [processor.anidb_episode_number(path.name) for path in batch[:3]] == [1, 2, 3]
+
+
+def test_an_episode_under_another_folder_name_is_on_disk(monkeypatch, tmp_path):
+    """A show kept as "Demon Slayer" is the one the TVDB route calls
+    "Demon Slayer: Kimetsu no Yaiba": its episodes are not fetched again."""
+    from bankai.web import library_walk
+
+    titles = ET.fromstring(
+        """<animetitles><anime aid="14107">
+        <title xml:lang="x-jat" type="main">Kimetsu no Yaiba</title>
+        <title xml:lang="en" type="official">Demon Slayer: Kimetsu no Yaiba</title>
+        </anime></animetitles>"""
+    )
+    records = ET.fromstring(
+        '<anime-list><anime anidbid="14107" tvdbid="348545" defaulttvdbseason="1" episodeoffset=""/></anime-list>'
+    )
+    table = anidb.build_index(titles, records)
+    files = [
+        {"path": f"/lib/Demon Slayer/Season 01/Demon Slayer - S01E0{n}.mkv", "name": f"Demon Slayer - S01E0{n}.mkv",
+         "series": "Demon Slayer", "season": "Season 01", "root": "/lib"}
+        for n in (1, 2)
+    ]
+    monkeypatch.setattr(library_walk, "files", lambda roots, rescan=False: files)
+    monkeypatch.setattr(anidb, "cached_index", lambda: table)
+    monkeypatch.setattr(anime_library, "folder_tvdb_ids", lambda folders, root: {"Demon Slayer": 348545})
+    token = erai._DISK_INDEX.set({})
+    try:
+        # The TVDB route, asking under TVDB's name for the series:
+        assert erai._episode_on_disk("Demon Slayer: Kimetsu no Yaiba", 1, 2, tvdb_id=348545)
+        assert not erai._episode_on_disk("Demon Slayer: Kimetsu no Yaiba", 1, 3, tvdb_id=348545)
+        # The AniDB route, by the entry's own episode, through its TVDB season:
+        assert erai._anidb_episode_on_disk(table.anime[14107], 1)
+        assert not erai._anidb_episode_on_disk(table.anime[14107], 3)
+    finally:
+        erai._DISK_INDEX.reset(token)
