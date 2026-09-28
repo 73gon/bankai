@@ -495,7 +495,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       )}
       <AnimeMappingDialog title={mappingTitle} onClose={() => setMappingTitle(null)} onSaved={() => void load()} />
       <Dialog open={eraiFor !== null} onOpenChange={(open) => { if (!open) setEraiFor(null); }}>
-        <DialogContent className='flex max-h-[90dvh] w-[min(80rem,calc(100vw-2rem))] max-w-6xl flex-col'>
+        <DialogContent className='flex max-h-[90dvh] w-[90vw] max-w-none flex-col'>
           <DialogHeader>
             <DialogTitle>Erai-raws: {eraiFor?.query}</DialogTitle>
             <DialogDescription>Every release erai-raws.info lists under this name. Replace takes one of them, a whole-season batch or a single episode, in place of what this card holds.</DialogDescription>
