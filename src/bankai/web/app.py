@@ -1883,12 +1883,18 @@ def create_app() -> Any:
     @app.get("/api/anime/anidb/search")
     async def anime_anidb_search(q: str = Query(..., min_length=1, max_length=200)) -> dict:
         """AniDB anime by title, through Shoko's local copy of AniDB's title list."""
+        from bankai.metadata import anidb_art
         from bankai.web import shoko
 
         try:
-            return {"items": await shoko.search_anidb(q)}
+            items = await shoko.search_anidb(q)
         except shoko.ShokoError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Shoko has images only for anime in its collection; the rest -- most
+        # of what is searched for here -- take anime-offline-database's cover.
+        for item in items:
+            item["poster_url"] = item.get("poster_url") or anidb_art.cover(item.get("anidb_id"))
+        return {"items": items}
 
     @app.get("/api/anime/anidb/image/{source}/{kind}/{image_id}")
     async def anime_anidb_image(source: str, kind: str, image_id: str) -> Response:
