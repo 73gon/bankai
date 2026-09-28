@@ -118,3 +118,21 @@ def test_a_romaji_english_name_is_looked_up_under_its_romaji_half():
     assert erai_site.show_slugs("Arifureta Shokugyou de Sekai Saikyou 2nd Season") == [
         "arifureta-shokugyou-de-sekai-saikyou-2nd-season"
     ]
+
+
+def test_a_search_brings_a_shows_older_seasons_into_the_index(store, monkeypatch):
+    import httpx
+
+    asked = []
+
+    def answer(request):
+        asked.append(dict(request.url.params))
+        return httpx.Response(200, text=FEED, request=request)
+
+    monkeypatch.setattr(erai_site, "_client", lambda: httpx.AsyncClient(base_url=erai_site.BASE_URL, transport=httpx.MockTransport(answer)))
+    assert asyncio.run(erai_site.search("Meitantei  Precure")) == 2
+    assert asked[0]["s"] == "meitantei precure" and asked[0]["feed"] == "rss2"
+    assert erai_site.german("1" * 40) is False
+    # Asked once an hour per term.
+    assert asyncio.run(erai_site.search("meitantei precure")) == 0
+    assert len(asked) == 1

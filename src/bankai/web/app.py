@@ -2406,16 +2406,26 @@ def create_app() -> Any:
     async def anime_erai(
         q: str | None = None,
         german: str = Query("all", pattern="^(all|yes|no)$"),
+        res: str = Query("1080p", pattern="^(all|2160p|1080p|720p|SD)$"),
         page: int = Query(0, ge=0),
         page_size: int = Query(100, ge=20, le=200),
     ) -> dict:
-        """Erai-raws' own listing of releases, with the subtitle languages it names."""
+        """Erai-raws' own listing of releases, with the subtitle languages it names.
+
+        A search also asks the site's own search, once an hour per term: the
+        site-wide feed only reaches back about eighteen months, and a show's
+        older seasons come in that way.
+        """
         from bankai.web import erai_site
 
-        rows = (await snaps["erai_site_rows"].get()).value
         term = (q or "").strip().casefold()
+        if len(term) >= 3 and await erai_site.search(term):
+            snaps["erai_site_rows"].invalidate()
+        rows = (await snaps["erai_site_rows"].get()).value
         if term:
             rows = [row for row in rows if term in row["name"].casefold()]
+        if res != "all":
+            rows = [row for row in rows if row["resolution"] == res]
         if german != "all":
             rows = [row for row in rows if row["german"] == (german == "yes")]
         start = page * page_size

@@ -144,8 +144,10 @@ export interface EraiPage {
   items: EraiRelease[];
 }
 
-export function eraiPath(page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all'): string {
-  const params = new URLSearchParams({ page: String(page), german });
+export type EraiResolution = '1080p' | '720p' | 'SD' | 'all';
+
+export function eraiPath(page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p'): string {
+  const params = new URLSearchParams({ page: String(page), german, res });
   if (q.trim()) params.set('q', q.trim());
   return `/api/anime/erai?${params}`;
 }
@@ -1011,7 +1013,8 @@ export const api = {
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
-  eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all') => remembering<EraiPage>(eraiPath(page, q, german)),
+  eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p') =>
+    remembering<EraiPage>(eraiPath(page, q, german, res)),
   refreshErai: () => request<{ refreshing: boolean }>('/api/anime/erai/refresh', { method: 'POST' }),
   sidebarCounts: () => remembering<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts),
   /** `rescan` checks the library against the disk first instead of the held tree. */

@@ -47,6 +47,8 @@ _BACKFILL_PAGES = 20
 _PAGE_DELAY_SECONDS = 2.0
 # A show's own feed is read again at most this often.
 _SHOW_FEED_SECONDS = 12 * 3600
+# A search is asked again at most this often.
+_SEARCH_SECONDS = 3600
 GERMAN = "de"
 
 # Erai's subtitle codes are the flags it shows.
@@ -178,8 +180,8 @@ def _merge(rows: list[dict[str, Any]], **changes: Any) -> int:
             new += info_hash not in known
             known[info_hash] = row
         for key, value in changes.items():
-            if key == "shows":
-                index.setdefault("shows", {}).update(value)
+            if key in {"shows", "searches"}:
+                index.setdefault(key, {}).update(value)
             else:
                 index[key] = value
         _save(index)
@@ -293,7 +295,33 @@ async def fill_show(name: str) -> int:
                 return _merge(rows, shows=tried)
             await asyncio.sleep(_PAGE_DELAY_SECONDS)
     _merge([], shows=tried)
-    return 0
+    # Under none of the addresses tried: the site's search finds it by name.
+    return await search(name)
+
+
+def _search_key(term: str) -> str:
+    return " ".join(term.casefold().split())
+
+
+async def search(term: str) -> int:
+    """The site's search, as a feed, into the index: every season of a show.
+
+    The site-wide feed reaches back about eighteen months, so a show's older
+    seasons were missing from the tab. The search feed has them all -- "oshi
+    no ko" brings its three seasons -- at every resolution.
+    """
+    key = _search_key(term)
+    if not configured() or len(key) < 3:
+        return 0
+    if time.time() - float((load().get("searches") or {}).get(key) or 0) < _SEARCH_SECONDS:
+        return 0
+    try:
+        async with _client() as client:
+            rows = await _page(client, "/", s=key, feed="rss2")
+    except (FeedError, httpx.HTTPError) as exc:
+        log.debug("Erai-raws search for %r failed: %s", key, type(exc).__name__)
+        rows = []
+    return _merge(rows, searches={key: time.time()})
 
 
 def summary() -> dict[str, Any]:

@@ -8,10 +8,23 @@ import { Button } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { api, eraiPath, recall, type EraiPage, type EraiRelease } from '@/lib/api';
+import { api, eraiPath, recall, type EraiPage, type EraiRelease, type EraiResolution } from '@/lib/api';
 import { cn, timeAgo } from '@/lib/utils';
 
 type GermanFilter = 'all' | 'yes' | 'no';
+
+const RES_KEY = 'bankai:erai:resolution';
+const RESOLUTIONS: EraiResolution[] = ['1080p', '720p', 'SD', 'all'];
+
+// 1080p unless this browser chose otherwise: the other qualities rarely matter.
+function storedResolution(): EraiResolution {
+  try {
+    const saved = localStorage.getItem(RES_KEY) as EraiResolution | null;
+    return saved && RESOLUTIONS.includes(saved) ? saved : '1080p';
+  } catch {
+    return '1080p';
+  }
+}
 
 // What bankai has done with a torrent Erai-raws lists.
 const STATUS: Record<string, { label: string; variant: 'success' | 'warning' | 'destructive' | 'muted' | 'info' }> = {
@@ -53,10 +66,11 @@ export default function AnimeErai() {
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState('');
   const [german, setGerman] = useState<GermanFilter>('all');
+  const [res, setRes] = useState<EraiResolution>(storedResolution);
   const [page, setPage] = useState(0);
   // Started from the last answer this browser saw, refreshed straight after.
-  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(0, '', 'all')));
-  const [loading, setLoading] = useState(() => recall(eraiPath(0, '', 'all')) === undefined);
+  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(0, '', 'all', storedResolution())));
+  const [loading, setLoading] = useState(() => recall(eraiPath(0, '', 'all', storedResolution())) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -64,20 +78,27 @@ export default function AnimeErai() {
     const timer = window.setTimeout(() => setSearch(query), 250);
     return () => window.clearTimeout(timer);
   }, [query]);
-  useEffect(() => setPage(0), [search, german]);
+  useEffect(() => setPage(0), [search, german, res]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(RES_KEY, res);
+    } catch {
+      /* a remembered filter is a convenience */
+    }
+  }, [res]);
 
   const load = useCallback(async () => {
-    const held = recall<EraiPage>(eraiPath(page, search, german));
+    const held = recall<EraiPage>(eraiPath(page, search, german, res));
     if (held) setData(held);
     else setLoading(true);
     try {
-      setData(await api.eraiReleases(page, search, german));
+      setData(await api.eraiReleases(page, search, german, res));
     } catch (error: any) {
       toast.error(error.message);
     } finally {
       setLoading(false);
     }
-  }, [page, search, german]);
+  }, [page, search, german, res]);
 
   useEffect(() => {
     void load();
@@ -138,6 +159,11 @@ export default function AnimeErai() {
               <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
               <Input ref={searchRef} className='pl-9' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter by release name…' aria-label='Filter Erai-raws releases' />
             </div>
+            <ToggleGroup label='Resolution'>
+              {RESOLUTIONS.map((value) => (
+                <ToggleGroupItem key={value} label={value === 'all' ? 'All' : value} selected={res === value} onClick={() => setRes(value)} />
+              ))}
+            </ToggleGroup>
             <ToggleGroup label='German subtitles'>
               <ToggleGroupItem label='All' selected={german === 'all'} onClick={() => setGerman('all')} />
               <ToggleGroupItem label='German' selected={german === 'yes'} onClick={() => setGerman('yes')} />
