@@ -470,7 +470,7 @@ def test_anime_review_and_blacklist_actions(client, monkeypatch):
     monkeypatch.setattr("bankai.web.erai.review_action", review_action)
     monkeypatch.setattr(
         "bankai.web.erai.remove_blacklist",
-        lambda key: {"ok": True, "requested": 2},
+        lambda key, schedule=True: {"ok": True, "requested": 2},
     )
     assert client.get("/api/anime/review").json()["items"] == review
     assert client.get("/api/anime/blacklist").json()["items"] == review

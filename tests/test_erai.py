@@ -1821,7 +1821,9 @@ def test_purge_removes_the_series_torrents_with_their_data(tmp_path, monkeypatch
         erai, "_load_policies", lambda: {"test show": {"mode": "blacklisted", "tvdb_id": "1"}}
     )
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    qbit = _RecordingQbit([])
+    # Only torrents qBittorrent still has are asked for: "a" is there, and a
+    # blacklisted release long since removed would not be.
+    qbit = _RecordingQbit([_Torrent("a" * 40)])
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
 
     result = asyncio.run(erai.purge_series("test show", english_title="", delete_files=False))

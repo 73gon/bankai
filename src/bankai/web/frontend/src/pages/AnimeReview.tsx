@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Ban, Check, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
@@ -40,7 +40,32 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   // Started from the last answer this browser saw, refreshed straight after.
   const [items, setItems] = useState<AnimeReviewItem[]>(() => recall<{ items: AnimeReviewItem[] }>(listPath)?.items ?? []);
   const [loading, setLoading] = useState(() => recall(listPath) === undefined);
-  const [busy, setBusy] = useState<string | null>(null);
+  // What is waiting on the server, per card: one card's action no longer
+  // greys out every other card on the page.
+  const [pending, setPending] = useState<Set<string>>(() => new Set());
+  const busyFor = (key: string) => pending.has(key) || pending.has('all');
+  function markBusy(key: string, on: boolean) {
+    setPending((current) => {
+      const next = new Set(current);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }
+  // Taken off the page at once; the server finishes in the background, and a
+  // failure puts the card back by reloading.
+  // Kept off the page until the server has finished with them, so a reload
+  // started by another action cannot bring one back in the meantime.
+  const dropped = useRef<Set<string>>(new Set());
+  function dropCard(key: string) {
+    dropped.current.add(key);
+    setItems((current) => current.filter((row) => row.key !== key));
+  }
+  function settle(key: string) {
+    dropped.current.delete(key);
+    markBusy(key, false);
+    void load();
+  }
   const [mappingTitle, setMappingTitle] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<AnimeReviewItem | null>(null);
   const [releasesFor, setReleasesFor] = useState<AnimeReviewItem | null>(null);
@@ -62,22 +87,24 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   }
 
   async function markOwned(payload: { key?: string; info_hashes?: string[] }, label: string) {
-    setBusy(payload.key ?? payload.info_hashes?.[0] ?? '');
+    const key = payload.key ?? payload.info_hashes?.[0] ?? '';
+    markBusy(key, true);
+    if (payload.key) dropCard(payload.key);
     try {
       const result = await api.markAnimeOwned(payload);
       toast.success('Dismissed ' + result.cleared + ' release' + (result.cleared === 1 ? '' : 's') + ' of ' + label);
       setReleasesFor(null);
-      await load();
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setBusy(null);
+      settle(key);
     }
   }
 
   async function load() {
     try {
-      setItems((blacklist ? await api.animeBlacklist() : await api.animeReview()).items);
+      const rows = (blacklist ? await api.animeBlacklist() : await api.animeReview()).items;
+      setItems(rows.filter((row) => !dropped.current.has(row.key)));
     } catch (error: any) {
       toast.error(error.message);
     } finally {
@@ -107,7 +134,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       const result = await api.saveAnidbMapping(anidbFor.release_title, anime.anidb_id);
       toast.success(anidbFor.source_title + ' is ' + anime.title + ' · ' + result.requested + ' releases rechecking');
       setAnidbFor(null);
-      await load();
+      void load();
     } catch (error: any) {
       toast.error(error.message);
     }
@@ -119,7 +146,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       const result = await api.linkAnimeBlacklist(linkTarget.key, anime.anidb_id);
       toast.success('Linked to ' + anime.title + (result.caught ? ' · ' + result.caught + ' more releases blacklisted' : ''));
       setLinkTarget(null);
-      await load();
+      void load();
     } catch (error: any) {
       toast.error(error.message);
     }
@@ -127,64 +154,67 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
 
   async function decide(item: AnimeReviewItem, action: 'recheck' | 'allow_german' | 'blacklist') {
     if (!item.info_hash) return;
-    setBusy(item.key);
+    markBusy(item.key, true);
+    // A discarded card leaves the page straight away; its releases are marked
+    // on the server in the background.
+    if (action === 'blacklist') dropCard(item.key);
     try {
       const result = await api.reviewAnime(item.info_hash, action);
       toast.success(action === 'blacklist'
-        ? 'Show discarded' + (result.blacklisted ? ' (' + result.blacklisted + ' releases)' : '')
+        ? 'Discarded ' + item.title + (result.blacklisted ? ' (' + result.blacklisted + ' releases)' : '')
         : result.requested + ' releases scheduled for a fresh check');
-      await load();
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setBusy(null);
+      settle(item.key);
     }
   }
 
   async function confirmPurge() {
-    if (!purgeTarget?.info_hash) return;
-    setBusy(purgeTarget.key);
+    const target = purgeTarget;
+    if (!target?.info_hash) return;
+    setPurgeTarget(null);
+    markBusy(target.key, true);
+    dropCard(target.key);
+    toast.info('Discarding ' + target.title + ' and deleting its files…');
     try {
-      const result = await api.purgeAnimeSeries(purgeTarget.info_hash, true);
+      const result = await api.purgeAnimeSeries(target.info_hash, true);
       toast.success(
-        'Discarded ' + purgeTarget.title + ' — removed ' + result.deleted_files + ' file'
+        'Discarded ' + target.title + ' — removed ' + result.deleted_files + ' file'
         + (result.deleted_files === 1 ? '' : 's')
         + (result.freed_bytes ? ' (' + formatBytes(result.freed_bytes) + ')' : '')
         + ' and ' + result.removed_torrents + ' torrent'
         + (result.removed_torrents === 1 ? '' : 's'),
       );
-      setPurgeTarget(null);
-      await load();
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setBusy(null);
+      settle(target.key);
     }
   }
 
   async function restore(item: AnimeReviewItem) {
-    setBusy(item.key);
+    markBusy(item.key, true);
+    dropCard(item.key);
     try {
       const result = await api.removeAnimeBlacklist(item.key);
-      toast.success('Show removed from blacklist; ' + result.requested + ' releases scheduled');
-      await load();
+      toast.success('Restored ' + item.title + '; ' + result.requested + ' releases scheduled');
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setBusy(null);
+      settle(item.key);
     }
   }
 
   async function retryAll() {
-    setBusy('all');
+    markBusy('all', true);
     try {
       const result = await api.retryHeldAnime();
       toast.success(result.requested + ' held releases scheduled for fresh checks');
-      await load();
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setBusy(null);
+      settle('all');
     }
   }
 
@@ -198,7 +228,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             ? 'Shows here are ignored permanently until you restore them.'
             : 'One card per AniDB entry, which is one season or cour. A decision applies to that entry only.'}</p>
         </div>
-        {!blacklist && <Button variant='secondary' onClick={() => void retryAll()} disabled={Boolean(busy) || items.length === 0}>
+        {!blacklist && <Button variant='secondary' onClick={() => void retryAll()} disabled={pending.has('all') || items.length === 0}>
           <RefreshCw data-icon='inline-start' /> Recheck everything
         </Button>}
         {blacklist && (
@@ -247,10 +277,10 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                   </td>
                   <td className='px-3 py-2'>
                     <div className='flex justify-end gap-1.5'>
-                      <Button size='sm' variant='secondary' onClick={() => setLinkTarget(item)} disabled={Boolean(busy)}>
+                      <Button size='sm' variant='secondary' onClick={() => setLinkTarget(item)} disabled={busyFor(item.key)}>
                         <Link2 data-icon='inline-start' /> {item.linked ? 'Relink' : 'Link'}
                       </Button>
-                      <Button size='sm' variant='secondary' onClick={() => void restore(item)} disabled={busy === item.key}>
+                      <Button size='sm' variant='secondary' onClick={() => void restore(item)} disabled={busyFor(item.key)}>
                         <RotateCcw data-icon='inline-start' /> Restore
                       </Button>
                     </div>
@@ -298,7 +328,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         title={item.linked ? 'Linked to AniDB: ' + (item.anidb_title || item.anidb_id) + '. Relink' : 'Not recognised: link to AniDB'}
                         aria-label={(item.linked ? 'Relink ' : 'Link ') + item.title + ' to AniDB'}
                         onClick={() => setLinkTarget(item)}
-                        disabled={Boolean(busy)}
+                        disabled={busyFor(item.key)}
                       >
                         <Link2 />
                       </Button>
@@ -319,7 +349,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         title='Restore and recheck'
                         aria-label={'Restore and recheck ' + item.title}
                         onClick={() => void restore(item)}
-                        disabled={busy === item.key}
+                        disabled={busyFor(item.key)}
                       >
                         <RotateCcw />
                       </Button>
@@ -365,7 +395,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                           variant='secondary'
                           className='min-w-0 flex-1 px-1.5 text-xs'
                           onClick={() => void decide(item, 'recheck')}
-                          disabled={Boolean(busy)}
+                          disabled={busyFor(item.key)}
                           title='Check these releases again'
                         >
                           Recheck
@@ -376,7 +406,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <Button
                           title='Always allow German subtitles for this show'
                           onClick={() => void decide(item, 'allow_german')}
-                          disabled={Boolean(busy)}
+                          disabled={busyFor(item.key)}
                         >
                           <ShieldCheck data-icon='inline-start' /> <span className='truncate'>Allow</span>
                         </Button>
@@ -385,7 +415,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         variant='secondary'
                         className={cn(!german && 'col-span-2')}
                         onClick={() => void markOwned({ key: item.key }, item.title)}
-                        disabled={Boolean(busy)}
+                        disabled={busyFor(item.key)}
                       >
                         <Check data-icon='inline-start' /> <span className='truncate'>Already downloaded</span>
                       </Button>
@@ -395,7 +425,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                           variant='outline'
                           className='col-span-2'
                           onClick={() => setAnidbFor(item)}
-                          disabled={Boolean(busy)}
+                          disabled={busyFor(item.key)}
                         >
                           <Search data-icon='inline-start' /> Choose AniDB anime
                         </Button>
@@ -406,26 +436,26 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                           variant='outline'
                           className='col-span-2'
                           onClick={() => setMappingTitle(item.release_title || null)}
-                          disabled={Boolean(busy)}
+                          disabled={busyFor(item.key)}
                         >
                           <Search data-icon='inline-start' /> Choose TVDB show
                         </Button>
                       )}
 
-                      <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={Boolean(busy)}>
+                      <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={busyFor(item.key)}>
                         <Ban data-icon='inline-start' /> <span className='truncate'>Discard</span>
                       </Button>
                       <Button
                         variant='destructive'
                         onClick={() => setPurgeTarget(item)}
-                        disabled={Boolean(busy) || !item.anidb_id}
+                        disabled={busyFor(item.key) || !item.anidb_id}
                         title={item.anidb_id ? undefined : 'Choose the AniDB anime first, so only its own files are deleted'}
                       >
                         <Trash2 data-icon='inline-start' /> <span className='truncate'>Discard and delete</span>
                       </Button>
 
                       {count > 1 && (
-                        <Button variant='ghost' className='col-span-2' onClick={() => void openReleases(item)} disabled={Boolean(busy)}>
+                        <Button variant='ghost' className='col-span-2' onClick={() => void openReleases(item)} disabled={busyFor(item.key)}>
                           <Layers data-icon='inline-start' /> Show {count} releases
                         </Button>
                       )}
@@ -485,7 +515,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                     )}
                     <Button
                       variant='ghost'
-                      disabled={Boolean(busy)}
+                      disabled={busyFor(release.info_hash)}
                       onClick={() => void markOwned({ info_hashes: [release.info_hash] }, release.title)}
                     >
                       <Check data-icon='inline-start' /> Have it
@@ -509,8 +539,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant='secondary' disabled={busy !== null} onClick={() => setPurgeTarget(null)}>Cancel</Button>
-            <Button variant='destructive' disabled={busy !== null} onClick={() => void confirmPurge()}>
+            <Button variant='secondary' onClick={() => setPurgeTarget(null)}>Cancel</Button>
+            <Button variant='destructive' onClick={() => void confirmPurge()}>
               <Trash2 data-icon='inline-start' /> <span className='truncate'>Discard and delete</span>
             </Button>
           </DialogFooter>

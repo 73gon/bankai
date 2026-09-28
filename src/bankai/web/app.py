@@ -1668,7 +1668,7 @@ def create_app() -> Any:
         return (_anime_inputs(), snaps["shoko_catalog"].built_at, _covers_stamp())
 
     snaps.add(
-        "anime_review", _review_payload, inputs=_review_inputs, tags={"anime"},
+        "anime_review", _review_payload, inputs=_review_inputs, tags={"anime", "review"},
         min_interval=30.0, max_age=600.0,
     )
 
@@ -1746,7 +1746,7 @@ def create_app() -> Any:
         return {"items": rows}
 
     snaps.add(
-        "anime_blacklist", _blacklist_payload, inputs=_review_inputs, tags={"anime"},
+        "anime_blacklist", _blacklist_payload, inputs=_review_inputs, tags={"anime", "review"},
         min_interval=30.0, max_age=600.0,
     )
 
@@ -1757,9 +1757,15 @@ def create_app() -> Any:
     @app.post("/api/anime/blacklist/remove")
     async def anime_blacklist_remove(req: dict) -> dict:
         try:
-            return erai_mod.remove_blacklist(str(req.get("key", "")))
+            # In a thread: it rewrites the release state, seconds on the event loop.
+            result = await asyncio.to_thread(
+                erai_mod.remove_blacklist, str(req.get("key", "")), schedule=False
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if result.get("requested"):
+            erai_mod._start_retry_cycle()
+        return result
 
     @app.post("/api/anime/blacklist/link")
     async def anime_blacklist_link(req: dict) -> dict:
@@ -1880,7 +1886,7 @@ def create_app() -> Any:
         "anime_queue_rows",
         _anime_queue_rows,
         inputs=lambda: (_queue_files(), _jobs_stamp()),
-        tags={"anime", "qbit"},
+        tags={"anime", "qbit", "review"},
         min_interval=2.0,
         # Rebuilt when the state or a job changes; a full build is seconds of
         # work, so not on a timer faster than that.
@@ -2396,7 +2402,7 @@ def create_app() -> Any:
         "erai_site_rows",
         lambda: asyncio.to_thread(_erai_site_rows),
         inputs=_erai_site_inputs,
-        tags={"anime"},
+        tags={"anime", "review"},
         min_interval=5.0,
         max_age=300.0,
         encode=False,
@@ -2554,7 +2560,7 @@ def create_app() -> Any:
     snaps.add(
         "dashboard",
         _dashboard_payload,
-        tags={"anime", "qbit", "movies", "mas"},
+        tags={"anime", "qbit", "movies", "mas", "review"},
         min_interval=1.0,
         max_age=3.0,
     )
@@ -2568,7 +2574,7 @@ def create_app() -> Any:
     snaps.add(
         "sidebar_counts",
         _compute_sidebar_counts,
-        tags={"anime", "qbit", "movies", "mas"},
+        tags={"anime", "qbit", "movies", "mas", "review"},
         min_interval=3.0,
         max_age=5.0,
     )

@@ -624,6 +624,15 @@ async def blacklist_show(
             entries.update((e.aid, e) for e in index.by_tvdb.get(int(tvdb_id), []))
         if anime and index.anime.get(int(anime["anidb_id"])):
             entries[int(anime["anidb_id"])] = index.anime[int(anime["anidb_id"])]
+    await asyncio.to_thread(_blacklist_show, key, name, title, tvdb_id, entries)
+    purged = await purge_series(key, english_title=title, delete_files=True, extra_folders=folders)
+    return {"ok": True, "key": key, "entries": sorted(entries), **purged}
+
+
+def _blacklist_show(
+    key: str, name: str, title: str, tvdb_id: int | str | None, entries: dict[int, Any]
+) -> None:
+    """The state half of blacklist_show, off the event loop."""
     with _STATE_LOCK:
         policies = _load_policies()
         if entries:
@@ -655,8 +664,6 @@ async def blacklist_show(
         _prune_holds(state)
         _save_retry_requests(requests)
         _save_state(state)
-    purged = await purge_series(key, english_title=title, delete_files=True, extra_folders=folders)
-    return {"ok": True, "key": key, "entries": sorted(entries), **purged}
 
 
 def _request_series_retries(state: dict[str, Any], key: str) -> int:
@@ -676,19 +683,27 @@ def _request_series_retries(state: dict[str, Any], key: str) -> int:
 
 
 async def review_action(info_hash: str, action: str) -> dict[str, Any]:
-    """Persist a series decision and schedule the affected releases immediately."""
-    with _STATE_LOCK:
-        release = (_load_state().get("releases", {}) or {}).get(info_hash)
-    if not release or not release.get("title"):
-        raise ValueError("Held release was not found")
-    key = _mapping_key(release["title"])
+    """Persist a series decision and schedule the affected releases immediately.
+
+    The work -- reading and writing the 20 MB release state, checking every
+    release against the blacklist -- runs in a thread: done on the event loop
+    it took seconds, during which every page of the web UI waited.
+    """
     await anidb_mod.index()  # the review card is an AniDB entry; make sure it can be told
+    result = await asyncio.to_thread(_review_action, info_hash, action)
+    if result["requested"]:
+        _start_retry_cycle()
+    return result
+
+
+def _review_action(info_hash: str, action: str) -> dict[str, Any]:
     with _STATE_LOCK:
         state = _load_state()
         release = state.get("releases", {}).get(info_hash)
         if not release or not release.get("title"):
             raise ValueError("Held release was not found")
         title = release["title"]
+        key = _mapping_key(title)
         mappings = _load_mappings()
         card = _card_key(title, mappings=mappings)
         # A card is one AniDB entry, so a decision is too: every release held
@@ -760,8 +775,6 @@ async def review_action(info_hash: str, action: str) -> dict[str, Any]:
             blacklisted = len(matched)
         else:
             raise ValueError("Unknown review action")
-    if requested:
-        _start_retry_cycle()
     return {
         "ok": True,
         "requested": requested,
@@ -775,11 +788,15 @@ async def review_action(info_hash: str, action: str) -> dict[str, Any]:
 async def review_card(info_hash: str) -> str:
     """The review card a held release sits on: its AniDB entry, or its Erai name."""
     await anidb_mod.index()
-    with _STATE_LOCK:
-        release = (_load_state().get("releases", {}) or {}).get(info_hash)
-    if not release or not release.get("title"):
-        raise ValueError("Held release was not found")
-    return _card_key(str(release["title"]))
+
+    def find() -> str:
+        with _STATE_LOCK:
+            release = (_load_state().get("releases", {}) or {}).get(info_hash)
+        if not release or not release.get("title"):
+            raise ValueError("Held release was not found")
+        return _card_key(str(release["title"]))
+
+    return await asyncio.to_thread(find)
 
 
 def _entry_policy(entry: anidb_mod.AniDBAnime, *, source_title: str = "", origin: str = "review") -> dict[str, Any]:
@@ -921,25 +938,33 @@ async def purge_series(
     """
     from bankai.torrent.qbittorrent import QBittorrentClient
 
-    with _STATE_LOCK:
-        state = _load_state()
-        policies = _load_policies()
-        mappings = _load_mappings()
-        blacklisted_ids = _policy_tvdb_ids(policies)
-        hashes = [
-            info_hash
-            for info_hash, release in state.get("releases", {}).items()
-            if _is_blacklisted_release(
-                release, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
-            )
-        ]
+    def blacklisted_hashes() -> set[str]:
+        with _STATE_LOCK:
+            state = _load_state()
+            policies = _load_policies()
+            mappings = _load_mappings()
+            blacklisted_ids = _policy_tvdb_ids(policies)
+            return {
+                info_hash.casefold()
+                for info_hash, release in state.get("releases", {}).items()
+                if _is_blacklisted_release(
+                    release, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
+                )
+            }
 
+    hashes = await asyncio.to_thread(blacklisted_hashes)
     removed_torrents = 0
     if hashes:
         qbit = QBittorrentClient()
         try:
             await qbit.login()
-            for info_hash in hashes:
+            # Only what qBittorrent still has. Every blacklisted release ever
+            # was asked for, one request each -- hundreds, long since removed.
+            present = {
+                torrent.hash.casefold()
+                for torrent in await qbit.list_torrents(category=get_settings().qbittorrent.category)
+            }
+            for info_hash in sorted(hashes & present):
                 try:
                     await qbit.remove(info_hash, delete_files=True)
                     removed_torrents += 1
@@ -950,6 +975,24 @@ async def purge_series(
         finally:
             await qbit.aclose()
 
+    deleted = await asyncio.to_thread(
+        _delete_series_files,
+        english_title=english_title,
+        delete_files=delete_files,
+        extra_folders=extra_folders,
+        extra_files=extra_files,
+    )
+    return {"ok": True, "key": key, "removed_torrents": removed_torrents, **deleted}
+
+
+def _delete_series_files(
+    *,
+    english_title: str,
+    delete_files: bool,
+    extra_folders: list[Path] | None,
+    extra_files: list[Path] | None,
+) -> dict[str, Any]:
+    """The file half of purge_series; walking and deleting over 9p is slow."""
     deleted_files = 0
     freed_bytes = 0
     deleted_folders: list[str] = []
@@ -1004,16 +1047,13 @@ async def purge_series(
                     folder.rmdir()
                     deleted_folders.append(str(folder))
     return {
-        "ok": True,
-        "key": key,
-        "removed_torrents": removed_torrents,
         "deleted_files": deleted_files,
         "deleted_folders": deleted_folders,
         "freed_bytes": freed_bytes,
     }
 
 
-def remove_blacklist(key: str) -> dict[str, Any]:
+def remove_blacklist(key: str, *, schedule: bool = True) -> dict[str, Any]:
     with _STATE_LOCK:
         policies = _load_policies()
         # Everything behind the one card: one AniDB entry, or -- for a decision
@@ -1050,7 +1090,8 @@ def remove_blacklist(key: str) -> dict[str, Any]:
                 _hold(state, _entry_from_dict(saved_entry), release["reason"])
         requested = sum(_request_series_retries(state, member) for member in restored)
         _save_state(state)
-    if requested:
+    # From a thread, the caller starts the retries on its own event loop.
+    if requested and schedule:
         _start_retry_cycle()
     return {"ok": True, "requested": requested}
 

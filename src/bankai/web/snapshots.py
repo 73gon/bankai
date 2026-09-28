@@ -254,6 +254,11 @@ def response(snapshot: Snapshot, request: Any) -> Any:
 # Which snapshots a write under a path can change. Anything not listed can
 # change anything.
 _WRITE_TAGS: tuple[tuple[str, frozenset[str]], ...] = (
+    # A review decision changes what is held, not the library: rebuilding the
+    # library grid for it cost seconds of CPU after every Discard. Deleted
+    # files reach the library through its own inputs (the library walk).
+    ("/api/anime/review", frozenset({"review"})),
+    ("/api/anime/blacklist", frozenset({"review"})),
     ("/api/anime/", frozenset({"anime"})),
     ("/api/qbittorrent/", frozenset({"qbit", "anime"})),
     ("/api/mas/", frozenset({"mas"})),
