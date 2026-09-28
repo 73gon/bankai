@@ -127,6 +127,23 @@ export interface EraiRelease {
   /** bankai's status for the torrent, when it has one. */
   status: string | null;
   reason: string | null;
+  /** The AniDB episodes it covers: [n, n] for one episode, a batch's first and last. */
+  episodes: [number, number] | null;
+}
+
+/** What taking an Erai-raws release for a review card would change. */
+export interface ReplacementPlan {
+  info_hash: string;
+  name: string;
+  batch: boolean;
+  first: number;
+  last: number;
+  german: boolean;
+  anidb_id: number;
+  anidb_title: string;
+  held_count: number;
+  file_count: number;
+  german_dubs_kept: number[];
 }
 
 export interface EraiPage {
@@ -1046,6 +1063,12 @@ export const api = {
   eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p') =>
     remembering<EraiPage>(eraiPath(page, q, german, res)),
   refreshErai: () => request<{ refreshing: boolean }>('/api/anime/erai/refresh', { method: 'POST' }),
+  replacementPlan: (key: string, infoHash: string) =>
+    request<ReplacementPlan>('/api/anime/review/replace-plan?' + new URLSearchParams({ key, info_hash: infoHash })),
+  replaceFromErai: (key: string, infoHash: string, label = '') =>
+    runAction<{ ok: boolean; queued: string; held_replaced: number; files_to_replace: number; german_dubs_kept: number[] }>(
+      '/api/anime/review/replace', { key, info_hash: infoHash, label },
+    ),
   sidebarCounts: () => remembering<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts),
   /** `rescan` checks the library against the disk first instead of the held tree. */
   animeLibrary: async (rescan = false) => {

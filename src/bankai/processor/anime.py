@@ -181,8 +181,13 @@ def _organize_anidb(
     library: Path,
     require_german_subtitles: bool,
     replace_existing: bool,
+    keep_episodes: frozenset[int] = frozenset(),
 ) -> list[Path]:
-    """Stage each video under its AniDB folder, with no TVDB lookup at all."""
+    """Stage each video under its AniDB folder, with no TVDB lookup at all.
+
+    ``keep_episodes`` are left out: a replacement taken over a whole season
+    must not publish over the episodes whose file carries a German dub.
+    """
     if episode_override is not None and len(sources) != 1:
         raise RuntimeError(
             "a manual episode override requires a torrent containing exactly one video file"
@@ -190,12 +195,15 @@ def _organize_anidb(
     outputs: list[Path] = []
     total = max(1, len(sources))
     for index, source in enumerate(sources):
-        if require_german_subtitles:
-            _require_german_subtitles(source)
         episode = anidb_episode_number(source.name, episode_override=episode_override)
         if episode is None:
             log.warning("[anime] skipped file with no episode number: %s", source.name)
             continue
+        if episode in keep_episodes:
+            log.info("[anime] episode %d kept as it is (German dub): %s", episode, source.name)
+            continue
+        if require_german_subtitles:
+            _require_german_subtitles(source)
         destination = render_anidb_episode_path(
             library=library, title=title, episode=episode
         ).with_suffix(source.suffix.casefold())
@@ -406,6 +414,7 @@ async def download_anime(
     require_german_subtitles: bool = False,
     cleanup_torrent: bool = False,
     replace_existing: bool = False,
+    keep_episodes: frozenset[int] = frozenset(),
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -495,6 +504,7 @@ async def download_anime(
                     library=output.directory,
                     require_german_subtitles=require_german_subtitles,
                     replace_existing=replace_existing,
+                    keep_episodes=keep_episodes,
                 )
             )
         else:

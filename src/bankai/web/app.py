@@ -1743,6 +1743,30 @@ def create_app() -> Any:
             path="/api/anime/review/owned", work=owned,
         )
 
+    @app.get("/api/anime/review/replace-plan")
+    async def anime_review_replace_plan(key: str, info_hash: str) -> dict:
+        """What taking an Erai-raws release for a review card would change."""
+        try:
+            return await erai_mod.replacement_plan(key, info_hash)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/anime/review/replace")
+    async def anime_review_replace(req: dict) -> dict:
+        """Take an Erai-raws release, batch or episode, in place of a card's releases."""
+        key = str(req.get("key") or "")
+        info_hash = str(req.get("info_hash") or "").strip()
+        if not key or not re.fullmatch(r"[0-9a-fA-F]{40}", info_hash):
+            raise HTTPException(status_code=422, detail="key and info_hash are required")
+
+        async def replace(action: Any) -> dict:
+            return await erai_mod.replace_from_erai(key, info_hash)
+
+        return await _run_action(
+            req, kind="replace", title="Replace: " + _label(req, key),
+            path="/api/anime/review/replace", work=replace,
+        )
+
     _REVIEW_VERBS = {"blacklist": "Discard", "recheck": "Recheck", "allow_german": "Allow"}
 
     @app.post("/api/anime/review/{info_hash}")
@@ -2481,10 +2505,13 @@ def create_app() -> Any:
         for info_hash, row in releases.items():
             mine = tracked.get(info_hash) or {}
             subs = list(row.get("subs") or [])
+            name = row.get("name") or row.get("title") or info_hash
             rows.append(
                 {
                     "info_hash": info_hash,
-                    "name": row.get("name") or row.get("title") or info_hash,
+                    "name": name,
+                    # One episode, or a batch's first and last: what it can replace.
+                    "episodes": erai_mod._release_range(name),
                     "title": row.get("title") or "",
                     "subs": subs,
                     "german": erai_site.GERMAN in subs,

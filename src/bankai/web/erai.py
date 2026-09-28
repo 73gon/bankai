@@ -1934,7 +1934,7 @@ _ERAI_EPISODE = re.compile(
 # season twice, so a batch is held and says so.
 BATCH_REASON = "Whole-season batch: its episodes come as single releases instead"
 _ERAI_BATCH = re.compile(
-    r"^(?P<name>.+?)\s+-\s+(?P<episode>\d{1,4})\s*~\s*\d{1,4}(?:v\d+)?(?:\s+END)?"
+    r"^(?P<name>.+?)\s+-\s+(?P<episode>\d{1,4})\s*~\s*(?P<last>\d{1,4})(?:v\d+)?(?:\s+END)?"
     r"(?:\s*\([^)]*\))*\s*(?:\[[^\]]*\]\s*)*$",
     re.IGNORECASE,
 )
@@ -2362,7 +2362,14 @@ async def _german_sibling(
     if found is None:
         return None
     info_hash, row = found
-    name = re.sub(r"\.(?:mkv|mp4)$", "", str(row.get("name") or ""), flags=re.IGNORECASE)
+    return await _nyaa_release(str(row.get("name") or ""), info_hash, client)
+
+
+async def _nyaa_release(
+    name: str, info_hash: str, client: httpx.AsyncClient
+) -> anime_mod.NyaaEntry | None:
+    """The Nyaa torrent Erai-raws lists under this name, matched by its info hash."""
+    name = re.sub(r"\.(?:mkv|mp4)$", "", name, flags=re.IGNORECASE)
     try:
         response = await client.get(
             f"{_NYAA_BASE}/", params={"u": "Erai-raws", "c": "1_2", "q": name}
@@ -2372,7 +2379,11 @@ async def _german_sibling(
         log.warning("Nyaa lookup of %s failed: %s", name, exc)
         return None
     return next(
-        (item for item in parse_listing(response.text) if item.info_hash.casefold() == info_hash),
+        (
+            item
+            for item in parse_listing(response.text)
+            if item.info_hash.casefold() == info_hash.casefold()
+        ),
         None,
     )
 
@@ -2911,6 +2922,274 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
         "already_hevc": already,
         "german_dub_kept": dubbed,
     }
+
+
+# --- Replacing a card's releases with one picked on Erai-raws --------------
+#
+# The automation takes each episode as its own release, and holds one whose
+# Nyaa page does not list German. Erai-raws often has the same season as a
+# batch that does, or another encode of one episode: picked from the Erai-raws
+# dialog in review, it replaces the held releases it covers and the files of
+# those episodes already in the library -- except a German dub, never
+# replaced. The old files go only once the new ones are published.
+
+REPLACED_STATUS = "replaced"
+
+
+def _release_range(title: str) -> tuple[int, int] | None:
+    """The AniDB episodes a release name covers: one, or a batch's first to last."""
+    single = _erai_name_episode(title)
+    if single:
+        return single[1], single[1]
+    match = _ERAI_BATCH.match(_erai_value(title))
+    if not match:
+        return None
+    first, last = int(match["episode"]), int(match["last"])
+    return (first, last) if first <= last else None
+
+
+def _entry_episode_files(aid: int) -> dict[int, list[Path]]:
+    """The library files of one AniDB entry, by its own episode numbers."""
+    from bankai.processor.anime import anidb_episode_number
+    from bankai.torrent.matcher import parse_se
+
+    index = anidb_mod.cached_index()
+    entry = index.anime.get(int(aid)) if index else None
+    if entry is None:
+        return {}
+    own = Path(get_settings().transfer.anime_shows_dir) / _anidb_folder(entry)
+    found: dict[int, list[Path]] = {}
+    for path in entry_files(aid):
+        if path.parent == own:
+            episode = anidb_episode_number(path.name)
+        else:
+            # A TVDB-era file: its season episode, less where this entry starts.
+            identity = parse_se(path.name)
+            episode = identity[1] - entry.tvdb_offset if identity else None
+        if episode:
+            found.setdefault(episode, []).append(path)
+    return found
+
+
+def _is_german_dub(path: Path) -> bool:
+    from bankai.web.anime_library import _load_codec_cache, has_german_audio, probe_streams
+
+    cached = _load_codec_cache().get(str(path))
+    if cached is None:
+        cached = probe_streams(path) or {}
+    return has_german_audio(cached)
+
+
+def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
+    """What taking this Erai-raws release for a review card would do."""
+    row = erai_site.lookup(info_hash)
+    if row is None:
+        raise ValueError("Erai-raws does not list this release")
+    name = str(row.get("name") or row.get("title") or "")
+    span = _release_range(name)
+    if span is None:
+        raise ValueError("The episode numbers could not be read from the release name")
+    table = anidb_mod.cached_index()
+    head, _, tail = key.partition(":")
+    card_aid = int(tail) if head == "anidb" and tail.isdigit() else None
+    release_aid = _release_anidb_id(name, table=table)
+    if card_aid and release_aid and card_aid != release_aid:
+        other = table.anime.get(release_aid) if table else None
+        label = other.title if other else f"AniDB {release_aid}"
+        raise ValueError(f"This release is {label}, not the AniDB entry of this card")
+    aid = card_aid or release_aid
+    anime = table.anime.get(aid) if table and aid else None
+    if anime is None:
+        raise ValueError("Choose the AniDB anime for this card first")
+    state = _load_state()
+    releases = state.get("releases") or {}
+    existing = releases.get(info_hash.casefold()) or {}
+    if existing.get("status") in {*_ACTIVE_RELEASE_STATES, "done"}:
+        raise ValueError("This release is already downloading or in the library")
+    first, last = span
+    mappings = _load_mappings()
+    held = []
+    for held_hash, release in releases.items():
+        title = str(release.get("title") or "")
+        if release.get("status") != "held" or held_hash == info_hash.casefold():
+            continue
+        covered = _release_range(title)
+        if covered is None or covered[0] < first or covered[1] > last:
+            continue
+        if key in {_card_key(title, mappings=mappings, table=table), _mapping_key(title)}:
+            held.append(held_hash)
+    files = _entry_episode_files(anime.aid)
+    dubs: list[int] = []
+    replaced: list[dict[str, Any]] = []
+    for episode in range(first, last + 1):
+        paths = files.get(episode) or []
+        if any(_is_german_dub(path) for path in paths):
+            dubs.append(episode)
+            continue
+        for path in paths:
+            with suppress(OSError):
+                stat = path.stat()
+                replaced.append(
+                    {
+                        "path": str(path),
+                        "episode": episode,
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    }
+                )
+    return {
+        "info_hash": info_hash.casefold(),
+        "name": name,
+        "batch": first != last,
+        "first": first,
+        "last": last,
+        "german": "de" in (row.get("subs") or []),
+        "anidb_id": anime.aid,
+        "anidb_title": anime.english_title or anime.title,
+        "held": held,
+        "files": replaced,
+        "german_dubs_kept": dubs,
+    }
+
+
+async def replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
+    """The plan, as the confirm dialog shows it."""
+    await anidb_mod.index()
+    plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
+    return {
+        **{name: value for name, value in plan.items() if name not in {"held", "files"}},
+        "held_count": len(plan["held"]),
+        "file_count": len(plan["files"]),
+    }
+
+
+async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
+    """Queue an Erai-raws release in place of what a review card holds."""
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    await anidb_mod.index()
+    plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
+    settings = get_settings()
+    async with httpx.AsyncClient(
+        headers={"User-Agent": settings.scraper.user_agent}, timeout=30, follow_redirects=True
+    ) as client:
+        entry = await _nyaa_release(plan["name"], plan["info_hash"], client)
+    if entry is None:
+        raise ValueError("The release was not found on Nyaa")
+    anime = anidb_mod.cached_index().anime[plan["anidb_id"]]
+    args = [*_anidb_args(entry, anime, plan["first"]), "--replace-existing"]
+    for episode in plan["german_dubs_kept"]:
+        args.extend(["--keep-episode", str(episode)])
+    qbit = QBittorrentClient()
+    try:
+        await qbit.login()
+        await qbit.add(
+            magnet=entry.magnet_uri or None,
+            torrent_url=None if entry.magnet_uri else entry.download_url,
+            category=settings.qbittorrent.category,
+            save_path=Path(settings.qbittorrent.save_path) if settings.qbittorrent.save_path else None,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"qBittorrent did not take the release: {exc}") from exc
+    finally:
+        await qbit.aclose()
+
+    def record() -> None:
+        with _STATE_LOCK:
+            state = _load_state()
+            title = anime.english_title or anime.title
+            span = f"{plan['first']:02d}" + (f"-{plan['last']:02d}" if plan["batch"] else "")
+            state["releases"][entry.info_hash] = {
+                "status": "queued",
+                "title": entry.title,
+                "display_title": f"{title} - {span}",
+                "canonical": f"anidb:{anime.aid}|{plan['first']}",
+                "resolution": _resolution(entry),
+                "size_bytes": entry.size_bytes,
+                "args": args,
+                "anidb_id": anime.aid,
+                "replace_files": plan["files"],
+                "replaced_holds": plan["held"],
+                "updated_at": time.time(),
+            }
+            # The episodes it brings are taken: the automation must not queue
+            # their single releases beside it.
+            for episode in range(plan["first"], plan["last"] + 1):
+                if episode not in plan["german_dubs_kept"]:
+                    state["canonical"][f"anidb:{anime.aid}|{episode}"] = {
+                        "info_hash": entry.info_hash,
+                        "resolution": _resolution(entry),
+                    }
+            for held_hash in plan["held"]:
+                release = state["releases"].get(held_hash)
+                if release and release.get("status") == "held":
+                    release.update(status=REPLACED_STATUS, reason=f"Replaced by {entry.title}")
+                    release.pop("retry_after", None)
+            _prune_holds(state)
+            _save_state(state)
+
+    await asyncio.to_thread(record)
+    return {
+        "ok": True,
+        "queued": entry.title,
+        "held_replaced": len(plan["held"]),
+        "files_to_replace": len(plan["files"]),
+        "german_dubs_kept": plan["german_dubs_kept"],
+    }
+
+
+def _finish_replacement(release: dict[str, Any]) -> int:
+    """Once the replacement is published: remove the files it took the place of.
+
+    Only a file that is still the one recorded -- an old file at the new
+    file's own path was simply overwritten, and its size and time say so --
+    and whose episode now has another file beside it.
+    """
+    if anidb_mod.cached_index() is None:
+        return 0  # without it no file can be told to be which episode: remove none
+    old = release.pop("replace_files", None) or []
+    release.pop("replaced_holds", None)
+    if not old:
+        return 0
+    now = _entry_episode_files(int(release["anidb_id"]))
+    recorded = {row["path"] for row in old}
+    roots = _series_roots()
+    removed = 0
+    for row in old:
+        path = Path(row["path"])
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_size != row["size"] or stat.st_mtime != row["mtime"]:
+            continue
+        newer = [p for p in now.get(int(row["episode"])) or [] if str(p) not in recorded]
+        if not newer or not _contained_by(path, roots):
+            continue
+        try:
+            path.unlink()
+            removed += 1
+            log.info("Replaced %s by %s", path.name, newer[0].name)
+        except OSError as exc:
+            log.warning("Could not remove replaced file %s: %s", path, exc)
+    if removed:
+        from bankai.web import library_walk
+
+        library_walk.mark_stale()
+    return removed
+
+
+def _undo_replacement(state: dict[str, Any], release: dict[str, Any]) -> None:
+    """The replacement failed: its episodes go back to review as they were."""
+    release.pop("replace_files", None)
+    for held_hash in release.pop("replaced_holds", None) or []:
+        held = state["releases"].get(held_hash)
+        if held and held.get("status") == REPLACED_STATUS:
+            held.update(
+                status="held",
+                reason=f"Its replacement failed ({release.get('reason') or 'publishing failed'})",
+                retry_after=time.time() + 86400,
+            )
 
 
 async def _fetch_rss(client: httpx.AsyncClient) -> list[anime_mod.NyaaEntry]:
@@ -3869,6 +4148,11 @@ async def _reconcile_releases() -> dict[str, int]:
                         if getattr(job, "final_path", None):
                             # Where it was filed, so Shoko can be told what it is.
                             release["published_path"] = job.final_path
+                        if release.get("replace_files") is not None:
+                            await anidb_mod.index()
+                            release["replaced_files"] = await asyncio.to_thread(
+                                _finish_replacement, release
+                            )
                         release["status"] = "deleting" if torrent is not None else "done"
                         if torrent is not None:
                             try:
@@ -3883,6 +4167,11 @@ async def _reconcile_releases() -> dict[str, int]:
                     else:
                         release["status"] = "failed"
                         release["reason"] = f"Publishing job {job.status}"
+                        # Retried a few times; back to review once it gives up.
+                        if release.get("replaced_holds") is not None and int(
+                            release.get("publish_attempts") or 0
+                        ) >= _MAX_PUBLISH_ATTEMPTS:
+                            _undo_replacement(state, release)
                     release["updated_at"] = time.time()
                     tally(release["status"])
                     continue

@@ -38,7 +38,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   // A held show whose AniDB anime the user picks, for review rather than the blacklist.
   const [anidbFor, setAnidbFor] = useState<AnimeReviewItem | null>(null);
   // The show whose Erai-raws releases are open in a dialog, by the name Erai gives it.
-  const [eraiFor, setEraiFor] = useState<string | null>(null);
+  // The card the Erai-raws dialog was opened from, and the name it searches for.
+  const [eraiFor, setEraiFor] = useState<{ query: string; item: AnimeReviewItem } | null>(null);
   // Blacklist only: every card, those tied to an AniDB anime, or those not yet.
   const [linkFilter, setLinkFilter] = useState<'all' | 'linked' | 'unlinked'>('all');
   const listPath = blacklist ? pagePaths.animeBlacklist : pagePaths.animeReview;
@@ -439,7 +440,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       <Button
                         variant='outline'
                         className='col-span-2'
-                        onClick={() => setEraiFor(eraiName(item))}
+                        onClick={() => setEraiFor({ query: eraiName(item), item })}
                         title='What Erai-raws lists for this anime: every release, with its subtitles'
                       >
                         <Subtitles data-icon='inline-start' /> <span className='truncate'>Erai-raws releases</span>
@@ -496,10 +497,18 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       <Dialog open={eraiFor !== null} onOpenChange={(open) => { if (!open) setEraiFor(null); }}>
         <DialogContent className='flex max-h-[90dvh] w-[min(80rem,calc(100vw-2rem))] max-w-6xl flex-col'>
           <DialogHeader>
-            <DialogTitle>Erai-raws: {eraiFor}</DialogTitle>
-            <DialogDescription>Every release erai-raws.info lists under this name, with the subtitle languages it names.</DialogDescription>
+            <DialogTitle>Erai-raws: {eraiFor?.query}</DialogTitle>
+            <DialogDescription>Every release erai-raws.info lists under this name. Replace takes one of them, a whole-season batch or a single episode, in place of what this card holds.</DialogDescription>
           </DialogHeader>
-          {eraiFor !== null && <AnimeErai key={eraiFor} embedded initialQuery={eraiFor} />}
+          {eraiFor !== null && (
+            <AnimeErai
+              key={eraiFor.item.key}
+              embedded
+              initialQuery={eraiFor.query}
+              replaceFor={{ key: eraiFor.item.key, label: eraiFor.item.anidb_title || eraiFor.item.title }}
+              onReplaced={() => { setEraiFor(null); void load(); }}
+            />
+          )}
         </DialogContent>
       </Dialog>
       <AniDBLinkDialog

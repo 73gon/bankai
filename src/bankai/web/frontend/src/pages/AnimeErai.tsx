@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, ExternalLink, RefreshCw, Search, Subtitles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ExternalLink, RefreshCw, Replace, Search, Subtitles } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { api, eraiPath, recall, type EraiPage, type EraiRelease, type EraiResolution } from '@/lib/api';
+import { api, eraiPath, recall, type EraiPage, type EraiRelease, type EraiResolution, type ReplacementPlan } from '@/lib/api';
 import { cn, timeAgo } from '@/lib/utils';
 
 type GermanFilter = 'all' | 'yes' | 'no';
@@ -38,7 +39,18 @@ const STATUS: Record<string, { label: string; variant: 'success' | 'warning' | '
   blacklisted: { label: 'Blacklisted', variant: 'destructive' },
   failed: { label: 'Failed', variant: 'destructive' },
   filtered: { label: 'Filtered', variant: 'muted' },
+  replaced: { label: 'Replaced', variant: 'muted' },
 };
+
+// A release bankai is already fetching or has: nothing to replace with it.
+const TAKEN = new Set(['done', 'existing', 'queued', 'downloading', 'complete', 'transferring', 'deleting']);
+
+const pad = (n: number) => String(n).padStart(2, '0');
+
+function replaceLabel(episodes: [number, number]) {
+  const [first, last] = episodes;
+  return first === last ? `Replace episode ${pad(first)}` : `Replace season ${pad(first)}–${pad(last)}`;
+}
 
 function SubtitleChips({ row, languages }: { row: EraiRelease; languages: Record<string, string> }) {
   // German first: it is the one this page is for.
@@ -65,9 +77,20 @@ function SubtitleChips({ row, languages }: { row: EraiRelease; languages: Record
 /**
  * The Erai-raws listing. ``embedded`` drops the page header, for showing one
  * anime's releases in a dialog opened from review; ``initialQuery`` is what
- * it opens searched for.
+ * it opens searched for. ``replaceFor`` is the review card it was opened
+ * from: each row can then replace what that card holds.
  */
-export default function AnimeErai({ initialQuery = '', embedded = false }: { initialQuery?: string; embedded?: boolean } = {}) {
+export default function AnimeErai({
+  initialQuery = '',
+  embedded = false,
+  replaceFor,
+  onReplaced,
+}: {
+  initialQuery?: string;
+  embedded?: boolean;
+  replaceFor?: { key: string; label: string };
+  onReplaced?: () => void;
+} = {}) {
   const [query, setQuery] = useState(initialQuery);
   const [search, setSearch] = useState(initialQuery);
   const [german, setGerman] = useState<GermanFilter>('all');
@@ -78,6 +101,38 @@ export default function AnimeErai({ initialQuery = '', embedded = false }: { ini
   const [loading, setLoading] = useState(() => recall(eraiPath(0, initialQuery, 'all', storedResolution())) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  // The row being considered for a replacement, and what it would change.
+  const [candidate, setCandidate] = useState<EraiRelease | null>(null);
+  const [plan, setPlan] = useState<ReplacementPlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [replacing, setReplacing] = useState(false);
+
+  async function consider(row: EraiRelease) {
+    if (!replaceFor) return;
+    setCandidate(row);
+    setPlan(null);
+    setPlanError(null);
+    try {
+      setPlan(await api.replacementPlan(replaceFor.key, row.info_hash));
+    } catch (error: any) {
+      setPlanError(error.message);
+    }
+  }
+
+  async function replace() {
+    if (!replaceFor || !candidate) return;
+    setReplacing(true);
+    try {
+      const result = await api.replaceFromErai(replaceFor.key, candidate.info_hash, replaceFor.label);
+      toast.success(`Queued ${result.queued}`);
+      setCandidate(null);
+      onReplaced?.();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setReplacing(false);
+    }
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(query), 250);
@@ -187,15 +242,16 @@ export default function AnimeErai({ initialQuery = '', embedded = false }: { ini
                   <th className='px-3 py-2.5 text-right font-medium'>Size</th>
                   <th className='px-3 py-2.5 font-medium'>Released</th>
                   <th className='px-3 py-2.5 font-medium'>bankai</th>
+                  {replaceFor && <th className='px-3 py-2.5 font-medium'>Use</th>}
                   <th className='px-3 py-2.5 text-right font-medium'>Link</th>
                 </tr>
               </thead>
               <tbody>
                 {loading && !data && (
-                  <tr><td colSpan={7} className='px-3 py-8 text-center text-muted-foreground'>Loading…</td></tr>
+                  <tr><td colSpan={replaceFor ? 8 : 7} className='px-3 py-8 text-center text-muted-foreground'>Loading…</td></tr>
                 )}
                 {data && data.items.length === 0 && (
-                  <tr><td colSpan={7} className='px-3 py-8 text-center text-muted-foreground'>{data.known ? 'No release matches.' : 'Nothing read yet; the feeds are read every ten minutes.'}</td></tr>
+                  <tr><td colSpan={replaceFor ? 8 : 7} className='px-3 py-8 text-center text-muted-foreground'>{data.known ? 'No release matches.' : 'Nothing read yet; the feeds are read every ten minutes.'}</td></tr>
                 )}
                 {data?.items.map((row) => {
                   const status = row.status ? STATUS[row.status] ?? { label: row.status, variant: 'muted' as const } : null;
@@ -212,6 +268,21 @@ export default function AnimeErai({ initialQuery = '', embedded = false }: { ini
                       <td className='px-3 py-2'>
                         {status ? <Badge variant={status.variant} title={row.reason ?? undefined}>{status.label}</Badge> : <span className='text-xs text-muted-foreground'>—</span>}
                       </td>
+                      {replaceFor && (
+                        <td className='whitespace-nowrap px-3 py-2'>
+                          {row.episodes ? (
+                            <Button
+                              size='sm'
+                              variant={row.german ? 'default' : 'secondary'}
+                              disabled={TAKEN.has(row.status ?? '')}
+                              title={TAKEN.has(row.status ?? '') ? 'bankai already has this release' : 'Take this release in place of what the card holds'}
+                              onClick={() => void consider(row)}
+                            >
+                              <Replace data-icon='inline-start' /> {replaceLabel(row.episodes)}
+                            </Button>
+                          ) : <span className='text-xs text-muted-foreground'>—</span>}
+                        </td>
+                      )}
                       <td className='px-3 py-2 text-right'>
                         {row.page && (
                           <Button asChild size='icon' variant='ghost' title='Open on erai-raws.info'>
@@ -235,6 +306,46 @@ export default function AnimeErai({ initialQuery = '', embedded = false }: { ini
           )}
         </>
       )}
+
+      <Dialog open={candidate !== null} onOpenChange={(open) => { if (!open && !replacing) setCandidate(null); }}>
+        <DialogContent className='max-w-xl'>
+          <DialogHeader>
+            <DialogTitle>{candidate?.episodes ? replaceLabel(candidate.episodes) : 'Replace'}</DialogTitle>
+            <DialogDescription className='break-words'>{candidate?.name}</DialogDescription>
+          </DialogHeader>
+          {planError ? (
+            <p className='rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{planError}</p>
+          ) : !plan ? (
+            <p className='text-sm text-muted-foreground'>Working out what it would change…</p>
+          ) : (
+            <ul className='flex flex-col gap-1.5 text-sm'>
+              <li>
+                Downloads {plan.batch ? `episodes ${pad(plan.first)}–${pad(plan.last)}` : `episode ${pad(plan.first)}`} of{' '}
+                <span className='font-medium text-foreground'>{plan.anidb_title}</span>
+                {plan.german ? ', with German subtitles as Erai-raws lists them.' : '. Erai-raws lists no German subtitles for it.'}
+              </li>
+              <li>{plan.held_count ? `Replaces ${plan.held_count} held release${plan.held_count === 1 ? '' : 's'} in review.` : 'No held release of this card falls in its episodes.'}</li>
+              <li>
+                {plan.file_count
+                  ? `Replaces ${plan.file_count} file${plan.file_count === 1 ? '' : 's'} already in the library, removed once the new ones are published.`
+                  : 'Nothing of these episodes is in the library yet.'}
+              </li>
+              {plan.german_dubs_kept.length > 0 && (
+                <li className='text-transfer'>
+                  Keeps {plan.german_dubs_kept.length === 1 ? 'episode' : 'episodes'} {plan.german_dubs_kept.map(pad).join(', ')}: German dub, never replaced.
+                </li>
+              )}
+              <li className='text-muted-foreground'>If publishing fails for good, the held releases go back to review.</li>
+            </ul>
+          )}
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setCandidate(null)} disabled={replacing}>Cancel</Button>
+            <Button onClick={() => void replace()} disabled={!plan || replacing}>
+              <Replace data-icon='inline-start' /> {replacing ? 'Queueing…' : 'Replace'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
