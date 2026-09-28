@@ -2433,11 +2433,19 @@ async def _consider(
             # The alternative was only accepted after its own German evidence
             # was verified, so this cannot bounce back into this branch.
             return await _consider(state, alternative, client)
-        sibling = (
-            await _german_sibling(entry, client)
-            if erai_says is False and get_settings().anime.german_avc_fallback
-            else None
+        listed = (
+            erai_says is False
+            and get_settings().anime.german_avc_fallback
+            and erai_site.german_sibling(entry.info_hash) is not None
         )
+        sibling = await _german_sibling(entry, client) if listed else None
+        if listed and sibling is None:
+            _hold(
+                state,
+                entry,
+                "Erai-raws lists German only for another encode of it, not found on Nyaa",
+            )
+            return False
         if sibling is not None:
             log.info(
                 "Using %s: Erai-raws lists German for it, not for %s", sibling.title, entry.title
@@ -2454,7 +2462,18 @@ async def _consider(
                 state["held"] = [
                     item for item in state["held"] if item.get("info_hash") != entry.info_hash
                 ]
-            return taken
+                return True
+            # Not taken yet -- no download space, most often. Saying "no German"
+            # here, as it did, sent the user to the site to find it had some.
+            other = state["releases"].get(sibling.info_hash) or {}
+            _hold(
+                state,
+                entry,
+                f"Its encode with German subtitles is held: {other['reason']}"
+                if other.get("status") == "held" and other.get("reason")
+                else "Erai-raws lists German for another encode of it; waiting for download space",
+            )
+            return False
         _hold(
             state,
             entry,
