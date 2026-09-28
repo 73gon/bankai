@@ -712,6 +712,7 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.backfill_enabled",
     "anime.backfill_request_delay_seconds",
     "anime.erai_feed_token",
+    "anime.german_avc_fallback",
     "scraper.interactive_pick",
     "selector.max_size_gib",
     "selector.min_seeders",

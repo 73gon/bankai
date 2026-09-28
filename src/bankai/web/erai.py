@@ -2234,6 +2234,33 @@ async def _erai_german(entry: anime_mod.NyaaEntry) -> bool | None:
     return says
 
 
+async def _german_sibling(
+    entry: anime_mod.NyaaEntry, client: httpx.AsyncClient
+) -> anime_mod.NyaaEntry | None:
+    """The Nyaa release of an encode of this episode that Erai-raws lists with German.
+
+    Found by its own name on Nyaa and matched by info hash, so it is exactly
+    the torrent Erai-raws described.
+    """
+    found = erai_site.german_sibling(entry.info_hash)
+    if found is None:
+        return None
+    info_hash, row = found
+    name = re.sub(r"\.(?:mkv|mp4)$", "", str(row.get("name") or ""), flags=re.IGNORECASE)
+    try:
+        response = await client.get(
+            f"{_NYAA_BASE}/", params={"u": "Erai-raws", "c": "1_2", "q": name}
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        log.warning("Nyaa lookup of %s failed: %s", name, exc)
+        return None
+    return next(
+        (item for item in parse_listing(response.text) if item.info_hash.casefold() == info_hash),
+        None,
+    )
+
+
 async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 40) -> int:
     """Held because Nyaa did not say German: ask Erai-raws, which lists it per release.
 
@@ -2243,12 +2270,21 @@ async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 40) -> in
     """
     if not erai_site.configured():
         return 0
+    fallback = get_settings().anime.german_avc_fallback
     held = [
         (info_hash, release)
         for info_hash, release in state["releases"].items()
         if release.get("status") == "held"
         and "German subtitles" in str(release.get("reason") or "")
-        and "Erai-raws" not in str(release.get("reason") or "")
+        and (
+            "Erai-raws" not in str(release.get("reason") or "")
+            # Settled as "no German" -- but another encode of it may have some.
+            or (
+                fallback
+                and release.get("reason") == "Erai-raws lists no German subtitles"
+                and erai_site.german_sibling(info_hash) is not None
+            )
+        )
     ]
     unknown: list[str] = []
     for info_hash, release in held:
@@ -2268,8 +2304,13 @@ async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 40) -> in
         if says is None:
             continue
         changed += 1
-        if says:
-            release["reason"] = "Erai-raws lists German subtitles; waiting to be checked again"
+        sibling = fallback and not says and erai_site.german_sibling(info_hash) is not None
+        if says or sibling:
+            release["reason"] = (
+                "Erai-raws lists German for another encode of it; waiting to be checked again"
+                if sibling
+                else "Erai-raws lists German subtitles; waiting to be checked again"
+            )
             release["retry_after"] = 0
             retries[info_hash] = {
                 "title": release.get("title"),
@@ -2330,10 +2371,13 @@ async def _consider(
     state: dict[str, Any],
     entry: anime_mod.NyaaEntry,
     client: httpx.AsyncClient,
+    *,
+    allow_avc: bool = False,
 ) -> bool:
+    """``allow_avc``: the German fallback, for an episode whose HEVC encode has none."""
     if not _needs_consideration(state, entry):
         return False
-    if not _is_hevc(entry):
+    if not _is_hevc(entry) and not allow_avc:
         state["releases"][entry.info_hash] = {
             "status": "filtered",
             "title": entry.title,
@@ -2389,6 +2433,28 @@ async def _consider(
             # The alternative was only accepted after its own German evidence
             # was verified, so this cannot bounce back into this branch.
             return await _consider(state, alternative, client)
+        sibling = (
+            await _german_sibling(entry, client)
+            if erai_says is False and get_settings().anime.german_avc_fallback
+            else None
+        )
+        if sibling is not None:
+            log.info(
+                "Using %s: Erai-raws lists German for it, not for %s", sibling.title, entry.title
+            )
+            # Erai-raws lists German for it, so this cannot come back here either.
+            taken = await _consider(state, sibling, client, allow_avc=True)
+            if taken:
+                # The episode is on its way; this encode is no decision to make.
+                state["releases"][entry.info_hash] = {
+                    "status": "filtered",
+                    "title": entry.title,
+                    "reason": "Its encode with German subtitles was downloaded instead",
+                }
+                state["held"] = [
+                    item for item in state["held"] if item.get("info_hash") != entry.info_hash
+                ]
+            return taken
         _hold(
             state,
             entry,

@@ -136,3 +136,47 @@ def test_a_search_brings_a_shows_older_seasons_into_the_index(store, monkeypatch
     # Asked once an hour per term.
     assert asyncio.run(erai_site.search("meitantei precure")) == 0
     assert len(asked) == 1
+
+
+PAIR = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:erai="https://www.erai-raws.info/rss-page/"><channel>
+<item><title>[Torrent] Sono Bisque Doll wa Koi o Suru Season 2 - 01 (HEVC)</title>
+  <erai:resolution>1080p</erai:resolution>
+  <erai:infohash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</erai:infohash>
+  <erai:subtitles>[us][br][fr][it]</erai:subtitles>
+  <description><![CDATA[<a href="https://x/1">[Erai-raws] Sono Bisque Doll wa Koi o Suru Season 2 - 01 [1080p CR WEBRip HEVC AAC][MultiSub][1].mkv</a>]]></description></item>
+<item><title>[Torrent] Sono Bisque Doll wa Koi o Suru Season 2 - 01</title>
+  <erai:resolution>1080p</erai:resolution>
+  <erai:infohash>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</erai:infohash>
+  <erai:subtitles>[us][br][fr][de][it]</erai:subtitles>
+  <description><![CDATA[<a href="https://x/2">[Erai-raws] Sono Bisque Doll wa Koi o Suru Season 2 - 01 [1080p CR WEB-DL AVC AAC][MultiSub][2].mkv</a>]]></description></item>
+<item><title>[Torrent] Sono Bisque Doll wa Koi o Suru Season 2 - 01</title>
+  <erai:resolution>720p</erai:resolution>
+  <erai:infohash>cccccccccccccccccccccccccccccccccccccccc</erai:infohash>
+  <erai:subtitles>[us][de]</erai:subtitles>
+  <description><![CDATA[<a href="https://x/3">[Erai-raws] Sono Bisque Doll wa Koi o Suru Season 2 - 01 [720p CR WEB-DL AVC AAC][MultiSub][3].mkv</a>]]></description></item>
+</channel></rss>"""
+
+
+def test_the_encode_with_german_is_found_for_one_without(store):
+    erai_site._merge(erai_site.parse_feed(PAIR))
+    found = erai_site.german_sibling("a" * 40)
+    # The same episode at the same resolution; not the 720p one.
+    assert found is not None and found[0] == "b" * 40
+    assert erai_site.german_sibling("b" * 40) is None  # has German itself, nothing else at 1080p with it
+
+
+def test_a_no_german_hold_with_a_german_sibling_is_retried(store, monkeypatch):
+    from bankai.config import Settings
+
+    erai_site._merge(erai_site.parse_feed(PAIR))
+    settings = Settings(anime={"german_avc_fallback": True})
+    monkeypatch.setattr(erai, "get_settings", lambda: settings)
+    monkeypatch.setattr(erai, "_catalog_entries", lambda state: {})
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: {"status": "held", "title": "[Erai-raws] Sono Bisque Doll wa Koi o Suru Season 2 - 01", "reason": "Erai-raws lists no German subtitles"},
+    }
+    assert asyncio.run(erai._recheck_german_holds(state)) == 1
+    assert state["releases"]["a" * 40]["reason"].startswith("Erai-raws lists German for another encode")
+    assert set(erai._load_retry_requests()) == {"a" * 40}

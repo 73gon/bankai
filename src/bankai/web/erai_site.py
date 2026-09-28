@@ -117,6 +117,41 @@ def german(info_hash: str) -> bool | None:
     return GERMAN in (row.get("subs") or [])
 
 
+def episode_stem(name: str) -> str:
+    """Show and episode of a release file name, the part every encode shares.
+
+    "[Erai-raws] Show Season 2 - 01 [1080p CR WEBRip HEVC AAC][MultiSub].mkv"
+    -> "show season 2 - 01". A v2 is a different file of the episode, so it
+    stays part of it.
+    """
+    value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", name).split(" [", 1)[0]
+    return " ".join(value.casefold().split())
+
+
+def german_sibling(info_hash: str) -> tuple[str, dict[str, Any]] | None:
+    """Another encode of the same episode and resolution that Erai-raws lists with German.
+
+    Erai-raws does not give every encode the same subtitles: Sono Bisque Doll
+    Season 2 episode 01 has German in its AVC encode and not in its HEVC one.
+    """
+    releases = load()["releases"]
+    row = releases.get(str(info_hash or "").casefold())
+    if row is None:
+        return None
+    stem, resolution = episode_stem(row.get("name") or ""), row.get("res")
+    if not stem:
+        return None
+    for other_hash, other in releases.items():
+        if (
+            other_hash != str(info_hash).casefold()
+            and GERMAN in (other.get("subs") or [])
+            and other.get("res") == resolution
+            and episode_stem(other.get("name") or "") == stem
+        ):
+            return other_hash, other
+    return None
+
+
 # -- reading feeds -----------------------------------------------------------
 
 

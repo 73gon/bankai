@@ -21,6 +21,7 @@ const LABELS: Record<string, { label: string; description: string; suffix?: stri
   'anime.max_concurrent_transfers': { label: 'Concurrent transfers', description: 'How many finished downloads are published into the library at once. Downloading is unlimited — qBittorrent governs that.' },
   'anime.max_hevc_upgrades_per_cycle': { label: 'HEVC upgrades per cycle', description: 'Queued AVC episodes swapped for their HEVC encode each cycle. HEVC is roughly half the size for the same episode. Set to 0 to stop upgrading.' },
   'anime.backfill_request_delay_seconds': { label: 'Backfill request delay', description: 'Delay between historical Nyaa catalogue pages.', suffix: 'seconds' },
+  'anime.german_avc_fallback': { label: 'AVC when HEVC lacks German', description: 'Erai-raws does not give every encode the same subtitles. When the HEVC encode of an episode has no German but Erai-raws lists it for another encode (AVC) of the same episode, download that one instead. German is required; HEVC is only preferred.' },
   'anime.erai_feed_token': { label: 'Erai-raws feed token', description: 'On any show page on erai-raws.info, right-click FHD under RSS Links and copy the link, then paste it here: bankai keeps only its token. With it, bankai reads which subtitles Erai-raws lists for each release, and trusts that over the Nyaa description.' },
 };
 
