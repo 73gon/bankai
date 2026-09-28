@@ -2193,7 +2193,7 @@ async def _erai_german(entry: anime_mod.NyaaEntry) -> bool | None:
     return says
 
 
-async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 10) -> int:
+async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 40) -> int:
     """Held because Nyaa did not say German: ask Erai-raws, which lists it per release.
 
     One Erai-raws says has German is retried like a recheck; one it says has

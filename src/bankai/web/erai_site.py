@@ -41,7 +41,9 @@ BASE_URL = "https://www.erai-raws.info"
 _NS = {"erai": "https://www.erai-raws.info/rss-page/"}
 # Per pass: newest pages until one brings nothing new, then this many older.
 _NEWEST_PAGES = 5
-_BACKFILL_PAGES = 5
+# The site-wide feed reaches back about eighteen months, some 100 pages:
+# read in a few passes. Older releases come from each show's own feed.
+_BACKFILL_PAGES = 20
 _PAGE_DELAY_SECONDS = 2.0
 # A show's own feed is read again at most this often.
 _SHOW_FEED_SECONDS = 12 * 3600
@@ -258,20 +260,40 @@ def show_slug(name: str) -> str:
     return re.sub(r"[\s_-]+", "-", value).strip("-")
 
 
+def show_slugs(name: str) -> list[str]:
+    """Addresses a show might be under, likeliest first.
+
+    Erai names some releases "Romaji | English" and keeps the show under the
+    romaji half: "Ao no Miburo | Blue Miburo" is at ao-no-miburo. A language
+    tag -- "(CA)" -- is not part of the address either.
+    """
+    cleaned = re.sub(r"\s*\((?:[A-Z]{2})\)\s*$", "", name.strip())
+    parts = [cleaned, *(part.strip() for part in cleaned.split("|"))] if "|" in cleaned else [cleaned]
+    slugs = [show_slug(part) for part in (parts[1:] + parts[:1] if "|" in cleaned else parts)]
+    return [slug for slug in dict.fromkeys(slugs) if slug]
+
+
 async def fill_show(name: str) -> int:
     """Read one show's own feed -- its whole history -- into the index."""
     if not configured() or not name.strip():
         return 0
-    slug = show_slug(name)
-    if time.time() - float((load().get("shows") or {}).get(slug) or 0) < _SHOW_FEED_SECONDS:
-        return 0
-    try:
-        async with _client() as client:
-            rows = await _page(client, f"/anime-list/{slug}/feed/")
-    except (FeedError, httpx.HTTPError) as exc:
-        log.debug("Erai-raws feed for %s unavailable: %s", slug, type(exc).__name__)
-        rows = []
-    return _merge(rows, shows={slug: time.time()})
+    read = load().get("shows") or {}
+    tried: dict[str, float] = {}
+    async with _client() as client:
+        for slug in show_slugs(name):
+            if time.time() - float(read.get(slug) or 0) < _SHOW_FEED_SECONDS:
+                return 0  # read lately, under this address
+            tried[slug] = time.time()
+            try:
+                rows = await _page(client, f"/anime-list/{slug}/feed/")
+            except (FeedError, httpx.HTTPError) as exc:
+                log.debug("Erai-raws feed for %s unavailable: %s", slug, type(exc).__name__)
+                rows = []
+            if rows:
+                return _merge(rows, shows=tried)
+            await asyncio.sleep(_PAGE_DELAY_SECONDS)
+    _merge([], shows=tried)
+    return 0
 
 
 def summary() -> dict[str, Any]:

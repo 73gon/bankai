@@ -110,3 +110,11 @@ def test_a_refused_token_is_reported_without_the_token(store, monkeypatch):
     assert "refused the feed token" in result["error"]
     summary = erai_site.summary()
     assert "refused" in summary["error"] and "token=" not in summary["error"]
+
+
+def test_a_romaji_english_name_is_looked_up_under_its_romaji_half():
+    assert erai_site.show_slugs("Ao no Miburo | Blue Miburo") == ["ao-no-miburo", "blue-miburo", "ao-no-miburo-blue-miburo"]
+    assert erai_site.show_slugs("Dragon Raja (CA)") == ["dragon-raja"]
+    assert erai_site.show_slugs("Arifureta Shokugyou de Sekai Saikyou 2nd Season") == [
+        "arifureta-shokugyou-de-sekai-saikyou-2nd-season"
+    ]
