@@ -2192,6 +2192,7 @@ def create_app() -> Any:
             only_key=show,
             catalog=await _catalog(),
         )
+        erai_mod.mark_blacklisted_shows(shows)
         # One show can span several folders, so its entries are the ones
         # belonging to any folder behind the card rather than to its name.
         folders = {name for row in shows for name in row.get("folders", [])}

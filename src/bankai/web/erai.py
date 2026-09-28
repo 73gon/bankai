@@ -10,6 +10,7 @@ ambiguity.
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 import html
 import json
@@ -1484,8 +1485,50 @@ def _load_state() -> dict[str, Any]:
         return state
 
 
+# The sections of the release state that are merged when a cycle saves.
+_MERGED_SECTIONS = ("releases", "canonical", "series")
+# The state a running cycle loaded, as it was: {"id": id(state), "sections": {...}}.
+_CYCLE_BASE: ContextVar[dict | None] = ContextVar("erai_cycle_base", default=None)
+
+
+def _begin_cycle_state(state: dict[str, Any]) -> Any:
+    """Remember what a cycle loaded, so its saves can merge; returns a reset token."""
+    return _CYCLE_BASE.set(
+        {"id": id(state), "sections": {name: copy.deepcopy(state.get(name) or {}) for name in _MERGED_SECTIONS}}
+    )
+
+
+def _merge_changes_made_elsewhere(state: dict[str, Any], base: dict[str, Any]) -> None:
+    """Take what changed on disk since the cycle loaded, where the cycle left it alone.
+
+    A cycle holds the state in memory for minutes. Written back whole, it
+    undid every decision made meanwhile in the web process: releases the user
+    discarded, or marked as already downloaded, came back as held. Per entry,
+    three ways: changed on disk and not by the cycle, the disk wins; changed
+    by the cycle, the cycle does; added or removed elsewhere, so be it.
+    """
+    disk = _load_state()
+    for name in _MERGED_SECTIONS:
+        mine = state.setdefault(name, {})
+        original = base["sections"].get(name) or {}
+        theirs = disk.get(name) or {}
+        for key, value in theirs.items():
+            if key not in original:
+                mine.setdefault(key, value)
+            elif value != original[key] and mine.get(key) == original[key]:
+                mine[key] = value
+        for key in original.keys() - theirs.keys():
+            if key in mine and mine[key] == original[key]:
+                del mine[key]
+    _prune_holds(state)
+
+
 def _save_state(state: dict[str, Any]) -> None:
     with _STATE_LOCK:
+        base = _CYCLE_BASE.get()
+        cycle = base is not None and base.get("id") == id(state)
+        if cycle:
+            _merge_changes_made_elsewhere(state, base)
         path = _state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
@@ -1495,6 +1538,9 @@ def _save_state(state: dict[str, Any]) -> None:
             json.dumps(state, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
         )
         tmp.replace(path)
+        if cycle:
+            # What is on disk now is the base the next save merges against.
+            base["sections"] = {name: copy.deepcopy(state.get(name) or {}) for name in _MERGED_SECTIONS}
 
 
 # Erai-raws advertises subtitles two different ways. The AVC releases list
@@ -1884,6 +1930,9 @@ _ERAI_EPISODE = re.compile(
 
 
 # A batch, a whole season in one torrent: "Date A Live V - 01 ~ 12 [1080p]".
+# Its episodes also come as single releases; taking both would download the
+# season twice, so a batch is held and says so.
+BATCH_REASON = "Whole-season batch: its episodes come as single releases instead"
 _ERAI_BATCH = re.compile(
     r"^(?P<name>.+?)\s+-\s+(?P<episode>\d{1,4})\s*~\s*\d{1,4}(?:v\d+)?(?:\s+END)?"
     r"(?:\s*\([^)]*\))*\s*(?:\[[^\]]*\]\s*)*$",
@@ -1930,6 +1979,8 @@ async def _resolve_anidb(
     """
     parsed = _erai_name_episode(entry.title)
     if parsed is None:
+        if _ERAI_BATCH.match(_erai_value(entry.title)):
+            return None, None, BATCH_REASON
         return None, None, "AniDB episode number was not found in the release title"
     name, episode = parsed
     saved = _load_mappings().get(_mapping_key(entry.title)) or {}
@@ -2066,6 +2117,31 @@ def _policy_anidb_ids(policies: dict[str, Any] | None = None) -> set[int]:
         for row in rows.values()
         if row.get("mode") == "blacklisted" and str(row.get("anidb_id") or "").isdigit()
     }
+
+
+def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
+    """Flag library cards the user blacklisted; their files stay until deleted.
+
+    Blacklisting stops new downloads and, from Review, deletes what was
+    downloaded -- but a show already in the library before it was blocked is
+    still on disk, and the grid should say so rather than look like a mistake.
+    A card goes by its primary AniDB entry, so blocking one sequel does not
+    flag the show it is filed under.
+    """
+    policies = _load_policies()
+    ids = _policy_anidb_ids(policies)
+    tvdb_ids = _policy_tvdb_ids(policies)
+    names, exact = _policy_show_keys(policies)
+    for show in shows:
+        titles = [
+            str(show.get(field) or "") for field in ("key", "title", "source_title")
+        ]
+        show["blacklisted"] = bool(
+            (show.get("anidb_id") is not None and show.get("anidb_id") in ids)
+            or (show.get("tvdb_id") and str(show["tvdb_id"]) in tvdb_ids)
+            or any(title and _show_name_key(title) in names for title in titles)
+            or any(title and anidb_mod.normalise(title) in exact for title in titles)
+        )
 
 
 async def _admit_anidb(
@@ -3148,177 +3224,182 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
         settings = get_settings()
         policy = settings.anime
         state = _load_state()
-        _prune_holds(state)
-        state["last_poll"] = time.time()
-        state["last_enqueued"] = 0
-        if not policy.enabled or updates.maintenance_active():
-            _save_state(state)
-            return status(state=state, running=False)
-        if not settings.metadata.tvdb_enabled or not settings.metadata.tvdb_api_key:
-            state["last_error"] = "TVDB is not configured"
-            _save_state(state)
-            return status(state=state, running=False)
-        free = free_space_gib()
-        if free is None:
-            state["last_error"] = "Anime destination is unavailable"
-            _save_state(state)
-            return status(state=state, running=False)
-        if free <= policy.min_free_space_gib:
-            state["last_error"] = f"Free space reserve reached ({free:.1f} GiB available)"
-            _save_state(state)
-            return status(state=state, running=False)
-        headers = {"User-Agent": settings.scraper.user_agent}
-        enqueued = 0
-        _set_activity("Checking qBittorrent and free space")
-        qbit = None
-        roster_token = _ROSTERS.set({})
-        admission_token = _ADMISSION.set(None)
-        # A fresh look at the library each cycle; see _library_identities.
-        disk_token = _DISK_INDEX.set({})
+        base_token = _begin_cycle_state(state)
         try:
-            if prefill:
-                from bankai.torrent.qbittorrent import QBittorrentClient
-
-                qbit = QBittorrentClient()
-                await qbit.login()
-                torrents = await qbit.list_torrents(category=settings.qbittorrent.category)
-                cleaned = 0
-                if settings.paths.cleanup_after_success:
-                    cleaned = await _cleanup_verified_torrents(qbit, torrents)
-                    if cleaned:
-                        torrents = await qbit.list_torrents(
-                            category=settings.qbittorrent.category
-                        )
-                state["last_cleanup_count"] = cleaned
-                try:
-                    await _rotate_stuck_torrents(state, qbit, torrents)
-                except Exception as exc:
-                    log.warning("[anime] could not rotate stuck downloads: %s", exc)
-                download_free_bytes = await qbit.free_space_bytes()
-                state["download_free_space_gib"] = (
-                    round(download_free_bytes / _GIB, 1)
-                    if download_free_bytes is not None
-                    else None
-                )
-                reserved = _reserved_torrent_bytes(state, torrents)
-                download_budget = (
-                    max(0, download_free_bytes - int(policy.min_free_space_gib * _GIB))
-                    if download_free_bytes is not None
-                    else int((free - policy.min_free_space_gib) * _GIB)
-                )
-                _ADMISSION.set(
-                    {
-                        "qbit": qbit,
-                        "remaining": max(
-                            0,
-                            min(
-                                int((free - policy.min_free_space_gib) * _GIB),
-                                download_budget,
-                            )
-                            - reserved,
-                        ),
-                    }
-                )
-            async with httpx.AsyncClient(
-                headers=headers, timeout=30, follow_redirects=True
-            ) as client:
-                _set_activity("Asking Erai-raws about subtitles")
-                with suppress(Exception):
-                    await _recheck_german_holds(state)
-                _set_activity("Gathering held releases to check again")
-                retries = await _retry_candidates(state, client)
-                if not retries_only:
-                    _set_activity("Reading the Erai-raws feed")
-                rss = [] if retries_only else await _fetch_rss(client)
-                if not retries_only:
-                    _set_activity("Indexing the Nyaa catalogue")
-                    try:
-                        await _crawl_backfill(state, client)
-                        state["backfill"]["error"] = None
-                    except Exception as exc:
-                        state["backfill"]["error"] = f"{type(exc).__name__}: {exc}"
-                        log.warning("Erai backfill paused; RSS ingestion continues: %s", exc)
-                fresh: dict[str, anime_mod.NyaaEntry] = {}
-                cutoff = time.time() - policy.settle_minutes * 60
-                for entry in rss:
-                    key = _release_key(entry)
-                    if (
-                        key is None
-                        or _resolution(entry) < 1080
-                        or not _is_hevc(entry)
-                        or _published_timestamp(entry) > cutoff
-                    ):
-                        continue
-                    current = fresh.get(key)
-                    if current is None or _rank(entry) > _rank(current):
-                        fresh[key] = entry
-                if not retries_only:
-                    _set_activity("Ordering the backlog")
-                normal = [] if retries_only else await _ordered_candidates(state, fresh, client)
-                candidates = list({item.info_hash: item for item in [*retries, *normal]}.values())
-                inspected = 0
-                # The loop stops at this many checks, or earlier at its enqueue cap.
-                budget = min(len(candidates), max(100, policy.max_enqueues_per_cycle * 3))
-                for entry in candidates:
-                    if enqueued >= policy.max_enqueues_per_cycle or inspected >= max(
-                        100, policy.max_enqueues_per_cycle * 3
-                    ):
-                        break
-                    if not _needs_consideration(state, entry):
-                        continue
-                    if not get_settings().anime.enabled or updates.maintenance_active():
-                        break
-                    admission = _ADMISSION.get()
-                    if admission is not None and admission["remaining"] <= 0:
-                        break
-                    inspected += 1
-                    _set_activity(
-                        "Checking releases",
-                        done=inspected,
-                        total=budget,
-                        current=entry.title,
-                        enqueued=enqueued,
-                    )
-                    if free_space_gib() is None or free_space_gib() <= policy.min_free_space_gib:
-                        break
-                    previous = dict(state["releases"].get(entry.info_hash, {}))
-                    if await _consider(state, entry, client):
-                        enqueued += 1
-                    _prune_holds(state)
-                    current = state["releases"].get(entry.info_hash, {})
-                    if current != previous and entry.info_hash in _load_retry_requests():
-                        # Commit the result before consuming its durable retry request.
-                        _save_state(state)
-                        with _STATE_LOCK:
-                            requests = _load_retry_requests()
-                            requests.pop(entry.info_hash, None)
-                            _save_retry_requests(requests)
-                    await asyncio.sleep(policy.backfill_request_delay_seconds)
-                    if inspected % 10 == 0:
-                        _save_state(state)
+            _prune_holds(state)
+            state["last_poll"] = time.time()
+            state["last_enqueued"] = 0
+            if not policy.enabled or updates.maintenance_active():
+                _save_state(state)
+                return status(state=state, running=False)
+            if not settings.metadata.tvdb_enabled or not settings.metadata.tvdb_api_key:
+                state["last_error"] = "TVDB is not configured"
+                _save_state(state)
+                return status(state=state, running=False)
+            free = free_space_gib()
+            if free is None:
+                state["last_error"] = "Anime destination is unavailable"
+                _save_state(state)
+                return status(state=state, running=False)
+            if free <= policy.min_free_space_gib:
+                state["last_error"] = f"Free space reserve reached ({free:.1f} GiB available)"
+                _save_state(state)
+                return status(state=state, running=False)
+            headers = {"User-Agent": settings.scraper.user_agent}
+            enqueued = 0
+            _set_activity("Checking qBittorrent and free space")
+            qbit = None
+            roster_token = _ROSTERS.set({})
+            admission_token = _ADMISSION.set(None)
+            # A fresh look at the library each cycle; see _library_identities.
+            disk_token = _DISK_INDEX.set({})
+            try:
                 if prefill:
-                    _set_activity("Swapping queued AVC episodes for HEVC")
-                    upgraded = await _upgrade_to_hevc(
-                        state, client, limit=policy.max_hevc_upgrades_per_cycle
+                    from bankai.torrent.qbittorrent import QBittorrentClient
+
+                    qbit = QBittorrentClient()
+                    await qbit.login()
+                    torrents = await qbit.list_torrents(category=settings.qbittorrent.category)
+                    cleaned = 0
+                    if settings.paths.cleanup_after_success:
+                        cleaned = await _cleanup_verified_torrents(qbit, torrents)
+                        if cleaned:
+                            torrents = await qbit.list_torrents(
+                                category=settings.qbittorrent.category
+                            )
+                    state["last_cleanup_count"] = cleaned
+                    try:
+                        await _rotate_stuck_torrents(state, qbit, torrents)
+                    except Exception as exc:
+                        log.warning("[anime] could not rotate stuck downloads: %s", exc)
+                    download_free_bytes = await qbit.free_space_bytes()
+                    state["download_free_space_gib"] = (
+                        round(download_free_bytes / _GIB, 1)
+                        if download_free_bytes is not None
+                        else None
                     )
-                    if upgraded:
-                        state["last_upgraded"] = upgraded
-                        _save_state(state)
-            state["last_success"] = time.time()
-            state["last_error"] = None
-            state["last_enqueued"] = enqueued
-        except Exception as exc:
-            state["last_error"] = f"{type(exc).__name__}: {exc}"
-            log.warning("Erai automation cycle failed: %s", exc)
+                    reserved = _reserved_torrent_bytes(state, torrents)
+                    download_budget = (
+                        max(0, download_free_bytes - int(policy.min_free_space_gib * _GIB))
+                        if download_free_bytes is not None
+                        else int((free - policy.min_free_space_gib) * _GIB)
+                    )
+                    _ADMISSION.set(
+                        {
+                            "qbit": qbit,
+                            "remaining": max(
+                                0,
+                                min(
+                                    int((free - policy.min_free_space_gib) * _GIB),
+                                    download_budget,
+                                )
+                                - reserved,
+                            ),
+                        }
+                    )
+                async with httpx.AsyncClient(
+                    headers=headers, timeout=30, follow_redirects=True
+                ) as client:
+                    _set_activity("Asking Erai-raws about subtitles")
+                    with suppress(Exception):
+                        await _recheck_german_holds(state)
+                    _set_activity("Gathering held releases to check again")
+                    retries = await _retry_candidates(state, client)
+                    if not retries_only:
+                        _set_activity("Reading the Erai-raws feed")
+                    rss = [] if retries_only else await _fetch_rss(client)
+                    if not retries_only:
+                        _set_activity("Indexing the Nyaa catalogue")
+                        try:
+                            await _crawl_backfill(state, client)
+                            state["backfill"]["error"] = None
+                        except Exception as exc:
+                            state["backfill"]["error"] = f"{type(exc).__name__}: {exc}"
+                            log.warning("Erai backfill paused; RSS ingestion continues: %s", exc)
+                    fresh: dict[str, anime_mod.NyaaEntry] = {}
+                    cutoff = time.time() - policy.settle_minutes * 60
+                    for entry in rss:
+                        key = _release_key(entry)
+                        if (
+                            key is None
+                            or _resolution(entry) < 1080
+                            or not _is_hevc(entry)
+                            or _published_timestamp(entry) > cutoff
+                        ):
+                            continue
+                        current = fresh.get(key)
+                        if current is None or _rank(entry) > _rank(current):
+                            fresh[key] = entry
+                    if not retries_only:
+                        _set_activity("Ordering the backlog")
+                    normal = [] if retries_only else await _ordered_candidates(state, fresh, client)
+                    candidates = list({item.info_hash: item for item in [*retries, *normal]}.values())
+                    inspected = 0
+                    # The loop stops at this many checks, or earlier at its enqueue cap.
+                    budget = min(len(candidates), max(100, policy.max_enqueues_per_cycle * 3))
+                    for entry in candidates:
+                        if enqueued >= policy.max_enqueues_per_cycle or inspected >= max(
+                            100, policy.max_enqueues_per_cycle * 3
+                        ):
+                            break
+                        if not _needs_consideration(state, entry):
+                            continue
+                        if not get_settings().anime.enabled or updates.maintenance_active():
+                            break
+                        admission = _ADMISSION.get()
+                        if admission is not None and admission["remaining"] <= 0:
+                            break
+                        inspected += 1
+                        _set_activity(
+                            "Checking releases",
+                            done=inspected,
+                            total=budget,
+                            current=entry.title,
+                            enqueued=enqueued,
+                        )
+                        if free_space_gib() is None or free_space_gib() <= policy.min_free_space_gib:
+                            break
+                        previous = dict(state["releases"].get(entry.info_hash, {}))
+                        if await _consider(state, entry, client):
+                            enqueued += 1
+                        _prune_holds(state)
+                        current = state["releases"].get(entry.info_hash, {})
+                        if current != previous and entry.info_hash in _load_retry_requests():
+                            # Commit the result before consuming its durable retry request.
+                            _save_state(state)
+                            with _STATE_LOCK:
+                                requests = _load_retry_requests()
+                                requests.pop(entry.info_hash, None)
+                                _save_retry_requests(requests)
+                        await asyncio.sleep(policy.backfill_request_delay_seconds)
+                        if inspected % 10 == 0:
+                            _save_state(state)
+                    if prefill:
+                        _set_activity("Swapping queued AVC episodes for HEVC")
+                        upgraded = await _upgrade_to_hevc(
+                            state, client, limit=policy.max_hevc_upgrades_per_cycle
+                        )
+                        if upgraded:
+                            state["last_upgraded"] = upgraded
+                            _save_state(state)
+                state["last_success"] = time.time()
+                state["last_error"] = None
+                state["last_enqueued"] = enqueued
+            except Exception as exc:
+                state["last_error"] = f"{type(exc).__name__}: {exc}"
+                log.warning("Erai automation cycle failed: %s", exc)
+            finally:
+                _set_activity(None)
+                _ROSTERS.reset(roster_token)
+                _ADMISSION.reset(admission_token)
+                _DISK_INDEX.reset(disk_token)
+                if qbit is not None:
+                    await qbit.aclose()
+            _save_state(state)
+            return status(state=state, running=False)
         finally:
-            _set_activity(None)
-            _ROSTERS.reset(roster_token)
-            _ADMISSION.reset(admission_token)
-            _DISK_INDEX.reset(disk_token)
-            if qbit is not None:
-                await qbit.aclose()
-        _save_state(state)
-        return status(state=state, running=False)
+            # Always: an id left behind could be reused by the next cycle's state.
+            _CYCLE_BASE.reset(base_token)
 
 
 # ---------------------------------------------------------------------------

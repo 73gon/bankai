@@ -523,6 +523,8 @@ export interface AnimeLibraryShow {
   avc_count?: number;
   hevc_count?: number;
   german_dub_count?: number;
+  /** Blacklisted by the user, yet its files are still in the library. */
+  blacklisted?: boolean;
   downloaded_count: number;
   total_count: number;
   completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
@@ -891,7 +893,8 @@ export const api = {
     // card with a Shoko cover showed the placeholder.
     url.startsWith('/')
       ? url
-      : url.includes('filmpalast.to/') || !url.startsWith('https://')
+      : // AniDB's image server refuses another site's referrer: fetched by bankai.
+        url.includes('filmpalast.to/') || url.includes('anidb.net/') || !url.startsWith('https://')
       ? `/api/discover/poster?url=${encodeURIComponent(url)}`
       : url,
 

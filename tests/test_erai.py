@@ -2395,3 +2395,29 @@ def test_an_episode_we_do_not_have_still_goes_through_the_subtitle_check(tmp_pat
         erai._DISK_INDEX.reset(token)
     assert state["releases"][item.info_hash]["status"] == "held"
 
+
+
+def test_library_cards_of_blacklisted_shows_are_flagged(monkeypatch):
+    monkeypatch.setattr(
+        erai,
+        "_load_policies",
+        lambda: {
+            "chuuzenji": {"mode": "blacklisted", "anidb_id": 111, "anidb_titles": ["Chuuzenji"]},
+            "old show": {"mode": "blacklisted", "source_title": "Old Show", "tvdb_id": 9},
+            "kept": {"mode": "allowed", "anidb_id": 222},
+        },
+    )
+    shows = [
+        {"key": "Chuuzenji", "title": "Chuuzenji", "anidb_id": 111},
+        {"key": "Old Show", "title": "Old Show", "anidb_id": None},
+        {"key": "Kept", "title": "Kept", "anidb_id": 222},
+        {"key": "Sequel", "title": "Bleach", "anidb_id": 2369, "tvdb_id": 74796},
+    ]
+    erai.mark_blacklisted_shows(shows)
+    assert [show["blacklisted"] for show in shows] == [True, True, False, False]
+
+
+def test_a_batch_is_held_with_its_own_reason():
+    batch = entry("[Erai-raws] Beastars Final Season - 13 ~ 24 [1080p][HEVC][BATCH]")
+    _, _, reason = asyncio.run(erai._resolve_anidb(batch))
+    assert reason == erai.BATCH_REASON

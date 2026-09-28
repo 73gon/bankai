@@ -111,3 +111,51 @@ def test_the_library_walk_generation_moves_on_change():
     before = library_walk.generation()
     library_walk.mark_stale()
     assert library_walk.generation() > before
+
+
+def test_a_cycle_saving_keeps_decisions_made_meanwhile(state_dir):
+    """The cycle held the state for minutes and wrote it back whole, undoing
+    a Discard made in the web process in the meantime."""
+    state = erai._default_state()
+    state["releases"] = {
+        "a" * 40: {"status": "held", "title": "A"},
+        "b" * 40: {"status": "held", "title": "B"},
+    }
+    erai._save_state(state)
+
+    cycle_state = erai._load_state()
+    token = erai._begin_cycle_state(cycle_state)
+    try:
+        # Meanwhile, in the web process: A is discarded, C is new.
+        web = erai._load_state()
+        web["releases"]["a" * 40] = {"status": "blacklisted", "title": "A", "reason": "Series blacklisted by user"}
+        web["releases"]["c" * 40] = {"status": "held", "title": "C"}
+        erai._save_state(web)
+        # The cycle changes B and saves its copy, twice.
+        cycle_state["releases"]["b" * 40] = {"status": "queued", "title": "B"}
+        erai._save_state(cycle_state)
+        erai._save_state(cycle_state)
+    finally:
+        erai._CYCLE_BASE.reset(token)
+
+    saved = erai._load_state()["releases"]
+    assert saved["a" * 40]["status"] == "blacklisted"  # the user's decision stands
+    assert saved["b" * 40]["status"] == "queued"  # the cycle's own change too
+    assert saved["c" * 40]["status"] == "held"  # and what was added meanwhile
+
+
+def test_a_change_the_cycle_made_itself_wins(state_dir):
+    state = erai._default_state()
+    state["releases"] = {"a" * 40: {"status": "held", "title": "A"}}
+    erai._save_state(state)
+    cycle_state = erai._load_state()
+    token = erai._begin_cycle_state(cycle_state)
+    try:
+        web = erai._load_state()
+        web["releases"]["a" * 40]["reason"] = "touched elsewhere"
+        erai._save_state(web)
+        cycle_state["releases"]["a" * 40] = {"status": "queued", "title": "A"}
+        erai._save_state(cycle_state)
+    finally:
+        erai._CYCLE_BASE.reset(token)
+    assert erai._load_state()["releases"]["a" * 40]["status"] == "queued"

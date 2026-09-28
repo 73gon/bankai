@@ -62,15 +62,20 @@ function SubtitleChips({ row, languages }: { row: EraiRelease; languages: Record
   );
 }
 
-export default function AnimeErai() {
-  const [query, setQuery] = useState('');
-  const [search, setSearch] = useState('');
+/**
+ * The Erai-raws listing. ``embedded`` drops the page header, for showing one
+ * anime's releases in a dialog opened from review; ``initialQuery`` is what
+ * it opens searched for.
+ */
+export default function AnimeErai({ initialQuery = '', embedded = false }: { initialQuery?: string; embedded?: boolean } = {}) {
+  const [query, setQuery] = useState(initialQuery);
+  const [search, setSearch] = useState(initialQuery);
   const [german, setGerman] = useState<GermanFilter>('all');
   const [res, setRes] = useState<EraiResolution>(storedResolution);
   const [page, setPage] = useState(0);
   // Started from the last answer this browser saw, refreshed straight after.
-  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(0, '', 'all', storedResolution())));
-  const [loading, setLoading] = useState(() => recall(eraiPath(0, '', 'all', storedResolution())) === undefined);
+  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(0, initialQuery, 'all', storedResolution())));
+  const [loading, setLoading] = useState(() => recall(eraiPath(0, initialQuery, 'all', storedResolution())) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -121,7 +126,7 @@ export default function AnimeErai() {
 
   return (
     <div className='flex min-h-0 flex-col gap-4'>
-      <div className='flex flex-wrap items-end justify-between gap-3'>
+      {!embedded && <div className='flex flex-wrap items-end justify-between gap-3'>
         <div>
           <h1 className='font-serif text-3xl font-semibold'>Erai-raws</h1>
           <p className='text-sm text-muted-foreground'>
@@ -137,7 +142,7 @@ export default function AnimeErai() {
         <Button variant='secondary' onClick={() => void refresh()} disabled={refreshing || !data?.configured}>
           <RefreshCw data-icon='inline-start' className={refreshing ? 'animate-spin' : ''} /> Read feeds now
         </Button>
-      </div>
+      </div>}
 
       {data?.configured && data.error && (
         <div className='rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning'>
@@ -172,7 +177,7 @@ export default function AnimeErai() {
             <span className='ml-auto text-xs text-muted-foreground'>{data ? data.total.toLocaleString() + ' releases' : ''}</span>
           </div>
 
-          <div className='table-bleed min-h-0 flex-1 overflow-auto'>
+          <div className={embedded ? 'max-h-[60dvh] overflow-auto rounded-md border border-border' : 'table-bleed min-h-0 flex-1 overflow-auto'}>
             <table className='w-full min-w-[980px] border-collapse text-sm'>
               <thead className='sticky top-0 z-10 bg-card'>
                 <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>

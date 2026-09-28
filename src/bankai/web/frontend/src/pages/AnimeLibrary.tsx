@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2 } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -30,11 +30,14 @@ const LIBRARY_SORTERS: Record<LibrarySortKey, (show: AnimeLibraryShow) => number
   title: (show) => show.title.toLocaleLowerCase(),
   seasons: (show) => show.season_count,
   episodes: (show) => show.downloaded_count,
-  // By how much of the show is the newer encode, not by a raw count, so a
+  // By how much of the show is at the better tiers, not by a raw count, so a
   // long series part-converted does not outrank a short one fully converted.
+  // A German dub is the top tier: it weighs more than HEVC.
   encode: (show) => {
-    const known = (show.hevc_count ?? 0) + (show.avc_count ?? 0);
-    return known ? (show.hevc_count ?? 0) / known : -1;
+    const hevc = show.hevc_count ?? 0;
+    const dubbed = show.german_dub_count ?? 0;
+    const known = hevc + dubbed + (show.avc_count ?? 0);
+    return known ? (hevc + 2 * dubbed) / (2 * known) : -1;
   },
   size: (show) => show.size,
   state: (show) => show.completion_state,
@@ -68,8 +71,9 @@ const COMPLETION: Record<string, { label: string; className: string }> = {
 /** How a show's episodes divide between encodes, as one compact bar.
  *
  *  The counts are the reason the upgrade exists, so they belong on the row
- *  rather than two clicks away. German dubs are shown apart from plain AVC
- *  because they are deliberately not replaceable.
+ *  rather than two clicks away. Each episode is in exactly one tier: German
+ *  dub (the top one, whatever its codec), HEVC, AVC. The number is the
+ *  episodes that need nothing more: dubs and HEVC.
  */
 function CodecMix({ show }: { show: AnimeLibraryShow }) {
   const hevc = show.hevc_count ?? 0;
@@ -98,7 +102,7 @@ function CodecMix({ show }: { show: AnimeLibraryShow }) {
           { value: unknown, className: 'bg-trend-muted' },
         ]}
       />
-      <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{hevc}/{total}</span>
+      <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{hevc + dubbed}/{total}</span>
     </div>
   );
 }
@@ -125,6 +129,8 @@ export default function AnimeLibrary() {
   const [shows, setShows] = useState<AnimeLibraryShow[]>(() => recall<{ shows: AnimeLibraryShow[] }>(pagePaths.animeLibrary)?.shows ?? []);
   const [root, setRoot] = useState(() => recall<{ root: string }>(pagePaths.animeLibrary)?.root ?? '');
   const [query, setQuery] = useState('');
+  // Blacklisted shows still on disk are hidden unless asked for.
+  const [showBlacklisted, setShowBlacklisted] = useState(false);
   const [view, setView] = useState<View>(storedView);
   const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -287,7 +293,7 @@ export default function AnimeLibrary() {
 
   useEffect(() => { void load(); }, []);
   const visible = useMemo(() => {
-    const matched = shows.filter((show) => show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+    const matched = shows.filter((show) => (showBlacklisted || !show.blacklisted) && show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
     if (!sort) return matched;
     const pick = LIBRARY_SORTERS[sort.key];
     const factor = sort.dir === 'asc' ? 1 : -1;
@@ -299,7 +305,8 @@ export default function AnimeLibrary() {
       }
       return (a === b ? 0 : a < b ? -1 : 1) * factor;
     });
-  }, [shows, query, sort]);
+  }, [shows, query, sort, showBlacklisted]);
+  const blacklistedCount = useMemo(() => shows.filter((show) => show.blacklisted).length, [shows]);
   const totals = useMemo(() => visible.reduce((acc, show) => ({
     size: acc.size + show.size,
     episodes: acc.episodes + show.episode_count,
@@ -342,6 +349,16 @@ export default function AnimeLibrary() {
             <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
             <Input aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} className='w-60 pl-9' />
           </div>
+          {blacklistedCount > 0 && (
+            <Button
+              variant='secondary'
+              aria-pressed={showBlacklisted}
+              onClick={() => setShowBlacklisted((current) => !current)}
+              title='Shows you blacklisted whose files are still in the library. Delete them from the show drawer to remove them.'
+            >
+              <Ban data-icon='inline-start' /> {showBlacklisted ? 'Hide' : 'Show'} blacklisted ({blacklistedCount})
+            </Button>
+          )}
           <ToggleGroup label='Library view'>
             {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
               <ToggleGroupItem
@@ -369,6 +386,7 @@ export default function AnimeLibrary() {
                 <Card className='poster-card h-full overflow-hidden border-border'>
                   <div className='relative block w-full'>
                     <AnimePoster url={show.poster_url} title={show.title} />
+                    {show.blacklisted && <Badge variant='destructive' className='absolute left-2 top-2'>Blacklisted</Badge>}
                     <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/75 to-transparent px-3 pb-2.5 pt-10 text-left text-sm font-medium leading-tight text-white'>{show.title}</span>
                   </div>
                   {/* The completion colour, as the rule between the cover and
@@ -429,6 +447,7 @@ export default function AnimeLibrary() {
                         <span className={cn('size-1.5 rounded-full', tone.className)} />
                         <span className='text-xs text-muted-foreground'>{tone.label}</span>
                         {show.staged_count > 0 && <Badge variant='warning'>{show.staged_count} staged</Badge>}
+                        {show.blacklisted && <Badge variant='destructive'>Blacklisted</Badge>}
                       </div>
                     </td>
                   </tr>

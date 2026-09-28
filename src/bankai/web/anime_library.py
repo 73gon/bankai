@@ -1467,10 +1467,12 @@ async def group_shows(
                 if row.get("codec") == "avc" and not row.get("german_dub")
             ),
             "hevc_count": sum(
-                1 for row in merged_episodes["episodes"] if row.get("codec") == "hevc"
+                1
+                for row in merged_episodes["episodes"]
+                if row.get("codec") == "hevc" and not row.get("german_dub")
             ),
-            # Counted separately from avc_count, which is what the upgrade can
-            # actually offer to replace.
+            # The top tier, whatever its codec: each episode is counted in one
+            # of the three, so together they never exceed the episodes on disk.
             "german_dub_count": sum(
                 1 for row in merged_episodes["episodes"] if row.get("german_dub")
             ),

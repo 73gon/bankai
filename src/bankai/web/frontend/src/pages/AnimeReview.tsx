@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Ban, Check, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { Ban, Check, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Subtitles, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
@@ -12,6 +12,7 @@ import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState, Spinner } from '@/components/ui/empty';
+import AnimeErai from '@/pages/AnimeErai';
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -36,6 +37,10 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   const [linkTarget, setLinkTarget] = useState<AnimeReviewItem | null>(null);
   // A held show whose AniDB anime the user picks, for review rather than the blacklist.
   const [anidbFor, setAnidbFor] = useState<AnimeReviewItem | null>(null);
+  // The show whose Erai-raws releases are open in a dialog, by the name Erai gives it.
+  const [eraiFor, setEraiFor] = useState<string | null>(null);
+  // Blacklist only: every card, those tied to an AniDB anime, or those not yet.
+  const [linkFilter, setLinkFilter] = useState<'all' | 'linked' | 'unlinked'>('all');
   const listPath = blacklist ? pagePaths.animeBlacklist : pagePaths.animeReview;
   // Started from the last answer this browser saw, refreshed straight after.
   const [items, setItems] = useState<AnimeReviewItem[]>(() => recall<{ items: AnimeReviewItem[] }>(listPath)?.items ?? []);
@@ -71,6 +76,10 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   const [releasesFor, setReleasesFor] = useState<AnimeReviewItem | null>(null);
   const [releases, setReleases] = useState<HeldRelease[]>([]);
   const [loadingReleases, setLoadingReleases] = useState(false);
+
+  const visible = !blacklist || linkFilter === 'all'
+    ? items
+    : items.filter((item) => Boolean(item.linked ?? item.anidb_id) === (linkFilter === 'linked'));
 
   async function openReleases(item: AnimeReviewItem) {
     setReleasesFor(item);
@@ -232,11 +241,18 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           <RefreshCw data-icon='inline-start' /> Recheck everything
         </Button>}
         {blacklist && (
-          <ToggleGroup label='Blacklist view'>
-            {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
-              <ToggleGroupItem key={value} icon={Icon} label={label} selected={view === value} onClick={() => setView(value)} />
-            ))}
-          </ToggleGroup>
+          <div className='flex flex-wrap items-center gap-2'>
+            <ToggleGroup label='Show blacklist entries'>
+              {([['all', 'All'], ['linked', 'Linked'], ['unlinked', 'Not linked']] as const).map(([value, label]) => (
+                <ToggleGroupItem key={value} label={label} selected={linkFilter === value} onClick={() => setLinkFilter(value)} />
+              ))}
+            </ToggleGroup>
+            <ToggleGroup label='Blacklist view'>
+              {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
+                <ToggleGroupItem key={value} icon={Icon} label={label} selected={view === value} onClick={() => setView(value)} />
+              ))}
+            </ToggleGroup>
+          </div>
         )}
       </div>
 
@@ -258,7 +274,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => (
+              {visible.map((item) => (
                 <tr key={item.key} className='border-b border-border/70 last:border-0'>
                   <td className='px-3 py-2'>
                     <div className='flex items-center gap-2.5'>
@@ -301,7 +317,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
               : 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5',
           )}
         >
-          {items.map((item) => {
+          {visible.map((item) => {
             const reasons = (item.reasons || [item.reason]).filter(Boolean) as string[];
             const german = reasons.some((reason) => reason.includes('German subtitles'));
             const tvdb = reasons.some((reason) => reason.includes('TVDB'));
@@ -420,14 +436,23 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <Check data-icon='inline-start' /> <span className='truncate'>Already downloaded</span>
                       </Button>
 
-                      {anidb && item.release_title && (
+                      <Button
+                        variant='outline'
+                        className='col-span-2'
+                        onClick={() => setEraiFor(eraiName(item))}
+                        title='What Erai-raws lists for this anime: every release, with its subtitles'
+                      >
+                        <Subtitles data-icon='inline-start' /> <span className='truncate'>Erai-raws releases</span>
+                      </Button>
+
+                      {(anidb || item.anidb_id) && item.release_title && (
                         <Button
                           variant='outline'
                           className='col-span-2'
                           onClick={() => setAnidbFor(item)}
                           disabled={busyFor(item.key)}
                         >
-                          <Search data-icon='inline-start' /> Choose AniDB anime
+                          <Search data-icon='inline-start' /> {item.anidb_id ? 'Change AniDB anime' : 'Choose AniDB anime'}
                         </Button>
                       )}
 
@@ -468,6 +493,15 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </div>
       )}
       <AnimeMappingDialog title={mappingTitle} onClose={() => setMappingTitle(null)} onSaved={() => void load()} />
+      <Dialog open={eraiFor !== null} onOpenChange={(open) => { if (!open) setEraiFor(null); }}>
+        <DialogContent className='flex max-h-[90dvh] w-[min(80rem,calc(100vw-2rem))] max-w-6xl flex-col'>
+          <DialogHeader>
+            <DialogTitle>Erai-raws: {eraiFor}</DialogTitle>
+            <DialogDescription>Every release erai-raws.info lists under this name, with the subtitle languages it names.</DialogDescription>
+          </DialogHeader>
+          {eraiFor !== null && <AnimeErai key={eraiFor} embedded initialQuery={eraiFor} />}
+        </DialogContent>
+      </Dialog>
       <AniDBLinkDialog
         name={linkTarget ? linkTarget.source_title || linkTarget.title : null}
         onClose={() => setLinkTarget(null)}
@@ -548,4 +582,10 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       </Dialog>
     </div>
   );
+}
+
+/** The name Erai-raws gives a card's show: its release name without tags and episode. */
+function eraiName(item: AnimeReviewItem): string {
+  const raw = item.release_title || item.source_title || item.title;
+  return raw.replace(/^(?:\s*\[[^\]]*\])+\s*/, '').split(/\s+-\s+\d/)[0].trim() || item.source_title || item.title;
 }
