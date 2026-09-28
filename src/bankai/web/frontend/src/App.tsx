@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
@@ -19,6 +19,7 @@ import AnimeQueue from '@/pages/AnimeQueue';
 import AnimeLibrary from '@/pages/AnimeLibrary';
 import AnimeSettings from '@/pages/AnimeSettings';
 import AnimeReview from '@/pages/AnimeReview';
+import AnimeErai from '@/pages/AnimeErai';
 import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
 
@@ -39,6 +40,7 @@ const ANIME_NAV = [
   { to: '/a/library', label: 'Library', icon: HardDrive },
   { to: '/a/review', label: 'Review', icon: ShieldAlert, count: 'anime_review' },
   { to: '/a/blacklist', label: 'Blacklist', icon: Ban, count: 'anime_blacklist' },
+  { to: '/a/erai', label: 'Erai-raws', icon: Subtitles },
   { to: '/a/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -470,7 +472,8 @@ export default function App() {
                   flag and the purge target all follow you between them. */}
               <Route path='/a/review' element={<AnimeReview key='review' />} />
               <Route path='/a/blacklist' element={<AnimeReview key='blacklist' blacklist />} />
-              <Route path='/a/settings' element={<AnimeSettings />} />
+              <Route path='/a/erai' element={<AnimeErai />} />
+          <Route path='/a/settings' element={<AnimeSettings />} />
 
               {/* Neither library's own. */}
               <Route path='/qbittorrent' element={<QBittorrent />} />

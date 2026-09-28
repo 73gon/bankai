@@ -127,6 +127,9 @@ class AnimeAutomationSettings(BaseModel):
     max_hevc_upgrades_per_cycle: int = Field(default=25, ge=0, le=500)
     backfill_enabled: bool = True
     backfill_request_delay_seconds: float = Field(default=2.0, ge=1.0)
+    # The token in the user's own erai-raws.info feed links (`?token=...`). With it,
+    # bankai reads Erai-raws' subtitle list for each release from its RSS feeds.
+    erai_feed_token: str = ""
 
 
     @model_validator(mode="after")

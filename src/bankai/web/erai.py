@@ -38,7 +38,7 @@ from bankai.metadata import anidb as anidb_mod
 from bankai.metadata import anime_mapping
 from bankai.processor.anime import EpisodeIdentity
 from bankai.web import anime as anime_mod
-from bankai.web import updates
+from bankai.web import erai_site, updates
 
 log = get_logger(__name__)
 _NYAA_BASE = "https://nyaa.si"
@@ -2160,8 +2160,11 @@ async def _german_alternative(
         candidates.append(other)
     candidates.sort(key=_rank, reverse=True)
     for other in candidates[:limit]:
-        if title_lists_german_subtitles(other.title):
+        says = erai_site.german(other.info_hash)
+        if title_lists_german_subtitles(other.title) or says is True:
             return other
+        if says is False:
+            continue
         try:
             description, magnet, uploader = await anime_mod._detail_url(client, other.detail_url)
         except Exception as exc:
@@ -2172,6 +2175,75 @@ async def _german_alternative(
         if has_explicit_german_subtitles(description):
             return replace(other, magnet_uri=magnet or other.magnet_uri, description=description)
     return None
+
+
+async def _erai_german(entry: anime_mod.NyaaEntry) -> bool | None:
+    """What Erai-raws lists for this torrent: German or not, None if it has not said.
+
+    A release the site-wide feed has not reached yet is looked up in its
+    show's own feed, which holds the show's whole history.
+    """
+    says = erai_site.german(entry.info_hash)
+    if says is None and erai_site.configured():
+        parsed = _erai_identity_name(entry.title)
+        if parsed is not None:
+            with suppress(Exception):
+                await erai_site.fill_show(parsed[0])
+            says = erai_site.german(entry.info_hash)
+    return says
+
+
+async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 10) -> int:
+    """Held because Nyaa did not say German: ask Erai-raws, which lists it per release.
+
+    One Erai-raws says has German is retried like a recheck; one it says has
+    none says so, which is a reason, not a guess. Up to ``shows`` shows not
+    yet in the index are read from their own feeds each cycle.
+    """
+    if not erai_site.configured():
+        return 0
+    held = [
+        (info_hash, release)
+        for info_hash, release in state["releases"].items()
+        if release.get("status") == "held"
+        and "German subtitles" in str(release.get("reason") or "")
+        and "Erai-raws" not in str(release.get("reason") or "")
+    ]
+    unknown: list[str] = []
+    for info_hash, release in held:
+        if erai_site.german(info_hash) is None:
+            parsed = _erai_identity_name(str(release.get("title") or ""))
+            if parsed is not None and parsed[0] not in unknown:
+                unknown.append(parsed[0])
+    for name in unknown[:shows]:
+        with suppress(Exception):
+            await erai_site.fill_show(name)
+        await asyncio.sleep(get_settings().anime.backfill_request_delay_seconds)
+    catalog = _catalog_entries(state)
+    retries: dict[str, dict] = {}
+    changed = 0
+    for info_hash, release in held:
+        says = erai_site.german(info_hash)
+        if says is None:
+            continue
+        changed += 1
+        if says:
+            release["reason"] = "Erai-raws lists German subtitles; waiting to be checked again"
+            release["retry_after"] = 0
+            retries[info_hash] = {
+                "title": release.get("title"),
+                "entry": release.get("entry") or catalog.get(info_hash),
+            }
+        else:
+            release["reason"] = "Erai-raws lists no German subtitles"
+    if retries:
+        with _STATE_LOCK:
+            requests = _load_retry_requests()
+            requests.update(retries)
+            _save_retry_requests(requests)
+    if changed:
+        log.info("Erai-raws settled %d German-subtitle holds (%d to retry)", changed, len(retries))
+    return changed
 
 
 def _episode_on_disk(
@@ -2256,11 +2328,16 @@ async def _consider(
         _hold(state, entry, "Detail-page uploader is not Erai-raws")
         return False
     policy = _series_policy(entry.title)
-    if (
-        not has_explicit_german_subtitles(description)
-        and not title_lists_german_subtitles(entry.title)
-        and not (policy and policy.get("mode") == "german_allowed")
-    ):
+    erai_says = await _erai_german(entry)
+    if title_lists_german_subtitles(entry.title):
+        has_german = True
+    elif erai_says is not None:
+        # Erai-raws' own subtitle list decides; Nyaa's description only
+        # when the site has not said.
+        has_german = erai_says
+    else:
+        has_german = has_explicit_german_subtitles(description)
+    if not has_german and not (policy and policy.get("mode") == "german_allowed"):
         alternative = await _german_alternative(state, entry, client)
         if alternative is not None:
             log.info(
@@ -2271,7 +2348,13 @@ async def _consider(
             # The alternative was only accepted after its own German evidence
             # was verified, so this cannot bounce back into this branch.
             return await _consider(state, alternative, client)
-        _hold(state, entry, "Nyaa description does not explicitly list German subtitles")
+        _hold(
+            state,
+            entry,
+            "Erai-raws lists no German subtitles"
+            if erai_says is False
+            else "Nyaa description does not explicitly list German subtitles",
+        )
         return False
     if magnet:
         entry = replace(entry, magnet_uri=magnet, description=description)
@@ -2427,6 +2510,9 @@ async def _carries_german(entry: anime_mod.NyaaEntry, client: httpx.AsyncClient)
     """Confirm a replacement really does offer German before swapping to it."""
     if title_lists_german_subtitles(entry.title):
         return True
+    says = await _erai_german(entry)
+    if says is not None:
+        return says
     try:
         description, _magnet, uploader = await anime_mod._detail_url(client, entry.detail_url)
     except Exception as exc:
@@ -3010,6 +3096,9 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             async with httpx.AsyncClient(
                 headers=headers, timeout=30, follow_redirects=True
             ) as client:
+                _set_activity("Asking Erai-raws about subtitles")
+                with suppress(Exception):
+                    await _recheck_german_holds(state)
                 _set_activity("Gathering held releases to check again")
                 retries = await _retry_candidates(state, client)
                 if not retries_only:

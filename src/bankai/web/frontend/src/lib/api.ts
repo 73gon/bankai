@@ -110,6 +110,44 @@ async function remembering<T>(path: string): Promise<T> {
   return value;
 }
 
+// ---- Erai-raws ----------------------------------------------------------
+
+export interface EraiRelease {
+  info_hash: string;
+  name: string;
+  title: string;
+  /** Erai's subtitle codes, the flags it shows: "us", "de", ... */
+  subs: string[];
+  german: boolean;
+  resolution: string;
+  size: string;
+  category: string;
+  published: number;
+  page: string;
+  /** bankai's status for the torrent, when it has one. */
+  status: string | null;
+  reason: string | null;
+}
+
+export interface EraiPage {
+  configured: boolean;
+  known: number;
+  newest: number | null;
+  complete: boolean;
+  updated_at: number | null;
+  total: number;
+  page: number;
+  page_size: number;
+  languages: Record<string, string>;
+  items: EraiRelease[];
+}
+
+export function eraiPath(page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all'): string {
+  const params = new URLSearchParams({ page: String(page), german });
+  if (q.trim()) params.set('q', q.trim());
+  return `/api/anime/erai?${params}`;
+}
+
 // ---- Dashboard ----------------------------------------------------------
 
 export interface DashboardTask {
@@ -971,6 +1009,8 @@ export const api = {
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
+  eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all') => remembering<EraiPage>(eraiPath(page, q, german)),
+  refreshErai: () => request<{ refreshing: boolean }>('/api/anime/erai/refresh', { method: 'POST' }),
   sidebarCounts: () => remembering<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts),
   /** `rescan` checks the library against the disk first instead of the held tree. */
   animeLibrary: async (rescan = false) => {

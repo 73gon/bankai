@@ -711,6 +711,7 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.max_hevc_upgrades_per_cycle",
     "anime.backfill_enabled",
     "anime.backfill_request_delay_seconds",
+    "anime.erai_feed_token",
     "scraper.interactive_pick",
     "selector.max_size_gib",
     "selector.min_seeders",
@@ -804,7 +805,7 @@ def _validate_setting_value(key: str, value: Any) -> Any:
 
 
 def _is_secret_key(key: str) -> bool:
-    return any(part in key.casefold() for part in ("password", "api_key", "pin", "webhook"))
+    return any(part in key.casefold() for part in ("password", "api_key", "pin", "webhook", "token"))
 
 
 def _review_transfer_kind(path: Path, state: review_mod.ReviewState) -> str:
@@ -2346,6 +2347,90 @@ def create_app() -> Any:
         with suppress(Exception):
             counts["qbittorrent"] = len((await snaps["qbittorrent"].get()).value["items"])
         return {"counts": counts}
+
+    # -- Erai-raws ---------------------------------------------------------
+
+    def _erai_site_rows() -> list[dict]:
+        """Every release Erai-raws has listed to bankai, newest first, with bankai's status."""
+        from bankai.web import erai_site
+
+        releases = erai_site.load()["releases"]
+        tracked = erai_mod._load_state()["releases"]
+        rows = []
+        for info_hash, row in releases.items():
+            mine = tracked.get(info_hash) or {}
+            subs = list(row.get("subs") or [])
+            rows.append(
+                {
+                    "info_hash": info_hash,
+                    "name": row.get("name") or row.get("title") or info_hash,
+                    "title": row.get("title") or "",
+                    "subs": subs,
+                    "german": erai_site.GERMAN in subs,
+                    "resolution": row.get("res") or "",
+                    "size": row.get("size") or "",
+                    "category": row.get("category") or "",
+                    "published": row.get("published") or 0,
+                    "page": row.get("page") or "",
+                    "status": mine.get("status"),
+                    "reason": mine.get("reason"),
+                }
+            )
+        rows.sort(key=lambda row: -float(row["published"] or 0))
+        return rows
+
+    def _erai_site_inputs() -> tuple:
+        from bankai.web import erai_site
+
+        return (snapshots_mod.file_stamps(lambda: [erai_site._store()])(), _anime_inputs())
+
+    snaps.add(
+        "erai_site_rows",
+        lambda: asyncio.to_thread(_erai_site_rows),
+        inputs=_erai_site_inputs,
+        tags={"anime"},
+        min_interval=5.0,
+        max_age=300.0,
+        encode=False,
+    )
+
+    @app.get("/api/anime/erai")
+    async def anime_erai(
+        q: str | None = None,
+        german: str = Query("all", pattern="^(all|yes|no)$"),
+        page: int = Query(0, ge=0),
+        page_size: int = Query(100, ge=20, le=200),
+    ) -> dict:
+        """Erai-raws' own listing of releases, with the subtitle languages it names."""
+        from bankai.web import erai_site
+
+        rows = (await snaps["erai_site_rows"].get()).value
+        term = (q or "").strip().casefold()
+        if term:
+            rows = [row for row in rows if term in row["name"].casefold()]
+        if german != "all":
+            rows = [row for row in rows if row["german"] == (german == "yes")]
+        start = page * page_size
+        return {
+            **erai_site.summary(),
+            "total": len(rows),
+            "page": page,
+            "page_size": page_size,
+            "languages": erai_site.LANGUAGES,
+            "items": rows[start : start + page_size],
+        }
+
+    _erai_refresh: dict[str, asyncio.Task | None] = {"task": None}
+
+    @app.post("/api/anime/erai/refresh")
+    async def anime_erai_refresh() -> dict:
+        """Read Erai-raws' feeds now, in the background."""
+        from bankai.web import erai_site
+
+        task = _erai_refresh["task"]
+        if erai_site.configured() and (task is None or task.done()):
+            _erai_refresh["task"] = asyncio.create_task(erai_site.refresh())
+        return {**erai_site.summary(), "refreshing": erai_site.configured()}
 
     # -- Dashboard ---------------------------------------------------------
 

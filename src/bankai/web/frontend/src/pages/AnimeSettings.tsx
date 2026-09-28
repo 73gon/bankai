@@ -21,6 +21,7 @@ const LABELS: Record<string, { label: string; description: string; suffix?: stri
   'anime.max_concurrent_transfers': { label: 'Concurrent transfers', description: 'How many finished downloads are published into the library at once. Downloading is unlimited — qBittorrent governs that.' },
   'anime.max_hevc_upgrades_per_cycle': { label: 'HEVC upgrades per cycle', description: 'Queued AVC episodes swapped for their HEVC encode each cycle. HEVC is roughly half the size for the same episode. Set to 0 to stop upgrading.' },
   'anime.backfill_request_delay_seconds': { label: 'Backfill request delay', description: 'Delay between historical Nyaa catalogue pages.', suffix: 'seconds' },
+  'anime.erai_feed_token': { label: 'Erai-raws feed token', description: 'The token= part of any feed link on erai-raws.info. With it, bankai reads which subtitles Erai-raws lists for each release, and trusts that over the Nyaa description.' },
 };
 
 function formatDate(value: number | null) {
@@ -147,7 +148,7 @@ export default function AnimeSettings() {
                   <Switch checked={Boolean(current)} onCheckedChange={(next) => setEdits((old) => ({ ...old, [row.key]: next }))} aria-label={meta.label} />
                 ) : (
                   <span className='flex min-w-36 items-center gap-2'>
-                    <Input type={isNumber ? 'number' : 'text'} min={isNumber ? 0 : undefined} value={String(current ?? '')} onChange={(event) => setEdits((old) => ({ ...old, [row.key]: isNumber ? Number(event.target.value) : event.target.value }))} />
+                    <Input type={row.secret ? 'password' : isNumber ? 'number' : 'text'} placeholder={row.secret ? (row.is_set ? 'set -- type to replace' : 'not set') : undefined} autoComplete='off' min={isNumber ? 0 : undefined} value={String(current ?? '')} onChange={(event) => setEdits((old) => ({ ...old, [row.key]: isNumber ? Number(event.target.value) : event.target.value }))} />
                     {meta.suffix && <span className='text-xs text-muted-foreground'>{meta.suffix}</span>}
                   </span>
                 )}
