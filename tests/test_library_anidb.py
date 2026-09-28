@@ -93,7 +93,7 @@ def library(monkeypatch):
 
     monkeypatch.setattr(anidb, "index", index)
     monkeypatch.setattr(erai, "_load_state", erai._default_state)
-    monkeypatch.setattr(erai, "_policy_tvdb_ids", lambda: set())
+    monkeypatch.setattr(erai, "_load_policies", lambda: {})
     monkeypatch.setattr(anime_library, "known_ids", lambda: {})
     monkeypatch.setattr(anime_library, "_nfo_id", lambda path: None)
     monkeypatch.setattr(anime_library, "probed_codecs", lambda files: {})

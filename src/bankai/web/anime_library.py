@@ -1264,10 +1264,11 @@ async def group_shows(
 
     # A tracked show with nothing on disk yet still gets a card -- unless it
     # was blacklisted, which is how a show removed from the library leaves it.
-    blacklisted_ids = await asyncio.to_thread(erai._policy_tvdb_ids)
+    # Per AniDB season now, so the show is gone once all its seasons are.
+    policies = await asyncio.to_thread(erai._load_policies)
     for tvdb_key, record in tracked.items():
         title = record.get("english_title")
-        if str(record.get("tvdb_id") or tvdb_key) in blacklisted_ids:
+        if erai.tvdb_show_blacklisted(record.get("tvdb_id") or tvdb_key, policies, table=table):
             continue
         if title and _name(title) not in buckets:
             buckets[_name(title)] = {"titles": [title], "files": []}

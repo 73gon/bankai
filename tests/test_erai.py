@@ -2425,3 +2425,20 @@ def test_a_batch_is_held_with_its_own_reason():
     batch = entry("[Erai-raws] Beastars Final Season - 13 ~ 24 [1080p][HEVC][BATCH]")
     _, _, reason = asyncio.run(erai._resolve_anidb(batch))
     assert reason == erai.BATCH_REASON
+
+
+def test_a_tvdb_show_is_blacklisted_once_every_season_is():
+    from bankai.metadata.anidb import AniDBAnime
+
+    def anime(aid, season):
+        return AniDBAnime(aid, f"A{aid}", None, (), tvdb_id=357019, tvdb_season=season)
+
+    table = SimpleNamespace(by_tvdb={357019: [anime(1, "1"), anime(2, "2"), anime(3, "3"), anime(9, "0")]})
+
+    def policies(*aids):
+        return {f"anidb:{aid}": {"mode": "blacklisted", "anidb_id": aid} for aid in aids}
+
+    # Specials are not needed; one season still wanted keeps the show.
+    assert erai.tvdb_show_blacklisted(357019, policies(1, 2, 3), table=table)
+    assert not erai.tvdb_show_blacklisted(357019, policies(1, 2), table=table)
+    assert not erai.tvdb_show_blacklisted(None, policies(1, 2, 3), table=table)

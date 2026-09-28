@@ -2119,6 +2119,36 @@ def _policy_anidb_ids(policies: dict[str, Any] | None = None) -> set[int]:
     }
 
 
+def tvdb_show_blacklisted(
+    tvdb_id: Any,
+    policies: dict[str, Any] | None = None,
+    *,
+    table: Any = None,
+) -> bool:
+    """Is a whole TVDB show blacklisted: every one of its seasons on AniDB?
+
+    Blacklisting is per AniDB entry, one per season or cour, so a show is
+    only gone once each of its regular seasons is; specials and entries
+    AniDB does not map to a TVDB season do not count. Decisions from before
+    AniDB entries block the TVDB id itself.
+    """
+    if not str(tvdb_id or "").isdigit():
+        return False
+    rows = policies if policies is not None else _load_policies()
+    if str(tvdb_id) in _policy_tvdb_ids(rows):
+        return True
+    blocked = _policy_anidb_ids(rows)
+    index = table if table is not None else anidb_mod.cached_index()
+    if not blocked or index is None:
+        return False
+    seasons = [
+        anime.aid
+        for anime in index.by_tvdb.get(int(tvdb_id), [])
+        if str(anime.tvdb_season or "").isdigit() and anime.tvdb_season != "0"
+    ]
+    return bool(seasons) and all(aid in blocked for aid in seasons)
+
+
 def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
     """Flag library cards the user blacklisted; their files stay until deleted.
 
@@ -2127,13 +2157,12 @@ def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
     still on disk, and the grid should say so rather than look like a mistake.
     A card goes by its primary AniDB entry, so blocking one sequel does not
     flag the show it is filed under. A card without one, a folder numbered
-    by TVDB, matches a blocked AniDB entry by title only when it holds a
-    single season: blocking "Oshi no Ko" season one must not hide the other
-    seasons in the same folder.
+    by TVDB, is flagged once every season of the show is blocked, or, holding
+    a single season, when that one is: blocking "Oshi no Ko" season one must
+    not hide the other seasons in the same folder.
     """
     policies = _load_policies()
     ids = _policy_anidb_ids(policies)
-    tvdb_ids = _policy_tvdb_ids(policies)
     names, exact = _policy_show_keys(policies)
     for show in shows:
         titles = [
@@ -2141,12 +2170,16 @@ def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
         ]
         show["blacklisted"] = bool(
             (show.get("anidb_id") is not None and show.get("anidb_id") in ids)
-            or (show.get("tvdb_id") and str(show["tvdb_id"]) in tvdb_ids)
             or any(title and _show_name_key(title) in names for title in titles)
             or (
                 show.get("anidb_id") is None
-                and (show.get("season_count") or 0) <= 1
-                and any(title and anidb_mod.normalise(title) in exact for title in titles)
+                and (
+                    tvdb_show_blacklisted(show.get("tvdb_id"), policies)
+                    or (
+                        (show.get("season_count") or 0) <= 1
+                        and any(title and anidb_mod.normalise(title) in exact for title in titles)
+                    )
+                )
             )
         )
 
