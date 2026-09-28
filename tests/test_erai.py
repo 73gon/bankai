@@ -2412,9 +2412,11 @@ def test_library_cards_of_blacklisted_shows_are_flagged(monkeypatch):
         {"key": "Old Show", "title": "Old Show", "anidb_id": None},
         {"key": "Kept", "title": "Kept", "anidb_id": 222},
         {"key": "Sequel", "title": "Bleach", "anidb_id": 2369, "tvdb_id": 74796},
+        # A TVDB folder of every season is not one blocked AniDB entry.
+        {"key": "Chuuzenji", "title": "Chuuzenji", "anidb_id": None, "tvdb_id": 5},
     ]
     erai.mark_blacklisted_shows(shows)
-    assert [show["blacklisted"] for show in shows] == [True, True, False, False]
+    assert [show["blacklisted"] for show in shows] == [True, True, False, False, False]
 
 
 def test_a_batch_is_held_with_its_own_reason():
