@@ -2126,15 +2126,15 @@ def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
     downloaded -- but a show already in the library before it was blocked is
     still on disk, and the grid should say so rather than look like a mistake.
     A card goes by its primary AniDB entry, so blocking one sequel does not
-    flag the show it is filed under. A card without one -- a folder numbered
-    by TVDB, holding every season -- matches only a whole-show decision:
-    blocking "Oshi no Ko" season one by its AniDB title must not hide the
-    other seasons in the same folder.
+    flag the show it is filed under. A card without one, a folder numbered
+    by TVDB, matches a blocked AniDB entry by title only when it holds a
+    single season: blocking "Oshi no Ko" season one must not hide the other
+    seasons in the same folder.
     """
     policies = _load_policies()
     ids = _policy_anidb_ids(policies)
     tvdb_ids = _policy_tvdb_ids(policies)
-    names, _ = _policy_show_keys(policies)
+    names, exact = _policy_show_keys(policies)
     for show in shows:
         titles = [
             str(show.get(field) or "") for field in ("key", "title", "source_title")
@@ -2143,6 +2143,11 @@ def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
             (show.get("anidb_id") is not None and show.get("anidb_id") in ids)
             or (show.get("tvdb_id") and str(show["tvdb_id"]) in tvdb_ids)
             or any(title and _show_name_key(title) in names for title in titles)
+            or (
+                show.get("anidb_id") is None
+                and (show.get("season_count") or 0) <= 1
+                and any(title and anidb_mod.normalise(title) in exact for title in titles)
+            )
         )
 
 
