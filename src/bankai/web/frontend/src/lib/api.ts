@@ -135,6 +135,8 @@ export interface EraiPage {
   newest: number | null;
   complete: boolean;
   updated_at: number | null;
+  /** Why the last read of the feeds failed, if it did. */
+  error?: string | null;
   total: number;
   page: number;
   page_size: number;

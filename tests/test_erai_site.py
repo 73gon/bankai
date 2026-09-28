@@ -97,3 +97,16 @@ def test_the_whole_feed_link_can_be_pasted_as_the_token():
     assert _validate_setting_value("anime.erai_feed_token", " 0123456789abcdef0123456789abcdef ") == "0123456789abcdef0123456789abcdef"
     with pytest.raises(ValueError):
         _validate_setting_value("anime.erai_feed_token", "not a token!")
+
+
+def test_a_refused_token_is_reported_without_the_token(store, monkeypatch):
+    import httpx
+
+    def refuse(request):
+        return httpx.Response(403, request=request)
+
+    monkeypatch.setattr(erai_site, "_client", lambda: httpx.AsyncClient(base_url=erai_site.BASE_URL, transport=httpx.MockTransport(refuse)))
+    result = asyncio.run(erai_site.refresh())
+    assert "refused the feed token" in result["error"]
+    summary = erai_site.summary()
+    assert "refused" in summary["error"] and "token=" not in summary["error"]

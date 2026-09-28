@@ -187,8 +187,19 @@ def _merge(rows: list[dict[str, Any]], **changes: Any) -> int:
 async def _page(client: httpx.AsyncClient, path: str, **params: Any) -> list[dict[str, Any]]:
     token = get_settings().anime.erai_feed_token.strip()
     response = await client.get(path, params={"token": token, "type": "torrent", **params})
-    response.raise_for_status()
+    if response.status_code >= 400:
+        # Not raise_for_status: its message is the URL, token and all, and
+        # that ends up in the service log.
+        raise FeedError(
+            "Erai-raws refused the feed token -- check it in Anime Settings"
+            if response.status_code in {401, 403}
+            else f"Erai-raws answered {response.status_code} for {path}"
+        )
     return parse_feed(response.text)
+
+
+class FeedError(RuntimeError):
+    """A feed that could not be read; the message never carries the token."""
 
 
 def _client() -> httpx.AsyncClient:
@@ -204,6 +215,16 @@ async def refresh() -> dict[str, Any]:
     """One pass: the newest releases, then a few pages further back in history."""
     if not configured():
         return {"configured": False}
+    try:
+        return await _refresh()
+    except (FeedError, httpx.HTTPError) as exc:
+        message = str(exc) if isinstance(exc, FeedError) else f"Erai-raws could not be reached: {type(exc).__name__}"
+        _merge([], last_error=message, updated_at=time.time())
+        log.warning("%s", message)
+        return {"configured": True, "error": message}
+
+
+async def _refresh() -> dict[str, Any]:
     async with _LOCK:
         added = 0
         async with _client() as client:
@@ -224,7 +245,7 @@ async def refresh() -> dict[str, Any]:
                     break
                 added += _merge(rows)
                 page += 1
-        _merge([], backfill_next=page, complete=complete, updated_at=time.time())
+        _merge([], backfill_next=page, complete=complete, updated_at=time.time(), last_error=None)
     known = len(load()["releases"])
     if added:
         log.info("Erai-raws: %d releases added (%d known)", added, known)
@@ -247,8 +268,8 @@ async def fill_show(name: str) -> int:
     try:
         async with _client() as client:
             rows = await _page(client, f"/anime-list/{slug}/feed/")
-    except httpx.HTTPError as exc:
-        log.debug("Erai-raws feed for %s unavailable: %s", slug, exc)
+    except (FeedError, httpx.HTTPError) as exc:
+        log.debug("Erai-raws feed for %s unavailable: %s", slug, type(exc).__name__)
         rows = []
     return _merge(rows, shows={slug: time.time()})
 
@@ -262,4 +283,5 @@ def summary() -> dict[str, Any]:
         "newest": max((float(r.get("published") or 0) for r in releases.values()), default=None),
         "complete": bool(index.get("complete")),
         "updated_at": index.get("updated_at") or None,
+        "error": index.get("last_error"),
     }

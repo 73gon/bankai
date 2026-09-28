@@ -118,6 +118,12 @@ export default function AnimeErai() {
         </Button>
       </div>
 
+      {data?.configured && data.error && (
+        <div className='rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning'>
+          {data.error}. <Link to='/a/settings' className='underline underline-offset-4'>Anime Settings</Link>
+        </div>
+      )}
+
       {data && !data.configured ? (
         <EmptyState
           icon={Subtitles}
