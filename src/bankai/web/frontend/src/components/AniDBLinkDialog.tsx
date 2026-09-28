@@ -3,6 +3,7 @@ import { Check, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type AniDBAnime } from '@/lib/api';
 import { AnimePoster } from '@/components/AnimePoster';
+import { TruncatedText } from '@/components/TruncatedText';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState, Spinner } from '@/components/ui/empty';
@@ -55,7 +56,8 @@ export function AniDBLinkDialog({
 
   return (
     <Dialog open={name !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className='flex max-h-[85dvh] max-w-2xl flex-col'>
+      {/* Wide: AniDB titles run long, and the whole of one is often what tells two entries apart. */}
+      <DialogContent className='flex max-h-[85dvh] w-[min(56rem,calc(100vw-2rem))] max-w-4xl flex-col'>
         <DialogHeader>
           <DialogTitle>Link to AniDB</DialogTitle>
           <DialogDescription>
@@ -81,9 +83,10 @@ export function AniDBLinkDialog({
                 <li key={anime.anidb_id} className='flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-accent/40'>
                   <AnimePoster url={anime.poster_url} title={anime.title} className='w-10 shrink-0 rounded' />
                   <div className='min-w-0 flex-1'>
-                    <p className='truncate text-sm font-medium' title={anime.title}>{anime.title}</p>
+                    {/* Two lines before they are cut; hovering shows the rest. */}
+                    <TruncatedText text={anime.title} className='line-clamp-2 break-words text-sm font-medium' />
                     {anime.english_title && anime.english_title.toLocaleLowerCase() !== anime.title.toLocaleLowerCase() && (
-                      <p className='truncate text-xs text-muted-foreground' title='English title'>{anime.english_title}</p>
+                      <TruncatedText text={anime.english_title} className='line-clamp-2 break-words text-xs text-muted-foreground' />
                     )}
                     <p className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
                       {/* Outside the Shoko collection only the title list is known,
