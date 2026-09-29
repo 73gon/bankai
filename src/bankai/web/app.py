@@ -2512,6 +2512,10 @@ def create_app() -> Any:
                     "name": name,
                     # One episode, or a batch's first and last: what it can replace.
                     "episodes": erai_mod._release_range(name),
+                    # Erai marks HEVC in the name; a release without the mark is AVC.
+                    "codec": "hevc"
+                    if erai_mod._is_hevc_title(f"{name} {row.get('title') or ''}")
+                    else "avc",
                     "title": row.get("title") or "",
                     "subs": subs,
                     "german": erai_site.GERMAN in subs,
@@ -2547,6 +2551,7 @@ def create_app() -> Any:
         q: str | None = None,
         german: str = Query("all", pattern="^(all|yes|no)$"),
         res: str = Query("1080p", pattern="^(all|2160p|1080p|720p|SD)$"),
+        codec: str = Query("all", pattern="^(all|hevc|avc)$"),
         page: int = Query(0, ge=0),
         page_size: int = Query(100, ge=20, le=200),
     ) -> dict:
@@ -2580,6 +2585,8 @@ def create_app() -> Any:
             rows = [row for row in rows if row["resolution"] == res]
         if german != "all":
             rows = [row for row in rows if row["german"] == (german == "yes")]
+        if codec != "all":
+            rows = [row for row in rows if row["codec"] == codec]
         start = page * page_size
         return {
             **erai_site.summary(),

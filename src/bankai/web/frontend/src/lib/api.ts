@@ -129,6 +129,8 @@ export interface EraiRelease {
   reason: string | null;
   /** The AniDB episodes it covers: [n, n] for one episode, a batch's first and last. */
   episodes: [number, number] | null;
+  /** From the name: Erai marks HEVC, and a release without the mark is AVC. */
+  codec: 'hevc' | 'avc';
 }
 
 /** What taking an Erai-raws release for a review card would change. */
@@ -165,8 +167,16 @@ export interface EraiPage {
 
 export type EraiResolution = '1080p' | '720p' | 'SD' | 'all';
 
-export function eraiPath(page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p'): string {
-  const params = new URLSearchParams({ page: String(page), german, res });
+export type EraiCodec = 'all' | 'hevc' | 'avc';
+
+export function eraiPath(
+  page = 0,
+  q = '',
+  german: 'all' | 'yes' | 'no' = 'all',
+  res: EraiResolution = '1080p',
+  codec: EraiCodec = 'all',
+): string {
+  const params = new URLSearchParams({ page: String(page), german, res, codec });
   if (q.trim()) params.set('q', q.trim());
   return `/api/anime/erai?${params}`;
 }
@@ -1062,8 +1072,8 @@ export const api = {
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
-  eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p') =>
-    remembering<EraiPage>(eraiPath(page, q, german, res)),
+  eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p', codec: EraiCodec = 'all') =>
+    remembering<EraiPage>(eraiPath(page, q, german, res, codec)),
   refreshErai: () => request<{ refreshing: boolean }>('/api/anime/erai/refresh', { method: 'POST' }),
   replacementPlan: (key: string, infoHash: string) =>
     request<ReplacementPlan>('/api/anime/review/replace-plan?' + new URLSearchParams({ key, info_hash: infoHash })),

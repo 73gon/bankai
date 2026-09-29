@@ -9,12 +9,14 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { EmptyState } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { api, eraiPath, recall, type EraiPage, type EraiRelease, type EraiResolution, type ReplacementPlan } from '@/lib/api';
+import { api, eraiPath, recall, type EraiCodec, type EraiPage, type EraiRelease, type EraiResolution, type ReplacementPlan } from '@/lib/api';
 import { cn, timeAgo } from '@/lib/utils';
 
 type GermanFilter = 'all' | 'yes' | 'no';
 
 const RES_KEY = 'bankai:erai:resolution';
+const CODEC_KEY = 'bankai:erai:codec';
+const CODECS: Array<[EraiCodec, string]> = [['all', 'All'], ['hevc', 'HEVC'], ['avc', 'AVC']];
 const RESOLUTIONS: EraiResolution[] = ['1080p', '720p', 'SD', 'all'];
 
 // 1080p unless this browser chose otherwise: the other qualities rarely matter.
@@ -24,6 +26,15 @@ function storedResolution(): EraiResolution {
     return saved && RESOLUTIONS.includes(saved) ? saved : '1080p';
   } catch {
     return '1080p';
+  }
+}
+
+function storedCodec(): EraiCodec {
+  try {
+    const saved = localStorage.getItem(CODEC_KEY) as EraiCodec | null;
+    return saved && CODECS.some(([value]) => value === saved) ? saved : 'all';
+  } catch {
+    return 'all';
   }
 }
 
@@ -95,10 +106,11 @@ export default function AnimeErai({
   const [search, setSearch] = useState(initialQuery);
   const [german, setGerman] = useState<GermanFilter>('all');
   const [res, setRes] = useState<EraiResolution>(storedResolution);
+  const [codec, setCodec] = useState<EraiCodec>(storedCodec);
   const [page, setPage] = useState(0);
   // Started from the last answer this browser saw, refreshed straight after.
-  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(0, initialQuery, 'all', storedResolution())));
-  const [loading, setLoading] = useState(() => recall(eraiPath(0, initialQuery, 'all', storedResolution())) === undefined);
+  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(0, initialQuery, 'all', storedResolution(), storedCodec())));
+  const [loading, setLoading] = useState(() => recall(eraiPath(0, initialQuery, 'all', storedResolution(), storedCodec())) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   // The row being considered for a replacement, and what it would change.
@@ -145,27 +157,28 @@ export default function AnimeErai({
     const timer = window.setTimeout(() => setSearch(query), 250);
     return () => window.clearTimeout(timer);
   }, [query]);
-  useEffect(() => setPage(0), [search, german, res]);
+  useEffect(() => setPage(0), [search, german, res, codec]);
   useEffect(() => {
     try {
       localStorage.setItem(RES_KEY, res);
+      localStorage.setItem(CODEC_KEY, codec);
     } catch {
       /* a remembered filter is a convenience */
     }
-  }, [res]);
+  }, [res, codec]);
 
   const load = useCallback(async () => {
-    const held = recall<EraiPage>(eraiPath(page, search, german, res));
+    const held = recall<EraiPage>(eraiPath(page, search, german, res, codec));
     if (held) setData(held);
     else setLoading(true);
     try {
-      setData(await api.eraiReleases(page, search, german, res));
+      setData(await api.eraiReleases(page, search, german, res, codec));
     } catch (error: any) {
       toast.error(error.message);
     } finally {
       setLoading(false);
     }
-  }, [page, search, german, res]);
+  }, [page, search, german, res, codec]);
 
   useEffect(() => {
     void load();
@@ -231,6 +244,11 @@ export default function AnimeErai({
                 <ToggleGroupItem key={value} label={value === 'all' ? 'All' : value} selected={res === value} onClick={() => setRes(value)} />
               ))}
             </ToggleGroup>
+            <ToggleGroup label='Codec'>
+              {CODECS.map(([value, label]) => (
+                <ToggleGroupItem key={value} label={label} selected={codec === value} onClick={() => setCodec(value)} />
+              ))}
+            </ToggleGroup>
             <ToggleGroup label='German subtitles'>
               <ToggleGroupItem label='All' selected={german === 'all'} onClick={() => setGerman('all')} />
               <ToggleGroupItem label='German' selected={german === 'yes'} onClick={() => setGerman('yes')} />
@@ -279,7 +297,10 @@ export default function AnimeErai({
                         {row.category && <p className='text-[0.68rem] text-muted-foreground'>{row.category}</p>}
                       </td>
                       <td className='max-w-[18rem] px-3 py-2'><SubtitleChips row={row} languages={data.languages} /></td>
-                      <td className='whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground'>{row.resolution}</td>
+                      <td className='whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground'>
+                        {row.resolution}{' '}
+                        <Badge variant={row.codec === 'hevc' ? 'success' : 'warning'}>{row.codec.toUpperCase()}</Badge>
+                      </td>
                       <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-muted-foreground'>{row.size}</td>
                       <td className='whitespace-nowrap px-3 py-2 text-xs text-muted-foreground'>{timeAgo(row.published)}</td>
                       <td className='px-3 py-2'>
