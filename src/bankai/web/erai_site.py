@@ -49,6 +49,8 @@ _PAGE_DELAY_SECONDS = 2.0
 _SHOW_FEED_SECONDS = 12 * 3600
 # A search is asked again at most this often.
 _SEARCH_SECONDS = 3600
+# Whether a show has a page on the site, asked again after a day.
+_PAGE_SECONDS = 24 * 3600
 GERMAN = "de"
 
 # Erai's subtitle codes are the flags it shows.
@@ -215,7 +217,7 @@ def _merge(rows: list[dict[str, Any]], **changes: Any) -> int:
             new += info_hash not in known
             known[info_hash] = row
         for key, value in changes.items():
-            if key in {"shows", "searches"}:
+            if key in {"shows", "searches", "pages"}:
                 index.setdefault(key, {}).update(value)
             else:
                 index[key] = value
@@ -357,6 +359,44 @@ async def search(term: str) -> int:
         log.debug("Erai-raws search for %r failed: %s", key, type(exc).__name__)
         rows = []
     return _merge(rows, searches={key: time.time()})
+
+
+async def empty_show(name: str) -> str | None:
+    """The show's page, when Erai-raws has one for it but lists no release there.
+
+    Older shows are emptied on the site -- "No episodes have been added yet"
+    -- and their feeds then answer with nothing, just as they do for an
+    address that is no show at all. The page itself tells the two apart: a
+    show's page is there, a wrong address is a 404. Without a login the page
+    does not list releases either way, so only its existence is asked.
+    """
+    if not configured() or not name.strip():
+        return None
+    pages = load().get("pages") or {}
+    checked: dict[str, dict[str, Any]] = {}
+    found = None
+    try:
+        async with _client() as client:
+            for slug in show_slugs(name):
+                seen = pages.get(slug)
+                if seen and time.time() - float(seen.get("checked") or 0) < _PAGE_SECONDS:
+                    exists = bool(seen.get("exists"))
+                else:
+                    try:
+                        response = await client.get(f"/anime-list/{slug}/")
+                    except httpx.HTTPError:
+                        continue
+                    if response.status_code not in {200, 404}:
+                        continue  # refused or failing: no answer either way
+                    exists = response.status_code == 200
+                    checked[slug] = {"checked": time.time(), "exists": exists}
+                if exists:
+                    found = f"{BASE_URL}/anime-list/{slug}/"
+                    break
+    finally:
+        if checked:
+            _merge([], pages=checked)
+    return found
 
 
 def summary() -> dict[str, Any]:

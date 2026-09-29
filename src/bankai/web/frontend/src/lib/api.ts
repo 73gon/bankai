@@ -147,6 +147,8 @@ export interface ReplacementPlan {
 }
 
 export interface EraiPage {
+  /** The show's page on the site when it has one but lists no release there. */
+  empty_show?: string | null;
   configured: boolean;
   known: number;
   newest: number | null;

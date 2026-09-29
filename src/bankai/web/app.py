@@ -2562,8 +2562,20 @@ def create_app() -> Any:
         if len(term) >= 3 and await erai_site.search(term):
             snaps["erai_site_rows"].invalidate()
         rows = (await snaps["erai_site_rows"].get()).value
+        empty_show = None
         if term:
             rows = [row for row in rows if term in row["name"].casefold()]
+            if not rows and len(term) >= 3:
+                # The site's search misses some shows its own feed has.
+                if await erai_site.fill_show(q or ""):
+                    snaps["erai_site_rows"].invalidate()
+                    rows = [
+                        row
+                        for row in (await snaps["erai_site_rows"].get()).value
+                        if term in row["name"].casefold()
+                    ]
+                if not rows:
+                    empty_show = await erai_site.empty_show(q or "")
         if res != "all":
             rows = [row for row in rows if row["resolution"] == res]
         if german != "all":
@@ -2575,6 +2587,8 @@ def create_app() -> Any:
             "page": page,
             "page_size": page_size,
             "languages": erai_site.LANGUAGES,
+            # Nothing found, yet the show has a page on the site: it is empty there.
+            "empty_show": empty_show,
             "items": rows[start : start + page_size],
         }
 

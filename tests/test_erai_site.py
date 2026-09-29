@@ -180,3 +180,24 @@ def test_a_no_german_hold_with_a_german_sibling_is_retried(store, monkeypatch):
     assert asyncio.run(erai._recheck_german_holds(state)) == 1
     assert state["releases"]["a" * 40]["reason"].startswith("Erai-raws lists German for another encode")
     assert set(erai._load_retry_requests()) == {"a" * 40}
+
+
+def test_a_show_emptied_on_the_site_is_told_from_a_wrong_address(store, monkeypatch):
+    """Both feeds answer with nothing; only the show's page says it exists."""
+    import httpx
+
+    asked = []
+
+    def answer(request):
+        asked.append(request.url.path)
+        exists = request.url.path == "/anime-list/hige-o-soru-soshite-joshikousei-o-hirou/"
+        return httpx.Response(200 if exists else 404, text="", request=request)
+
+    monkeypatch.setattr(erai_site, "_client", lambda: httpx.AsyncClient(base_url=erai_site.BASE_URL, transport=httpx.MockTransport(answer)))
+
+    found = asyncio.run(erai_site.empty_show("Hige o Soru. Soshite Joshikousei o Hirou."))
+    assert found == erai_site.BASE_URL + "/anime-list/hige-o-soru-soshite-joshikousei-o-hirou/"
+    assert asyncio.run(erai_site.empty_show("No Such Show")) is None
+    # Remembered for a day: asked once each.
+    asyncio.run(erai_site.empty_show("Hige o Soru. Soshite Joshikousei o Hirou."))
+    assert len(asked) == 2

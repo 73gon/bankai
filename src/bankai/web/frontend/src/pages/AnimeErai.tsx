@@ -258,7 +258,17 @@ export default function AnimeErai({
                   <tr><td colSpan={replaceFor ? 8 : 7} className='px-3 py-8 text-center text-muted-foreground'>Loading…</td></tr>
                 )}
                 {data && data.items.length === 0 && (
-                  <tr><td colSpan={replaceFor ? 8 : 7} className='px-3 py-8 text-center text-muted-foreground'>{data.known ? 'No release matches.' : 'Nothing read yet; the feeds are read every ten minutes.'}</td></tr>
+                  <tr>
+                    <td colSpan={replaceFor ? 8 : 7} className='px-3 py-8 text-center text-muted-foreground'>
+                      {data.empty_show ? (
+                        <>
+                          Erai-raws has a page for this show, but lists no release on it: older shows are often emptied there.
+                          Nyaa may still have its torrents.{' '}
+                          <a href={data.empty_show} target='_blank' rel='noreferrer' className='underline underline-offset-4'>Open the page</a>
+                        </>
+                      ) : data.known ? 'No release matches.' : 'Nothing read yet; the feeds are read every ten minutes.'}
+                    </td>
+                  </tr>
                 )}
                 {data?.items.map((row) => {
                   const status = row.status ? STATUS[row.status] ?? { label: row.status, variant: 'muted' as const } : null;
