@@ -2381,7 +2381,8 @@ async def _nyaa_release(
     if identity and span:
         numbers = f"{span[0]:02d}" if span[0] == span[1] else f"{span[0]:02d} {span[1]:02d}"
         queries.append(f"{identity[0]} {numbers}")
-    for query in queries:
+
+    async def ask(query: str) -> anime_mod.NyaaEntry | None:
         try:
             response = await client.get(
                 f"{_NYAA_BASE}/", params={"u": "Erai-raws", "c": "1_2", "q": query}
@@ -2389,8 +2390,8 @@ async def _nyaa_release(
             response.raise_for_status()
         except httpx.HTTPError as exc:
             log.warning("Nyaa lookup of %s failed: %s", query, exc)
-            continue
-        found = next(
+            return None
+        return next(
             (
                 item
                 for item in parse_listing(response.text)
@@ -2398,8 +2399,18 @@ async def _nyaa_release(
             ),
             None,
         )
-        if found is not None:
-            return found
+
+    # Both at once: Nyaa takes seconds per search, and either may be the one.
+    pending = {asyncio.ensure_future(ask(query)) for query in queries}
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task.result() is not None:
+                    return task.result()
+    finally:
+        for task in pending:
+            task.cancel()
     return None
 
 
@@ -3067,10 +3078,44 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     }
 
 
+# Nyaa lookups started while the confirm dialog is read, by info hash: the
+# Replace that follows finds its torrent already looked up.
+_NYAA_LOOKUPS: dict[str, tuple[float, asyncio.Task]] = {}
+_NYAA_LOOKUP_SECONDS = 600.0
+
+
+def _find_on_nyaa(name: str, info_hash: str) -> asyncio.Task:
+    """The lookup of this release on Nyaa, started now or earlier."""
+    now = time.time()
+    for key, (started, _) in list(_NYAA_LOOKUPS.items()):
+        if now - started > _NYAA_LOOKUP_SECONDS:
+            _NYAA_LOOKUPS.pop(key, None)
+    held = _NYAA_LOOKUPS.get(info_hash)
+    if held is not None:
+        task = held[1]
+        # Still running, or found it; one that found nothing or failed is asked again.
+        if not task.done() or (
+            not task.cancelled() and task.exception() is None and task.result() is not None
+        ):
+            return task
+
+    async def look() -> anime_mod.NyaaEntry | None:
+        settings = get_settings()
+        async with httpx.AsyncClient(
+            headers={"User-Agent": settings.scraper.user_agent}, timeout=30, follow_redirects=True
+        ) as client:
+            return await _nyaa_release(name, info_hash, client)
+
+    task = asyncio.create_task(look(), name=f"nyaa:{info_hash[:8]}")
+    _NYAA_LOOKUPS[info_hash] = (now, task)
+    return task
+
+
 async def replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
-    """The plan, as the confirm dialog shows it."""
+    """The plan, as the confirm dialog shows it; Nyaa is asked meanwhile."""
     await anidb_mod.index()
     plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
+    _find_on_nyaa(plan["name"], plan["info_hash"])
     return {
         **{name: value for name, value in plan.items() if name not in {"held", "files"}},
         "held_count": len(plan["held"]),
@@ -3085,10 +3130,8 @@ async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
     await anidb_mod.index()
     plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
     settings = get_settings()
-    async with httpx.AsyncClient(
-        headers={"User-Agent": settings.scraper.user_agent}, timeout=30, follow_redirects=True
-    ) as client:
-        entry = await _nyaa_release(plan["name"], plan["info_hash"], client)
+    entry = await _find_on_nyaa(plan["name"], plan["info_hash"])
+    _NYAA_LOOKUPS.pop(plan["info_hash"], None)
     if entry is None:
         raise ValueError("The release was not found on Nyaa")
     anime = anidb_mod.cached_index().anime[plan["anidb_id"]]

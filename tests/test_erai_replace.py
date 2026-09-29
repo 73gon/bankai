@@ -201,3 +201,24 @@ def test_a_release_is_found_on_nyaa_under_a_title_that_differs_from_erai_s(monke
 
     assert found is nyaa
     assert asked[-1] == "Watashi no Shiawase na Kekkon 2nd Season 12"
+
+
+def test_the_nyaa_lookup_started_for_the_plan_is_reused_by_the_replace(monkeypatch):
+    import asyncio
+
+    calls = []
+
+    async def lookup(name, info_hash, client):
+        calls.append(info_hash)
+        return "entry"
+
+    monkeypatch.setattr(erai, "_nyaa_release", lookup)
+    monkeypatch.setattr(erai, "_NYAA_LOOKUPS", {})
+
+    async def go():
+        first = erai._find_on_nyaa("name", "b" * 40)
+        await first
+        return await erai._find_on_nyaa("name", "b" * 40)
+
+    assert asyncio.run(go()) == "entry"
+    assert calls == ["b" * 40]

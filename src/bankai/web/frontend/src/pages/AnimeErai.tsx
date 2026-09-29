@@ -105,7 +105,8 @@ export default function AnimeErai({
   const [candidate, setCandidate] = useState<EraiRelease | null>(null);
   const [plan, setPlan] = useState<ReplacementPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
-  const [replacing, setReplacing] = useState(false);
+  // Rows being queued in the background, so several can be replaced in a row.
+  const [queueing, setQueueing] = useState<Set<string>>(() => new Set());
 
   async function consider(row: EraiRelease) {
     if (!replaceFor) return;
@@ -121,16 +122,22 @@ export default function AnimeErai({
 
   async function replace() {
     if (!replaceFor || !candidate) return;
-    setReplacing(true);
+    const row = candidate;
+    setCandidate(null);
+    setQueueing((current) => new Set(current).add(row.info_hash));
     try {
-      const result = await api.replaceFromErai(replaceFor.key, candidate.info_hash, replaceFor.label);
+      const result = await api.replaceFromErai(replaceFor.key, row.info_hash, replaceFor.label);
       toast.success(`Queued ${result.queued}`);
-      setCandidate(null);
       onReplaced?.();
+      void load();
     } catch (error: any) {
       toast.error(error.message);
     } finally {
-      setReplacing(false);
+      setQueueing((current) => {
+        const next = new Set(current);
+        next.delete(row.info_hash);
+        return next;
+      });
     }
   }
 
@@ -274,11 +281,11 @@ export default function AnimeErai({
                             <Button
                               size='sm'
                               variant={row.german ? 'default' : 'secondary'}
-                              disabled={TAKEN.has(row.status ?? '')}
+                              disabled={TAKEN.has(row.status ?? '') || queueing.has(row.info_hash)}
                               title={TAKEN.has(row.status ?? '') ? 'bankai already has this release' : 'Take this release in place of what the card holds'}
                               onClick={() => void consider(row)}
                             >
-                              <Replace data-icon='inline-start' /> {replaceLabel(row.episodes)}
+                              <Replace data-icon='inline-start' /> {queueing.has(row.info_hash) ? 'Queueing…' : replaceLabel(row.episodes)}
                             </Button>
                           ) : <span className='text-xs text-muted-foreground'>—</span>}
                         </td>
@@ -307,7 +314,7 @@ export default function AnimeErai({
         </>
       )}
 
-      <Dialog open={candidate !== null} onOpenChange={(open) => { if (!open && !replacing) setCandidate(null); }}>
+      <Dialog open={candidate !== null} onOpenChange={(open) => { if (!open) setCandidate(null); }}>
         <DialogContent className='max-w-xl'>
           <DialogHeader>
             <DialogTitle>{candidate?.episodes ? replaceLabel(candidate.episodes) : 'Replace'}</DialogTitle>
@@ -339,9 +346,9 @@ export default function AnimeErai({
             </ul>
           )}
           <DialogFooter>
-            <Button variant='secondary' onClick={() => setCandidate(null)} disabled={replacing}>Cancel</Button>
-            <Button onClick={() => void replace()} disabled={!plan || replacing}>
-              <Replace data-icon='inline-start' /> {replacing ? 'Queueing…' : 'Replace'}
+            <Button variant='secondary' onClick={() => setCandidate(null)}>Cancel</Button>
+            <Button onClick={() => void replace()} disabled={!plan}>
+              <Replace data-icon='inline-start' /> Replace
             </Button>
           </DialogFooter>
         </DialogContent>

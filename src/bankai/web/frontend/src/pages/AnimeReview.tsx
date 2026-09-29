@@ -506,7 +506,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
               embedded
               initialQuery={eraiFor.query}
               replaceFor={{ key: eraiFor.item.key, label: eraiFor.item.anidb_title || eraiFor.item.title }}
-              onReplaced={() => { setEraiFor(null); void load(); }}
+              onReplaced={() => void load()}
             />
           )}
         </DialogContent>
