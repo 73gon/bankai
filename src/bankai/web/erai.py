@@ -2368,24 +2368,39 @@ async def _german_sibling(
 async def _nyaa_release(
     name: str, info_hash: str, client: httpx.AsyncClient
 ) -> anime_mod.NyaaEntry | None:
-    """The Nyaa torrent Erai-raws lists under this name, matched by its info hash."""
+    """The Nyaa torrent Erai-raws lists under this name, matched by its info hash.
+
+    Nyaa's search wants every word, and its title is not always Erai-raws'
+    file name: "EAC3" on the site was "AAC" on Nyaa, and the checksum is not
+    in it at all. So the full name first, then the show and its episode
+    numbers only -- few enough results that the hash picks the right one.
+    """
     name = re.sub(r"\.(?:mkv|mp4)$", "", name, flags=re.IGNORECASE)
-    try:
-        response = await client.get(
-            f"{_NYAA_BASE}/", params={"u": "Erai-raws", "c": "1_2", "q": name}
+    queries = [name]
+    identity, span = _erai_identity_name(name), _release_range(name)
+    if identity and span:
+        numbers = f"{span[0]:02d}" if span[0] == span[1] else f"{span[0]:02d} {span[1]:02d}"
+        queries.append(f"{identity[0]} {numbers}")
+    for query in queries:
+        try:
+            response = await client.get(
+                f"{_NYAA_BASE}/", params={"u": "Erai-raws", "c": "1_2", "q": query}
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("Nyaa lookup of %s failed: %s", query, exc)
+            continue
+        found = next(
+            (
+                item
+                for item in parse_listing(response.text)
+                if item.info_hash.casefold() == info_hash.casefold()
+            ),
+            None,
         )
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        log.warning("Nyaa lookup of %s failed: %s", name, exc)
-        return None
-    return next(
-        (
-            item
-            for item in parse_listing(response.text)
-            if item.info_hash.casefold() == info_hash.casefold()
-        ),
-        None,
-    )
+        if found is not None:
+            return found
+    return None
 
 
 async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 40) -> int:

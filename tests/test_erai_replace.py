@@ -170,3 +170,34 @@ def test_a_kept_episode_is_not_published(tmp_path, monkeypatch):
 )
 def test_the_episodes_a_release_covers(title, expected):
     assert erai._release_range(title) == expected
+
+
+def test_a_release_is_found_on_nyaa_under_a_title_that_differs_from_erai_s(monkeypatch):
+    """Erai-raws said EAC3 and gave a checksum; Nyaa's title said AAC and had none."""
+    import asyncio
+
+    from bankai.web.anime import NyaaEntry
+
+    info_hash = "41dc3dd4318453b5736825a0b1a07b597c69c70c"
+    nyaa = NyaaEntry(
+        id=1, title="[Erai-raws] Watashi no Shiawase na Kekkon 2nd Season - 12 (REPACK) [1080p NF WEBRip HEVC AAC][MultiSub]",
+        download_url="https://nyaa.si/download/1.torrent", detail_url="https://nyaa.si/view/1",
+        magnet_uri=f"magnet:?xt=urn:btih:{info_hash}", info_hash=info_hash, category_id="1_2", category="Anime",
+        size="701 MiB", size_bytes=1, seeders=1, leechers=0, downloads=0, comments=0,
+        trusted=False, remake=False, published_at="", publisher="Erai-raws", quality="1080p",
+    )
+    asked = []
+
+    class Client:
+        async def get(self, url, params):
+            asked.append(params["q"])
+            text = "match" if params["q"] == "Watashi no Shiawase na Kekkon 2nd Season 12" else ""
+            return type("R", (), {"text": text, "raise_for_status": lambda self: None})()
+
+    monkeypatch.setattr(erai, "parse_listing", lambda text: [nyaa] if text == "match" else [])
+    name = "[Erai-raws] Watashi no Shiawase na Kekkon 2nd Season - 12 (REPACK) [1080p NF WEBRip HEVC EAC3][MultiSub][0DA30B54].mkv"
+
+    found = asyncio.run(erai._nyaa_release(name, info_hash, Client()))
+
+    assert found is nyaa
+    assert asked[-1] == "Watashi no Shiawase na Kekkon 2nd Season 12"

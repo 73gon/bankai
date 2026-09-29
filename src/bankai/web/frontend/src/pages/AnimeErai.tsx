@@ -180,7 +180,7 @@ export default function AnimeErai({
   const pages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
 
   return (
-    <div className='flex min-h-0 flex-col gap-4'>
+    <div className={cn('flex min-h-0 flex-col gap-4', embedded && 'flex-1')}>
       {!embedded && <div className='flex flex-wrap items-end justify-between gap-3'>
         <div>
           <h1 className='font-serif text-3xl font-semibold'>Erai-raws</h1>
@@ -232,7 +232,7 @@ export default function AnimeErai({
             <span className='ml-auto text-xs text-muted-foreground'>{data ? data.total.toLocaleString() + ' releases' : ''}</span>
           </div>
 
-          <div className={embedded ? 'max-h-[60dvh] overflow-auto rounded-md border border-border' : 'table-bleed min-h-0 flex-1 overflow-auto'}>
+          <div className={embedded ? 'min-h-0 flex-1 overflow-auto rounded-md border border-border' : 'table-bleed min-h-0 flex-1 overflow-auto'}>
             <table className='w-full min-w-[980px] border-collapse text-sm'>
               <thead className='sticky top-0 z-10 bg-card'>
                 <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
