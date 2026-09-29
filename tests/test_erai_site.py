@@ -201,3 +201,28 @@ def test_a_show_emptied_on_the_site_is_told_from_a_wrong_address(store, monkeypa
     # Remembered for a day: asked once each.
     asyncio.run(erai_site.empty_show("Hige o Soru. Soshite Joshikousei o Hirou."))
     assert len(asked) == 2
+
+
+def test_the_bot_protection_pauses_every_request_and_nothing_is_remembered_as_empty(store, monkeypatch):
+    import httpx
+
+    asked = []
+
+    def guard(request):
+        asked.append(request.url.path)
+        return httpx.Response(403, headers={"server": "ddos-guard"}, text="", request=request)
+
+    monkeypatch.setattr(erai_site, "_client", lambda: httpx.AsyncClient(base_url=erai_site.BASE_URL, transport=httpx.MockTransport(guard)))
+
+    assert asyncio.run(erai_site.fill_show("Meitantei Precure")) == 0
+    assert erai_site.blocked()
+    # Not remembered as read: once the pause is over it is asked again.
+    assert not (erai_site.load().get("shows") or {}).get("meitantei-precure")
+    assert not (erai_site.load().get("searches") or {})
+    # Paused: no request goes out at all.
+    before = len(asked)
+    assert asyncio.run(erai_site.search("meitantei precure")) == 0
+    assert asyncio.run(erai_site.empty_show("Meitantei Precure")) is None
+    with pytest.raises(erai_site.FeedError, match="bot protection"):
+        asyncio.run(erai_site._refresh())
+    assert len(asked) == before

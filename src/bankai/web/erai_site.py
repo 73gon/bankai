@@ -225,9 +225,36 @@ def _merge(rows: list[dict[str, Any]], **changes: Any) -> int:
     return new
 
 
+# The site sits behind DDoS-Guard, which turns an address away for a while
+# once it has asked too much -- feeds and pages alike, with a 403 that is not
+# about the token at all. bankai then leaves the site alone for this long,
+# the web process and the worker both: asking on only prolongs it.
+_BLOCK_SECONDS = 30 * 60
+BLOCKED_MESSAGE = "Erai-raws' bot protection is turning bankai away for now; it is asked again in half an hour"
+
+
+def _guarded(response: httpx.Response) -> bool:
+    """Is this the bot protection answering, rather than the site?"""
+    return response.status_code == 403 and "ddos-guard" in response.headers.get("server", "").casefold()
+
+
+def blocked() -> bool:
+    return time.time() < float(load().get("blocked_until") or 0)
+
+
+def _block() -> None:
+    log.warning("Erai-raws' bot protection refused bankai; pausing for %d min", _BLOCK_SECONDS // 60)
+    _merge([], blocked_until=time.time() + _BLOCK_SECONDS)
+
+
 async def _page(client: httpx.AsyncClient, path: str, **params: Any) -> list[dict[str, Any]]:
+    if blocked():
+        raise FeedError(BLOCKED_MESSAGE)
     token = get_settings().anime.erai_feed_token.strip()
     response = await client.get(path, params={"token": token, "type": "torrent", **params})
+    if _guarded(response):
+        _block()
+        raise FeedError(BLOCKED_MESSAGE)
     if response.status_code >= 400:
         # Not raise_for_status: its message is the URL, token and all, and
         # that ends up in the service log.
@@ -326,12 +353,19 @@ async def fill_show(name: str) -> int:
             try:
                 rows = await _page(client, f"/anime-list/{slug}/feed/")
             except (FeedError, httpx.HTTPError) as exc:
+                # Not read is not empty: only an answer is remembered.
                 log.debug("Erai-raws feed for %s unavailable: %s", slug, type(exc).__name__)
-                rows = []
+                tried.pop(slug, None)
+                if blocked():
+                    break
+                continue
             if rows:
                 return _merge(rows, shows=tried)
             await asyncio.sleep(_PAGE_DELAY_SECONDS)
-    _merge([], shows=tried)
+    if tried:
+        _merge([], shows=tried)
+    if blocked():
+        return 0
     # Under none of the addresses tried: the site's search finds it by name.
     return await search(name)
 
@@ -356,8 +390,9 @@ async def search(term: str) -> int:
         async with _client() as client:
             rows = await _page(client, "/", s=key, feed="rss2")
     except (FeedError, httpx.HTTPError) as exc:
+        # Not remembered: asked again next time, not an hour from now.
         log.debug("Erai-raws search for %r failed: %s", key, type(exc).__name__)
-        rows = []
+        return 0
     return _merge(rows, searches={key: time.time()})
 
 
@@ -370,7 +405,7 @@ async def empty_show(name: str) -> str | None:
     show's page is there, a wrong address is a 404. Without a login the page
     does not list releases either way, so only its existence is asked.
     """
-    if not configured() or not name.strip():
+    if not configured() or not name.strip() or blocked():
         return None
     pages = load().get("pages") or {}
     checked: dict[str, dict[str, Any]] = {}
@@ -386,6 +421,9 @@ async def empty_show(name: str) -> str | None:
                         response = await client.get(f"/anime-list/{slug}/")
                     except httpx.HTTPError:
                         continue
+                    if _guarded(response):
+                        _block()
+                        break
                     if response.status_code not in {200, 404}:
                         continue  # refused or failing: no answer either way
                     exists = response.status_code == 200
