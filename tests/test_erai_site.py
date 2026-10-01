@@ -226,3 +226,16 @@ def test_the_bot_protection_pauses_every_request_and_nothing_is_remembered_as_em
     with pytest.raises(erai_site.FeedError, match="bot protection"):
         asyncio.run(erai_site._refresh())
     assert len(asked) == before
+
+
+def test_a_page_that_is_not_a_feed_is_the_bot_protection_not_an_empty_show(store, monkeypatch):
+    import httpx
+
+    def challenge(request):
+        return httpx.Response(200, text="<!DOCTYPE html><html><title>DDoS-Guard</title></html>", request=request)
+
+    monkeypatch.setattr(erai_site, "_client", lambda: httpx.AsyncClient(base_url=erai_site.BASE_URL, transport=httpx.MockTransport(challenge)))
+
+    assert asyncio.run(erai_site.fill_show("Kaguya-sama wa Kokurasetai: Ultra Romantic")) == 0
+    assert erai_site.blocked()
+    assert not (erai_site.load().get("shows") or {})

@@ -2527,7 +2527,9 @@ def create_app() -> Any:
                 {
                     "info_hash": info_hash,
                     "name": name,
-                    "words": _erai_words(name),
+                    # The file name and Erai's own show title: "Kaguya 3 - 01 ~ 13"
+                    # is "Kaguya-sama wa Kokurasetai: Ultra Romantic".
+                    "words": _erai_words(f"{name} {row.get('title') or ''}"),
                     # One episode, or a batch's first and last: what it can replace.
                     "episodes": erai_mod._release_range(name),
                     # Erai marks HEVC in the name; a release without the mark is AVC.

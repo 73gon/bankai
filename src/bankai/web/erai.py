@@ -3032,9 +3032,12 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     releases = state.get("releases") or {}
     own = releases.get(info_hash.casefold()) or {}
     row = erai_site.lookup(info_hash)
+    show_title = ""
     if row is not None:
         name = str(row.get("name") or row.get("title") or "")
         german = "de" in (row.get("subs") or [])
+        # Erai's own show title; the file name can be a short one ("Kaguya 3").
+        show_title = str(row.get("title") or "")
     elif own.get("status") == "held" and own.get("title"):
         name = str(own["title"])
         german = title_lists_german_subtitles(name) or bool(erai_site.german(info_hash))
@@ -3046,7 +3049,9 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     table = anidb_mod.cached_index()
     head, _, tail = key.partition(":")
     card_aid = int(tail) if head == "anidb" and tail.isdigit() else None
-    release_aid = _release_anidb_id(name, table=table)
+    release_aid = (
+        _release_anidb_id(show_title, table=table) if show_title else None
+    ) or _release_anidb_id(name, table=table)
     if card_aid and release_aid and card_aid != release_aid:
         other = table.anime.get(release_aid) if table else None
         label = other.title if other else f"AniDB {release_aid}"

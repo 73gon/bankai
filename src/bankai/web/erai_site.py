@@ -238,6 +238,16 @@ def _guarded(response: httpx.Response) -> bool:
     return response.status_code == 403 and "ddos-guard" in response.headers.get("server", "").casefold()
 
 
+def _not_a_feed(response: httpx.Response) -> bool:
+    """A 200 that is a page, not a feed: the bot protection's own.
+
+    Read as a feed, that page was an empty one, and the show was remembered
+    as having no releases -- Kaguya-sama's third season, whose feed lists two
+    batches.
+    """
+    return response.status_code == 200 and "<rss" not in response.text[:4096]
+
+
 def blocked() -> bool:
     return time.time() < float(load().get("blocked_until") or 0)
 
@@ -252,7 +262,7 @@ async def _page(client: httpx.AsyncClient, path: str, **params: Any) -> list[dic
         raise FeedError(BLOCKED_MESSAGE)
     token = get_settings().anime.erai_feed_token.strip()
     response = await client.get(path, params={"token": token, "type": "torrent", **params})
-    if _guarded(response):
+    if _guarded(response) or _not_a_feed(response):
         _block()
         raise FeedError(BLOCKED_MESSAGE)
     if response.status_code >= 400:
