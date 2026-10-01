@@ -2182,11 +2182,13 @@ def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
         titles = [
             str(show.get(field) or "") for field in ("key", "title", "source_title")
         ]
+        # An entry taken from Anime-Lists is only the show's first season.
+        own_id = None if show.get("anidb_auto") else show.get("anidb_id")
         show["blacklisted"] = bool(
-            (show.get("anidb_id") is not None and show.get("anidb_id") in ids)
+            (own_id is not None and own_id in ids)
             or any(title and _show_name_key(title) in names for title in titles)
             or (
-                show.get("anidb_id") is None
+                own_id is None
                 and (
                     tvdb_show_blacklisted(show.get("tvdb_id"), policies)
                     or (

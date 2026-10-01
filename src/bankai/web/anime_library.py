@@ -1078,6 +1078,26 @@ def _resolve_name(table: Any, names: list[str], memo: dict[str, int | None]) -> 
     return None
 
 
+def _season_entries(table: Any, tvdb_id: Any) -> dict[str, list[dict]]:
+    """Each TVDB season's AniDB entries, in order; a season split in cours has several."""
+    if table is None or not str(tvdb_id or "").isdigit():
+        return {}
+    seasons: dict[str, list[dict]] = {}
+    family = sorted(
+        (
+            anime
+            for anime in table.by_tvdb.get(int(tvdb_id), [])
+            if str(anime.tvdb_season or "").isdigit() and anime.tvdb_season != "0"
+        ),
+        key=lambda anime: (int(anime.tvdb_season), anime.tvdb_offset, anime.aid),
+    )
+    for anime in family:
+        seasons.setdefault(str(int(anime.tvdb_season)), []).append(
+            {"anidb_id": anime.aid, "title": anime.english_title or anime.title}
+        )
+    return seasons
+
+
 def assign_entries(
     files: list[dict], *, catalog: Any, table: Any, links: dict[str, int] | None = None
 ) -> None:
@@ -1490,9 +1510,17 @@ async def group_shows(
             aired = [ep.aired for ep in card["rosters"].get(anidb_id) or [] if ep.aired]
             if aired:
                 year = int(min(aired)[:4])
-        else:
-            # Nothing on disk to tell: the entry the user linked its folder to.
+        # TVDB counts seasons, AniDB has an entry for each (or for each cour):
+        # Anime-Lists says which entry each season is.
+        season_anidb = _season_entries(table, tvdb_id)
+        auto_ids: list[int] = []
+        if card is None:
+            # Nothing on disk to tell: the entry the user linked its folder to,
+            # else the show's seasons as Anime-Lists maps them.
             anidb_id = next((links[name] for name in slot["titles"] if name in links), None)
+            if anidb_id is None and season_anidb:
+                auto_ids = [row["anidb_id"] for rows in season_anidb.values() for row in rows]
+                anidb_id = auto_ids[0]
         result = {
             "key": title,
             # Every folder behind this one card, so the page can ask for the
@@ -1501,7 +1529,10 @@ async def group_shows(
             "title": display_title,
             "source_title": source_title,
             "anidb_id": anidb_id,
-            "anidb_ids": card["order"] if card is not None else [],
+            "anidb_ids": card["order"] if card is not None else auto_ids,
+            # Taken from Anime-Lists rather than from files or the user.
+            "anidb_auto": bool(auto_ids),
+            "season_anidb": season_anidb,
             "avc_count": sum(
                 1
                 for row in merged_episodes["episodes"]

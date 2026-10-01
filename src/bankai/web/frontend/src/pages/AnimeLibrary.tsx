@@ -595,6 +595,22 @@ export default function AnimeLibrary() {
                 </TabsList>
                 {seasons.map((season) => (
                   <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>
+                    {(active.numbering ?? 'season') === 'season' && season !== null && (active.season_anidb?.[String(season)]?.length ?? 0) > 0 && (
+                      <p className='flex flex-wrap items-center gap-x-3 gap-y-1 pt-3 text-xs text-muted-foreground'>
+                        <span>AniDB:</span>
+                        {active.season_anidb![String(season)].map((entry) => (
+                          <a
+                            key={entry.anidb_id}
+                            href={'https://anidb.net/anime/' + entry.anidb_id}
+                            target='_blank'
+                            rel='noreferrer'
+                            className='inline-flex items-center gap-1 text-foreground underline-offset-4 hover:underline'
+                          >
+                            {entry.title} <ExternalLink className='size-3' />
+                          </a>
+                        ))}
+                      </p>
+                    )}
                     <div className='overflow-x-auto'>
                       <table className='w-full border-collapse text-sm'>
                         <thead><tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'><th className='py-2.5 pr-3 font-medium'>Ep</th><th className='px-3 py-2.5 font-medium'>Episode / File</th><th className='px-3 py-2.5 font-medium'>Encode</th><th className='px-3 py-2.5 text-right font-medium'>Size</th><th className='py-2.5 pl-3 text-right font-medium'>State</th></tr></thead>

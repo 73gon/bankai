@@ -556,6 +556,10 @@ export interface AnimeLibraryShow {
   german_dub_count?: number;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
+  /** The AniDB link was taken from Anime-Lists (the show's first season), not from files. */
+  anidb_auto?: boolean;
+  /** Each TVDB season's AniDB entries, per Anime-Lists; a season split in cours has several. */
+  season_anidb?: Record<string, Array<{ anidb_id: number; title: string }>>;
   downloaded_count: number;
   total_count: number;
   completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';

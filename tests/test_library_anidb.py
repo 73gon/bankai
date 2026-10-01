@@ -340,3 +340,28 @@ def test_a_folder_linked_by_the_user_wins_over_its_name_but_not_over_shoko():
 
     # Shoko's own match stays; the unmatched file of the folder takes the link.
     assert [row["anidb_id"] for row in files] == [111, 222, None]
+
+
+def test_each_tvdb_season_names_its_anidb_entries():
+    from types import SimpleNamespace
+
+    from bankai.metadata.anidb import AniDBAnime
+    from bankai.web.anime_library import _season_entries
+
+    def anime(aid, title, season, offset=0):
+        return AniDBAnime(aid, title, None, (), tvdb_id=411800, tvdb_season=season, tvdb_offset=offset)
+
+    table = SimpleNamespace(by_tvdb={411800: [
+        anime(18602, "Rise from Ember", "3"),
+        anime(16931, "Prelude to Dawn", "1"),
+        anime(17781, "Perish in Frost", "2"),
+        anime(17782, "Perish in Frost Part 2", "2", offset=8),
+        anime(9, "Special", "0"),
+    ]})
+
+    seasons = _season_entries(table, 411800)
+
+    assert list(seasons) == ["1", "2", "3"]
+    # A season split in cours: both, in order.
+    assert [row["anidb_id"] for row in seasons["2"]] == [17781, 17782]
+    assert _season_entries(table, None) == {}
