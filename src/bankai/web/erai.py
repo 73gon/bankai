@@ -3165,7 +3165,13 @@ async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
     if entry is None:
         raise ValueError("The release was not found on Nyaa")
     anime = anidb_mod.cached_index().anime[plan["anidb_id"]]
-    args = [*_anidb_args(entry, anime, plan["first"]), "--replace-existing"]
+    # Chosen by hand, with what is listed for it in view: taken as it is,
+    # without the automation's German check -- which, after the whole download,
+    # would only refuse to publish what was knowingly picked.
+    args = [
+        arg for arg in _anidb_args(entry, anime, plan["first"]) if arg != "--require-german-subtitles"
+    ]
+    args.append("--replace-existing")
     for episode in plan["german_dubs_kept"]:
         args.extend(["--keep-episode", str(episode)])
     qbit = QBittorrentClient()
