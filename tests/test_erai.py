@@ -2425,6 +2425,10 @@ def test_a_batch_is_held_with_its_own_reason():
     batch = entry("[Erai-raws] Beastars Final Season - 13 ~ 24 [1080p][HEVC][BATCH]")
     _, _, reason = asyncio.run(erai._resolve_anidb(batch))
     assert reason == erai.BATCH_REASON
+    # A season pack named by its season alone is one too, not "no episode number".
+    pack = entry("[Erai-raws] Fairy Tail - 100 Years Quest - S01 [1080p][HEVC][Multiple Subtitle]")
+    _, _, reason = asyncio.run(erai._resolve_anidb(pack))
+    assert reason == erai.BATCH_REASON
 
 
 def test_a_tvdb_show_is_blacklisted_once_every_season_is():

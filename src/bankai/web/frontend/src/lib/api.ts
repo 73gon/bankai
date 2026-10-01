@@ -431,6 +431,8 @@ export interface HeldRelease {
   hevc: boolean;
   season: number | null;
   episode: number | null;
+  /** A batch's first and last episode; a single release names one. */
+  episodes: [number, number] | null;
 }
 
 export interface AnimeReviewItem {

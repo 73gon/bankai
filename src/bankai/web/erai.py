@@ -453,6 +453,8 @@ def review_releases(key: str) -> list[dict[str, Any]]:
                 # One card is one AniDB entry: its own episode numbers.
                 "season": None,
                 "episode": (_erai_name_episode(title) or (None, None))[1],
+                # A batch's first and last episode: it can be downloaded whole.
+                "episodes": _release_range(title),
             }
         )
     rows.sort(
@@ -1930,9 +1932,17 @@ _ERAI_EPISODE = re.compile(
 
 
 # A batch, a whole season in one torrent: "Date A Live V - 01 ~ 12 [1080p]".
-# Its episodes also come as single releases; taking both would download the
-# season twice, so a batch is held and says so.
-BATCH_REASON = "Whole-season batch: its episodes come as single releases instead"
+# Taken beside the single releases it would download the season twice, so the
+# automation holds it -- but an older season often exists only as a batch,
+# so review offers to take it ("Download batch" on its card).
+BATCH_REASON = "Whole-season batch: not taken automatically; use Download batch on its card"
+# A season pack named by its season alone: "Fairy Tail - 100 Years Quest - S01".
+_ERAI_SEASON_PACK = re.compile(
+    r"^(?P<name>.+?)\s+-\s+S(?P<season>\d{1,2})(?:\s*\([^)]*\))*\s*(?:\[[^\]]*\]\s*)*$",
+    re.IGNORECASE,
+)
+# The last episode of a season pack is not in its name: every episode it has.
+SEASON_PACK_LAST = 999
 _ERAI_BATCH = re.compile(
     r"^(?P<name>.+?)\s+-\s+(?P<episode>\d{1,4})\s*~\s*(?P<last>\d{1,4})(?:v\d+)?(?:\s+END)?"
     r"(?:\s*\([^)]*\))*\s*(?:\[[^\]]*\]\s*)*$",
@@ -1962,11 +1972,14 @@ def _erai_identity_name(title: str) -> tuple[str, int] | None:
     Date A Live showed in review as five identical cards under TVDB's one
     name and poster, and could not be blacklisted per entry.
     """
-    return _erai_name_episode(title) or (
-        (match["name"].strip(), int(match["episode"]))
-        if (match := _ERAI_BATCH.match(_erai_value(title)))
-        else None
-    )
+    if found := _erai_name_episode(title):
+        return found
+    value = _erai_value(title)
+    if match := _ERAI_BATCH.match(value):
+        return match["name"].strip(), int(match["episode"])
+    if match := _ERAI_SEASON_PACK.match(value):
+        return match["name"].strip(), 1
+    return None
 
 
 async def _resolve_anidb(
@@ -1979,7 +1992,8 @@ async def _resolve_anidb(
     """
     parsed = _erai_name_episode(entry.title)
     if parsed is None:
-        if _ERAI_BATCH.match(_erai_value(entry.title)):
+        value = _erai_value(entry.title)
+        if _ERAI_BATCH.match(value) or _ERAI_SEASON_PACK.match(value):
             return None, None, BATCH_REASON
         return None, None, "AniDB episode number was not found in the release title"
     name, episode = parsed
@@ -2967,11 +2981,13 @@ def _release_range(title: str) -> tuple[int, int] | None:
     single = _erai_name_episode(title)
     if single:
         return single[1], single[1]
-    match = _ERAI_BATCH.match(_erai_value(title))
-    if not match:
-        return None
-    first, last = int(match["episode"]), int(match["last"])
-    return (first, last) if first <= last else None
+    value = _erai_value(title)
+    if match := _ERAI_BATCH.match(value):
+        first, last = int(match["episode"]), int(match["last"])
+        return (first, last) if first <= last else None
+    if _ERAI_SEASON_PACK.match(value):
+        return 1, SEASON_PACK_LAST
+    return None
 
 
 def _entry_episode_files(aid: int) -> dict[int, list[Path]]:
@@ -3007,11 +3023,23 @@ def _is_german_dub(path: Path) -> bool:
 
 
 def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
-    """What taking this Erai-raws release for a review card would do."""
+    """What taking this release for a review card would do.
+
+    The release is one Erai-raws lists, or one held for the card itself -- a
+    batch the automation did not take on its own.
+    """
+    state = _load_state()
+    releases = state.get("releases") or {}
+    own = releases.get(info_hash.casefold()) or {}
     row = erai_site.lookup(info_hash)
-    if row is None:
+    if row is not None:
+        name = str(row.get("name") or row.get("title") or "")
+        german = "de" in (row.get("subs") or [])
+    elif own.get("status") == "held" and own.get("title"):
+        name = str(own["title"])
+        german = title_lists_german_subtitles(name) or bool(erai_site.german(info_hash))
+    else:
         raise ValueError("Erai-raws does not list this release")
-    name = str(row.get("name") or row.get("title") or "")
     span = _release_range(name)
     if span is None:
         raise ValueError("The episode numbers could not be read from the release name")
@@ -3027,9 +3055,7 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     anime = table.anime.get(aid) if table and aid else None
     if anime is None:
         raise ValueError("Choose the AniDB anime for this card first")
-    state = _load_state()
-    releases = state.get("releases") or {}
-    existing = releases.get(info_hash.casefold()) or {}
+    existing = own
     if existing.get("status") in {*_ACTIVE_RELEASE_STATES, "done"}:
         raise ValueError("This release is already downloading or in the library")
     first, last = span
@@ -3069,7 +3095,7 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
         "batch": first != last,
         "first": first,
         "last": last,
-        "german": "de" in (row.get("subs") or []),
+        "german": german,
         "anidb_id": anime.aid,
         "anidb_title": anime.english_title or anime.title,
         "held": held,
@@ -3130,7 +3156,11 @@ async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
     await anidb_mod.index()
     plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
     settings = get_settings()
-    entry = await _find_on_nyaa(plan["name"], plan["info_hash"])
+    saved = ((_load_state().get("releases") or {}).get(plan["info_hash"]) or {}).get("entry")
+    if saved and saved.get("magnet_uri"):
+        entry = _entry_from_dict(saved)  # a held release: the torrent it was found as
+    else:
+        entry = await _find_on_nyaa(plan["name"], plan["info_hash"])
     _NYAA_LOOKUPS.pop(plan["info_hash"], None)
     if entry is None:
         raise ValueError("The release was not found on Nyaa")
@@ -3172,7 +3202,8 @@ async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
             }
             # The episodes it brings are taken: the automation must not queue
             # their single releases beside it.
-            for episode in range(plan["first"], plan["last"] + 1):
+            last = plan["last"] if plan["last"] < SEASON_PACK_LAST else plan["first"] - 1
+            for episode in range(plan["first"], last + 1):
                 if episode not in plan["german_dubs_kept"]:
                     state["canonical"][f"anidb:{anime.aid}|{episode}"] = {
                         "info_hash": entry.info_hash,

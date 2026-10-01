@@ -222,3 +222,23 @@ def test_the_nyaa_lookup_started_for_the_plan_is_reused_by_the_replace(monkeypat
 
     assert asyncio.run(go()) == "entry"
     assert calls == ["b" * 40]
+
+
+def test_a_batch_held_for_the_card_is_planned_from_its_own_release(library):
+    """No Erai-raws listing needed: the held batch is the release to take."""
+    title = "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 12 [1080p][HEVC][BATCH][Multiple Subtitle] [ENG][GER]"
+    held(library["state"], "c" * 40, title)
+    held(library["state"], "1" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 05 [1080p HEVC][Multiple Subtitle].mkv")
+
+    plan = erai._replacement_plan("anidb:2", "c" * 40)
+
+    assert (plan["name"], plan["first"], plan["last"], plan["german"]) == (title, 1, 12, True)
+    # The batch itself is the release being taken, not one it replaces.
+    assert plan["held"] == ["1" * 40]
+
+
+def test_a_season_pack_is_a_batch_of_the_whole_season():
+    title = "[Erai-raws] Fairy Tail - 100 Years Quest - S01 [1080p][HEVC][Multiple Subtitle] [ENG][POR-BR][SPA-LA][GER]"
+    assert erai._release_range(title) == (1, erai.SEASON_PACK_LAST)
+    assert erai._erai_identity_name(title) == ("Fairy Tail - 100 Years Quest", 1)
+    assert erai._erai_name_episode(title) is None

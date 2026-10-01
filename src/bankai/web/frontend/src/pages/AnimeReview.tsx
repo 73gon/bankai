@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Ban, Check, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Subtitles, Trash2 } from 'lucide-react';
+import { Ban, Check, Download, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Subtitles, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
@@ -13,6 +13,7 @@ import { cn } from '@/lib/utils';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import AnimeErai from '@/pages/AnimeErai';
+import { ReplaceDialog, episodesLabel, type ReplaceCandidate } from '@/components/ReplaceDialog';
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -40,6 +41,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   // The show whose Erai-raws releases are open in a dialog, by the name Erai gives it.
   // The card the Erai-raws dialog was opened from, and the name it searches for.
   const [eraiFor, setEraiFor] = useState<{ query: string; item: AnimeReviewItem } | null>(null);
+  // A batch held for a card, being considered for download.
+  const [batchFor, setBatchFor] = useState<{ item: AnimeReviewItem; candidate: ReplaceCandidate } | null>(null);
   // Blacklist only: every card, those tied to an AniDB anime, or those not yet.
   const [linkFilter, setLinkFilter] = useState<'all' | 'linked' | 'unlinked'>('all');
   const listPath = blacklist ? pagePaths.animeBlacklist : pagePaths.animeReview;
@@ -93,6 +96,28 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       toast.error(error.message);
     } finally {
       setLoadingReleases(false);
+    }
+  }
+
+  const isBatch = (release: HeldRelease) =>
+    Boolean(release.episodes && release.episodes[0] !== release.episodes[1]);
+
+  function considerBatch(item: AnimeReviewItem, release: HeldRelease) {
+    if (!release.episodes) return;
+    setReleasesFor(null);
+    setBatchFor({ item, candidate: { info_hash: release.info_hash, name: release.title, episodes: release.episodes } });
+  }
+
+  // The card's batch to offer: German in its name first, then HEVC.
+  async function openBatch(item: AnimeReviewItem) {
+    try {
+      const batches = (await api.animeReviewReleases(item.key)).items.filter(isBatch);
+      const score = (release: HeldRelease) => Number(release.german_in_title) * 2 + Number(release.hevc);
+      const best = batches.sort((a, b) => score(b) - score(a))[0];
+      if (best) considerBatch(item, best);
+      else toast.error('No batch is held for this card any more');
+    } catch (error: any) {
+      toast.error(error.message);
     }
   }
 
@@ -323,6 +348,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             const german = reasons.some((reason) => reason.includes('German subtitles'));
             const tvdb = reasons.some((reason) => reason.includes('TVDB'));
             const anidb = reasons.some((reason) => reason.includes('AniDB'));
+            const batch = reasons.some((reason) => reason.startsWith('Whole-season batch'));
             const count = item.release_count || 1;
             return (
               <Card key={item.key} className='flex flex-col overflow-hidden'>
@@ -437,6 +463,16 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <Check data-icon='inline-start' /> <span className='truncate'>Already downloaded</span>
                       </Button>
 
+                      {batch && (
+                        <Button
+                          className='col-span-2'
+                          onClick={() => void openBatch(item)}
+                          disabled={busyFor(item.key)}
+                          title='Download the whole-season batch held for this card, in place of its single episodes'
+                        >
+                          <Download data-icon='inline-start' /> <span className='truncate'>Download batch</span>
+                        </Button>
+                      )}
                       <Button
                         variant='outline'
                         className='col-span-2'
@@ -511,6 +547,18 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           )}
         </DialogContent>
       </Dialog>
+      {batchFor && (
+        <ReplaceDialog
+          cardKey={batchFor.item.key}
+          label={batchFor.item.anidb_title || batchFor.item.title}
+          candidate={batchFor.candidate}
+          verb='Download batch'
+          onClose={() => setBatchFor(null)}
+          onStart={() => markBusy(batchFor.item.key, true)}
+          onSettled={() => settle(batchFor.item.key)}
+          onQueued={() => void load()}
+        />
+      )}
       <AniDBLinkDialog
         name={linkTarget ? linkTarget.source_title || linkTarget.title : null}
         onClose={() => setLinkTarget(null)}
@@ -543,8 +591,9 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                 {releases.map((release) => (
                   <li key={release.info_hash} className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/40'>
                     <span className='w-14 shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
-                      {release.season != null ? 'S' + release.season + ' ' : ''}
-                      {release.episode != null ? 'E' + release.episode : '—'}
+                      {isBatch(release) && release.episodes
+                        ? (release.episodes[1] >= 999 ? 'Season' : release.episodes[0] + '–' + release.episodes[1])
+                        : <>{release.season != null ? 'S' + release.season + ' ' : ''}{release.episode != null ? 'E' + release.episode : '—'}</>}
                     </span>
                     <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={release.title}>
                       {release.title}
@@ -554,6 +603,15 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                     {release.detail_url && (
                       <Button asChild size='icon' variant='ghost' title='Nyaa description'>
                         <a href={release.detail_url} target='_blank' rel='noreferrer' aria-label='Nyaa description'><ExternalLink /></a>
+                      </Button>
+                    )}
+                    {isBatch(release) && releasesFor && (
+                      <Button
+                        variant='secondary'
+                        title={'Download ' + (release.episodes ? episodesLabel(release.episodes) : 'it') + ' with this batch'}
+                        onClick={() => considerBatch(releasesFor, release)}
+                      >
+                        <Download data-icon='inline-start' /> Download
                       </Button>
                     )}
                     <Button
