@@ -242,3 +242,18 @@ def test_a_season_pack_is_a_batch_of_the_whole_season():
     assert erai._release_range(title) == (1, erai.SEASON_PACK_LAST)
     assert erai._erai_identity_name(title) == ("Fairy Tail - 100 Years Quest", 1)
     assert erai._erai_name_episode(title) is None
+
+
+def test_holds_whose_episodes_are_all_in_the_library_leave_review(library, monkeypatch):
+    state = library["state"]
+    held(state, "1" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 02 [1080p HEVC][Multiple Subtitle].mkv")
+    held(state, "2" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 03 [1080p HEVC][Multiple Subtitle]")
+    held(state, "3" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 05 [1080p HEVC][Multiple Subtitle]")
+    on_disk = {1, 2, 3}
+    monkeypatch.setattr(erai, "_anidb_episode_on_disk", lambda anime, episode: episode in on_disk)
+
+    assert erai._settle_holds_on_disk(state) == 2
+
+    statuses = {h[0]: r["status"] for h, r in state["releases"].items()}
+    # Episode 2 and the 01-03 batch are in the library; 04 and 05 are not.
+    assert statuses == {"1": "existing", "2": "existing", "3": "held"}

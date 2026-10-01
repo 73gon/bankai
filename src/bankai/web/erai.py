@@ -3719,6 +3719,9 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                 async with httpx.AsyncClient(
                     headers=headers, timeout=30, follow_redirects=True
                 ) as client:
+                    _set_activity("Clearing holds already in the library")
+                    with suppress(Exception):
+                        await asyncio.to_thread(_settle_holds_on_disk, state)
                     _set_activity("Asking Erai-raws about subtitles")
                     with suppress(Exception):
                         await _recheck_german_holds(state)
@@ -3892,6 +3895,38 @@ def _torrent_phase(torrent: Any) -> str:
     if "downloading" in state_name or "forceddl" in state_name or "metadl" in state_name:
         return "downloading"
     return "queued"
+
+
+def _settle_holds_on_disk(state: dict[str, Any]) -> int:
+    """Holds whose episodes are all in the library already: nothing to decide.
+
+    A season can arrive by another route than the releases held for it --
+    Kaguya-sama's third season came as a batch while twelve of its single
+    episodes stayed in review, held for German the library already had.
+    """
+    table = anidb_mod.cached_index()
+    if table is None:
+        return 0
+    settled = 0
+    for release in (state.get("releases") or {}).values():
+        if release.get("status") != "held":
+            continue
+        title = str(release.get("title") or "")
+        span = _release_range(title)
+        if span is None or span[1] >= SEASON_PACK_LAST:
+            continue
+        aid = _release_anidb_id(title, table=table)
+        anime = table.anime.get(aid) if aid else None
+        if anime is None:
+            continue
+        if all(_anidb_episode_on_disk(anime, episode) for episode in range(span[0], span[1] + 1)):
+            release.update(status="existing", reason="Already in the library")
+            release.pop("retry_after", None)
+            settled += 1
+    if settled:
+        _prune_holds(state)
+        log.info("Cleared %d held releases already in the library", settled)
+    return settled
 
 
 def reclassify_tvdb_holds(table: Any = None) -> dict[str, int]:
