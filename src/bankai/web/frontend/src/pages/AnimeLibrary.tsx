@@ -533,7 +533,7 @@ export default function AnimeLibrary() {
                           <Link2 data-icon='inline-start' /> Link to AniDB
                         </Button>
                       )}
-                      {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
+                      {active.anidb_id && !Object.keys(active.season_anidb ?? {}).length && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
                       {Boolean(active.avc_count) && (
                         <Button
                           size='sm'
@@ -595,7 +595,7 @@ export default function AnimeLibrary() {
                 </TabsList>
                 {seasons.map((season) => (
                   <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>
-                    {(active.numbering ?? 'season') === 'season' && season !== null && (active.season_anidb?.[String(season)]?.length ?? 0) > 0 && (
+                    {season !== null && (active.season_anidb?.[String(season)]?.length ?? 0) > 0 && (
                       <p className='flex flex-wrap items-center gap-x-3 gap-y-1 pt-3 text-xs text-muted-foreground'>
                         <span>AniDB:</span>
                         {active.season_anidb![String(season)].map((entry) => (

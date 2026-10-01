@@ -1565,6 +1565,26 @@ async def group_shows(
             "staged_count": sum(row["staged"] for row in files),
             **merged_episodes,
         }
+        if card is not None:
+            # A card of AniDB entries: its tabs are the entries, or -- one
+            # entry kept in season folders -- that entry's folders.
+            def entry_link(aid: int) -> list[dict]:
+                entry = catalog.entries.get(aid) if catalog is not None else None
+                anime = known.get(aid)
+                name = (entry.title if entry else None) or (
+                    (anime.english_title or anime.title) if anime else f"AniDB {aid}"
+                )
+                return [{"anidb_id": aid, "title": name}]
+
+            tabs = {row["season_number"] for row in result["episodes"] if row["season_number"] is not None}
+            result["season_anidb"] = (
+                {str(tab): entry_link(card["order"][0]) for tab in tabs}
+                if len(card["order"]) == 1
+                else {str(index): entry_link(aid) for index, aid in enumerate(card["order"], start=1)}
+            )
+        elif numbering != "season":
+            # Arc folders of an absolute count are not TVDB's seasons.
+            result["season_anidb"] = {}
         if not include_episodes:
             result["episodes"] = []
         return result
