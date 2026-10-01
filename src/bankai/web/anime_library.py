@@ -1283,12 +1283,13 @@ async def group_shows(
             bucket["titles"].append(entry["series"])
         bucket["files"].append({**entry, "season_number": season, "episode": episode})
     prefs = await asyncio.to_thread(load_prefs)
+    links = folder_links(prefs)
     await asyncio.to_thread(
         assign_entries,
         [row for bucket in buckets.values() for row in bucket["files"]],
         catalog=catalog,
         table=table,
-        links=folder_links(prefs),
+        links=links,
     )
 
     ids = await asyncio.to_thread(known_ids)
@@ -1489,6 +1490,9 @@ async def group_shows(
             aired = [ep.aired for ep in card["rosters"].get(anidb_id) or [] if ep.aired]
             if aired:
                 year = int(min(aired)[:4])
+        else:
+            # Nothing on disk to tell: the entry the user linked its folder to.
+            anidb_id = next((links[name] for name in slot["titles"] if name in links), None)
         result = {
             "key": title,
             # Every folder behind this one card, so the page can ask for the

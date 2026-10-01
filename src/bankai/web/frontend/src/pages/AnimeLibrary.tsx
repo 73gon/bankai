@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, MoreHorizontal } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -15,6 +15,7 @@ import { AnimePoster } from '@/components/AnimePoster';
 import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
 import { Meter, rampParts } from '@/components/ui/meter';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
 import { cn } from '@/lib/utils';
 
@@ -132,6 +133,9 @@ export default function AnimeLibrary() {
   const [query, setQuery] = useState('');
   // Blacklisted shows still on disk are hidden unless asked for.
   const [showBlacklisted, setShowBlacklisted] = useState(false);
+  // Only the shows not yet linked to an AniDB entry.
+  const [onlyUnlinked, setOnlyUnlinked] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [view, setView] = useState<View>(storedView);
   const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -310,7 +314,10 @@ export default function AnimeLibrary() {
 
   useEffect(() => { void load(); }, []);
   const visible = useMemo(() => {
-    const matched = shows.filter((show) => (showBlacklisted || !show.blacklisted) && show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+    const matched = shows.filter((show) =>
+      (showBlacklisted || !show.blacklisted)
+      && (!onlyUnlinked || !show.anidb_id)
+      && show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
     if (!sort) return matched;
     const pick = LIBRARY_SORTERS[sort.key];
     const factor = sort.dir === 'asc' ? 1 : -1;
@@ -322,8 +329,9 @@ export default function AnimeLibrary() {
       }
       return (a === b ? 0 : a < b ? -1 : 1) * factor;
     });
-  }, [shows, query, sort, showBlacklisted]);
+  }, [shows, query, sort, showBlacklisted, onlyUnlinked]);
   const blacklistedCount = useMemo(() => shows.filter((show) => show.blacklisted).length, [shows]);
+  const unlinkedCount = useMemo(() => shows.filter((show) => !show.anidb_id && (showBlacklisted || !show.blacklisted)).length, [shows, showBlacklisted]);
   const totals = useMemo(() => visible.reduce((acc, show) => ({
     size: acc.size + show.size,
     episodes: acc.episodes + show.episode_count,
@@ -366,6 +374,16 @@ export default function AnimeLibrary() {
             <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
             <Input aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} className='w-60 pl-9' />
           </div>
+          {(unlinkedCount > 0 || onlyUnlinked) && (
+            <Button
+              variant={onlyUnlinked ? 'default' : 'secondary'}
+              aria-pressed={onlyUnlinked}
+              onClick={() => setOnlyUnlinked((current) => !current)}
+              title='Shows not linked to an AniDB entry yet; link them from their details'
+            >
+              <Link2 data-icon='inline-start' /> Not linked ({unlinkedCount})
+            </Button>
+          )}
           {blacklistedCount > 0 && (
             <Button
               variant='secondary'
@@ -403,7 +421,8 @@ export default function AnimeLibrary() {
                 <Card className='poster-card h-full overflow-hidden border-border'>
                   <div className='relative block w-full'>
                     <AnimePoster url={show.poster_url} title={show.title} />
-                    {show.blacklisted && <Badge variant='destructive' className='absolute left-2 top-2'>Blacklisted</Badge>}
+                    {show.blacklisted && <Badge variant='destructive' className='absolute left-2 top-2 bg-background/85 backdrop-blur-sm'>Blacklisted</Badge>}
+                    {!show.anidb_id && <Badge variant='warning' className='absolute right-2 top-2 bg-background/85 backdrop-blur-sm' title='Not linked to an AniDB entry yet'>No AniDB</Badge>}
                     <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/75 to-transparent px-3 pb-2.5 pt-10 text-left text-sm font-medium leading-tight text-white'>{show.title}</span>
                   </div>
                   {/* The completion colour, as the rule between the cover and
@@ -465,6 +484,7 @@ export default function AnimeLibrary() {
                         <span className='text-xs text-muted-foreground'>{tone.label}</span>
                         {show.staged_count > 0 && <Badge variant='warning'>{show.staged_count} staged</Badge>}
                         {show.blacklisted && <Badge variant='destructive'>Blacklisted</Badge>}
+                        {!show.anidb_id && <Badge variant='warning' title='Not linked to an AniDB entry yet'>No AniDB</Badge>}
                       </div>
                     </td>
                   </tr>
@@ -504,14 +524,13 @@ export default function AnimeLibrary() {
                     <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
                       {active.tvdb_id && <Button asChild variant='secondary' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
-                      {active.downloaded_count > 0 && (
+                      {!active.anidb_id && (
                         <Button
-                          variant={active.anidb_id ? 'secondary' : 'default'}
                           size='sm'
                           onClick={() => setLinkFor(active)}
-                          title='Pick the AniDB entry for the files of this show Shoko has not matched itself'
+                          title='Pick the AniDB entry of this show: for its files Shoko has not matched, and those still to come'
                         >
-                          <Search data-icon='inline-start' /> {active.anidb_id ? 'Change AniDB anime' : 'Link to AniDB'}
+                          <Link2 data-icon='inline-start' /> Link to AniDB
                         </Button>
                       )}
                       {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
@@ -538,9 +557,34 @@ export default function AnimeLibrary() {
                           </SelectGroup>
                         </SelectContent>
                       </Select>}
-                      <Button size='sm' variant='destructive' onClick={() => setRemoveTarget(active)} title='Delete this show from disk and never download it again'>
-                        <Trash2 data-icon='inline-start' /> Remove and blacklist
-                      </Button>
+                      <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+                        <PopoverTrigger asChild>
+                          <Button size='icon' variant='secondary' className='size-8' aria-label='More actions for this show' title='More actions'>
+                            <MoreHorizontal />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent align='end' className='flex w-60 flex-col gap-0.5 p-1'>
+                          {active.anidb_id && (
+                            <Button
+                              variant='ghost'
+                              size='sm'
+                              className='justify-start'
+                              onClick={() => { setMenuOpen(false); setLinkFor(active); }}
+                            >
+                              <Search data-icon='inline-start' /> Change AniDB anime
+                            </Button>
+                          )}
+                          <Button
+                            variant='ghost'
+                            size='sm'
+                            className='justify-start text-destructive hover:text-destructive'
+                            onClick={() => { setMenuOpen(false); setRemoveTarget(active); }}
+                            title='Delete this show from disk and never download it again'
+                          >
+                            <Trash2 data-icon='inline-start' /> Remove and blacklist
+                          </Button>
+                        </PopoverContent>
+                      </Popover>
                     </div>
                   </div>
                 </div>
