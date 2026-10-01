@@ -760,6 +760,37 @@ def numbering_for(prefs: dict[str, dict], *, tvdb_id: object, key: str) -> str:
     return mode if mode in NUMBERING_MODES else "season"
 
 
+def folder_links(prefs: dict[str, dict]) -> dict[str, int]:
+    """The AniDB entry the user linked each library folder to, by folder name."""
+    return {
+        name.split(":", 1)[1]: int(row["anidb_id"])
+        for name, row in prefs.items()
+        if name.startswith("folder:") and str((row or {}).get("anidb_id") or "").isdigit()
+    }
+
+
+def _write_prefs(prefs: dict[str, dict]) -> None:
+    path = _prefs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def save_folder_link(folders: list[str], anidb_id: int) -> None:
+    """Link library folders to one AniDB entry.
+
+    For the files Shoko has not matched: those it has keep Shoko's answer,
+    which comes from the file itself. The rest were matched by the folder's
+    name alone, which can miss or pick the wrong entry.
+    """
+    prefs = load_prefs()
+    for folder in folders:
+        if folder.strip():
+            prefs[f"folder:{folder}"] = {"anidb_id": int(anidb_id)}
+    _write_prefs(prefs)
+
+
 def save_numbering(*, key: str, tvdb_id: object, mode: str) -> None:
     if mode not in NUMBERING_MODES:
         raise ValueError(f"numbering must be one of {', '.join(NUMBERING_MODES)}")
@@ -769,11 +800,7 @@ def save_numbering(*, key: str, tvdb_id: object, mode: str) -> None:
             prefs.pop(name, None)  # the default needs no entry
         else:
             prefs[name] = {"numbering": mode}
-    path = _prefs_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _write_prefs(prefs)
 
 
 def merge_episodes_absolute(
@@ -1051,19 +1078,28 @@ def _resolve_name(table: Any, names: list[str], memo: dict[str, int | None]) -> 
     return None
 
 
-def assign_entries(files: list[dict], *, catalog: Any, table: Any) -> None:
-    """Set each file's ``anidb_id`` and, when Shoko linked it, ``anidb_episode``."""
+def assign_entries(
+    files: list[dict], *, catalog: Any, table: Any, links: dict[str, int] | None = None
+) -> None:
+    """Set each file's ``anidb_id`` and, when Shoko linked it, ``anidb_episode``.
+
+    Shoko's link first; then the entry the user linked the folder to; then
+    the folder's name.
+    """
     memo: dict[str, int | None] = {}
     for row in files:
-        links = catalog.files.get(str(row.get("path"))) if catalog is not None else None
-        if links:
-            row["anidb_id"], row["anidb_episode"] = links[0]
+        shoko = catalog.files.get(str(row.get("path"))) if catalog is not None else None
+        if shoko:
+            row["anidb_id"], row["anidb_episode"] = shoko[0]
             continue
         row["anidb_episode"] = None
         row["anidb_id"] = None
+        folder = str(row.get("series") or "")
+        if links and folder in links:
+            row["anidb_id"] = links[folder]
+            continue
         if table is None:
             continue
-        folder = str(row.get("series") or "")
         season = _SEASON_FOLDER.match(str(row.get("season") or ""))
         if season:
             base = re.split(r"\s+-\s+|:\s*", folder, maxsplit=1)[0]
@@ -1246,11 +1282,13 @@ async def group_shows(
         if entry["series"] not in bucket["titles"]:
             bucket["titles"].append(entry["series"])
         bucket["files"].append({**entry, "season_number": season, "episode": episode})
+    prefs = await asyncio.to_thread(load_prefs)
     await asyncio.to_thread(
         assign_entries,
         [row for bucket in buckets.values() for row in bucket["files"]],
         catalog=catalog,
         table=table,
+        links=folder_links(prefs),
     )
 
     ids = await asyncio.to_thread(known_ids)
@@ -1260,7 +1298,6 @@ async def group_shows(
     codecs_by_series = codec_index(state)
     source_titles = erai_source_titles(state)
     tracked = state.get("series", {})
-    prefs = await asyncio.to_thread(load_prefs)
 
     # A tracked show with nothing on disk yet still gets a card -- unless it
     # was blacklisted, which is how a show removed from the library leaves it.

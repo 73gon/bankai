@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, pagePaths, recall, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
+import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/u
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
+import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
 import { Meter, rampParts } from '@/components/ui/meter';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
@@ -135,6 +136,8 @@ export default function AnimeLibrary() {
   const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedShow, setSelectedShow] = useState<AnimeLibraryShow | null>(null);
+  // The show whose folders are being linked to an AniDB entry.
+  const [linkFor, setLinkFor] = useState<AnimeLibraryShow | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   // Only a spinner with nothing to show: otherwise the held answer stays up while it refreshes.
   const [loading, setLoading] = useState(() => recall(pagePaths.animeLibrary) === undefined);
@@ -182,6 +185,20 @@ export default function AnimeLibrary() {
       toast.error(error.message);
     } finally {
       setTransferring(null);
+    }
+  }
+
+  async function linkShow(anime: AniDBAnime) {
+    if (!linkFor) return;
+    const show = linkFor;
+    try {
+      await api.linkLibraryShow(show.folders?.length ? show.folders : [show.key], anime.anidb_id);
+      toast.success(show.title + ' is linked to ' + anime.title);
+      setLinkFor(null);
+      void load();
+      if (selected === show.key) void openShow(show.key);
+    } catch (error: any) {
+      toast.error(error.message);
     }
   }
 
@@ -487,6 +504,16 @@ export default function AnimeLibrary() {
                     <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
                       {active.tvdb_id && <Button asChild variant='secondary' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
+                      {active.downloaded_count > 0 && (
+                        <Button
+                          variant={active.anidb_id ? 'secondary' : 'default'}
+                          size='sm'
+                          onClick={() => setLinkFor(active)}
+                          title='Pick the AniDB entry for the files of this show Shoko has not matched itself'
+                        >
+                          <Search data-icon='inline-start' /> {active.anidb_id ? 'Change AniDB anime' : 'Link to AniDB'}
+                        </Button>
+                      )}
                       {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
                       {Boolean(active.avc_count) && (
                         <Button
@@ -593,6 +620,7 @@ export default function AnimeLibrary() {
           </div>
         </DialogContent>
       </Dialog>
+      <AniDBLinkDialog name={linkFor ? linkFor.source_title || linkFor.title : null} onClose={() => setLinkFor(null)} onPick={linkShow} />
     </div>
   );
 }

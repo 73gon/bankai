@@ -321,3 +321,22 @@ def test_tvdb_era_holds_are_read_again_on_anidb(tmp_path, monkeypatch):
     # A batch is identified by its name, and waits for its recheck.
     assert releases["d" * 40]["reason"].startswith("Identified on AniDB as Bleach: Sennen Kessen Hen")
     assert releases["e" * 40]["reason"] == "German subtitles not listed"
+
+
+def test_a_folder_linked_by_the_user_wins_over_its_name_but_not_over_shoko():
+    from types import SimpleNamespace
+
+    from bankai.web.anime_library import assign_entries, folder_links
+
+    catalog = SimpleNamespace(files={"/lib/Show/Show - S01E01.mkv": [(111, 1)]})
+    files = [
+        {"path": "/lib/Show/Show - S01E01.mkv", "series": "Show", "season": "Season 01"},
+        {"path": "/lib/Show/Show - S01E02.mkv", "series": "Show", "season": "Season 01"},
+        {"path": "/lib/Other/Other - 01.mkv", "series": "Other", "season": None},
+    ]
+    links = folder_links({"folder:Show": {"anidb_id": 222}, "tvdb:5": {"numbering": "absolute"}})
+
+    assign_entries(files, catalog=catalog, table=None, links=links)
+
+    # Shoko's own match stays; the unmatched file of the folder takes the link.
+    assert [row["anidb_id"] for row in files] == [111, 222, None]

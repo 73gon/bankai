@@ -2147,6 +2147,19 @@ def create_app() -> Any:
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    @app.post("/api/anime/library/link")
+    async def anime_library_link(req: dict) -> dict:
+        """Link a show's folders to an AniDB entry, for the files Shoko has not matched."""
+        from bankai.web.anime_library import save_folder_link
+
+        folders = [str(name) for name in req.get("folders") or [] if str(name).strip()]
+        anidb_id = req.get("anidb_id")
+        if not folders or not str(anidb_id or "").isdigit():
+            raise HTTPException(status_code=422, detail="folders and anidb_id are required")
+        await asyncio.to_thread(save_folder_link, folders, int(anidb_id))
+        snaps["anime_library"].invalidate()
+        return {"ok": True, "folders": folders, "anidb_id": int(anidb_id)}
+
     @app.get("/api/anime/library", response_model=None)
     async def anime_library(
         request: Request,
@@ -2495,6 +2508,10 @@ def create_app() -> Any:
 
     # -- Erai-raws ---------------------------------------------------------
 
+    def _erai_words(text: str) -> str:
+        """A name as its words alone: "Kokurasetai: Ultra" and "Kokurasetai - Ultra" match."""
+        return " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+
     def _erai_site_rows() -> list[dict]:
         """Every release Erai-raws has listed to bankai, newest first, with bankai's status."""
         from bankai.web import erai_site
@@ -2510,6 +2527,7 @@ def create_app() -> Any:
                 {
                     "info_hash": info_hash,
                     "name": name,
+                    "words": _erai_words(name),
                     # One episode, or a batch's first and last: what it can replace.
                     "episodes": erai_mod._release_range(name),
                     # Erai marks HEVC in the name; a release without the mark is AVC.
@@ -2563,13 +2581,13 @@ def create_app() -> Any:
         """
         from bankai.web import erai_site
 
-        term = (q or "").strip().casefold()
+        term = _erai_words(q or "")
         if len(term) >= 3 and await erai_site.search(term):
             snaps["erai_site_rows"].invalidate()
         rows = (await snaps["erai_site_rows"].get()).value
         empty_show = None
         if term:
-            rows = [row for row in rows if term in row["name"].casefold()]
+            rows = [row for row in rows if term in row["words"]]
             if not rows and len(term) >= 3:
                 # The site's search misses some shows its own feed has.
                 if await erai_site.fill_show(q or ""):
@@ -2577,7 +2595,7 @@ def create_app() -> Any:
                     rows = [
                         row
                         for row in (await snaps["erai_site_rows"].get()).value
-                        if term in row["name"].casefold()
+                        if term in row["words"]
                     ]
                 if not rows:
                     empty_show = await erai_site.empty_show(q or "")

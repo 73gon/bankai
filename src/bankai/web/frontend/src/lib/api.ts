@@ -1051,6 +1051,11 @@ export const api = {
       method: 'POST', body: JSON.stringify({ release_title: releaseTitle, anidb_id: anidbId }),
     }),
   /** AniDB anime by title, through Shoko. */
+  /** Link a library show's folders to an AniDB entry, for the files Shoko has not matched. */
+  linkLibraryShow: (folders: string[], anidbId: number) =>
+    request<{ ok: boolean; folders: string[]; anidb_id: number }>('/api/anime/library/link', {
+      method: 'POST', body: JSON.stringify({ folders, anidb_id: anidbId }),
+    }),
   anidbSearch: (q: string) =>
     request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
   /** How a show's episode numbers are read; kept per show. */

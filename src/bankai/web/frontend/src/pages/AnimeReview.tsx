@@ -347,7 +347,6 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             const reasons = (item.reasons || [item.reason]).filter(Boolean) as string[];
             const german = reasons.some((reason) => reason.includes('German subtitles'));
             const tvdb = reasons.some((reason) => reason.includes('TVDB'));
-            const anidb = reasons.some((reason) => reason.includes('AniDB'));
             const batch = reasons.some((reason) => reason.startsWith('Whole-season batch'));
             const count = item.release_count || 1;
             return (
@@ -482,7 +481,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <Subtitles data-icon='inline-start' /> <span className='truncate'>Erai-raws releases</span>
                       </Button>
 
-                      {(anidb || item.anidb_id) && item.release_title && (
+                      {item.release_title && (
                         <Button
                           variant='outline'
                           className='col-span-2'
