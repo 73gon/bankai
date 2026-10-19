@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, MoreHorizontal } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -14,7 +14,6 @@ import { AnimePoster } from '@/components/AnimePoster';
 import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
 import { Meter, rampParts } from '@/components/ui/meter';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
 import { cn } from '@/lib/utils';
 
@@ -134,7 +133,6 @@ export default function AnimeLibrary() {
   const [showBlacklisted, setShowBlacklisted] = useState(false);
   // Only the shows not yet linked to an AniDB entry.
   const [onlyUnlinked, setOnlyUnlinked] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [view, setView] = useState<View>(storedView);
   const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -553,34 +551,27 @@ export default function AnimeLibrary() {
                           {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.avc_count} to HEVC`}
                         </Button>
                       )}
-                      <Popover open={menuOpen} onOpenChange={setMenuOpen}>
-                        <PopoverTrigger asChild>
-                          <Button size='icon' variant='secondary' className='size-8' aria-label='More actions for this show' title='More actions'>
-                            <MoreHorizontal />
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent align='end' className='flex w-60 flex-col gap-0.5 p-1'>
-                          {active.anidb_id && (
-                            <Button
-                              variant='ghost'
-                              size='sm'
-                              className='justify-start'
-                              onClick={() => { setMenuOpen(false); setLinkFor(active); }}
-                            >
-                              <Search data-icon='inline-start' /> Change AniDB anime
-                            </Button>
-                          )}
-                          <Button
-                            variant='ghost'
-                            size='sm'
-                            className='justify-start text-destructive hover:text-destructive'
-                            onClick={() => { setMenuOpen(false); setRemoveTarget(active); }}
-                            title='Delete this show from disk and never download it again'
-                          >
-                            <Trash2 data-icon='inline-start' /> Remove and blacklist
-                          </Button>
-                        </PopoverContent>
-                      </Popover>
+                      {/* Straight on the header, not in a menu: a dialog opened from a
+                          popover item was dismissed by the popover closing, so
+                          "Remove and blacklist" never asked and never removed. */}
+                      {active.anidb_id && (
+                        <Button
+                          size='sm'
+                          variant='secondary'
+                          onClick={() => setLinkFor(active)}
+                          title='Pick another AniDB entry for this show'
+                        >
+                          <Search data-icon='inline-start' /> Change AniDB anime
+                        </Button>
+                      )}
+                      <Button
+                        size='sm'
+                        variant='destructive'
+                        onClick={() => setRemoveTarget(active)}
+                        title='Delete this show from disk and never download it again'
+                      >
+                        <Trash2 data-icon='inline-start' /> Remove and blacklist
+                      </Button>
                     </div>
                   </div>
                 </div>
