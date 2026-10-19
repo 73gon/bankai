@@ -530,6 +530,9 @@ export default function AnimeLibrary() {
                     )}
                     <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
+                      {/* First, always: every card is an AniDB entry now, so the
+                          tabs' own links no longer stand in for it. */}
+                      {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries; each tab links its own' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
                       {!active.anidb_id && (
                         <Button
                           size='sm'
@@ -539,7 +542,6 @@ export default function AnimeLibrary() {
                           <Link2 data-icon='inline-start' /> Link to AniDB
                         </Button>
                       )}
-                      {active.anidb_id && !Object.keys(active.season_anidb ?? {}).length && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
                       {Boolean(active.avc_count) && (
                         <Button
                           size='sm'
