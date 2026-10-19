@@ -154,6 +154,8 @@ export default function AnimeLibrary() {
   const [searchMatch, setSearchMatch] = useState<AnimeTVDBMatch | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<AnimeLibraryShow | null>(null);
+  const [episodeTarget, setEpisodeTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
+  const [deletingEpisode, setDeletingEpisode] = useState(false);
   // Shows being removed in the background: kept off the page until done.
   const removing = useRef<Set<string>>(new Set());
 
@@ -278,6 +280,23 @@ export default function AnimeLibrary() {
     } finally {
       removing.current.delete(target.key);
       void load();
+    }
+  }
+
+  async function deleteEpisode() {
+    const target = episodeTarget;
+    if (!target) return;
+    setDeletingEpisode(true);
+    try {
+      const result = await api.deleteAnimeEpisodes(target.show.key, [target.episode.path]);
+      toast.success('Deleted ' + target.episode.name + (result.freed_bytes ? ' (' + formatSize(result.freed_bytes) + ')' : ''));
+      setEpisodeTarget(null);
+      await openShow(target.show.key);
+      void load();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setDeletingEpisode(false);
     }
   }
 
@@ -625,9 +644,24 @@ export default function AnimeLibrary() {
                               </div>
                             </td>
                             <td className='px-3 py-2.5 text-right font-mono text-xs tabular-nums'>{entry.missing ? '—' : formatSize(entry.size)}</td>
-                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={!active.tvdb_id || active.numbering === 'anidb'} aria-label='Search for a release' title={active.numbering === 'anidb' ? 'Searching by AniDB episode is not available yet' : 'Search for a release'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : entry.staged ? (
-                              <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>
-                            ) : <Badge variant='success'>In library</Badge>}</td>
+                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={!active.tvdb_id || active.numbering === 'anidb'} aria-label='Search for a release' title={active.numbering === 'anidb' ? 'Searching by AniDB episode is not available yet' : 'Search for a release'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : (
+                              <div className='flex items-center justify-end gap-1.5'>
+                                {entry.staged ? (
+                                  <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>
+                                ) : <Badge variant='success'>In library</Badge>}
+                                <Button
+                                  size='icon'
+                                  variant='ghost'
+                                  className='size-7 text-muted-foreground hover:text-destructive'
+                                  disabled={entry.transfer_status === 'transferring'}
+                                  aria-label={'Delete ' + entry.name}
+                                  title='Delete this episode from disk'
+                                  onClick={() => setEpisodeTarget({ show: active, episode: entry })}
+                                >
+                                  <Trash2 />
+                                </Button>
+                              </div>
+                            )}</td>
                           </tr>
                         ))}</tbody>
                       </table>
@@ -655,6 +689,24 @@ export default function AnimeLibrary() {
             <Button variant='secondary' onClick={() => setRemoveTarget(null)}>Cancel</Button>
             <Button variant='destructive' onClick={() => void removeShow()}>
               <Trash2 data-icon='inline-start' /> Delete and blacklist
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={Boolean(episodeTarget)} onOpenChange={(open) => { if (!open && !deletingEpisode) setEpisodeTarget(null); }}>
+        <DialogContent className='max-w-md'>
+          <DialogHeader>
+            <DialogTitle>Delete episode {episodeTarget?.episode.episode ?? ''}?</DialogTitle>
+            <DialogDescription>
+              This deletes <span className='break-all font-mono text-xs text-foreground'>{episodeTarget?.episode.name}</span>
+              {episodeTarget ? ' (' + formatSize(episodeTarget.episode.size) + ')' : ''} and its subtitle files from disk.
+              The show is not blacklisted; the episode shows as missing afterwards. The file cannot be recovered.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setEpisodeTarget(null)} disabled={deletingEpisode}>Cancel</Button>
+            <Button variant='destructive' onClick={() => void deleteEpisode()} disabled={deletingEpisode}>
+              <Trash2 data-icon='inline-start' /> {deletingEpisode ? 'Deleting…' : 'Delete episode'}
             </Button>
           </DialogFooter>
         </DialogContent>

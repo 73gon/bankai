@@ -1070,6 +1070,11 @@ export const api = {
   /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
   removeAnimeLibraryShow: (key: string, label = '') =>
     runAction<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', { key, label }),
+  /** Delete episode files of one show, subtitles with them; only files the library lists under it. */
+  deleteAnimeEpisodes: (key: string, paths: string[]) =>
+    request<Pick<PurgeResult, 'deleted_files' | 'deleted_folders' | 'freed_bytes'>>('/api/anime/library/episodes/delete', {
+      method: 'POST', body: JSON.stringify({ key, paths }),
+    }),
   upgradeShowToHevc: (tvdbId: number, title: string) =>
     request<{
       ok: boolean;

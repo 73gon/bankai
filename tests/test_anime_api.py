@@ -282,6 +282,40 @@ def test_library_groups_episodes_into_one_show_with_sorted_seasons(
     ]
 
 
+def test_deleting_an_episode_takes_its_subtitles_and_nothing_else(
+    client: TestClient, tmp_path: Path
+) -> None:
+    season = tmp_path / "shows_anime" / "Example Anime" / "Season 01"
+    season.mkdir(parents=True)
+    first, second = (season / f"Example - S01E{n:02d}.mkv" for n in (1, 2))
+    for path in (first, second):
+        path.write_bytes(b"video")
+    subtitle = season / "Example - S01E01.de.ass"
+    subtitle.write_text("subs")
+    stranger = tmp_path / "shows_anime" / "Other Anime" / "Season 01" / "Other - S01E01.mkv"
+    stranger.parent.mkdir(parents=True)
+    stranger.write_bytes(b"video")
+    client.get("/api/anime/library", params={"rescan": True})
+
+    # The paths pick among the show's own files; another show's is refused.
+    refused = client.post(
+        "/api/anime/library/episodes/delete",
+        json={"key": "Example Anime", "paths": [str(stranger)]},
+    )
+    assert refused.status_code == 404
+    assert stranger.exists()
+
+    body = client.post(
+        "/api/anime/library/episodes/delete",
+        json={"key": "Example Anime", "paths": [str(first)]},
+    ).json()
+    assert body["deleted_files"] == 2
+    assert not first.exists() and not subtitle.exists()
+    assert second.exists()
+    detail = client.get("/api/anime/library", params={"show": "Example Anime"}).json()["shows"][0]
+    assert [row["name"] for row in detail["episodes"] if not row.get("missing")] == [second.name]
+
+
 @pytest.mark.parametrize(
     "url",
     [

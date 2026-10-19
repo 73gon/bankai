@@ -2135,6 +2135,63 @@ def create_app() -> Any:
             path="/api/anime/library/remove", work=remove,
         )
 
+    @app.post("/api/anime/library/episodes/delete")
+    async def anime_library_delete_episodes(req: dict) -> dict:
+        """Delete episode files of one library show, with their subtitle sidecars.
+
+        The paths only pick among the files the library itself lists under the
+        show; a path it does not list is refused rather than deleted.
+        """
+        from bankai.web import library_walk, shoko
+
+        key = str(req.get("key") or "").strip()
+        wanted = {str(raw) for raw in req.get("paths") or [] if str(raw).strip()}
+        if not key or not wanted:
+            raise HTTPException(status_code=422, detail="key and paths are required")
+        listing = await _anime_library_payload(show=key)
+        episodes = {
+            str(row["path"]): row
+            for show in listing.get("shows") or []
+            for row in show.get("episodes") or []
+            if row.get("path") and not row.get("missing")
+        }
+        unknown = sorted(wanted - set(episodes))
+        if unknown:
+            raise HTTPException(
+                status_code=404, detail="not an episode of this show: " + Path(unknown[0]).name
+            )
+
+        def files_with_sidecars() -> list[Path]:
+            files: list[Path] = []
+            for raw in sorted(wanted):
+                path = Path(raw)
+                files.append(path)
+                with suppress(OSError):
+                    files.extend(
+                        sidecar
+                        for sidecar in path.parent.iterdir()
+                        if sidecar.name.startswith(path.stem + ".")
+                        and sidecar.suffix.casefold() in {".ass", ".ssa", ".srt", ".sub", ".vtt"}
+                    )
+            return files
+
+        result = await asyncio.to_thread(
+            erai_mod._delete_series_files,
+            english_title="",
+            delete_files=True,
+            extra_folders=None,
+            extra_files=await asyncio.to_thread(files_with_sidecars),
+        )
+        for raw in wanted:
+            # A staged copy keeps a tombstone, as in the movie library.
+            if episodes[raw].get("staged"):
+                review_mod.set_stage(raw, "deleted")
+        library_walk.mark_stale()
+        if shoko.configured():
+            with suppress(Exception):
+                await shoko.forget_missing_files()
+        return result
+
     @app.post("/api/anime/library/upgrade-hevc")
     async def anime_library_upgrade_hevc(req: dict) -> dict:
         """Queue HEVC replacements for one show's published AVC episodes."""
