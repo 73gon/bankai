@@ -2156,6 +2156,34 @@ def create_app() -> Any:
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    @app.post("/api/anime/collections/title")
+    async def anime_collection_title(req: dict) -> dict:
+        """Name and picture a collection after one of its entries, in Shoko and so in Jellyfin.
+
+        The card is looked up by its key, and the entry must be one Shoko holds
+        in that card's own group: the request picks, the library decides.
+        """
+        from bankai.web import anime_collections
+
+        key = str(req.get("key") or "").strip()
+        aid = req.get("anidb_id")
+        if not key or not str(aid or "").isdigit():
+            raise HTTPException(status_code=422, detail="key and anidb_id are required")
+        listing = await _anime_library_payload(show=key)
+        show = next((row for row in listing.get("shows") or [] if row.get("collection_id")), None)
+        catalog = await _catalog()
+        entry = catalog.entries.get(int(aid)) if catalog is not None else None
+        if show is None or entry is None or entry.series_id is None or entry.group_id != show["collection_id"]:
+            raise HTTPException(status_code=404, detail="that entry is not one of this collection's in Shoko")
+        try:
+            group = await anime_collections.set_title(show["collection_id"], entry.series_id)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Shoko did not take it: {exc}") from exc
+        # Shoko's name for the group follows; the next page load reads it.
+        snaps["shoko_catalog"].invalidate()
+        snaps["anime_library"].invalidate()
+        return {"ok": True, "name": (group or {}).get("Name"), "anidb_id": int(aid)}
+
     @app.post("/api/anime/library/link")
     async def anime_library_link(req: dict) -> dict:
         """Link a show's folders to an AniDB entry, for the files Shoko has not matched."""

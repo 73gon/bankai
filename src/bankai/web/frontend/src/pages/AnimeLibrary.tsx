@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -152,6 +153,7 @@ export default function AnimeLibrary() {
   const [removeTarget, setRemoveTarget] = useState<AnimeLibraryShow | null>(null);
   const [episodeTarget, setEpisodeTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
   const [deletingEpisode, setDeletingEpisode] = useState(false);
+  const [titling, setTitling] = useState(false);
   // Shows being removed in the background: kept off the page until done.
   const removing = useRef<Set<string>>(new Set());
 
@@ -266,6 +268,22 @@ export default function AnimeLibrary() {
     } finally {
       removing.current.delete(target.key);
       void load();
+    }
+  }
+
+  /** Name the collection after one of its entries; Shoko renames the group, Jellyfin follows. */
+  async function setTitle(show: AnimeLibraryShow, anidbId: number) {
+    setTitling(true);
+    try {
+      const result = await api.setCollectionTitle(show.key, anidbId);
+      toast.success('Collection now shown as ' + (result.name || 'the chosen entry'));
+      await load();
+      // The card's key is its name, which just changed.
+      await openShow(result.name || show.key);
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setTitling(false);
     }
   }
 
@@ -533,6 +551,29 @@ export default function AnimeLibrary() {
                       {/* First, always: every card is an AniDB entry now, so the
                           tabs' own links no longer stand in for it. */}
                       {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries; each tab links its own' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
+                      {(active.collection_entries?.filter((entry) => entry.owned).length ?? 0) > 1 && (
+                        <Select
+                          value={String(active.anidb_id ?? '')}
+                          onValueChange={(value) => void setTitle(active, Number(value))}
+                          disabled={titling}
+                        >
+                          <SelectTrigger
+                            data-size='sm'
+                            className='w-72'
+                            aria-label='Which entry the collection is shown as'
+                            title='The entry this collection is named and pictured after, here and in Jellyfin'
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {active.collection_entries!.filter((entry) => entry.owned).map((entry) => (
+                                <SelectItem key={entry.anidb_id} value={String(entry.anidb_id)}>Shown as: {entry.title}</SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      )}
                       {!active.anidb_id && (
                         <Button
                           size='sm'

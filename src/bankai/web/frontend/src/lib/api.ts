@@ -558,6 +558,10 @@ export interface AnimeLibraryShow {
   blacklisted?: boolean;
   /** Each tab's AniDB entry. */
   season_anidb?: Record<string, Array<{ anidb_id: number; title: string }>>;
+  /** The Shoko group the card is: its collection, null for a card that is no group. */
+  collection_id?: number | null;
+  /** The collection's entries in order; the owned ones can name it. */
+  collection_entries?: Array<{ anidb_id: number; title: string; owned: boolean }>;
   downloaded_count: number;
   total_count: number;
   completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
@@ -1052,6 +1056,11 @@ export const api = {
     }),
   anidbSearch: (q: string) =>
     request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
+  /** Name and picture a collection after one of its entries, in Shoko and so in Jellyfin. */
+  setCollectionTitle: (key: string, anidbId: number) =>
+    request<{ ok: boolean; name: string | null; anidb_id: number }>('/api/anime/collections/title', {
+      method: 'POST', body: JSON.stringify({ key, anidb_id: anidbId }),
+    }),
   /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
   removeAnimeLibraryShow: (key: string, label = '') =>
     runAction<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', { key, label }),

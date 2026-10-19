@@ -25,7 +25,7 @@ from bankai.logging import get_logger
 from bankai.metadata.tvdb import TVDBClient, TVDBEpisode
 from bankai.processor.naming import sanitise
 from bankai.torrent.matcher import parse_se
-from bankai.web import anime, discover, erai
+from bankai.web import anime, anime_collections, discover, erai
 
 log = get_logger(__name__)
 
@@ -1041,18 +1041,68 @@ async def group_shows(
         slot["folders"] = slot["titles"]
         slot["key"] = _display_title(slot["titles"])
 
-    # An AniDB entry the automation took with nothing on disk still gets a
-    # card -- unless it was blacklisted, which is how one removed from the
-    # library leaves it. One read of the release state for the whole page: it
-    # is a fourteen megabyte file.
+    # One read of the release state for the whole page: it is a fourteen
+    # megabyte file.
     state = await asyncio.to_thread(erai._load_state)
     blocked = erai._policy_anidb_ids(await asyncio.to_thread(erai._load_policies))
+
+    # Collections: the cards of one Shoko group are one card, named after the
+    # group, and the group's sequels and prequels not on disk are its missing
+    # tabs. Without Shoko's groups, cards stay as their folders made them.
+    collections = anime_collections.assign(catalog)
+    groups = getattr(catalog, "groups", None) or {}
+    if collections.of:
+        regrouped: dict[str, dict] = {}
+        for identity, slot in merged.items():
+            aids = slot["aids"]
+            primary = min(aids, key=lambda aid: (-aids[aid], aid)) if aids else None
+            group = collections.of.get(primary) if primary is not None else None
+            if group is None:
+                regrouped[identity] = slot
+                continue
+            target = regrouped.setdefault(
+                f"group:{group}",
+                {"titles": [], "folders": [], "files": [], "aids": Counter(), "collection_id": group},
+            )
+            target["titles"].extend(slot["titles"])
+            target["folders"].extend(slot["folders"])
+            target["files"].extend(slot["files"])
+            target["aids"].update(slot["aids"])
+        merged = regrouped
+        on_disk = {aid for slot in merged.values() for aid in slot["aids"]}
+        for aid, group in sorted(collections.of.items()):
+            slot = merged.get(f"group:{group}")
+            if slot is not None and aid not in on_disk and aid not in blocked:
+                slot["aids"][aid] = 0
+        keys: set[str] = set()
+        for identity, slot in merged.items():
+            group = groups.get(slot.get("collection_id"))
+            if group is None:
+                keys.add(_name(slot["key"]))
+                continue
+            slot["main_aid"] = group.main_aid
+            # The group's name is the card's; its key must still be its own.
+            key = group.name if _name(group.name) not in keys else f"{group.name} ({group.id})"
+            slot["key"] = key
+            slot["titles"] = sorted(dict.fromkeys([key, *slot["titles"]]))
+            slot["folders"] = sorted(dict.fromkeys(slot["folders"]))
+            keys.add(_name(key))
+    else:
+        keys = {_name(slot["key"]) for slot in merged.values()}
+
+    # An AniDB entry the automation took with nothing on disk still gets a
+    # card -- its collection's, if it has one -- unless it was blacklisted,
+    # which is how one removed from the library leaves it.
     covered = {aid for slot in merged.values() for aid in slot["aids"]}
-    keys = {_name(slot["key"]) for slot in merged.values()}
     for raw, record in (state.get("anime") or {}).items():
         if not str(raw).isdigit() or int(raw) in covered or int(raw) in blocked:
             continue
         aid = int(raw)
+        home = merged.get(f"group:{collections.of.get(aid)}")
+        if home is not None:
+            home["aids"][aid] = 0
+            covered.add(aid)
+            continue
         anime_entry = known.get(aid)
         names = [
             (anime_entry.english_title or anime_entry.title) if anime_entry else None,
@@ -1147,12 +1197,16 @@ async def group_shows(
         year = None
         anidb_id = None
         if card is not None:
-            # The first entry names the card and lends it its cover: AniDB's
-            # own, from Shoko or else anime-offline-database.
-            anidb_id = card["order"][0]
+            # The collection's title entry names the card and lends it its
+            # cover, else the first entry: AniDB's own cover, from Shoko or
+            # else anime-offline-database.
+            main = slot.get("main_aid")
+            anidb_id = main if main in card["order"] else card["order"][0]
             entry = catalog.entries.get(anidb_id) if catalog is not None else None
             anime_entry = known.get(anidb_id)
-            if entry is not None or anime_entry is not None:
+            if slot.get("collection_id") is not None:
+                display_title = title  # the collection's own name
+            elif entry is not None or anime_entry is not None:
                 display_title = _entry_name(anidb_id, catalog, known)
             if anime_entry is not None and not _same_name(anime_entry.title, display_title):
                 source_title = anime_entry.title
@@ -1168,6 +1222,17 @@ async def group_shows(
             "source_title": source_title,
             "anidb_id": anidb_id,
             "anidb_ids": card["order"] if card is not None else [],
+            # The Shoko group the card is, and its entries: the ones Shoko
+            # holds can be picked to name and picture the collection.
+            "collection_id": slot.get("collection_id"),
+            "collection_entries": [
+                {
+                    "anidb_id": aid,
+                    "title": _entry_name(aid, catalog, known),
+                    "owned": catalog is not None and aid in catalog.entries,
+                }
+                for aid in (card["order"] if card is not None else [])
+            ],
             "avc_count": sum(
                 1
                 for row in merged_episodes["episodes"]

@@ -5,6 +5,10 @@ and every episode -- missing ones included -- with the files linked to it.
 Together they say, for each file on disk, which AniDB entry and episode it
 is, and for each entry, its whole AniDB episode list. The episode listing is
 ~15 MB and takes Shoko ~10 s, so it is read in the background and held.
+
+Beside them, Shoko's groups -- the collections a show's seasons are kept
+together in, which Jellyfin shows through Shokofin -- and the AniDB relations
+between entries, sequels and prequels among them.
 """
 
 from __future__ import annotations
@@ -35,6 +39,20 @@ class Entry:
     poster_url: str | None
     episodes: tuple[EntryEpisode, ...]
     tvdb_ids: tuple[int, ...] = ()
+    # Shoko's own id for the series, and the top-level group it is in.
+    series_id: int | None = None
+    group_id: int | None = None
+
+
+@dataclass(frozen=True)
+class Group:
+    """One Shoko group: the seasons of a show kept together as one collection."""
+
+    id: int
+    name: str
+    # The entry the group is named and pictured after.
+    main_aid: int | None
+    has_custom_name: bool = False
 
 
 @dataclass
@@ -43,6 +61,10 @@ class Catalog:
     # Absolute file path -> the (AniDB id, episode number) it is linked to.
     # Regular episodes only; a double episode's file is linked to both.
     files: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+    groups: dict[int, Group] = field(default_factory=dict)
+    # (AniDB id, related AniDB id, AniDB relation type: "Sequel", "SideStory", ...).
+    # Known for the entries Shoko holds; their relatives need not be held.
+    relations: list[tuple[int, int, str]] = field(default_factory=list)
 
     def entry_of(self, path: str) -> int | None:
         links = self.files.get(path)
@@ -60,10 +82,11 @@ def _title(episode: dict) -> str | None:
     return anidb.get("Title") or episode.get("Name") or None
 
 
-def build(series: Any, episodes: Any) -> Catalog:
-    """The catalogue, from the two listings as Shoko returns them; pure."""
+def build(series: Any, episodes: Any, groups: Any = None, relations: Any = None) -> Catalog:
+    """The catalogue, from the listings as Shoko returns them; pure."""
     catalog = Catalog()
     names: dict[int, tuple[str, str | None, tuple[int, ...]]] = {}
+    placed: dict[int, tuple[int | None, int | None]] = {}
     for row in _rows(series):
         ids = row.get("IDs") or {}
         aid = ids.get("AniDB")
@@ -75,6 +98,11 @@ def build(series: Any, episodes: Any) -> Catalog:
         ) or next((shoko.poster_path(image) for image in posters if shoko.poster_path(image)), None)
         tvdb = tuple(int(value) for value in ids.get("TvDB") or [] if str(value).isdigit())
         names[aid] = (str(row.get("Name") or aid), poster, tvdb)
+        group = ids.get("TopLevelGroup") or ids.get("ParentGroup")
+        placed[aid] = (
+            ids.get("ID") if isinstance(ids.get("ID"), int) else None,
+            group if isinstance(group, int) else None,
+        )
 
     lists: dict[int, dict[int, EntryEpisode]] = {aid: {} for aid in names}
     for row in _rows(episodes):
@@ -92,15 +120,34 @@ def build(series: Any, episodes: Any) -> Catalog:
                     catalog.files.setdefault(str(path), []).append((aid, number))
     for aid, episodes_of in lists.items():
         title, poster, tvdb = names.get(aid, (str(aid), None, ()))
+        series_id, group_id = placed.get(aid, (None, None))
         catalog.entries[aid] = Entry(
             aid=aid,
             title=title,
             poster_url=poster,
             episodes=tuple(episodes_of[n] for n in sorted(episodes_of)),
             tvdb_ids=tvdb,
+            series_id=series_id,
+            group_id=group_id,
         )
     for links in catalog.files.values():
         links.sort(key=lambda link: link[1])
+    for row in _rows(groups):
+        ids = row.get("IDs") or {}
+        if not isinstance(ids.get("ID"), int) or ids.get("ParentGroup"):
+            continue  # sub-groups are part of their top-level group
+        main = ids.get("MainAnime")
+        catalog.groups[ids["ID"]] = Group(
+            id=ids["ID"],
+            name=str(row.get("Name") or ids["ID"]),
+            main_aid=main if isinstance(main, int) else None,
+            has_custom_name=bool(row.get("HasCustomName")),
+        )
+    for row in _rows(relations):
+        left = (row.get("IDs") or {}).get("AniDB")
+        right = (row.get("RelatedIDs") or {}).get("AniDB")
+        if isinstance(left, int) and isinstance(right, int) and row.get("Type"):
+            catalog.relations.append((left, right, str(row["Type"])))
     return catalog
 
 
@@ -145,6 +192,8 @@ async def fetch() -> Catalog | None:
     if not shoko.configured():
         return None
     series = await shoko._get("/api/v3/Series", pageSize=0)
+    groups = await shoko._get("/api/v3/Group", pageSize=0, includeEmpty="false")
+    relations = await shoko._get("/api/v3/Series/AniDB/Relations", pageSize=0)
     async with shoko._client(timeout=120.0) as client:
         response = await client.get(
             "/api/v3/Episode",
@@ -160,4 +209,4 @@ async def fetch() -> Catalog | None:
     response.raise_for_status()
     # Parsing 15 MB of JSON is best kept off the event loop.
     episodes = await asyncio.to_thread(response.json)
-    return await asyncio.to_thread(build, series, episodes)
+    return await asyncio.to_thread(build, series, episodes, groups, relations)
