@@ -330,24 +330,31 @@ def test_rss_setting_rejects_non_erai_nyaa_feeds(client: TestClient, url: str) -
     assert response.status_code == 422
 
 
-def test_queue_cover_uses_canonical_tvdb_id(
+def test_queue_cover_comes_from_the_job_s_anidb_entry(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from bankai.web import anime_library
+    """A season's own cover, not one poster for every season of the show."""
+    from bankai.metadata import anidb, anidb_art
 
-    anime_library._CACHE.clear()
+    entry = anidb.AniDBAnime(
+        aid=17765, title="Bleach: Sennen Kessen Hen - Ketsubetsu Tan",
+        english_title="Bleach: Thousand-Year Blood War - The Separation", titles=(),
+    )
 
-    async def metadata(title, tvdb_id):
-        assert tvdb_id == 74796
-        return {"english_title": "Bleach", "poster_url": "https://example.com/bleach.jpg"}
+    async def index():
+        return anidb._Index(anime={entry.aid: entry}, exact={}, loose={}, by_tvdb={})
 
+    monkeypatch.setattr(anidb, "index", index)
+    monkeypatch.setattr(
+        anidb_art, "cover", lambda aid: "https://example.com/tybw2.jpg" if int(aid) == 17765 else None
+    )
     monkeypatch.setattr(
         "bankai.web.jobs.anime_snapshot",
-        lambda: [{"id": "anime", "title": "Bleach S17E14", "tvdb_id": "74796"}],
+        lambda: [{"id": "anime", "title": "Bleach - 02", "anidb_id": "17765"}],
     )
-    monkeypatch.setattr(anime_library, "show_metadata", metadata)
     row = client.get("/api/anime/queue").json()["jobs"][0]
-    assert row["poster_url"] == "https://example.com/bleach.jpg" and row["series_title"] == "Bleach"
+    assert row["poster_url"] == "https://example.com/tybw2.jpg"
+    assert row["series_title"] == "Bleach: Thousand-Year Blood War - The Separation"
 
 
 @pytest.mark.parametrize(
@@ -397,23 +404,25 @@ def test_staged_and_duplicate_files_do_not_inflate_download_count():
     assert result["episodes"][0]["path"] == "final"
 
 
-def test_missing_episode_search_reverses_anidb_part_offset(monkeypatch):
+def test_missing_episode_search_keeps_only_that_anidb_episode(monkeypatch):
+    """Searched by the entry's names, each result checked to be this very episode."""
     from dataclasses import replace
     from xml.etree import ElementTree as ET
 
-    from bankai.metadata import anime_mapping
-    from bankai.metadata.tvdb import TVDBEpisode
+    from bankai.metadata import anidb
     from bankai.web import anime, anime_library, erai
 
-    part_name = "Bleach Sennen Kessen Hen Ketsubetsu Tan"
-    part = anime_mapping.Part(
-        74796, 17765, ET.fromstring('<anime defaulttvdbseason="17" episodeoffset="13"/>')
+    table = anidb.build_index(
+        ET.fromstring(
+            """<animetitles>
+  <anime aid="17765"><title xml:lang="x-jat" type="main">Bleach: Sennen Kessen Hen - Ketsubetsu Tan</title></anime>
+</animetitles>"""
+        ),
+        ET.fromstring("<anime-list/>"),
     )
-    roster = [TVDBEpisode(17, 14, 380), TVDBEpisode(17, 15, 381), TVDBEpisode(1, 1, 1)]
-    match = anime.AnimeTVDBMatch(74796, "show", "Bleach", aliases=(part_name,))
     sample = anime.NyaaEntry(
         1,
-        f"[Erai-raws] {part_name} - 01 [1080p][MultiSub]",
+        "[Erai-raws] Bleach: Sennen Kessen Hen - Ketsubetsu Tan - 01 [1080p][MultiSub]",
         "https://nyaa.si/download/1.torrent",
         "https://nyaa.si/view/1",
         "magnet:?xt=urn:btih:" + "1" * 40,
@@ -434,20 +443,8 @@ def test_missing_episode_search_reverses_anidb_part_offset(monkeypatch):
     )
     searched = []
 
-    async def metadata(*args):
-        return match
-
-    async def episodes(*args):
-        return roster
-
-    async def titles(*args):
-        return [part_name]
-
-    async def parts(*args):
-        return [part]
-
-    async def candidates(*args, **kwargs):
-        return [match]
+    async def index():
+        return table
 
     async def fetch(client, query, *args):
         searched.append(query)
@@ -456,18 +453,15 @@ def test_missing_episode_search_reverses_anidb_part_offset(monkeypatch):
             replace(sample, id=2, info_hash="2" * 40, title=sample.title.replace(" - 01", " - 02")),
         ]
 
-    monkeypatch.setattr(anime, "series_metadata", metadata)
-    monkeypatch.setattr(anime_library, "episode_roster", episodes)
-    monkeypatch.setattr(anime_mapping, "related_titles", titles)
-    monkeypatch.setattr(anime_mapping, "anidb_parts", parts)
-    monkeypatch.setattr(anime, "tvdb_candidates", candidates)
+    monkeypatch.setattr(anidb, "index", index)
     monkeypatch.setattr(anime, "_fetch_rss", fetch)
     monkeypatch.setattr(erai, "_load_state", erai._default_state)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    result = asyncio.run(anime_library.search_episode(74796, 17, 14))
-    assert any(part_name in query and "- 01" in query for query in searched)
+    result = asyncio.run(anime_library.search_episode(17765, 1))
+    assert searched == ['"Bleach: Sennen Kessen Hen - Ketsubetsu Tan" "- 01"']
     assert len(result["items"]) == 1
-    assert (result["items"][0]["season"], result["items"][0]["episode"]) == (17, 14)
+    assert result["items"][0]["anidb"]["anidb_id"] == 17765
+    assert result["items"][0]["episode"] == 1
 
 
 def test_retry_held_endpoint_returns_scheduled_count(

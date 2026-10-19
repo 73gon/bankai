@@ -14,11 +14,18 @@ export function AniDBLinkDialog({
   name,
   onClose,
   onPick,
+  title = 'Link to AniDB',
+  description = "Every release named after any of the anime's AniDB titles is matched from then on.",
+  action = 'Link',
 }: {
   /** What to search for first; null closes the dialog. */
   name: string | null;
   onClose: () => void;
   onPick: (anime: AniDBAnime) => Promise<void>;
+  title?: string;
+  description?: string;
+  /** The pick button's label. */
+  action?: string;
 }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<AniDBAnime[]>([]);
@@ -59,10 +66,9 @@ export function AniDBLinkDialog({
       {/* Wide: AniDB titles run long, and the whole of one is often what tells two entries apart. */}
       <DialogContent className='flex max-h-[85dvh] w-[min(56rem,calc(100vw-2rem))] max-w-4xl flex-col'>
         <DialogHeader>
-          <DialogTitle>Link to AniDB</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            Search by romaji or English title, or paste an AniDB id or anidb.net link.
-            Every release named after any of the anime&apos;s AniDB titles is matched from then on.
+            Search by romaji or English title, or paste an AniDB id or anidb.net link. {description}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -96,7 +102,7 @@ export function AniDBLinkDialog({
                     </p>
                   </div>
                   <Button size='sm' onClick={() => void pick(anime)} disabled={picking !== null}>
-                    <Check data-icon='inline-start' /> {picking === anime.anidb_id ? 'Linking…' : 'Link'}
+                    <Check data-icon='inline-start' /> {picking === anime.anidb_id ? 'Working…' : action}
                   </Button>
                 </li>
               ))}

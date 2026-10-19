@@ -3,7 +3,7 @@
 Fresh releases come from the uploader RSS feed. Historical backfill completes
 2160p and 1080p HEVC catalogue passes before allowing 720p HEVC for logical episodes
 that never appeared in either high-quality pass. Nothing is queued until the release is
-HEVC, the Nyaa detail page explicitly lists German subtitles, and TVDB resolves without
+HEVC, the Nyaa detail page explicitly lists German subtitles, and AniDB resolves without
 ambiguity.
 """
 
@@ -24,7 +24,6 @@ from contextvars import ContextVar
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urljoin
@@ -37,7 +36,6 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.metadata import anidb as anidb_mod
 from bankai.metadata import anime_mapping
-from bankai.processor.anime import EpisodeIdentity
 from bankai.web import anime as anime_mod
 from bankai.web import erai_site, updates
 
@@ -101,7 +99,6 @@ _STATE_LOCK = _StateLock()
 _CYCLE_LOCK = asyncio.Lock()
 _STOP = asyncio.Event()
 _GIB = 1024**3
-_ROSTERS: ContextVar[dict | None] = ContextVar("erai_rosters", default=None)
 _ADMISSION: ContextVar[dict | None] = ContextVar("erai_admission", default=None)
 _DISK_INDEX: ContextVar[dict | None] = ContextVar("erai_disk_index", default=None)
 _GERMAN_LINE = re.compile(
@@ -161,22 +158,8 @@ def _series_policy(release_title: str) -> dict[str, Any] | None:
 
 
 def _per_entry(row: dict[str, Any]) -> bool:
-    """A decision on one AniDB entry, rather than a whole show by name or TVDB id."""
+    """A decision on one AniDB entry, rather than a whole show by name."""
     return str(row.get("anidb_id") or "").isdigit()
-
-
-def _policy_tvdb_ids(policies: dict[str, Any] | None = None) -> set[str]:
-    """TVDB ids of blacklisted shows, from decisions made before AniDB entries.
-
-    A TVDB id spans every season, so only a decision that was never tied to
-    one AniDB entry blocks by it; blocking an AniDB entry blocks that entry.
-    """
-    rows = policies if policies is not None else _load_policies()
-    return {
-        str(row["tvdb_id"])
-        for row in rows.values()
-        if row.get("mode") == "blacklisted" and row.get("tvdb_id") and not _per_entry(row)
-    }
 
 
 _SHOW_KEYS_CACHE: tuple[tuple, tuple[frozenset[str], frozenset[str]]] | None = None
@@ -273,39 +256,16 @@ def _title_blacklisted(
     return _release_anidb_id(release_title, mappings=mappings) in blocked
 
 
-def _release_tvdb_id(release: dict[str, Any], mappings: dict[str, Any]) -> str | None:
-    """Best known TVDB id for a release, without going back to the network.
-
-    A release resolved by discovery carries its identity in the canonical key.
-    One held before resolution does not, but the series it belongs to has
-    usually been resolved through some other release, so the saved mapping for
-    its title covers it.
-    """
-    canonical = str(release.get("canonical") or "")
-    head = canonical.split("|")[0]
-    if head.startswith("anidb:"):
-        # Identified on AniDB; the TVDB id, where Anime-Lists knows one, rides
-        # along on the record.
-        return str(release["tvdb_id"]) if release.get("tvdb_id") else None
-    if head:
-        return head
-    saved = mappings.get(_mapping_key(str(release.get("title") or "")))
-    tvdb_id = (saved or {}).get("tvdb_id")
-    return str(tvdb_id) if tvdb_id else None
-
-
 def _is_blacklisted_release(
     release: dict[str, Any],
     *,
     policies: dict[str, Any],
     mappings: dict[str, Any],
-    blacklisted_ids: set[str] | None = None,
 ) -> bool:
     """Does this release belong to an anime the user has blacklisted?
 
     An AniDB entry blocks exactly that entry -- one season or cour, as AniDB
-    splits them. Decisions from before AniDB entries block by TVDB id, which
-    spans the whole show.
+    splits them. Decisions from before AniDB entries block the show by name.
     """
     title = str(release.get("title") or "")
     if _title_blacklisted(title, policies, mappings=mappings):
@@ -315,27 +275,7 @@ def _is_blacklisted_release(
         aid = _release_anidb_id(title, canonical=str(release["canonical"]), mappings=mappings)
         if aid in blocked:
             return True
-    ids = _policy_tvdb_ids(policies) if blacklisted_ids is None else blacklisted_ids
-    if not ids:
-        return False
-    tvdb_id = _release_tvdb_id(release, mappings)
-    return bool(tvdb_id and tvdb_id in ids)
-
-
-async def _resolve_series_tvdb_id(source_title: str, key: str) -> str | None:
-    """Identify the series behind a held release, for the policy record."""
-    saved = (_load_mappings().get(key) or {}).get("tvdb_id")
-    if saved:
-        return str(saved)
-    try:
-        from bankai.web.anime_library import show_metadata
-
-        metadata = await show_metadata(source_title, None)
-    except Exception as exc:
-        log.warning("Could not identify %s for blacklisting: %s", source_title, exc)
-        return None
-    tvdb_id = (metadata or {}).get("tvdb_id")
-    return str(tvdb_id) if tvdb_id else None
+    return False
 
 
 def _card_key(
@@ -363,14 +303,11 @@ def review_items(
     groups: dict[str, dict[str, Any]] = {}
     policies = _load_policies()
     mappings = _load_mappings()
-    blacklisted_ids = _policy_tvdb_ids(policies)
     recent = {item.get("info_hash"): item for item in state.get("held", [])}
     for info_hash, release in state.get("releases", {}).items():
         if release.get("status") != "held" or not release.get("title"):
             continue
-        if _is_blacklisted_release(
-            release, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
-        ):
+        if _is_blacklisted_release(release, policies=policies, mappings=mappings):
             continue
         saved_entry = release.get("entry") or {}
         item = {
@@ -406,8 +343,6 @@ def review_items(
                         anidb_id=entry.aid,
                         anidb_title=entry.title,
                         english_title=entry.english_title,
-                        # For the cover only: TVDB has one per show, not per entry.
-                        tvdb_id=entry.tvdb_id,
                     )
         member = _mapping_key(item["title"])
         if member not in row["keys"]:
@@ -525,17 +460,13 @@ def blacklist_items(policies: dict[str, Any] | None = None) -> list[dict[str, An
         row["keys"].append(key)
         if len(str(value.get("source_title") or "")) < len(str(row.get("source_title") or "")):
             row["source_title"] = value.get("source_title")
-        for field in ("tvdb_id", "anidb_id", "anidb_title", "anidb_poster_url", "english_title"):
+        for field in ("anidb_id", "anidb_title", "anidb_poster_url", "english_title"):
             row[field] = row.get(field) or value.get(field)
     # Two names of one anime -- romaji and English, or two AniDB titles --
-    # are still one show when they share an AniDB or TVDB id.
+    # are still one show when they share an AniDB id.
     merged: dict[str, dict[str, Any]] = {}
     for row in groups.values():
-        identity = (
-            f"anidb:{row['anidb_id']}" if row.get("anidb_id")
-            else f"tvdb:{row['tvdb_id']}" if row.get("tvdb_id")
-            else f"name:{row['key']}"
-        )
+        identity = f"anidb:{row['anidb_id']}" if row.get("anidb_id") else f"name:{row['key']}"
         slot = merged.get(identity)
         if slot is None:
             merged[identity] = row
@@ -543,7 +474,7 @@ def blacklist_items(policies: dict[str, Any] | None = None) -> list[dict[str, An
         slot["keys"] = sorted({*slot["keys"], *row["keys"]})
         if len(str(row.get("source_title") or "")) < len(str(slot.get("source_title") or "")):
             slot["source_title"] = row.get("source_title")
-        for field in ("tvdb_id", "anidb_id", "anidb_title", "anidb_poster_url", "english_title"):
+        for field in ("anidb_id", "anidb_title", "anidb_poster_url", "english_title"):
             slot[field] = slot.get(field) or row.get(field)
     for row in merged.values():
         row["linked"] = bool(row.get("anidb_id"))
@@ -565,7 +496,7 @@ def link_blacklist(key: str, anime: dict[str, Any]) -> dict[str, Any]:
     """Tie a blacklist card to its AniDB anime.
 
     From then on every release named after any of the anime's AniDB titles is
-    blacklisted, which is what makes a card that no TVDB search recognised
+    blacklisted, which is what makes a card that no title search recognised
     actually match something.
     """
     with _STATE_LOCK:
@@ -586,11 +517,10 @@ def link_blacklist(key: str, anime: dict[str, Any]) -> dict[str, Any]:
         # Anything already held that the new titles now cover goes too.
         state = _load_state()
         mappings = _load_mappings()
-        ids = _policy_tvdb_ids(policies)
         caught = 0
         for row in state.get("releases", {}).values():
             if row.get("status") in {"held", "queued"} and _is_blacklisted_release(
-                row, policies=policies, mappings=mappings, blacklisted_ids=ids
+                row, policies=policies, mappings=mappings
             ):
                 row.update(status="blacklisted", reason="Series blacklisted by user")
                 caught += 1
@@ -604,7 +534,7 @@ async def blacklist_show(
     *,
     title: str,
     source_title: str,
-    tvdb_id: int | str | None,
+    anidb_ids: list[int] | None,
     folders: list[Path],
     anime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -612,9 +542,8 @@ async def blacklist_show(
 
     A library card is a whole show, every season of it on disk, so every
     AniDB entry of it is blocked -- each as its own blacklist card, which can
-    be restored on its own. The entries come from Anime-Lists through the
-    show's TVDB id, plus the one Shoko matched. Only a show neither can place
-    is blocked by name and TVDB id as a whole.
+    be restored on its own. The entries are the card's own, plus the one
+    Shoko matched. Only a show neither can place is blocked by name.
     """
     name = source_title or title
     key = _show_name_key(name)
@@ -623,18 +552,16 @@ async def blacklist_show(
     index = await anidb_mod.index()
     entries: dict[int, anidb_mod.AniDBAnime] = {}
     if index is not None:
-        if tvdb_id and str(tvdb_id).isdigit():
-            entries.update((e.aid, e) for e in index.by_tvdb.get(int(tvdb_id), []))
-        if anime and index.anime.get(int(anime["anidb_id"])):
-            entries[int(anime["anidb_id"])] = index.anime[int(anime["anidb_id"])]
-    await asyncio.to_thread(_blacklist_show, key, name, title, tvdb_id, entries)
+        wanted = [int(aid) for aid in anidb_ids or [] if str(aid).isdigit()]
+        if anime and str(anime.get("anidb_id") or "").isdigit():
+            wanted.append(int(anime["anidb_id"]))
+        entries.update((aid, index.anime[aid]) for aid in wanted if aid in index.anime)
+    await asyncio.to_thread(_blacklist_show, key, name, title, entries)
     purged = await purge_series(key, english_title=title, delete_files=True, extra_folders=folders)
     return {"ok": True, "key": key, "entries": sorted(entries), **purged}
 
 
-def _blacklist_show(
-    key: str, name: str, title: str, tvdb_id: int | str | None, entries: dict[int, Any]
-) -> None:
+def _blacklist_show(key: str, name: str, title: str, entries: dict[int, Any]) -> None:
     """The state half of blacklist_show, off the event loop."""
     with _STATE_LOCK:
         policies = _load_policies()
@@ -646,24 +573,22 @@ def _blacklist_show(
                 "mode": "blacklisted",
                 "source_title": name,
                 "english_title": title,
-                "tvdb_id": str(tvdb_id) if tvdb_id else None,
                 "origin": "library",
                 "updated_at": time.time(),
             }
         _save_policies(policies)
         state = _load_state()
         mappings = _load_mappings()
-        ids = _policy_tvdb_ids(policies)
         requests = _load_retry_requests()
         for info_hash, row in state.get("releases", {}).items():
             if row.get("status") not in {"blacklisted", "done", "existing"} and (
-                _is_blacklisted_release(row, policies=policies, mappings=mappings, blacklisted_ids=ids)
+                _is_blacklisted_release(row, policies=policies, mappings=mappings)
             ):
                 row.update(status="blacklisted", reason="Series blacklisted by user")
                 requests.pop(info_hash, None)
         # Tracked, it would come back as an empty library card.
-        if tvdb_id:
-            state.get("series", {}).pop(str(tvdb_id), None)
+        for aid in entries:
+            state.get("anime", {}).pop(str(aid), None)
         _prune_holds(state)
         _save_retry_requests(requests)
         _save_state(state)
@@ -752,13 +677,10 @@ def _review_action(info_hash: str, action: str) -> dict[str, Any]:
                         "updated_at": time.time(),
                     }
             _save_policies(policies)
-            blacklisted_ids = _policy_tvdb_ids(policies)
             requests = _load_retry_requests()
             matched: list[str] = []
             for release_hash, row in state.get("releases", {}).items():
-                if _is_blacklisted_release(
-                    row, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
-                ):
+                if _is_blacklisted_release(row, policies=policies, mappings=mappings):
                     row.update(status="blacklisted", reason="Series blacklisted by user")
                     requests.pop(release_hash, None)
                     matched.append(release_hash)
@@ -770,7 +692,6 @@ def _review_action(info_hash: str, action: str) -> dict[str, Any]:
                     held_lookup.get(row.get("info_hash"), {"title": row.get("title", "")}),
                     policies=policies,
                     mappings=mappings,
-                    blacklisted_ids=blacklisted_ids,
                 )
             ]
             _save_retry_requests(requests)
@@ -821,14 +742,10 @@ def _entry_policy(entry: anidb_mod.AniDBAnime, *, source_title: str = "", origin
 def entry_files(aid: int) -> list[Path]:
     """The library files of one AniDB entry, for "Discard and delete".
 
-    Its own folder under the AniDB layout, and -- from the TVDB era -- only
-    the episodes Anime-Lists places within this entry's part of its TVDB
-    season. Never the rest of the show's folder: the other seasons are
-    entries of their own.
+    Its own folder under the AniDB layout, and every file elsewhere that is
+    this entry's episode -- by Shoko's link, else by its folder. Never the
+    rest of a show's folder: the other seasons are entries of their own.
     """
-    from bankai.backend.transfer import _existing_show_folder
-    from bankai.torrent.matcher import parse_se
-
     index = anidb_mod.cached_index()
     entry = index.anime.get(int(aid)) if index else None
     if entry is None:
@@ -838,26 +755,8 @@ def entry_files(aid: int) -> list[Path]:
     own = root / _anidb_folder(entry)
     if own.is_dir():
         found.extend(p for p in own.iterdir() if p.is_file() and p.suffix.casefold() in _VIDEO_SUFFIXES)
-    if not entry.tvdb_id or not (entry.tvdb_season or "").isdigit():
-        return found
-    state = _load_state()
-    english = str(((state.get("series") or {}).get(str(entry.tvdb_id)) or {}).get("english_title") or "")
-    folder = _existing_show_folder(english, cache={}, roots=[root]) if english else None
-    if folder is None:
-        return found
-    season = int(entry.tvdb_season)
-    parts = sorted(
-        (e for e in index.by_tvdb.get(entry.tvdb_id, []) if e.tvdb_season == entry.tvdb_season),
-        key=lambda e: e.tvdb_offset,
-    )
-    later = [e.tvdb_offset for e in parts if e.tvdb_offset > entry.tvdb_offset]
-    first, last = entry.tvdb_offset + 1, (later[0] if later else None)
-    for path in folder.rglob("*"):
-        if not path.is_file() or path.suffix.casefold() not in _VIDEO_SUFFIXES:
-            continue
-        identity = parse_se(path.name)
-        if identity and identity[0] == season and identity[1] >= first and (last is None or identity[1] <= last):
-            found.append(path)
+    for paths in _library_episodes(rescan=False).get(int(aid), {}).values():
+        found.extend(path for path in paths if path not in found)
     return found
 
 
@@ -946,13 +845,10 @@ async def purge_series(
             state = _load_state()
             policies = _load_policies()
             mappings = _load_mappings()
-            blacklisted_ids = _policy_tvdb_ids(policies)
             return {
                 info_hash.casefold()
                 for info_hash, release in state.get("releases", {}).items()
-                if _is_blacklisted_release(
-                    release, policies=policies, mappings=mappings, blacklisted_ids=blacklisted_ids
-                )
+                if _is_blacklisted_release(release, policies=policies, mappings=mappings)
             }
 
     hashes = await asyncio.to_thread(blacklisted_hashes)
@@ -1251,8 +1147,6 @@ async def _retry_candidates(state: dict[str, Any], client: httpx.AsyncClient) ->
         except Exception as exc:
             log.warning("Held release recovery failed for %s: %s", info_hash, exc)
         await asyncio.sleep(get_settings().anime.backfill_request_delay_seconds)
-    if candidates:
-        anime_mod._TVDB_CACHE.clear()
     for item in candidates:
         anime_mod._DETAIL_CACHE.pop(item.detail_url, None)
     return sorted(candidates, key=_episode_order)
@@ -1314,37 +1208,6 @@ def _load_mappings() -> dict[str, dict[str, Any]]:
             return {}
 
 
-def save_mapping(
-    release_title: str,
-    match: anime_mod.AnimeTVDBMatch,
-    *,
-    season: int | None = None,
-    episode_offset: int = 0,
-    clear_episode_mapping: bool = False,
-) -> None:
-    """Remember an explicit user TVDB selection for future Erai episodes."""
-
-    if match.kind != "show" or match.tvdb_id <= 0:
-        return
-    with _STATE_LOCK:
-        mappings = _load_mappings()
-        key = _mapping_key(release_title)
-        previous = mappings.get(key, {})
-        episode_mapping = (
-            {field: previous[field] for field in ("season", "episode_offset") if field in previous}
-            if previous.get("tvdb_id") == match.tvdb_id and not clear_episode_mapping
-            else {}
-        )
-        if season is not None:
-            episode_mapping = {"season": season, "episode_offset": episode_offset}
-        mappings[key] = {**asdict(match), **episode_mapping}
-        path = _state_path().with_name("erai_mappings.json")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(mappings, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-
-
 async def link_in_shoko() -> dict[str, int]:
     """Tell Shoko what bankai published; for the scheduler.
 
@@ -1373,16 +1236,11 @@ async def link_in_shoko() -> dict[str, int]:
 
 
 def save_anidb_mapping(release_title: str, anime: dict[str, Any], *, episode_offset: int = 0) -> str:
-    """Remember which AniDB anime a show name is, chosen by the user in review.
-
-    Kept beside any TVDB choice for the same name rather than replacing it,
-    so switching anime.identity back still finds its mapping.
-    """
+    """Remember which AniDB anime a show name is, chosen by the user in review."""
     with _STATE_LOCK:
         mappings = _load_mappings()
         key = _mapping_key(release_title)
         mappings[key] = {
-            **mappings.get(key, {}),
             "anidb_id": int(anime["anidb_id"]),
             "anidb_title": anime.get("title"),
             "anidb_episode_offset": int(episode_offset),
@@ -1488,7 +1346,7 @@ def _load_state() -> dict[str, Any]:
 
 
 # The sections of the release state that are merged when a cycle saves.
-_MERGED_SECTIONS = ("releases", "canonical", "series")
+_MERGED_SECTIONS = ("releases", "canonical", "anime")
 # The state a running cycle loaded, as it was: {"id": id(state), "sections": {...}}.
 _CYCLE_BASE: ContextVar[dict | None] = ContextVar("erai_cycle_base", default=None)
 
@@ -1616,7 +1474,7 @@ def _rank(entry: anime_mod.NyaaEntry) -> tuple[int, int, int, int]:
 
 def _entry_dict(entry: anime_mod.NyaaEntry) -> dict[str, Any]:
     row = asdict(entry)
-    row["tvdb"] = None
+    row["anidb"] = None
     return row
 
 
@@ -1751,176 +1609,6 @@ def _published_timestamp(entry: anime_mod.NyaaEntry) -> float:
             return 0.0
 
 
-async def _resolve(
-    entry: anime_mod.NyaaEntry,
-    episodes: list | None = None,
-) -> tuple[anime_mod.AnimeTVDBMatch | None, Any | None, str | None]:
-    query = anime_mod.clean_release_title(entry.title)
-    saved = _load_mappings().get(_mapping_key(entry.title))
-    # A choice made on AniDB carries no TVDB show to build a match from.
-    if saved and not saved.get("tvdb_id"):
-        saved = None
-    if saved:
-        match = anime_mod.AnimeTVDBMatch(
-            **{
-                key: value
-                for key, value in saved.items()
-                if key in anime_mod.AnimeTVDBMatch.__dataclass_fields__
-            }
-        )
-    else:
-        candidates = await anime_mod.tvdb_candidates(query, limit=6)
-        scored = sorted(
-            ((anime_mod._match_score(query, item), item) for item in candidates),
-            key=lambda pair: pair[0],
-            reverse=True,
-        )
-        if not scored or scored[0][0] < 0.999:
-            return None, None, "No confident TVDB match"
-        if (
-            len(scored) > 1
-            and scored[1][0] >= 0.999
-            and scored[0][1].tvdb_id != scored[1][1].tvdb_id
-        ):
-            return None, None, "TVDB match is ambiguous"
-        match = scored[0][1]
-    if match.kind != "show":
-        return None, None, "Automatic ingestion currently requires a TVDB show match"
-    from bankai.processor.anime import _tvdb_episode_map
-
-    if episodes is None:
-        cache = _ROSTERS.get()
-        if cache is not None and match.tvdb_id in cache:
-            episodes = cache[match.tvdb_id]
-        else:
-            episodes = await _tvdb_episode_map(match.tvdb_id)
-            if cache is not None:
-                cache[match.tvdb_id] = episodes
-    season, episode = anime_mod.release_episode_info(entry.title)
-    if episode is None:
-        return None, None, "TVDB episode number was not found in the release title"
-    regular = [item for item in episodes if item.season > 0]
-    seasons = {item.season for item in regular}
-    target = None
-    _, part = anime_mod.release_part(entry.title)
-    structured = anime_mod.deconstruct_release(entry.title)
-    scene_title = structured[0] if structured else query
-    if saved and saved.get("season") is not None:
-        target_number = episode + int(saved.get("episode_offset", 0))
-        target = next(
-            (
-                item
-                for item in regular
-                if (item.season, item.episode) == (int(saved["season"]), target_number)
-            ),
-            None,
-        )
-    elif part and part > 1:
-        mapped, known = await anime_mapping.mapped_episode(
-            scene_title, episode, match.tvdb_id, episodes
-        )
-        if known:
-            target = next((item for item in regular if (item.season, item.episode) == mapped), None)
-        elif len(seasons) == 1:
-            # An explicit Part N plus TVDB's split-cour air-date boundary.
-            from datetime import date
-
-            ordered = sorted(regular, key=lambda item: item.episode)
-            starts = [ordered[0].episode] if ordered else []
-            for before, after in pairwise(ordered):
-                if before.aired and after.aired:
-                    try:
-                        gap = (
-                            date.fromisoformat(after.aired[:10])
-                            - date.fromisoformat(before.aired[:10])
-                        ).days
-                    except ValueError:
-                        continue
-                    if gap >= 28 and after.episode == before.episode + 1:
-                        starts.append(after.episode)
-            if len(starts) >= part:
-                target_number = starts[part - 1] + episode - 1
-                target = next((item for item in regular if item.episode == target_number), None)
-            elif regular and len(regular) % part == 0:
-                # TVDB sometimes schedules a split cour without an air-date gap.
-                # A terminal "Part N" is continuation metadata, never title text.
-                segment = len(regular) // part
-                target_number = (part - 1) * segment + episode
-                target = next((item for item in regular if item.episode == target_number), None)
-        if target is None:
-            return (
-                None,
-                None,
-                "TVDB continuation boundary is not verified; select a season and episode offset manually",
-            )
-    elif season is not None:
-        target = next(
-            (item for item in regular if (item.season, item.episode) == (season, episode)), None
-        )
-    elif len(seasons) == 1:
-        target = next((item for item in regular if item.episode == episode), None)
-    else:
-        mapped, known_part = await anime_mapping.mapped_episode(
-            query, episode, match.tvdb_id, episodes
-        )
-        if known_part:
-            if mapped is None:
-                return None, None, "TVDB/AniDB/TheXEM part mapping does not verify this episode"
-            target = next((item for item in regular if (item.season, item.episode) == mapped), None)
-        elif anime_mapping.normalise(query) in {
-            anime_mapping.normalise(match.english_title),
-            anime_mapping.normalise(match.japanese_title or ""),
-        }:
-            absolute = [item for item in regular if item.absolute_number == episode]
-            if len(absolute) == 1:
-                target = absolute[0]
-    if target is None:
-        return (
-            None,
-            None,
-            "TVDB ordering needs an AniDB/TheXEM episode mapping; no season was guessed",
-        )
-    identity = EpisodeIdentity(target.season, target.episode, target.name)
-    return match, identity, None
-
-
-def _anime_args(
-    entry: anime_mod.NyaaEntry, match: anime_mod.AnimeTVDBMatch, identity: Any
-) -> list[str]:
-    args = [
-        "anime-download",
-        "--release-title",
-        entry.title,
-        "--torrent-url",
-        entry.download_url,
-        "--detail-url",
-        entry.detail_url,
-        "--magnet-uri",
-        entry.magnet_uri,
-        "--info-hash",
-        entry.info_hash,
-        "--kind",
-        "show",
-        "--tvdb-id",
-        str(match.tvdb_id),
-        "--english-title",
-        match.english_title,
-        "--season",
-        str(identity.season),
-        "--episode",
-        str(identity.episode),
-        "--require-german-subtitles",
-        "--cleanup-torrent",
-    ]
-    if match.year is not None:
-        args.extend(["--year", str(match.year)])
-    return args
-
-
-def _anidb_identity() -> bool:
-    return get_settings().anime.identity == "anidb"
-
-
 # "Show Name - 05", tolerating what Erai puts after the number: "v2", "END",
 # "(Repack)", "(AAC 2.0)", "(CA)", then the bracketed tags. deconstruct_release
 # stops at any of those, which is how one season came to be two review cards.
@@ -2016,32 +1704,28 @@ def _anidb_folder(anime: anidb_mod.AniDBAnime) -> str:
     return sanitise(anime.title)
 
 
-def _library_identities() -> dict[str, dict]:
-    """Every episode in the anime library, by what it is rather than where it is.
+def _library_episodes(*, rescan: bool = True) -> dict[int, dict[int, list[Path]]]:
+    """Every episode file in the anime library, by AniDB entry and episode.
 
     The on-disk checks used to look in the one folder a release would be filed
-    under, found by name -- "Kimetsu no Yaiba" for the AniDB route, "Demon
-    Slayer: Kimetsu no Yaiba" for the TVDB one -- and a show kept under any
-    other name, "Demon Slayer", was not there to either: 56 of its episodes
-    were downloaded again into a second folder. Here each file is placed by
-    its AniDB entry (season folder or show folder name, as the library page
-    does) and by its folder's TVDB id. Built once per cycle.
+    under, found by name, and a show kept under any other name -- "Demon
+    Slayer" for "Kimetsu no Yaiba" -- was not there: 56 of its episodes were
+    downloaded again into a second folder. Here each file is placed by
+    Shoko's link for it, which comes from hashing the file and so holds for a
+    folder of any name and era; else by the entry its folder is linked to,
+    else by its folder's name, as the library page does. Built once per cycle.
     """
     cache = _DISK_INDEX.get()
-    if cache is None:
-        cache = {}
-        _DISK_INDEX.set(cache)
-    if "identities" in cache:
-        return cache["identities"]
+    if cache is not None and "episodes" in cache:
+        return cache["episodes"]
     from bankai.torrent.matcher import parse_se
-    from bankai.web import anime_library, library_walk
+    from bankai.web import anime_library, library_walk, shoko_catalog
 
-    index: dict[str, dict] = {"tvdb": {}, "anidb": {}}
     root = Path(get_settings().transfer.anime_shows_dir)
     try:
         # Checked against the disk: in the automation worker nothing else
         # keeps the held tree current.
-        files = library_walk.files([root], rescan=True)
+        files = library_walk.files([root], rescan=rescan)
     except OSError:
         files = []
     rows = []
@@ -2049,28 +1733,32 @@ def _library_identities() -> dict[str, dict]:
         season, episode = parse_se(str(entry.get("name") or "")) or (None, None)
         rows.append({**entry, "season_number": season, "episode": episode})
     table = anidb_mod.cached_index()
-    anime_library.assign_entries(rows, catalog=None, table=table)
-    folder_ids = anime_library.folder_tvdb_ids({str(row["series"]) for row in rows}, root)
+    catalog = shoko_catalog.saved_links()
+    links = anime_library.folder_links(anime_library.load_prefs())
+    anime_library.assign_entries(rows, catalog=catalog, table=table, links=links)
+    found: dict[int, dict[int, list[Path]]] = {}
     for row in rows:
-        tvdb_id = folder_ids.get(str(row["series"]))
-        if tvdb_id and row["season_number"] is not None and row["episode"] is not None:
-            index["tvdb"].setdefault(tvdb_id, set()).add((row["season_number"], row["episode"]))
+        path = Path(str(row["path"]))
+        # A double episode's file is linked to both.
+        shoko = catalog.files.get(str(row["path"])) if catalog is not None else None
+        if shoko:
+            for aid, number in shoko:
+                found.setdefault(int(aid), {}).setdefault(int(number), []).append(path)
+            continue
         aid = row.get("anidb_id")
-        if aid and table is not None:
-            number = anime_library.anidb_episode_of(row, table.anime.get(aid))
-            if number:
-                index["anidb"].setdefault(int(aid), set()).add(number)
-    cache["identities"] = index
-    return index
+        if not aid or table is None:
+            continue
+        number = anime_library.anidb_episode_of(row, table.anime.get(aid))
+        if number:
+            found.setdefault(int(aid), {}).setdefault(int(number), []).append(path)
+    if cache is not None:
+        cache["episodes"] = found
+    return found
 
 
 def _anidb_episode_on_disk(anime: anidb_mod.AniDBAnime, episode: int) -> bool:
     """Is this episode already in the library, under whatever folder name?"""
-    identities = _library_identities()
-    if episode in identities["anidb"].get(int(anime.aid), set()):
-        return True
-    legacy = anidb_mod.legacy_tvdb_episode(anime, episode)
-    if legacy and (legacy[1], legacy[2]) in identities["tvdb"].get(legacy[0], set()):
+    if episode in _library_episodes().get(int(anime.aid), {}):
         return True
     folder = Path(get_settings().transfer.anime_shows_dir) / _anidb_folder(anime)
     cache = _DISK_INDEX.get()
@@ -2117,10 +1805,6 @@ def _anidb_args(
         "--require-german-subtitles",
         "--cleanup-torrent",
     ]
-    if anime.tvdb_id:
-        # Not what files it: kept so queue covers and the TVDB-keyed parts of
-        # the library still know the show until they move to AniDB as well.
-        args.extend(["--tvdb-id", str(anime.tvdb_id)])
     return args
 
 
@@ -2133,36 +1817,6 @@ def _policy_anidb_ids(policies: dict[str, Any] | None = None) -> set[int]:
     }
 
 
-def tvdb_show_blacklisted(
-    tvdb_id: Any,
-    policies: dict[str, Any] | None = None,
-    *,
-    table: Any = None,
-) -> bool:
-    """Is a whole TVDB show blacklisted: every one of its seasons on AniDB?
-
-    Blacklisting is per AniDB entry, one per season or cour, so a show is
-    only gone once each of its regular seasons is; specials and entries
-    AniDB does not map to a TVDB season do not count. Decisions from before
-    AniDB entries block the TVDB id itself.
-    """
-    if not str(tvdb_id or "").isdigit():
-        return False
-    rows = policies if policies is not None else _load_policies()
-    if str(tvdb_id) in _policy_tvdb_ids(rows):
-        return True
-    blocked = _policy_anidb_ids(rows)
-    index = table if table is not None else anidb_mod.cached_index()
-    if not blocked or index is None:
-        return False
-    seasons = [
-        anime.aid
-        for anime in index.by_tvdb.get(int(tvdb_id), [])
-        if str(anime.tvdb_season or "").isdigit() and anime.tvdb_season != "0"
-    ]
-    return bool(seasons) and all(aid in blocked for aid in seasons)
-
-
 def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
     """Flag library cards the user blacklisted; their files stay until deleted.
 
@@ -2170,10 +1824,10 @@ def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
     downloaded -- but a show already in the library before it was blocked is
     still on disk, and the grid should say so rather than look like a mistake.
     A card goes by its primary AniDB entry, so blocking one sequel does not
-    flag the show it is filed under. A card without one, a folder numbered
-    by TVDB, is flagged once every season of the show is blocked, or, holding
-    a single season, when that one is: blocking "Oshi no Ko" season one must
-    not hide the other seasons in the same folder.
+    flag the show it is filed under. A card without one, a folder no AniDB
+    entry answers for, is flagged by name -- by an entry's exact title only
+    when it holds a single season: blocking "Oshi no Ko" season one must not
+    hide the other seasons in the same folder.
     """
     policies = _load_policies()
     ids = _policy_anidb_ids(policies)
@@ -2182,20 +1836,14 @@ def mark_blacklisted_shows(shows: list[dict[str, Any]]) -> None:
         titles = [
             str(show.get(field) or "") for field in ("key", "title", "source_title")
         ]
-        # An entry taken from Anime-Lists is only the show's first season.
-        own_id = None if show.get("anidb_auto") else show.get("anidb_id")
+        own_id = show.get("anidb_id")
         show["blacklisted"] = bool(
             (own_id is not None and own_id in ids)
             or any(title and _show_name_key(title) in names for title in titles)
             or (
                 own_id is None
-                and (
-                    tvdb_show_blacklisted(show.get("tvdb_id"), policies)
-                    or (
-                        (show.get("season_count") or 0) <= 1
-                        and any(title and anidb_mod.normalise(title) in exact for title in titles)
-                    )
-                )
+                and (show.get("season_count") or 0) <= 1
+                and any(title and anidb_mod.normalise(title) in exact for title in titles)
             )
         )
 
@@ -2213,9 +1861,7 @@ async def _admit_anidb(
     if error or anime is None or episode is None:
         _hold(state, entry, error or "AniDB resolution failed")
         return None
-    if anime.aid in _policy_anidb_ids() or (
-        anime.tvdb_id and str(anime.tvdb_id) in _policy_tvdb_ids()
-    ):
+    if anime.aid in _policy_anidb_ids():
         state["releases"][entry.info_hash] = {
             "status": "blacklisted",
             "title": entry.title,
@@ -2224,18 +1870,11 @@ async def _admit_anidb(
         return None
     state.setdefault("anime", {})[str(anime.aid)] = {
         **anime.as_dict(),
-        "tvdb_id": anime.tvdb_id,
         "folder": _anidb_folder(anime),
     }
     canonical = f"anidb:{anime.aid}|{episode}"
     resolution = _resolution(entry)
-    # What the TVDB era already fetched is keyed and foldered by TVDB, so the
-    # same episode is looked for under its old key and folder as well.
-    legacy = anidb_mod.legacy_tvdb_episode(anime, episode)
-    legacy_key = "|".join(str(part) for part in legacy) if legacy else None
-    previous = state["canonical"].get(canonical) or (
-        state["canonical"].get(legacy_key) if legacy_key else None
-    )
+    previous = state["canonical"].get(canonical)
     if previous and int(previous.get("resolution", 0)) >= resolution:
         state["releases"][entry.info_hash] = {
             "status": "duplicate",
@@ -2243,14 +1882,7 @@ async def _admit_anidb(
             "canonical": canonical,
         }
         return None
-    legacy_title = (
-        str(((state.get("series") or {}).get(str(legacy[0])) or {}).get("english_title") or "")
-        if legacy
-        else ""
-    )
-    if _anidb_episode_on_disk(anime, episode) or (
-        legacy and _episode_on_disk(legacy_title, legacy[1], legacy[2], tvdb_id=legacy[0])
-    ):
+    if _anidb_episode_on_disk(anime, episode):
         state["releases"][entry.info_hash] = {
             "status": "existing",
             "title": entry.title,
@@ -2258,48 +1890,8 @@ async def _admit_anidb(
         }
         return None
     display = f"{anime.english_title or anime.title} - {episode:02d}"
-    extras = {"anidb_id": anime.aid, "episode": episode, "tvdb_id": anime.tvdb_id}
+    extras = {"anidb_id": anime.aid, "episode": episode}
     return canonical, display, (lambda final: _anidb_args(final, anime, episode)), extras
-
-
-async def _admit_tvdb(
-    state: dict[str, Any], entry: anime_mod.NyaaEntry
-) -> tuple[str, str, Any, dict[str, Any]] | None:
-    """The former TVDB identification, behind anime.identity = "tvdb"."""
-    match, identity, error = await _resolve(entry)
-    if error or match is None or identity is None:
-        _hold(state, entry, error or "TVDB resolution failed")
-        return None
-    if str(match.tvdb_id) in _policy_tvdb_ids():
-        # The title key check above only sees the words in this release's name;
-        # the series behind it is only known once TVDB has resolved it.
-        state["releases"][entry.info_hash] = {
-            "status": "blacklisted",
-            "title": entry.title,
-            "reason": "Series blacklisted by user",
-        }
-        return None
-    state["series"][str(match.tvdb_id)] = asdict(match)
-    canonical = f"{match.tvdb_id}|{identity.season}|{identity.episode}"
-    previous = state["canonical"].get(canonical)
-    if previous and int(previous.get("resolution", 0)) >= _resolution(entry):
-        state["releases"][entry.info_hash] = {
-            "status": "duplicate",
-            "title": entry.title,
-            "canonical": canonical,
-        }
-        return None
-    if _episode_on_disk(
-        match.english_title, identity.season, identity.episode, tvdb_id=match.tvdb_id
-    ):
-        state["releases"][entry.info_hash] = {
-            "status": "existing",
-            "title": entry.title,
-            "canonical": canonical,
-        }
-        return None
-    display = f"{match.english_title} S{identity.season:02d}E{identity.episode:02d}"
-    return canonical, display, (lambda final: _anime_args(final, match, identity)), {}
 
 
 async def _german_alternative(
@@ -2497,45 +2089,6 @@ async def _recheck_german_holds(state: dict[str, Any], *, shows: int = 40) -> in
     return changed
 
 
-def _episode_on_disk(
-    english_title: str, season: int, episode: int, tvdb_id: int | None = None
-) -> bool:
-    """Is this episode already in the library?
-
-    In any folder of the same TVDB series, when ``tvdb_id`` is given; else in
-    the folder found by name. Cached for the cycle: a season pack asks the
-    same question for every episode it contains, and the answer is one
-    directory walk over a slow library disk.
-    """
-    from bankai.backend.transfer import _existing_show_folder
-    from bankai.torrent.matcher import parse_se
-
-    if tvdb_id and (season, episode) in _library_identities()["tvdb"].get(int(tvdb_id), set()):
-        return True
-    if not english_title:
-        return False
-    cache = _DISK_INDEX.get()
-    if cache is None:
-        cache = {}
-        _DISK_INDEX.set(cache)
-    have = cache.get(english_title)
-    if have is None:
-        have = set()
-        folder = _existing_show_folder(
-            english_title,
-            cache={},
-            roots=[Path(get_settings().transfer.anime_shows_dir)],
-        )
-        if folder is not None:
-            for path in folder.rglob("*"):
-                if path.is_file() and path.suffix.casefold() in _VIDEO_SUFFIXES:
-                    identity = parse_se(path.name)
-                    if identity:
-                        have.add(identity)
-        cache[english_title] = have
-    return (season, episode) in have
-
-
 async def _consider(
     state: dict[str, Any],
     entry: anime_mod.NyaaEntry,
@@ -2567,7 +2120,7 @@ async def _consider(
     # library was held for review over subtitles it did not need -- which is
     # what put a finished Bleach arc in the review queue. Resolving first also
     # means an episode we already have costs no Nyaa request at all.
-    admitted = await (_admit_anidb if _anidb_identity() else _admit_tvdb)(state, entry)
+    admitted = await _admit_anidb(state, entry)
     if admitted is None:
         return False
     canonical, title, build_args, extras = admitted
@@ -2818,30 +2371,8 @@ async def _carries_german(entry: anime_mod.NyaaEntry, client: httpx.AsyncClient)
     return has_explicit_german_subtitles(description)
 
 
-def _german_dubbed_episodes(english_title: str) -> set[tuple[int, int]]:
-    """Episodes of a show whose file carries a German dub."""
-    from bankai.backend.transfer import _existing_show_folder
-    from bankai.torrent.matcher import parse_se
-    from bankai.web.anime_library import german_dubbed_episodes
-
-    root = Path(get_settings().transfer.anime_shows_dir)
-    folder = _existing_show_folder(english_title, cache={}, roots=[root])
-    if folder is None:
-        return set()
-    files = []
-    for path in folder.rglob("*"):
-        if not path.is_file() or path.suffix.casefold() not in _VIDEO_SUFFIXES:
-            continue
-        identity = parse_se(path.name)
-        if identity:
-            files.append(
-                {"path": str(path), "season_number": identity[0], "episode": identity[1]}
-            )
-    return german_dubbed_episodes(files)
-
-
-async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, Any]:
-    """Queue HEVC replacements for a show's already-published AVC episodes.
+async def upgrade_show_to_hevc(anidb_ids: list[int]) -> dict[str, Any]:
+    """Queue HEVC replacements for the already-published AVC episodes of AniDB entries.
 
     Unlike the backlog upgrade, these episodes are on disk and watchable. The
     replacement is downloaded first and published over the original only once
@@ -2853,10 +2384,26 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
     skipped = 0
     already = 0
     dubbed = 0
+    index = await anidb_mod.index()
+    entries = {
+        int(aid): index.anime[int(aid)]
+        for aid in anidb_ids
+        if index is not None and int(aid) in index.anime
+    }
+    if not entries:
+        raise ValueError("None of these AniDB entries is in AniDB's title list")
     # An episode carrying a German dub is irreplaceable: Erai-raws ships
     # Japanese audio only, so upgrading one would trade a track that cannot be
     # got back for a smaller file.
-    protected = _german_dubbed_episodes(english_title)
+    def dubbed_episodes() -> set[tuple[int, int]]:
+        return {
+            (aid, episode)
+            for aid in entries
+            for episode, paths in _entry_episode_files(aid).items()
+            if any(_is_german_dub(path) for path in paths)
+        }
+
+    protected = await asyncio.to_thread(dubbed_episodes)
     from bankai.torrent.qbittorrent import QBittorrentClient
 
     qbit = QBittorrentClient()
@@ -2875,8 +2422,9 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
                 state = _load_state()
                 targets = []
                 for canonical, row in state.get("canonical", {}).items():
-                    parts = str(canonical).split("|")
-                    if len(parts) != 3 or parts[0] != str(tvdb_id):
+                    head, _, number = str(canonical).partition("|")
+                    aid = head.split(":", 1)[1] if head.startswith("anidb:") else ""
+                    if not aid.isdigit() or int(aid) not in entries or not number.isdigit():
                         continue
                     release = state.get("releases", {}).get(str(row.get("info_hash") or ""))
                     if not release or release.get("status") != "done":
@@ -2884,42 +2432,19 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
                     if _is_hevc_title(str(release.get("title") or "")):
                         already += 1
                         continue
-                    targets.append((canonical, parts[1], parts[2], release))
+                    targets.append((canonical, int(aid), int(number), release))
 
-            for canonical, season, episode, release in targets:
-                if (int(season), int(episode)) in protected:
+            for canonical, aid, episode, release in targets:
+                if (aid, episode) in protected:
                     dubbed += 1
                     continue
                 twin = _hevc_twin(state, release)
                 if twin is None or not await _carries_german(twin, client):
                     skipped += 1
                     continue
-                args = [
-                    "anime-download",
-                    "--release-title",
-                    twin.title,
-                    "--torrent-url",
-                    twin.download_url,
-                    "--detail-url",
-                    twin.detail_url,
-                    "--magnet-uri",
-                    twin.magnet_uri,
-                    "--info-hash",
-                    twin.info_hash,
-                    "--kind",
-                    "show",
-                    "--tvdb-id",
-                    str(tvdb_id),
-                    "--english-title",
-                    english_title,
-                    "--season",
-                    str(int(season)),
-                    "--episode",
-                    str(int(episode)),
-                    "--require-german-subtitles",
-                    # Publishing has to overwrite the episode being replaced.
-                    "--replace-existing",
-                ]
+                anime = entries[aid]
+                # Publishing has to overwrite the episode being replaced.
+                args = [*_anidb_args(twin, anime, episode), "--replace-existing"]
                 try:
                     await qbit.add(
                         magnet=twin.magnet_uri or None,
@@ -2938,12 +2463,14 @@ async def upgrade_show_to_hevc(tvdb_id: int, english_title: str) -> dict[str, An
                     state["releases"][twin.info_hash] = {
                         "status": "queued",
                         "title": twin.title,
-                        "display_title": f"{english_title} S{int(season):02d}E{int(episode):02d}",
+                        "display_title": f"{anime.english_title or anime.title} - {episode:02d}",
                         "canonical": canonical,
                         "resolution": _resolution(twin),
                         "size_bytes": twin.size_bytes,
                         "args": args,
                         "replaces": release.get("title"),
+                        "anidb_id": aid,
+                        "episode": episode,
                         "updated_at": time.time(),
                     }
                     # The upgrade takes over the episode's slot; the original
@@ -2995,23 +2522,22 @@ def _release_range(title: str) -> tuple[int, int] | None:
 def _entry_episode_files(aid: int) -> dict[int, list[Path]]:
     """The library files of one AniDB entry, by its own episode numbers."""
     from bankai.processor.anime import anidb_episode_number
-    from bankai.torrent.matcher import parse_se
 
     index = anidb_mod.cached_index()
     entry = index.anime.get(int(aid)) if index else None
     if entry is None:
         return {}
+    found: dict[int, list[Path]] = {
+        episode: list(paths) for episode, paths in _library_episodes(rescan=False).get(int(aid), {}).items()
+    }
     own = Path(get_settings().transfer.anime_shows_dir) / _anidb_folder(entry)
-    found: dict[int, list[Path]] = {}
-    for path in entry_files(aid):
-        if path.parent == own:
+    if own.is_dir():
+        for path in own.iterdir():
+            if not path.is_file() or path.suffix.casefold() not in _VIDEO_SUFFIXES:
+                continue
             episode = anidb_episode_number(path.name)
-        else:
-            # A TVDB-era file: its season episode, less where this entry starts.
-            identity = parse_se(path.name)
-            episode = identity[1] - entry.tvdb_offset if identity else None
-        if episode:
-            found.setdefault(episode, []).append(path)
+            if episode and path not in found.get(episode, []):
+                found.setdefault(episode, []).append(path)
     return found
 
 
@@ -3653,10 +3179,6 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             if not policy.enabled or updates.maintenance_active():
                 _save_state(state)
                 return status(state=state, running=False)
-            if not settings.metadata.tvdb_enabled or not settings.metadata.tvdb_api_key:
-                state["last_error"] = "TVDB is not configured"
-                _save_state(state)
-                return status(state=state, running=False)
             free = free_space_gib()
             if free is None:
                 state["last_error"] = "Anime destination is unavailable"
@@ -3670,9 +3192,8 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             enqueued = 0
             _set_activity("Checking qBittorrent and free space")
             qbit = None
-            roster_token = _ROSTERS.set({})
             admission_token = _ADMISSION.set(None)
-            # A fresh look at the library each cycle; see _library_identities.
+            # A fresh look at the library each cycle; see _library_episodes.
             disk_token = _DISK_INDEX.set({})
             try:
                 if prefill:
@@ -3814,7 +3335,6 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                 log.warning("Erai automation cycle failed: %s", exc)
             finally:
                 _set_activity(None)
-                _ROSTERS.reset(roster_token)
                 _ADMISSION.reset(admission_token)
                 _DISK_INDEX.reset(disk_token)
                 if qbit is not None:
@@ -4077,21 +3597,20 @@ def _rebuilt_args(
 
     Releases tracked by older builds stored no arguments, so the reconciler had
     nothing to publish with and skipped them forever -- which is how finished
-    downloads sat untouched. The canonical key carries the TVDB identity and
-    the series is already resolved, so the arguments can be rebuilt.
+    downloads sat untouched. The canonical key carries the AniDB entry and
+    episode, and the entry is on record, so the arguments can be rebuilt.
     """
-    parts = str(release.get("canonical") or "").split("|")
-    if len(parts) != 3 or not all(parts):
+    canonical = str(release.get("canonical") or "")
+    if not canonical.startswith("anidb:"):
         return None
-    tvdb_id, season, episode = parts
-    series = (state.get("series") or {}).get(tvdb_id) or {}
-    english_title = str(series.get("english_title") or "")
-    if not english_title:
+    head, _, episode = canonical.partition("|")
+    record = (state.get("anime") or {}).get(head.split(":", 1)[1]) or {}
+    if not record.get("title") or not episode.isdigit():
         return None
-    args = [
+    return [
         "anime-download",
         "--release-title",
-        str(release.get("title") or english_title),
+        str(release.get("title") or record["title"]),
         # The torrent is already in qBittorrent, so a magnet built from the
         # info hash re-adds nothing; these URLs only satisfy the nyaa.si check.
         "--torrent-url",
@@ -4104,70 +3623,35 @@ def _rebuilt_args(
         info_hash,
         "--kind",
         "show",
-        "--tvdb-id",
-        tvdb_id,
+        "--anidb-id",
+        str(record["anidb_id"]),
+        "--anidb-title",
+        str(record["title"]),
         "--english-title",
-        english_title,
-        "--season",
-        season,
+        str(record.get("english_title") or record["title"]),
         "--episode",
         episode,
         "--require-german-subtitles",
     ]
-    if series.get("year"):
-        args.extend(["--year", str(series["year"])])
-    return args
 
 
 def _episode_already_published(
     state: dict[str, Any],
     release: dict[str, Any],
-    cache: dict[str, set[tuple[int, int]]],
+    cache: dict[str, set[tuple[int, int]]] | None = None,
 ) -> bool:
-    """Is this episode already sitting in the library?
-
-    The walk is cached per series for the pass; doing it per release meant one
-    directory scan each over a spinning library disk.
-    """
+    """Is this episode already sitting in the library?"""
     canonical = str(release.get("canonical") or "")
-    if canonical.startswith("anidb:"):
-        head, _, number = canonical.partition("|")
-        record = (state.get("anime") or {}).get(head.split(":", 1)[1]) or {}
-        if not record.get("title") or not number.isdigit():
-            return False
-        filed = anidb_mod.AniDBAnime(
-            aid=int(record["anidb_id"]), title=str(record["title"]), english_title=None, titles=()
-        )
-        return _anidb_episode_on_disk(filed, int(number))
-    parts = canonical.split("|")
-    if len(parts) != 3 or not all(parts):
+    if not canonical.startswith("anidb:"):
         return False
-    tvdb_id, season, episode = parts
-    english_title = str(((state.get("series") or {}).get(tvdb_id) or {}).get("english_title") or "")
-    if not english_title:
+    head, _, number = canonical.partition("|")
+    record = (state.get("anime") or {}).get(head.split(":", 1)[1]) or {}
+    if not record.get("title") or not number.isdigit():
         return False
-    try:
-        wanted = (int(season), int(episode))
-    except ValueError:
-        return False
-    if english_title not in cache:
-        from bankai.backend.transfer import _existing_show_folder
-        from bankai.torrent.matcher import parse_se
-
-        found: set[tuple[int, int]] = set()
-        folder = _existing_show_folder(
-            english_title,
-            cache={},
-            roots=[Path(get_settings().transfer.anime_shows_dir)],
-        )
-        if folder is not None:
-            for path in folder.rglob("*"):
-                if path.is_file() and path.suffix.casefold() in _VIDEO_SUFFIXES:
-                    identity = parse_se(path.name)
-                    if identity:
-                        found.add(identity)
-        cache[english_title] = found
-    return wanted in cache[english_title]
+    filed = anidb_mod.AniDBAnime(
+        aid=int(record["anidb_id"]), title=str(record["title"]), english_title=None, titles=()
+    )
+    return _anidb_episode_on_disk(filed, int(number))
 
 
 async def _readd_torrent(qbit: Any, info_hash: str, release: dict[str, Any]) -> bool:
@@ -4434,7 +3918,7 @@ def release_queue_rows(state: dict[str, Any] | None = None) -> list[dict[str, An
                 "reason_detail": None,
                 "queue_position": None,
                 "queue_total": None,
-                "tvdb_id": _args_value(release.get("args"), "--tvdb-id"),
+                "anidb_id": _args_value(release.get("args"), "--anidb-id"),
                 "german_source_url": None,
                 "torrent_source_url": None,
                 "torrent_source_title": release.get("title"),
@@ -4462,8 +3946,6 @@ def status(*, state: dict[str, Any] | None = None, running: bool | None = None) 
         pause_reason = "Automation is disabled"
     elif _delegated() and _worker_heartbeat() is None:
         pause_reason = "The automation worker is not running (bankai-automation)"
-    elif not get_settings().metadata.tvdb_enabled or not get_settings().metadata.tvdb_api_key:
-        pause_reason = "TVDB is not configured"
     elif free is None:
         pause_reason = "Anime destination is unavailable"
     elif free <= policy.min_free_space_gib:
@@ -4838,7 +4320,6 @@ __all__ = [
     "has_explicit_german_subtitles",
     "parse_listing",
     "run_cycle",
-    "save_mapping",
     "scheduler",
     "shutdown",
     "status",

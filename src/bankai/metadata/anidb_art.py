@@ -8,7 +8,9 @@ record, cover included: one image per entry, for every entry.
 
 The release is a 60 MB JSON file, updated weekly. It is fetched weekly and
 boiled down, in a child process so the web server never holds the whole
-thing, to AniDB id -> cover URL: about a megabyte.
+thing, to AniDB id -> cover URL: about a megabyte. Beside it, each entry's
+facts -- how many episodes, whether it is finished, its year and type -- so
+an entry Shoko does not hold still has an episode count and a year.
 """
 
 from __future__ import annotations
@@ -37,11 +39,39 @@ _ANIDB_SOURCE = re.compile(r"https?://anidb\.net/anime/(\d+)")
 _NO_PICTURE = ("no_pic", "noimage", "placeholder")
 
 _LOADED: tuple[float, dict[int, str]] | None = None
+_FACTS: tuple[float, dict[int, dict]] | None = None
 _REFRESH_LOCK = asyncio.Lock()
 
 
 def _store() -> Path:
     return bgjobs.jobs_root().parent / "anime_metadata" / "anidb_covers.json"
+
+
+def _facts_store(covers_path: Path | None = None) -> Path:
+    return (covers_path or _store()).with_name("anidb_facts.json")
+
+
+def facts(anidb_id: object) -> dict:
+    """{episodes, status, year, type} of one AniDB entry, as far as known; {} if not.
+
+    ``status`` is the database's: FINISHED, ONGOING, UPCOMING or UNKNOWN.
+    """
+    global _FACTS
+    path = _facts_store()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _FACTS is None or _FACTS[0] != mtime:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        _FACTS = (mtime, {int(aid): row for aid, row in raw.items() if str(aid).isdigit()})
+    try:
+        return _FACTS[1].get(int(anidb_id), {})  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return {}
 
 
 def covers() -> dict[int, str]:
@@ -69,21 +99,39 @@ def cover(anidb_id: object) -> str | None:
 
 
 def condense(source: Path, target: Path) -> int:
-    """The full database -> AniDB id -> cover URL. Returns how many were kept."""
+    """The full database -> AniDB id -> cover URL, and the facts beside it.
+
+    Returns how many covers were kept.
+    """
     data = json.loads(source.read_text(encoding="utf-8")).get("data") or []
     found: dict[str, str] = {}
+    known: dict[str, dict] = {}
     for item in data:
-        picture = str(item.get("picture") or "")
-        if not picture.startswith("https://") or any(mark in picture for mark in _NO_PICTURE):
+        aids = [
+            match[1]
+            for url in item.get("sources") or []
+            if (match := _ANIDB_SOURCE.match(str(url)))
+        ]
+        if not aids:
             continue
-        for url in item.get("sources") or []:
-            match = _ANIDB_SOURCE.match(str(url))
-            if match:
-                found.setdefault(match[1], picture)
+        season = item.get("animeSeason") or {}
+        row = {
+            "episodes": item.get("episodes") if isinstance(item.get("episodes"), int) else None,
+            "status": item.get("status"),
+            "year": season.get("year") if isinstance(season.get("year"), int) else None,
+            "type": item.get("type"),
+        }
+        picture = str(item.get("picture") or "")
+        usable = picture.startswith("https://") and not any(mark in picture for mark in _NO_PICTURE)
+        for aid in aids:
+            known.setdefault(aid, row)
+            if usable:
+                found.setdefault(aid, picture)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".part")
-    temporary.write_text(json.dumps(found, separators=(",", ":")), encoding="utf-8")
-    temporary.replace(target)
+    for path, value in ((_facts_store(target), known), (target, found)):
+        temporary = path.with_suffix(".part")
+        temporary.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(path)
     return len(found)
 
 
@@ -92,7 +140,8 @@ async def refresh(*, force: bool = False) -> bool:
     async with _REFRESH_LOCK:
         target = _store()
         try:
-            fresh = time.time() - target.stat().st_mtime < _TTL
+            # The facts came later than the covers: without them, renew now.
+            fresh = time.time() - target.stat().st_mtime < _TTL and _facts_store().exists()
         except OSError:
             fresh = False
         if fresh and not force:

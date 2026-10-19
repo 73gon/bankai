@@ -1,4 +1,4 @@
-"""Nyaa-only anime catalogue with TVDB enrichment.
+"""Nyaa-only anime catalogue, each release identified on AniDB.
 
 Nyaa exposes a stable RSS representation for browse/search results.  We use
 that feed for the cheap list operation and only open individual detail pages
@@ -13,7 +13,7 @@ import html
 import re
 import time
 from dataclasses import asdict, dataclass, replace
-from difflib import SequenceMatcher
+from typing import Any
 from urllib.parse import quote, urlparse
 from xml.etree import ElementTree as ET
 
@@ -22,10 +22,6 @@ from selectolax.parser import HTMLParser
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata import anime_mapping
-from bankai.metadata.tvdb import TitleAlias, TVDBClient
-from bankai.queue.models import MediaKind
-from bankai.web import discover
 
 log = get_logger(__name__)
 
@@ -33,20 +29,7 @@ _NYAA_BASE = "https://nyaa.si"
 _NYAA_NS = "https://nyaa.si/xmlns/nyaa"
 _RSS_PAGE_SIZE = 75
 _CACHE_TTL = 15 * 60
-_TVDB_CACHE: dict[str, tuple[float, list[AnimeTVDBMatch]]] = {}
 _DETAIL_CACHE: dict[str, tuple[float, tuple[str, str | None, str | None]]] = {}
-
-
-@dataclass(frozen=True, slots=True)
-class AnimeTVDBMatch:
-    tvdb_id: int
-    kind: str  # show | movie
-    english_title: str
-    japanese_title: str | None = None
-    year: int | None = None
-    poster_url: str | None = None
-    aliases: tuple[str, ...] = ()
-    status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +56,9 @@ class NyaaEntry:
     season: int | None = None
     episode: int | None = None
     description: str = ""
-    tvdb: AnimeTVDBMatch | None = None
+    # The AniDB entry and episode it is, when that can be told offline:
+    # {anidb_id, title, english_title, episode, poster_url, year, type}.
+    anidb: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,7 +99,7 @@ def deconstruct_release(title: str) -> tuple[str, int] | None:
 
 @functools.lru_cache(maxsize=65536)
 def release_part(title: str) -> tuple[str, int | None]:
-    """Keep a terminal Part N separate from the title used to find TVDB."""
+    """Keep a terminal Part N separate from the show's own title."""
     structured = deconstruct_release(title)
     name = structured[0] if structured else title
     match = re.fullmatch(r"(.+?)\s+Part\s+(\d+)\s*", name, re.I)
@@ -122,7 +107,7 @@ def release_part(title: str) -> tuple[str, int | None]:
 
 
 def clean_release_title(title: str) -> str:
-    """Reduce a scene-style release name to a TVDB-searchable anime title."""
+    """Reduce a scene-style release name to the anime's own title."""
     value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
     value = re.sub(r"\.(?:mkv|mp4|avi|m4v|mov|ts|webm)$", "", value, flags=re.I)
     value = re.sub(r"\s*[|/]\s*.*$", "", value)
@@ -157,9 +142,7 @@ def release_episode_info(title: str) -> tuple[int | None, int | None]:
 
     Anime releases commonly use either TV notation (``S02E01``), a written
     season plus an episode, or absolute numbering (``Title - 41``).  Absolute
-    episode numbers intentionally keep the season unknown: the anime download
-    worker later maps them to TVDB's absolute episode order without guessing a
-    potentially wrong season.
+    episode numbers intentionally keep the season unknown rather than guess it.
     """
     value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
     match = re.search(r"\bS(?P<season>\d{1,2})\s*E(?P<episode>\d{1,4})\b", value, re.I)
@@ -317,211 +300,55 @@ def _normalise(value: str) -> str:
     return " ".join(re.findall(r"\w+", value.casefold(), flags=re.UNICODE))
 
 
-def _match_score(query: str, candidate: AnimeTVDBMatch) -> float:
-    clean = _normalise(query)
-    names = [candidate.english_title, candidate.japanese_title or "", *candidate.aliases]
+def anidb_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | None:
+    """The AniDB entry and episode a release is, from the title index; no network.
 
-    def score(name: str) -> float:
-        normalized = _normalise(name)
-        if clean == normalized:
-            return 1.0
-        query_words = clean.split()
-        name_words = normalized.split()
-        if query_words and name_words[: len(query_words)] == query_words:
-            return 0.96
-        return SequenceMatcher(None, clean, normalized).ratio() * 0.72
-
-    return max(score(name) for name in names if name)
-
-
-async def series_metadata(tvdb_id: int) -> AnimeTVDBMatch:
-    key = f"id:{tvdb_id}"
-    hit = _TVDB_CACHE.get(key)
-    if hit and time.time() - hit[0] < _CACHE_TTL:
-        return hit[1][0]
-    metadata = get_settings().metadata
-    client = TVDBClient(
-        api_key=metadata.tvdb_api_key, pin=metadata.tvdb_pin, languages=["eng", "jpn"],
-    )
-    try:
-        info = await client.series_info(tvdb_id)
-    finally:
-        await client.aclose()
-    if not info.get("english_title"):
-        raise ValueError("TVDB series has no usable title")
-    info["poster_url"] = discover._abs_image(info.get("poster_url"))
-    item = AnimeTVDBMatch(kind="show", **info)
-    _TVDB_CACHE[key] = (time.time(), [item])
-    return item
-
-
-async def tvdb_candidates(
-    query: str, *, limit: int = 8, raise_errors: bool = False, anime_only: bool = True
-) -> list[AnimeTVDBMatch]:
-    """TVDB matches for an anime title -- or, without ``anime_only``, any title.
-
-    A failed search returns ``[]`` like a search that found nothing, unless
-    ``raise_errors``: callers that cache the answer have to tell the two apart,
-    or an outage is remembered as "no such show". The Movies & Shows library
-    searches without ``anime_only``: filtered to TVDB's anime genre, "Eyes
-    Wide Shut" was never found and its card had no cover.
+    The user's choice for its name first, as the automation does; else the
+    name as AniDB has it, its episode settled into the right part of a split
+    season. None when no single entry answers for the name.
     """
-    clean = query.strip()
-    if not clean or not discover.is_configured():
-        return []
-    cache_key = _normalise(clean) if anime_only else "all:" + _normalise(clean)
-    hit = _TVDB_CACHE.get(cache_key)
-    if hit and time.time() - hit[0] < _CACHE_TTL:
-        return hit[1][:limit]
-    mapped_ids = await anime_mapping.mapped_series_ids(clean) if anime_only else []
-    mapped = []
-    for tvdb_id in mapped_ids:
-        try:
-            item = await series_metadata(tvdb_id)
-            mapped.append(replace(item, aliases=tuple(dict.fromkeys((*item.aliases, clean)))))
-        except Exception as exc:
-            log.debug("Mapped TVDB identity unavailable for %s: %s", tvdb_id, exc)
-    if mapped:
-        _TVDB_CACHE[cache_key] = (time.time(), mapped)
-        return mapped[:limit]
-    metadata = get_settings().metadata
-    client = TVDBClient(
-        api_key=metadata.tvdb_api_key,
-        pin=metadata.tvdb_pin,
-        languages=["eng", "jpn"],
-    )
-    try:
-        series_eng, series_jpn, movies_eng, movies_jpn = await asyncio.gather(
-            client.search_aliases(
-                clean,
-                kind=MediaKind.EPISODE,
-                limit=8,
-                anime_only=anime_only,
-                search_language="eng",
-            ),
-            client.search_aliases(
-                clean,
-                kind=MediaKind.EPISODE,
-                limit=8,
-                anime_only=anime_only,
-                search_language="jpn",
-            ),
-            client.search_aliases(
-                clean,
-                kind=MediaKind.MOVIE,
-                limit=8,
-                anime_only=anime_only,
-                search_language="eng",
-            ),
-            client.search_aliases(
-                clean,
-                kind=MediaKind.MOVIE,
-                limit=8,
-                anime_only=anime_only,
-                search_language="jpn",
-            ),
-        )
-        series = [*series_eng, *series_jpn]
-        movies = [*movies_eng, *movies_jpn]
-    except Exception as exc:
-        log.warning("TVDB anime lookup failed for %r: %s", clean, exc)
-        if raise_errors:
-            raise
-        return []
-    finally:
-        await client.aclose()
+    from bankai.metadata import anidb as anidb_mod
+    from bankai.metadata import anidb_art
+    from bankai.web import erai
 
-    async def convert(alias: TitleAlias, kind: str) -> AnimeTVDBMatch | None:
-        if alias.tvdb_id is None:
-            return None
-        english = alias.english_title or alias.name or alias.japanese_title
-        if not english:
-            return None
-        poster: str | None = alias.poster_url
-        try:
-            results = await discover.search(english, kind=kind, limit=5)
-            matched = next((item for item in results if item.tvdb_id == alias.tvdb_id), None)
-            poster = poster or (matched.poster_url if matched else None)
-        except Exception:
-            pass
-        return AnimeTVDBMatch(
-            tvdb_id=alias.tvdb_id,
-            kind=kind,
-            english_title=english,
-            japanese_title=alias.japanese_title or (alias.name if alias.name != english else None),
-            year=alias.year,
-            poster_url=discover._abs_image(poster),
-            aliases=tuple(
-                dict.fromkeys(
-                    value
-                    for value in (alias.name, *alias.aliases)
-                    if value and value not in {english, alias.japanese_title}
-                )
-            ),
-        )
-
-    converted = await asyncio.gather(
-        *(convert(alias, "show") for alias in series),
-        *(convert(alias, "movie") for alias in movies),
-    )
-    unique: list[AnimeTVDBMatch] = []
-    seen: set[tuple[str, int]] = set()
-    for item in converted:
-        if item is None or (item.kind, item.tvdb_id) in seen:
-            continue
-        seen.add((item.kind, item.tvdb_id))
-        unique.append(item)
-    # AniDB part names often do not exist as aliases on TVDB's parent show.
-    for tvdb_id in mapped_ids:
-        if ("show", tvdb_id) in seen:
-            unique = [
-                replace(item, aliases=tuple(dict.fromkeys((*item.aliases, clean))))
-                if item.kind == "show" and item.tvdb_id == tvdb_id else item
-                for item in unique
-            ]
-            continue
-        try:
-            info = await series_metadata(tvdb_id)
-            unique.insert(0, replace(info, aliases=tuple(dict.fromkeys((*info.aliases, clean)))))
-            seen.add(("show", tvdb_id))
-        except Exception as exc:
-            log.debug("Mapped TVDB metadata unavailable for %s: %s", tvdb_id, exc)
-    unique.sort(key=lambda item: _match_score(clean, item), reverse=True)
-    _TVDB_CACHE[cache_key] = (time.time(), unique)
-    return unique[:limit]
+    if table is None:
+        return None
+    parsed = erai._erai_name_episode(title)
+    name = parsed[0] if parsed else clean_release_title(title)
+    number = parsed[1] if parsed else release_episode_info(title)[1]
+    saved = mappings.get(erai._mapping_key(title)) or {}
+    if str(saved.get("anidb_id") or "").isdigit():
+        entry = table.anime.get(int(saved["anidb_id"]))
+        if number is not None:
+            number += int(saved.get("anidb_episode_offset") or 0)
+    else:
+        entry = anidb_mod.resolve_in(table, name).anime
+        if entry is not None and number is not None:
+            entry, number = anidb_mod.settle_episode(table, entry, number)
+    if entry is None:
+        return None
+    facts = anidb_art.facts(entry.aid)
+    return {
+        "anidb_id": entry.aid,
+        "title": entry.title,
+        "english_title": entry.english_title,
+        "episode": number,
+        "poster_url": anidb_art.cover(entry.aid),
+        "year": facts.get("year"),
+        "type": facts.get("type"),
+    }
 
 
-async def _quick_tvdb_candidates(query: str) -> list[AnimeTVDBMatch]:
-    """Resolve a release title with English/Japanese TVDB translations."""
-    return await tvdb_candidates(query, limit=4)
+async def _enrich_anidb(entries: list[NyaaEntry]) -> list[NyaaEntry]:
+    from bankai.metadata import anidb as anidb_mod
+    from bankai.web import erai
 
-
-async def _enrich_tvdb(
-    entries: list[NyaaEntry], query_matches: list[AnimeTVDBMatch]
-) -> list[NyaaEntry]:
-    semaphore = asyncio.Semaphore(4)
-    release_lookups: dict[str, asyncio.Task[list[AnimeTVDBMatch]]] = {}
-
-    async def release_candidates(release_query: str) -> list[AnimeTVDBMatch]:
-        async with semaphore:
-            return await _quick_tvdb_candidates(release_query)
-
-    async def enrich(entry: NyaaEntry) -> NyaaEntry:
-        release_query = clean_release_title(entry.title)
-        candidates = query_matches
-        if not candidates:
-            lookup_key = _normalise(release_query)
-            task = release_lookups.get(lookup_key)
-            if task is None:
-                task = asyncio.create_task(release_candidates(release_query))
-                release_lookups[lookup_key] = task
-            candidates = await task
-        match = max(candidates, key=lambda item: _match_score(release_query, item), default=None)
-        if match is not None and _match_score(release_query, match) < 0.28:
-            match = None
-        return replace(entry, tvdb=match)
-
-    return list(await asyncio.gather(*(enrich(entry) for entry in entries)))
+    table = await anidb_mod.index()
+    mappings = await asyncio.to_thread(erai._load_mappings)
+    return [
+        replace(entry, anidb=anidb_match(entry.title, table=table, mappings=mappings))
+        for entry in entries
+    ]
 
 
 def _matches_filters(
@@ -563,18 +390,17 @@ async def search(
 ) -> AnimeSearchPage:
     if category not in {"1_0", "1_1", "1_2", "1_3", "1_4"}:
         category = "1_0"
-    query_candidates = await tvdb_candidates(query, limit=8) if query.strip() else []
-    query_matches = [
-        candidate for candidate in query_candidates[:1] if _match_score(query, candidate) >= 0.75
-    ]
-    aliases: list[str] = []
-    for value in [
-        query.strip(),
-        *(item.english_title for item in query_matches),
-        *(item.japanese_title or "" for item in query_matches),
-    ]:
-        if value and value.casefold() not in {item.casefold() for item in aliases}:
-            aliases.append(value)
+    aliases: list[str] = [query.strip()] if query.strip() else []
+    if query.strip():
+        from bankai.metadata import anidb as anidb_mod
+
+        # The anime's other names on AniDB widen the search: Erai publishes
+        # under the romaji title, people type the English one.
+        table = await anidb_mod.index()
+        found = anidb_mod.resolve_in(table, query.strip()).anime if table is not None else None
+        for value in (found.title, found.english_title) if found is not None else ():
+            if value and value.casefold() not in {item.casefold() for item in aliases}:
+                aliases.append(value)
     queries = aliases or [""]
     headers = {"User-Agent": get_settings().scraper.user_agent}
     async with httpx.AsyncClient(
@@ -632,14 +458,10 @@ async def search(
         )
     ]
     items.sort(key=lambda entry: (entry.seeders, entry.downloads), reverse=True)
-    # Keep every Nyaa row so pagination never skips releases. Blank browsing
-    # gets fast automatic TVDB matches for the leading rows; all other rows
-    # remain downloadable through the explicit TVDB picker.
-    enrich_count = len(items) if query.strip() else min(20, len(items))
-    items = [
-        *(await _enrich_tvdb(items[:enrich_count], query_matches)),
-        *items[enrich_count:],
-    ]
+    # Every row is identified: AniDB's title index is on disk, so it costs
+    # no requests. A row it cannot place is still downloadable once an AniDB
+    # entry is picked for it.
+    items = await _enrich_anidb(items)
     has_next = any(len(batch) >= _RSS_PAGE_SIZE for batch in batches)
     return AnimeSearchPage(items=items, page=page, has_next=has_next, aliases=aliases)
 
@@ -648,14 +470,10 @@ def entry_to_dict(entry: NyaaEntry) -> dict:
     return asdict(entry)
 
 
-def tvdb_to_dict(item: AnimeTVDBMatch) -> dict:
-    return asdict(item)
-
-
 __all__ = [
     "AnimeSearchPage",
-    "AnimeTVDBMatch",
     "NyaaEntry",
+    "anidb_match",
     "clean_release_title",
     "detail",
     "entry_to_dict",
@@ -664,6 +482,4 @@ __all__ = [
     "release_episode_info",
     "search",
     "split_filter_terms",
-    "tvdb_candidates",
-    "tvdb_to_dict",
 ]

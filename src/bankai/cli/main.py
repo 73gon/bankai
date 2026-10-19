@@ -1707,6 +1707,20 @@ def web_serve(
     run_server(host=host, port=port)
 
 
+@anime_app.command("migrate-anidb")
+def anime_migrate_anidb(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only report what would change"),
+) -> None:
+    """Move the TVDB-era anime state over to AniDB; run with the automation stopped."""
+    from bankai.web.anidb_migration import migrate
+
+    report = asyncio.run(migrate(dry_run=dry_run))
+    for kind, count in sorted(report.items()):
+        console.print(f"{count:>6}  {kind}")
+    if dry_run:
+        console.print("[yellow]dry run: nothing was changed[/yellow]")
+
+
 @anime_app.command("worker")
 def anime_worker() -> None:
     """Run the anime automation cycle in the foreground, apart from the web UI.
@@ -2332,10 +2346,11 @@ def anime_download(
     magnet_uri: str = typer.Option(..., "--magnet-uri"),
     info_hash: str = typer.Option(..., "--info-hash"),
     media_kind: str = typer.Option(..., "--kind", help="show | movie"),
-    tvdb_id: int = typer.Option(0, "--tvdb-id"),
+    # Accepted and ignored: jobs queued before anime moved to AniDB carry them.
+    _tvdb_id: int = typer.Option(0, "--tvdb-id", hidden=True),
     english_title: str = typer.Option(..., "--english-title"),
     year: int | None = typer.Option(None, "--year"),
-    season: int | None = typer.Option(None, "--season"),
+    _season: int | None = typer.Option(None, "--season", hidden=True),
     episode: int | None = typer.Option(None, "--episode"),
     anidb_id: int | None = typer.Option(None, "--anidb-id"),
     anidb_title: str | None = typer.Option(None, "--anidb-title"),
@@ -2351,8 +2366,8 @@ def anime_download(
     if not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url):
         console.print("[red]anime downloads only accept nyaa.si sources[/red]")
         raise typer.Exit(code=1)
-    if not anidb_id and not tvdb_id:
-        console.print("[red]an anime download needs --anidb-id or --tvdb-id[/red]")
+    if media_kind == "show" and not anidb_id:
+        console.print("[red]an anime show download needs --anidb-id[/red]")
         raise typer.Exit(code=1)
 
     async def go() -> None:
@@ -2364,10 +2379,8 @@ def anime_download(
                 magnet_uri=magnet_uri,
                 info_hash=info_hash,
                 media_kind=media_kind,
-                tvdb_id=tvdb_id,
                 english_title=english_title,
                 year=year,
-                season_override=season,
                 episode_override=episode,
                 anidb_id=anidb_id,
                 anidb_title=anidb_title,

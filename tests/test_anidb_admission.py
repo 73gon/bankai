@@ -1,4 +1,4 @@
-"""Releases identified on AniDB, the default route since the switch from TVDB."""
+"""Releases identified on AniDB, the only route since TVDB left the anime side."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 from bankai.config import Settings
 from bankai.metadata import anidb
 from bankai.processor import anime as processor
-from bankai.web import erai
+from bankai.web import anime_library, erai, shoko_catalog
 from bankai.web.anime import NyaaEntry
 
 FRIEREN = anidb.AniDBAnime(
@@ -55,8 +55,10 @@ def world(monkeypatch, tmp_path):
     library.mkdir()
     settings = Settings(anime={"enabled": True}, transfer={"anime_shows_dir": str(library)})
     monkeypatch.setattr(erai, "get_settings", lambda: settings)
-    monkeypatch.setattr(erai, "_anidb_identity", lambda: True)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    # What places a file of any folder name: Shoko's links, the user's folder links.
+    monkeypatch.setattr(shoko_catalog, "saved_links", lambda: None)
+    monkeypatch.setattr(anime_library, "load_prefs", lambda: {})
     monkeypatch.setattr(erai, "_load_policies", lambda: {})
     monkeypatch.setattr(erai, "_SHOW_KEYS_CACHE", None)
 
@@ -76,7 +78,6 @@ def world(monkeypatch, tmp_path):
         return ("Subtitles Info:\nGerman (CR_German) | ASS", None, "Erai-raws")
 
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
     added: list[dict] = []
 
     class Qbit:
@@ -108,14 +109,17 @@ def test_a_release_is_its_anidb_anime_and_its_own_episode_number(world):
     assert args[args.index("--anidb-title") + 1] == "Sousou no Frieren"
     assert args[args.index("--episode") + 1] == "5"
     assert "--season" not in args
-    # Kept for the parts of the library still keyed by TVDB.
-    assert args[args.index("--tvdb-id") + 1] == "424536"
+    # Nothing of TVDB is left in what publishing is told, or in the record.
+    assert "--tvdb-id" not in args
+    assert (record["anidb_id"], record["episode"]) == (17617, 5)
+    assert "tvdb_id" not in record
+    assert "tvdb_id" not in world["state"]["anime"]["17617"]
     assert world["added"], "the torrent goes to qBittorrent once recorded"
 
 
-def test_an_episode_fetched_in_the_tvdb_era_is_not_fetched_again(world):
-    """The old key for the same episode is (TVDB id, season, episode)."""
-    world["state"]["canonical"]["424536|1|5"] = {"info_hash": "f" * 40, "resolution": 1080}
+def test_an_episode_already_taken_is_not_fetched_again(world):
+    """The key for an episode is its AniDB entry and its number there."""
+    world["state"]["canonical"]["anidb:17617|5"] = {"info_hash": "f" * 40, "resolution": 1080}
     item = release("[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC][MultiSub]")
 
     assert consider(world, item) is False
@@ -133,14 +137,20 @@ def test_an_episode_already_filed_under_its_anidb_folder_is_existing(world):
 
 
 def test_an_episode_in_the_old_tvdb_folder_is_existing(world, monkeypatch):
-    world["state"]["series"]["424536"] = {"english_title": "Frieren"}
+    """Filed in the TVDB days under another name; Shoko's link says which episode it is."""
+    season = world["library"] / "Frieren" / "Season 01"
+    season.mkdir(parents=True)
+    old = season / "Frieren - S01E05.mkv"
+    old.write_bytes(b"x")
     monkeypatch.setattr(
-        erai, "_episode_on_disk", lambda title, season, episode, tvdb_id=None: (title, season, episode) == ("Frieren", 1, 5)
+        shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files={str(old): [(17617, 5)]})
     )
     item = release("[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC][MultiSub]")
 
     assert consider(world, item) is False
     assert world["state"]["releases"][item.info_hash]["status"] == "existing"
+    # Episode 6 is not in that folder, and is still fetched.
+    assert consider(world, release("[Erai-raws] Sousou no Frieren - 06 [1080p][HEVC][MultiSub]", 6)) is True
 
 
 def test_a_show_blacklisted_by_its_anidb_anime_is_blacklisted(world, monkeypatch):

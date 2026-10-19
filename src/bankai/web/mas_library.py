@@ -75,7 +75,7 @@ async def _resolve(title: str, kind: str) -> dict:
     """Artwork and identity for one title, or an empty dict."""
     with suppress(Exception):
         # Any title, not only anime: this is the Movies & Shows library.
-        return await show_metadata(title, None, kind=kind, anime_only=False)
+        return await show_metadata(title, kind=kind)
     return {}
 
 

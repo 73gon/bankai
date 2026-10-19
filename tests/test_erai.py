@@ -13,21 +13,34 @@ import pytest
 
 from bankai.backend.transfer import TransferItem, TransferResult
 from bankai.config import Settings
-from bankai.metadata.tvdb import TVDBEpisode
+from bankai.metadata import anidb
 from bankai.processor import anime as processor
-from bankai.web import erai
+from bankai.web import anime_library, erai, shoko_catalog
 from bankai.web import jobs as webjobs
-from bankai.web.anime import AnimeTVDBMatch, NyaaEntry
+from bankai.web.anime import NyaaEntry
 from bankai.web.jobs import PendingJob
 
 
-@pytest.fixture(autouse=True)
-def _tvdb_identity(monkeypatch):
-    """These tests cover the TVDB identification route, behind anime.identity.
+def show(aid: int = 1, title: str = "Test Show", english_title: str | None = None) -> anidb.AniDBAnime:
+    """An AniDB entry, as the title index describes it."""
+    return anidb.AniDBAnime(aid=aid, title=title, english_title=english_title, titles=(title,))
 
-    The AniDB route, the default, is covered in test_anidb_admission.py.
-    """
-    monkeypatch.setattr(erai, "_anidb_identity", lambda: False)
+
+def resolved(anime: anidb.AniDBAnime, episode: int | None = None):
+    """A stand-in for _resolve_anidb: every release is this entry, by its own number."""
+
+    async def resolve(candidate):
+        number = episode or erai._erai_name_episode(candidate.title)[1]
+        return anime, number, None
+
+    return resolve
+
+
+@pytest.fixture(autouse=True)
+def _no_library_links(monkeypatch):
+    """Shoko's file links and the user's folder links are files of the real state."""
+    monkeypatch.setattr(shoko_catalog, "saved_links", lambda: None)
+    monkeypatch.setattr(anime_library, "load_prefs", lambda: {})
 
 
 def entry(
@@ -265,7 +278,7 @@ def test_reserve_stops_network_and_new_downloads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = Settings(anime={"enabled": True}, metadata={"tvdb_api_key": "test"})
+    settings = Settings(anime={"enabled": True})
     monkeypatch.setattr(erai, "get_settings", lambda: settings)
     monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
     monkeypatch.setattr(erai, "free_space_gib", lambda: 100.0)
@@ -280,39 +293,18 @@ def test_reserve_stops_network_and_new_downloads(
     assert "reserve" in result["pause_reason"]
 
 
-def test_tvdb_ambiguity_is_held_instead_of_guessed(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def candidates(_query: str, **_kwargs: object) -> list[AnimeTVDBMatch]:
-        return [AnimeTVDBMatch(1, "show", "Test Show"), AnimeTVDBMatch(2, "show", "Test Show")]
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    match, identity, error = asyncio.run(erai._resolve(entry()))
-    assert match is None and identity is None
-    assert error == "TVDB match is ambiguous"
-
-
-def test_tvdb_fabricated_episode_is_not_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def candidates(_query: str, **_kwargs: object) -> list[AnimeTVDBMatch]:
-        return [AnimeTVDBMatch(1, "show", "Test Show")]
-
-    async def episodes(_id: int) -> list[TVDBEpisode]:
-        return [TVDBEpisode(1, 1, 1, "First")]
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    match, identity, error = asyncio.run(erai._resolve(entry("[Erai-raws] Test Show - 99 [1080p]")))
-    assert match is None and identity is None
-    assert "TVDB ordering" in error
-
-
 def test_manual_mapping_is_durable_and_unblocks_future_episodes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
-    erai.save_mapping(entry().title, AnimeTVDBMatch(123, "show", "Canonical Show", year=2024))
-    assert erai._load_mappings()[erai._mapping_key(entry().title)]["tvdb_id"] == 123
+    erai.save_anidb_mapping(entry().title, {"anidb_id": 123, "title": "Canonical Show"})
+    # The AniDB choice alone: nothing of the TVDB days is carried along.
+    assert erai._load_mappings()[erai._mapping_key(entry().title)] == {
+        "anidb_id": 123,
+        "anidb_title": "Canonical Show",
+        "anidb_episode_offset": 0,
+    }
     next_episode = entry("[Erai-raws] Test Show - 02 [1080p]")
     assert erai._mapping_key(next_episode.title) == erai._mapping_key(entry().title)
 
@@ -432,18 +424,15 @@ def test_autonomous_anime_transfers_video_and_german_sidecar_without_approval(
     source = download / "Test Show - 01.mkv"
     source.write_bytes(b"video")
     source.with_suffix(".de.ass").write_text("German subtitles")
-    target = tmp_path / "shows_anime" / "Test Show" / "Season 01" / "Test Show - S01E01.mkv"
+    target = tmp_path / "shows_anime" / "Test Show" / "Test Show - 01.mkv"
     settings = Settings(
         output={"directory": tmp_path / "staging"},
         paths={"cleanup_after_success": False},
-        transfer={"anime_shows_dir": target.parent.parent.parent},
+        transfer={"anime_shows_dir": target.parent.parent},
     )
     monkeypatch.setattr(processor, "get_settings", lambda: settings)
     monkeypatch.setattr(processor, "_has_german_subtitles", lambda _path: True)
     monkeypatch.delenv("BANKAI_BG_JOB_ID", raising=False)
-
-    async def episodes(_id: int) -> list[TVDBEpisode]:
-        return [TVDBEpisode(1, 1, 1, "First")]
 
     async def locate(*_args: object, **_kwargs: object) -> str:
         return entry().info_hash
@@ -483,7 +472,6 @@ def test_autonomous_anime_transfers_video_and_german_sidecar_without_approval(
 
     monkeypatch.setattr(processor, "QBittorrentClient", Qbit)
     monkeypatch.setattr(processor, "_locate_torrent", locate)
-    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
     monkeypatch.setattr(
         "bankai.backend.transfer.plan_transfer",
         lambda paths, **kwargs: [TransferItem(paths[0], target, "anime")],
@@ -501,10 +489,10 @@ def test_autonomous_anime_transfers_video_and_german_sidecar_without_approval(
             magnet_uri=entry().magnet_uri,
             info_hash=entry().info_hash,
             media_kind="show",
-            tvdb_id=123,
+            anidb_id=1,
+            anidb_title="Test Show",
             english_title="Test Show",
             year=2024,
-            season_override=1,
             episode_override=1,
             require_german_subtitles=True,
         )
@@ -532,18 +520,15 @@ def test_prefilled_anime_torrent_cleanup_respects_automation_ownership(
     download.mkdir()
     source = download / "Test Show - 01.mkv"
     source.write_bytes(b"video")
-    target = tmp_path / "shows_anime" / "Test Show" / "Season 01" / "Test Show - S01E01.mkv"
+    target = tmp_path / "shows_anime" / "Test Show" / "Test Show - 01.mkv"
     settings = Settings(
         output={"directory": tmp_path / "staging"},
         paths={"cleanup_after_success": True},
-        transfer={"anime_shows_dir": target.parent.parent.parent},
+        transfer={"anime_shows_dir": target.parent.parent},
     )
     monkeypatch.setattr(processor, "get_settings", lambda: settings)
     monkeypatch.delenv("BANKAI_BG_JOB_ID", raising=False)
     removed: list[tuple[str, bool]] = []
-
-    async def episodes(_id: int) -> list[TVDBEpisode]:
-        return [TVDBEpisode(1, 1, 1, "First")]
 
     async def locate(*_args: object, **_kwargs: object) -> str:
         return entry().info_hash
@@ -581,7 +566,6 @@ def test_prefilled_anime_torrent_cleanup_respects_automation_ownership(
 
     monkeypatch.setattr(processor, "QBittorrentClient", Qbit)
     monkeypatch.setattr(processor, "_locate_torrent", locate)
-    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
     monkeypatch.setattr(processor.review, "set_stage", lambda *args, **kwargs: None)
     monkeypatch.setattr(processor.review, "set_sources", lambda *args, **kwargs: None)
 
@@ -593,10 +577,10 @@ def test_prefilled_anime_torrent_cleanup_respects_automation_ownership(
             magnet_uri=entry().magnet_uri,
             info_hash=entry().info_hash,
             media_kind="show",
-            tvdb_id=123,
+            anidb_id=1,
+            anidb_title="Test Show",
             english_title="Test Show",
             year=2024,
-            season_override=1,
             episode_override=1,
             cleanup_torrent=cleanup_torrent,
         )
@@ -697,19 +681,6 @@ def test_listing_ignores_comment_link_titles() -> None:
     assert parsed[0].title == entry().title
 
 
-def test_automatic_tvdb_match_does_not_accept_extra_title_words(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def candidates(_query: str, **_kwargs: object) -> list[AnimeTVDBMatch]:
-        return [AnimeTVDBMatch(1, "show", "Test Show: A Different Series")]
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    match, identity, error = asyncio.run(erai._resolve(entry()))
-    assert match is None and identity is None
-    assert error == "No confident TVDB match"
-
-
 def test_series_name_cannot_prove_sidecar_language(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -753,66 +724,6 @@ def test_backfill_follows_actual_nyaa_next_page_markup(
     assert state["backfill"]["frontier"][0]["page"] == 4
     assert not state["backfill"]["complete"]
     assert len(queries) == 3
-
-
-def test_one_season_resolution_does_not_need_xem(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def candidates(*args, **kwargs):
-        return [AnimeTVDBMatch(1, "show", "Test Show")]
-
-    async def episodes(_id):
-        return [TVDBEpisode(1, 1), TVDBEpisode(1, 2)]
-
-    async def forbidden(*args):
-        raise AssertionError("one-season shows do not need mapping")
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", forbidden)
-    match, identity, error = asyncio.run(erai._resolve(entry()))
-    assert match is not None and not error and (identity.season, identity.episode) == (1, 1)
-
-
-def test_named_bleach_part_uses_published_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
-    title = "Bleach: Sennen Kessen Hen - Ketsubetsu Tan"
-
-    async def candidates(*args, **kwargs):
-        return [AnimeTVDBMatch(74796, "show", "Bleach", aliases=(title,))]
-
-    async def episodes(_id):
-        return [TVDBEpisode(1, 1), TVDBEpisode(17, 14)]
-
-    async def mapped(*args):
-        return (17, 14), True
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapped)
-    match, identity, error = asyncio.run(
-        erai._resolve(entry("[Erai-raws] " + title + " - 01 [1080p]"))
-    )
-    assert match is not None and not error and (identity.season, identity.episode) == (17, 14)
-
-
-def test_named_multiseason_alias_without_mapping_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def candidates(*args, **kwargs):
-        return [AnimeTVDBMatch(74796, "show", "Bleach", aliases=("Bleach Calamity",))]
-
-    async def episodes(_id):
-        return [TVDBEpisode(1, 1, 1), TVDBEpisode(17, 41, 407)]
-
-    async def mapped(*args):
-        return None, False
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(processor, "_tvdb_episode_map", episodes)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapped)
-    match, identity, error = asyncio.run(
-        erai._resolve(entry("[Erai-raws] Bleach Calamity - 01 [1080p]"))
-    )
-    assert match is None and identity is None and "no season was guessed" in error
 
 
 def test_rss_reads_configured_nyaa_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -991,109 +902,45 @@ def test_german_aac_audio_row_is_not_subtitle_evidence():
     )
 
 
-def test_part_two_uses_verified_split_cour_boundary(monkeypatch):
-    from datetime import date, timedelta
-
-    match = AnimeTVDBMatch(464693, "show", "Yoroi-Shinden Samurai Troopers")
-    rows = [
-        TVDBEpisode(
-            1,
-            n,
-            n,
-            f"Episode {n}",
-            aired=(
-                date(2026, 1, 6) + timedelta(days=(n - 1) * 7 + (90 if n > 12 else 0))
-            ).isoformat(),
-        )
-        for n in range(1, 25)
-    ]
-
-    async def candidates(*args, **kwargs):
-        return [match]
-
-    async def mapping(*args):
-        return None, False
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapping)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    selected, identity, error = asyncio.run(
-        erai._resolve(
-            entry("[Erai-raws] Yoroi-Shinden Samurai Troopers Part 2 - 11 [1080p][MultiSub]"),
-            episodes=rows,
-        )
-    )
-    assert selected == match and error is None
-    assert (identity.season, identity.episode) == (1, 23)
-
-
-def test_part_two_uses_equal_tvdb_cour_when_air_dates_have_no_boundary(monkeypatch):
-
-    match = AnimeTVDBMatch(1, "show", "Test Show")
-
-    async def candidates(*args, **kwargs):
-        return [match]
-
-    async def mapping(*args):
-        return None, False
-
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", candidates)
-    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", mapping)
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    selected, identity, error = asyncio.run(
-        erai._resolve(
-            entry("[Erai-raws] Test Show Part 2 - 11 [1080p]"),
-            episodes=[TVDBEpisode(1, n) for n in range(1, 25)],
-        )
-    )
-    assert selected == match and error is None
-    assert (identity.season, identity.episode) == (1, 23)
-
-
 def test_saved_one_piece_selection_bypasses_ambiguous_search(monkeypatch, tmp_path):
     monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai_automation.json")
-    erai.save_mapping(
+    erai.save_anidb_mapping(
         "[Erai-raws] One Piece - 1173 [1080p][MultiSub]",
-        AnimeTVDBMatch(81797, "show", "One Piece", year=1999),
+        {"anidb_id": 69, "title": "One Piece"},
     )
+    one_piece = show(69, "One Piece")
 
     async def ambiguous(*args, **kwargs):
         raise AssertionError("A saved source identity must bypass fuzzy/provider selection")
 
-    async def no_mapping(*args):
-        return None, False
+    async def known(aid):
+        return one_piece if aid == 69 else None
 
-    monkeypatch.setattr(erai.anime_mod, "tvdb_candidates", ambiguous)
-    monkeypatch.setattr(erai.anime_mapping, "mapped_episode", no_mapping)
-    selected, identity, error = asyncio.run(
-        erai._resolve(
-            entry("[Erai-raws] One Piece - 1174 [1080p][MultiSub]"),
-            episodes=[TVDBEpisode(22, 90, 1174), TVDBEpisode(1, 1, 1)],
-        )
+    monkeypatch.setattr(erai.anidb_mod, "resolve", ambiguous)
+    monkeypatch.setattr(erai.anidb_mod, "settle", ambiguous)
+    monkeypatch.setattr(erai.anidb_mod, "anime", known)
+    selected, episode, error = asyncio.run(
+        erai._resolve_anidb(entry("[Erai-raws] One Piece - 1174 [1080p][MultiSub]"))
     )
-    assert selected.tvdb_id == 81797 and error is None
-    assert (identity.season, identity.episode) == (22, 90)
+    assert selected.aid == 69 and error is None
+    # AniDB numbers One Piece straight through, as Erai does.
+    assert episode == 1174
     assert (
         erai._mapping_key("[Erai-raws] One Piece Film Red - 01 [1080p]")
         not in erai._load_mappings()
     )
 
 
-def test_backlog_submission_reserves_space_before_qbit_add(monkeypatch):
+def test_backlog_submission_reserves_space_before_qbit_add(monkeypatch, tmp_path):
     state = erai._default_state()
-    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    _admit_as(monkeypatch, tmp_path)
 
     async def detail(*args):
         return "German | ASS", None, "Erai-raws"
 
-    async def resolve(*args):
-        return AnimeTVDBMatch(1, "show", "Test Show"), processor.EpisodeIdentity(1, 1), None
-
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr(erai, "_resolve", resolve)
-    monkeypatch.setattr(
-        "bankai.backend.transfer._existing_show_folder", lambda *args, **kwargs: None
-    )
+    # HEVC, so it is the reserve that stops it and not the codec policy.
+    item = entry("[Erai-raws] Test Show - 01 [1080p][HEVC][MultiSub]")
 
     class Qbit:
         async def add(self, **kwargs):
@@ -1101,14 +948,17 @@ def test_backlog_submission_reserves_space_before_qbit_add(monkeypatch):
 
     async def run():
         token = erai._ADMISSION.set({"qbit": Qbit(), "remaining": 100})
+        disk = erai._DISK_INDEX.set(None)
         try:
             async with httpx.AsyncClient() as client:
-                assert not await erai._consider(state, entry(), client)
+                assert not await erai._consider(state, item, client)
         finally:
             erai._ADMISSION.reset(token)
+            erai._DISK_INDEX.reset(disk)
 
     asyncio.run(run())
     assert not state["canonical"]
+    assert item.info_hash not in state["releases"]
 
 
 def test_completed_prefill_torrents_are_not_double_counted_against_free_space():
@@ -1127,7 +977,7 @@ def test_review_groups_every_held_release_beyond_recent_display_cap(tmp_path, mo
     state = erai._default_state()
     for number in range(1, 502):
         item = entry(f"[Erai-raws] Test Show - {number:03d} [1080p][MultiSub]", number)
-        erai._hold(state, item, "No confident TVDB match")
+        erai._hold(state, item, "No AniDB anime has this title")
     erai._save_state(state)
 
     rows = erai.review_items()
@@ -1175,15 +1025,12 @@ def test_retry_checks_old_catalog_release_and_consumes_one_attempt(
     result_status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
-    settings = Settings(
-        anime={"enabled": True, "backfill_request_delay_seconds": 1},
-        metadata={"tvdb_api_key": "test"},
-    )
+    settings = Settings(anime={"enabled": True, "backfill_request_delay_seconds": 1})
     monkeypatch.setattr(erai, "get_settings", lambda: settings)
     monkeypatch.setattr(erai, "free_space_gib", lambda: 1000.0)
     held = entry()
     state = erai._default_state()
-    erai._hold(state, held, "TVDB match is ambiguous")
+    erai._hold(state, held, "AniDB match is ambiguous: Test Show, Test Show (2024)")
     # Simulate a legacy hold whose original entry only exists in its catalogue.
     state["releases"][held.info_hash].pop("entry")
     state["backfill"]["catalog_1080"]["show|1"] = erai._entry_dict(held)
@@ -1287,7 +1134,7 @@ async def test_blacklist_removes_holds_and_can_be_restored(tmp_path, monkeypatch
     monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
     state = erai._default_state()
     item = entry()
-    erai._hold(state, item, "No confident TVDB match")
+    erai._hold(state, item, "No AniDB anime has this title")
     erai._save_state(state)
 
     async def no_cycle(**kwargs):
@@ -1352,7 +1199,7 @@ def _release(info_hash, status="queued", **extra):
             info_hash,
             "--magnet-uri",
             "magnet:?xt=urn:btih:" + info_hash,
-            "--tvdb-id",
+            "--anidb-id",
             "123",
         ],
         "updated_at": 1.0,
@@ -1515,7 +1362,8 @@ def test_queue_rows_expose_the_backlog_that_has_no_job(monkeypatch):
     rows = erai.release_queue_rows()
     # Only releases without a worker of their own; the rest come from bgjobs.
     assert {row["phase"] for row in rows} == {"queued", "downloading"}
-    assert all(row["tvdb_id"] == "123" for row in rows)
+    assert all(row["anidb_id"] == "123" for row in rows)
+    assert all("tvdb_id" not in row for row in rows)
     assert all(row["pending"] for row in rows)
 
 
@@ -1571,7 +1419,19 @@ def test_migration_retires_placeholders_and_adopts_untracked_ones(monkeypatch):
     assert "j3" not in cancelled
 
 
-def test_discovery_records_the_release_before_adding_the_torrent(monkeypatch):
+def _admit_as(monkeypatch, tmp_path, anime=None, episode=None):
+    """Discovery as far as subtitles: every release is ``anime``, and none is on disk."""
+    monkeypatch.setattr(
+        erai,
+        "get_settings",
+        lambda: Settings(anime={"enabled": True}, transfer={"anime_shows_dir": tmp_path / "shows_anime"}),
+    )
+    monkeypatch.setattr(erai, "_load_policies", lambda: {})
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    monkeypatch.setattr(erai, "_resolve_anidb", resolved(anime or show(), episode))
+
+
+def test_discovery_records_the_release_before_adding_the_torrent(monkeypatch, tmp_path):
     """The old order could add a torrent that no record ever pointed at."""
     order: list[str] = []
     state = erai._default_state()
@@ -1586,18 +1446,8 @@ def test_discovery_records_the_release_before_adding_the_torrent(monkeypatch):
     async def detail(_client, _url):
         return ("Subtitles Info:\nGerman (CR_German) | ASS", item.magnet_uri, "Erai-raws")
 
-    async def resolve(_entry):
-        return (
-            AnimeTVDBMatch(1, "show", "Test Show", year=2024),
-            SimpleNamespace(season=1, episode=1),
-            None,
-        )
-
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    _admit_as(monkeypatch, tmp_path)
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr(erai, "_resolve", resolve)
-    monkeypatch.setattr(erai, "_existing_show_folder_lookup", None, raising=False)
-    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
     token = erai._ADMISSION.set({"qbit": Qbit(), "remaining": 10 * 1024**3})
 
     def spawn(**_kwargs):
@@ -1612,9 +1462,10 @@ def test_discovery_records_the_release_before_adding_the_torrent(monkeypatch):
     assert order == ["qbit.add"]
     record = state["releases"][item.info_hash]
     assert record["status"] == "queued"
-    assert record["display_title"] == "Test Show S01E01"
-    # The arguments are kept so publishing never re-resolves against TVDB.
+    assert record["display_title"] == "Test Show - 01"
+    # The arguments are kept so publishing never resolves the release again.
     assert record["args"][0] == "anime-download"
+    assert record["args"][record["args"].index("--anidb-id") + 1] == "1"
 
 
 def _legacy_release(status="queued"):
@@ -1622,15 +1473,22 @@ def _legacy_release(status="queued"):
     return {
         "status": status,
         "title": "[Erai-raws] Test Show - 11 [1080p][HEVC]",
-        "canonical": "402642|1|11",
+        "canonical": "anidb:17617|11",
         "updated_at": 1.0,
     }
 
 
-def _state_with_series():
+def _state_with_anime():
+    """The AniDB entry the canonical key names, as discovery recorded it."""
     state = erai._default_state()
-    state["series"] = {
-        "402642": {"tvdb_id": 402642, "english_title": "Test Show", "year": 2024}
+    state["anime"] = {
+        "17617": {
+            "anidb_id": 17617,
+            "title": "Tesuto Shou",
+            "english_title": "Test Show",
+            "matching_titles": ["Tesuto Shou", "Test Show"],
+            "folder": "Tesuto Shou",
+        }
     }
     return state
 
@@ -1638,7 +1496,7 @@ def _state_with_series():
 def test_legacy_record_without_arguments_is_rebuilt_and_published(monkeypatch, tmp_path):
     """Finished downloads sat untouched because the record carried no arguments."""
     info_hash = "a" * 40
-    state = _state_with_series()
+    state = _state_with_anime()
     state["releases"] = {info_hash: _legacy_release()}
 
     monkeypatch.setattr(erai, "_load_state", lambda: state)
@@ -1661,11 +1519,11 @@ def test_legacy_record_without_arguments_is_rebuilt_and_published(monkeypatch, t
     assert state["releases"][info_hash]["status"] == "transferring"
     args = spawned[0]["args"]
     assert args[0] == "anime-download"
-    assert args[args.index("--tvdb-id") + 1] == "402642"
-    assert args[args.index("--season") + 1] == "1"
-    assert args[args.index("--episode") + 1] == "11"
+    assert args[args.index("--anidb-id") + 1] == "17617"
+    assert args[args.index("--anidb-title") + 1] == "Tesuto Shou"
     assert args[args.index("--english-title") + 1] == "Test Show"
-    assert args[args.index("--year") + 1] == "2024"
+    assert args[args.index("--episode") + 1] == "11"
+    assert "--tvdb-id" not in args and "--season" not in args
     # The CLI refuses anything that is not a nyaa.si source.
     from bankai.web.anime import is_nyaa_url
 
@@ -1676,7 +1534,7 @@ def test_legacy_record_without_arguments_is_rebuilt_and_published(monkeypatch, t
 
 def test_unrebuildable_record_is_held_instead_of_skipped_forever(monkeypatch, tmp_path):
     info_hash = "b" * 40
-    state = erai._default_state()  # no series, so nothing to rebuild from
+    state = erai._default_state()  # no AniDB entry on record, so nothing to rebuild from
     state["releases"] = {info_hash: _legacy_release()}
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
@@ -1701,7 +1559,7 @@ def test_unrebuildable_record_is_held_instead_of_skipped_forever(monkeypatch, tm
 def test_legacy_running_status_is_re_driven(monkeypatch, tmp_path):
     """Those records point at workers from the old model that no longer exist."""
     info_hash = "c" * 40
-    state = _state_with_series()
+    state = _state_with_anime()
     state["releases"] = {info_hash: _legacy_release(status="running")}
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
@@ -1818,7 +1676,7 @@ def test_purge_removes_the_series_torrents_with_their_data(tmp_path, monkeypatch
     monkeypatch.setattr(erai, "get_settings", lambda: _purge_settings(tmp_path))
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(
-        erai, "_load_policies", lambda: {"test show": {"mode": "blacklisted", "tvdb_id": "1"}}
+        erai, "_load_policies", lambda: {"test show": {"mode": "blacklisted", "source_title": "Test Show"}}
     )
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
     # Only torrents qBittorrent still has are asked for: "a" is there, and a
@@ -1832,22 +1690,32 @@ def test_purge_removes_the_series_torrents_with_their_data(tmp_path, monkeypatch
 
 
 def test_blacklist_matches_every_season_of_the_same_series():
-    """The reported bug: one season blacklisted, the other left in review."""
+    """The reported bug: one season blacklisted, the other left in review.
+
+    A decision made by name, before AniDB entries, still covers every season
+    of the show. One made on an AniDB entry covers that entry under any name,
+    by its canonical key or by the anime chosen for the name in review, and
+    leaves its sequels, entries of their own, alone.
+    """
     policies = {
         "yozakura san chi no daisakusen 2nd season": {
             "mode": "blacklisted",
-            "tvdb_id": "417912",
-        }
+            "source_title": "Yozakura-san Chi no Daisakusen 2nd Season",
+        },
+        "anidb:500": {"mode": "blacklisted", "anidb_id": 500, "anidb_titles": ["Tensei Hen"]},
     }
-    mappings = {"yozakura san chi no daisakusen": {"tvdb_id": "417912"}}
+    mappings = {"chosen in review": {"anidb_id": 500}}
     season_two = {"title": "[Erai-raws] Yozakura-san Chi no Daisakusen 2nd Season - 01 [1080p]"}
     season_one = {"title": "[Erai-raws] Yozakura-san Chi no Daisakusen - 08 [1080p]"}
-    japanese = {"title": "[Erai-raws] Totally Different Name - 03 [1080p]", "canonical": "417912|1|3"}
+    japanese = {"title": "[Erai-raws] Totally Different Name - 03 [1080p]", "canonical": "anidb:500|3"}
+    chosen = {"title": "[Erai-raws] Chosen in Review - 04 [1080p]"}
+    sequel = {"title": "[Erai-raws] Another Name - 02 [1080p]", "canonical": "anidb:501|2"}
     unrelated = {"title": "[Erai-raws] Some Other Show - 01 [1080p]"}
 
-    for release in (season_two, season_one, japanese):
+    for release in (season_two, season_one, japanese, chosen):
         assert erai._is_blacklisted_release(release, policies=policies, mappings=mappings)
-    assert not erai._is_blacklisted_release(unrelated, policies=policies, mappings=mappings)
+    for release in (sequel, unrelated):
+        assert not erai._is_blacklisted_release(release, policies=policies, mappings=mappings)
 
 
 def _argless(info_hash, status="queued", **extra):
@@ -1855,7 +1723,7 @@ def _argless(info_hash, status="queued", **extra):
     row = {
         "status": status,
         "title": "[Erai-raws] Test Show - 11 [1080p][HEVC]",
-        "canonical": "402642|1|11",
+        "canonical": "anidb:17617|11",
         "updated_at": 1.0,
     }
     row.update(extra)
@@ -1901,13 +1769,21 @@ def test_a_real_hold_is_left_alone(monkeypatch, tmp_path):
 
 
 def test_an_episode_already_in_the_library_is_not_downloaded_again(monkeypatch, tmp_path):
-    """Its torrent is gone because it was published before the reconciler existed."""
+    """Its torrent is gone because it was published before the reconciler existed.
+
+    Then, in a TVDB folder under the English name: Shoko's link for the file
+    is what says it is this AniDB entry's episode 11.
+    """
     info_hash = "d" * 40
     season = tmp_path / "shows_anime" / "Test Show" / "Season 01"
     season.mkdir(parents=True)
-    (season / "Test Show - S01E11.mkv").write_bytes(b"video")
+    published = season / "Test Show - S01E11.mkv"
+    published.write_bytes(b"video")
+    monkeypatch.setattr(
+        shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files={str(published): [(17617, 11)]})
+    )
 
-    state = _state_with_series()
+    state = _state_with_anime()
     state["releases"] = {info_hash: _argless(info_hash)}
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
@@ -1953,7 +1829,7 @@ def test_german_language_tags_are_read_from_the_title(title, expected):
     assert erai.title_lists_german_subtitles(title) is expected
 
 
-def test_a_title_tagged_german_is_not_held(monkeypatch):
+def test_a_title_tagged_german_is_not_held(monkeypatch, tmp_path):
     """150 HEVC episodes were held while stating [GER] in their own name."""
     state = erai._default_state()
     item = entry(
@@ -1964,17 +1840,8 @@ def test_a_title_tagged_german_is_not_held(monkeypatch):
         # The HEVC releases say nothing about subtitles in the description.
         return ("Some description with no subtitle section", item.magnet_uri, "Erai-raws")
 
-    async def resolve(_entry):
-        return (
-            AnimeTVDBMatch(1, "show", "Test Show", year=2024),
-            SimpleNamespace(season=1, episode=1),
-            None,
-        )
-
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    _admit_as(monkeypatch, tmp_path)
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr(erai, "_resolve", resolve)
-    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
 
     assert asyncio.run(erai._consider(state, item, object())) is True
     assert state["releases"][item.info_hash]["status"] == "queued"
@@ -1992,7 +1859,7 @@ def test_non_hevc_holds_leave_review_because_the_policy_already_decided(monkeypa
         },
         "b" * 40: {
             "status": "held",
-            "reason": "No confident TVDB match",
+            "reason": "No AniDB anime has this title",
             "title": "[Erai-raws] Show - 03 [1080p][HEVC][Multiple Subtitle][ENG]",
             "retry_after": 9e9,
         },
@@ -2026,7 +1893,7 @@ def test_existing_german_tagged_holds_are_reopened(monkeypatch):
         },
         "c" * 40: {
             "status": "held",
-            "reason": "No confident TVDB match",
+            "reason": "No AniDB anime has this title",
             "title": "[Erai-raws] Show - 03 [1080p][HEVC][ENG][GER]",
             "retry_after": 9e9,
         },
@@ -2046,7 +1913,7 @@ def _catalogued(state, entry):
     state["backfill"]["catalog_1080"][entry.info_hash] = erai._entry_dict(entry)
 
 
-def test_the_hevc_release_of_the_same_episode_is_tried_before_holding(monkeypatch):
+def test_the_hevc_release_of_the_same_episode_is_tried_before_holding(monkeypatch, tmp_path):
     """Episode 2 sat in review while its HEVC twin waited in the catalogue."""
     state = erai._default_state()
     # What discovery looked at first: HEVC, but no German anywhere.
@@ -2064,17 +1931,8 @@ def test_the_hevc_release_of_the_same_episode_is_tried_before_holding(monkeypatc
             return ("Subtitles Info:\nGerman (CR_German) | ASS", hevc.magnet_uri, "Erai-raws")
         return ("No subtitle section here", avc.magnet_uri, "Erai-raws")
 
-    async def resolve(candidate):
-        return (
-            AnimeTVDBMatch(1, "show", "Tai Ari Deshita Ojou-sama", year=2026),
-            SimpleNamespace(season=1, episode=2),
-            None,
-        )
-
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    _admit_as(monkeypatch, tmp_path, show(1, "Tai Ari Deshita Ojou-sama"))
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr(erai, "_resolve", resolve)
-    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
 
     assert asyncio.run(erai._consider(state, avc, object())) is True
     # The episode is queued from the HEVC release, and nothing is in review.
@@ -2083,7 +1941,7 @@ def test_the_hevc_release_of_the_same_episode_is_tried_before_holding(monkeypatc
     assert state["held"] == []
 
 
-def test_it_still_holds_when_no_alternative_carries_german(monkeypatch):
+def test_it_still_holds_when_no_alternative_carries_german(monkeypatch, tmp_path):
     state = erai._default_state()
     avc = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL HEVC AAC][MultiSub]", 1)
     hevc = entry("[Erai-raws] Show - 02 [1080p CR WEBRip HEVC AAC][MultiSub]", 2)
@@ -2092,14 +1950,15 @@ def test_it_still_holds_when_no_alternative_carries_german(monkeypatch):
     async def detail(_client, _url):
         return ("No subtitle section anywhere", avc.magnet_uri, "Erai-raws")
 
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    _admit_as(monkeypatch, tmp_path, show(1, "Show"))
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
 
     assert asyncio.run(erai._consider(state, avc, object())) is False
     assert state["releases"][avc.info_hash]["status"] == "held"
+    assert "German subtitles" in state["releases"][avc.info_hash]["reason"]
 
 
-def test_an_alternative_for_a_different_episode_is_not_substituted(monkeypatch):
+def test_an_alternative_for_a_different_episode_is_not_substituted(monkeypatch, tmp_path):
     """Swapping in the wrong episode would be far worse than a hold."""
     state = erai._default_state()
     avc = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL HEVC AAC][MultiSub]", 1)
@@ -2111,15 +1970,16 @@ def test_an_alternative_for_a_different_episode_is_not_substituted(monkeypatch):
             return ("Subtitles Info:\nGerman | ASS", other_episode.magnet_uri, "Erai-raws")
         return ("No subtitle section here", avc.magnet_uri, "Erai-raws")
 
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    _admit_as(monkeypatch, tmp_path, show(1, "Show"))
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
 
     assert asyncio.run(erai._consider(state, avc, object())) is False
     assert state["releases"][avc.info_hash]["status"] == "held"
+    assert "German subtitles" in state["releases"][avc.info_hash]["reason"]
     assert other_episode.info_hash not in state["releases"]
 
 
-def _upgrade_fixture(monkeypatch, *, twin_has_german=True, resolvable=True):
+def _upgrade_fixture(monkeypatch, tmp_path, *, twin_has_german=True, resolvable=True):
     """One queued AVC episode with an HEVC encode waiting in the catalogue."""
     state = erai._default_state()
     avc = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL AVC AAC][MultiSub]", 1)
@@ -2127,33 +1987,25 @@ def _upgrade_fixture(monkeypatch, *, twin_has_german=True, resolvable=True):
     state["releases"][avc.info_hash] = {
         "status": "queued",
         "title": avc.title,
-        "canonical": "1|1|2",
+        "canonical": "anidb:1|2",
         "resolution": 1080,
     }
-    state["canonical"]["1|1|2"] = {"info_hash": avc.info_hash, "resolution": 1080}
+    state["canonical"]["anidb:1|2"] = {"info_hash": avc.info_hash, "resolution": 1080}
     state["backfill"]["catalog_1080"][hevc.info_hash] = erai._entry_dict(hevc)
 
     async def detail(_client, _url):
         body = "Subtitles Info:GERMAN_LINE" if twin_has_german else "nothing useful"
         return (body.replace("GERMAN_LINE", "GERMANLINE"), hevc.magnet_uri, "Erai-raws")
 
-    async def resolve(candidate):
-        if not resolvable:
-            return (None, None, "TVDB resolution failed")
-        # Derive the episode from the release, so several upgrades in one pass
-        # do not all claim the same canonical slot.
-        _season, number = erai.anime_mod.release_episode_info(candidate.title)
-        return (
-            AnimeTVDBMatch(1, "show", "Show", year=2026),
-            SimpleNamespace(season=1, episode=number or 2),
-            None,
-        )
+    _admit_as(monkeypatch, tmp_path, show(1, "Show"))
+    if not resolvable:
 
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+        async def unresolved(candidate):
+            return None, None, "No AniDB anime matches this title"
+
+        monkeypatch.setattr(erai, "_resolve_anidb", unresolved)
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr(erai, "_resolve", resolve)
     monkeypatch.setattr(erai, "has_explicit_german_subtitles", lambda text: twin_has_german)
-    monkeypatch.setattr("bankai.backend.transfer._existing_show_folder", lambda *a, **k: None)
 
     async def no_sleep(_seconds):
         pass
@@ -2162,9 +2014,9 @@ def _upgrade_fixture(monkeypatch, *, twin_has_german=True, resolvable=True):
     return state, avc, hevc
 
 
-def test_a_queued_avc_episode_is_replaced_by_its_hevc_encode(monkeypatch):
+def test_a_queued_avc_episode_is_replaced_by_its_hevc_encode(monkeypatch, tmp_path):
     """918 episodes and 1.2 TiB were queued as AVC with HEVC already available."""
-    state, avc, hevc = _upgrade_fixture(monkeypatch)
+    state, avc, hevc = _upgrade_fixture(monkeypatch, tmp_path)
     qbit = _RecordingQbit([])
     token = erai._ADMISSION.set({"qbit": qbit, "remaining": 10 * 1024**3})
     try:
@@ -2179,9 +2031,9 @@ def test_a_queued_avc_episode_is_replaced_by_its_hevc_encode(monkeypatch):
     assert qbit.removed == [(avc.info_hash, True)]
 
 
-def test_the_avc_release_is_kept_when_the_replacement_is_rejected(monkeypatch):
+def test_the_avc_release_is_kept_when_the_replacement_is_rejected(monkeypatch, tmp_path):
     """Losing the episode entirely would be worse than keeping the AVC encode."""
-    state, avc, _hevc = _upgrade_fixture(monkeypatch, resolvable=False)
+    state, avc, _hevc = _upgrade_fixture(monkeypatch, tmp_path, resolvable=False)
     qbit = _RecordingQbit([])
     token = erai._ADMISSION.set({"qbit": qbit, "remaining": 10 * 1024**3})
     try:
@@ -2191,12 +2043,12 @@ def test_the_avc_release_is_kept_when_the_replacement_is_rejected(monkeypatch):
 
     assert upgraded == 0
     assert state["releases"][avc.info_hash]["status"] == "queued"
-    assert state["canonical"]["1|1|2"]["info_hash"] == avc.info_hash
+    assert state["canonical"]["anidb:1|2"]["info_hash"] == avc.info_hash
     assert qbit.removed == []
 
 
-def test_a_replacement_without_german_is_not_used(monkeypatch):
-    state, avc, hevc = _upgrade_fixture(monkeypatch, twin_has_german=False)
+def test_a_replacement_without_german_is_not_used(monkeypatch, tmp_path):
+    state, avc, hevc = _upgrade_fixture(monkeypatch, tmp_path, twin_has_german=False)
     token = erai._ADMISSION.set({"qbit": _RecordingQbit([]), "remaining": 10 * 1024**3})
     try:
         assert asyncio.run(erai._upgrade_to_hevc(state, object(), limit=5)) == 0
@@ -2206,9 +2058,9 @@ def test_a_replacement_without_german_is_not_used(monkeypatch):
     assert hevc.info_hash not in state["releases"]
 
 
-def test_only_work_that_has_not_downloaded_yet_is_swapped(monkeypatch):
+def test_only_work_that_has_not_downloaded_yet_is_swapped(monkeypatch, tmp_path):
     """Swapping something already on disk throws away bytes already paid for."""
-    state, avc, _hevc = _upgrade_fixture(monkeypatch)
+    state, avc, _hevc = _upgrade_fixture(monkeypatch, tmp_path)
     state["releases"][avc.info_hash]["status"] = "downloading"
     token = erai._ADMISSION.set({"qbit": _RecordingQbit([]), "remaining": 10 * 1024**3})
     try:
@@ -2218,8 +2070,8 @@ def test_only_work_that_has_not_downloaded_yet_is_swapped(monkeypatch):
     assert state["releases"][avc.info_hash]["status"] == "downloading"
 
 
-def test_the_upgrade_is_bounded_per_cycle(monkeypatch):
-    state, _avc, _hevc = _upgrade_fixture(monkeypatch)
+def test_the_upgrade_is_bounded_per_cycle(monkeypatch, tmp_path):
+    state, _avc, _hevc = _upgrade_fixture(monkeypatch, tmp_path)
     for index in range(3, 8):
         extra_avc = entry(f"[Erai-raws] Show - {index:02d} [1080p CR WEB-DL AVC AAC][MultiSub]", index * 10)
         extra_hevc = entry(
@@ -2227,7 +2079,7 @@ def test_the_upgrade_is_bounded_per_cycle(monkeypatch):
         )
         state["releases"][extra_avc.info_hash] = {
             "status": "queued", "title": extra_avc.title,
-            "canonical": f"1|1|{index}", "resolution": 1080,
+            "canonical": f"anidb:1|{index}", "resolution": 1080,
         }
         state["backfill"]["catalog_1080"][extra_hevc.info_hash] = erai._entry_dict(extra_hevc)
     token = erai._ADMISSION.set({"qbit": _RecordingQbit([]), "remaining": 100 * 1024**3})
@@ -2237,8 +2089,31 @@ def test_the_upgrade_is_bounded_per_cycle(monkeypatch):
         erai._ADMISSION.reset(token)
 
 
-def _published_show(monkeypatch, *, twin_available=True):
-    """One show with two published episodes: E01 HEVC, E02 AVC."""
+def _anidb_index(monkeypatch, titles: dict[int, str]):
+    """AniDB's title index holding these entries, loaded as the app loads it."""
+    from xml.etree import ElementTree as ET
+
+    nodes = "".join(
+        f'<anime aid="{aid}"><title xml:lang="x-jat" type="main">{title}</title></anime>'
+        for aid, title in titles.items()
+    )
+    table = anidb.build_index(
+        ET.fromstring(f"<animetitles>{nodes}</animetitles>"), ET.fromstring("<anime-list/>")
+    )
+
+    async def index():
+        return table
+
+    monkeypatch.setattr(anidb, "index", index)
+    monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
+    return table
+
+
+def _published_show(monkeypatch, tmp_path, *, twin_available=True):
+    """One AniDB entry with two published episodes: E01 HEVC, E02 AVC.
+
+    Both sit in the entry's own folder, where publishing files them.
+    """
     state = erai._default_state()
     hevc_done = entry("[Erai-raws] Show - 01 [1080p CR WEBRip HEVC AAC][MultiSub]", 1)
     avc_done = entry("[Erai-raws] Show - 02 [1080p CR WEB-DL AVC AAC][MultiSub]", 2)
@@ -2248,15 +2123,26 @@ def _published_show(monkeypatch, *, twin_available=True):
         avc_done.info_hash: {"status": "done", "title": avc_done.title},
     }
     state["canonical"] = {
-        "555|1|1": {"info_hash": hevc_done.info_hash},
-        "555|1|2": {"info_hash": avc_done.info_hash},
+        "anidb:555|1": {"info_hash": hevc_done.info_hash},
+        "anidb:555|2": {"info_hash": avc_done.info_hash},
     }
     if twin_available:
         state["backfill"]["catalog_1080"][replacement.info_hash] = erai._entry_dict(replacement)
+    _anidb_index(monkeypatch, {555: "Show"})
+    folder = tmp_path / "shows_anime" / "Show"
+    folder.mkdir(parents=True)
+    for number in (1, 2):
+        (folder / f"Show - {number:02d}.mkv").write_bytes(b"video")
 
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(anime={"enabled": True}))
+    monkeypatch.setattr(
+        erai,
+        "get_settings",
+        lambda: Settings(anime={"enabled": True}, transfer={"anime_shows_dir": tmp_path / "shows_anime"}),
+    )
+    # No German dub anywhere unless a test says so; the real check runs ffprobe.
+    monkeypatch.setattr(erai, "_is_german_dub", lambda path: False)
 
     async def no_sleep(_seconds):
         pass
@@ -2267,26 +2153,28 @@ def _published_show(monkeypatch, *, twin_available=True):
     return state, avc_done, replacement, qbit
 
 
-def test_upgrading_a_show_queues_hevc_only_for_its_avc_episodes(monkeypatch):
-    state, avc_done, replacement, qbit = _published_show(monkeypatch)
-    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+def test_upgrading_a_show_queues_hevc_only_for_its_avc_episodes(monkeypatch, tmp_path):
+    state, avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path)
+    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
 
     assert result["queued"] == 1
     assert result["already_hevc"] == 1
     queued = state["releases"][replacement.info_hash]
     assert queued["status"] == "queued"
-    assert queued["canonical"] == "555|1|2"
+    assert queued["canonical"] == "anidb:555|2"
+    assert (queued["anidb_id"], queued["episode"]) == (555, 2)
     # Publishing must overwrite the episode it replaces.
     assert "--replace-existing" in queued["args"]
+    assert queued["args"][queued["args"].index("--anidb-id") + 1] == "555"
     assert queued["args"][queued["args"].index("--episode") + 1] == "2"
     assert len(qbit.added) == 1
     # The original stays on disk and playable until the replacement lands.
     assert state["releases"][avc_done.info_hash]["status"] == "done"
 
 
-def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch):
-    state, avc_done, _replacement, qbit = _published_show(monkeypatch, twin_available=False)
-    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch, tmp_path):
+    state, avc_done, _replacement, qbit = _published_show(monkeypatch, tmp_path, twin_available=False)
+    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
 
     assert result["queued"] == 0
     assert result["no_replacement"] == 1
@@ -2294,39 +2182,67 @@ def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch):
     assert qbit.added == []
 
 
-def test_a_german_dubbed_episode_is_never_upgraded(monkeypatch):
+def test_a_german_dubbed_episode_is_never_upgraded(monkeypatch, tmp_path):
     """Erai-raws ships Japanese audio only, so the dub could not be got back."""
-    state, avc_done, replacement, qbit = _published_show(monkeypatch)
+    state, avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path)
     # The episode that would otherwise be replaced carries a German dub.
-    monkeypatch.setattr(erai, "_german_dubbed_episodes", lambda title: {(1, 2)})
+    monkeypatch.setattr(erai, "_is_german_dub", lambda path: path.name == "Show - 02.mkv")
 
-    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
 
     assert result["queued"] == 0
     assert result["german_dub_kept"] == 1
     assert qbit.added == []
     # The original is untouched and still the canonical release.
     assert state["releases"][avc_done.info_hash]["status"] == "done"
-    assert state["canonical"]["555|1|2"]["info_hash"] == avc_done.info_hash
+    assert state["canonical"]["anidb:555|2"]["info_hash"] == avc_done.info_hash
     assert replacement.info_hash not in state["releases"]
 
 
-def test_an_undubbed_episode_of_the_same_show_is_still_upgraded(monkeypatch):
+def test_an_undubbed_episode_of_the_same_show_is_still_upgraded(monkeypatch, tmp_path):
     """The protection is per episode, not per show."""
-    state, _avc_done, replacement, _qbit = _published_show(monkeypatch)
-    monkeypatch.setattr(erai, "_german_dubbed_episodes", lambda title: {(1, 99)})
+    state, _avc_done, replacement, _qbit = _published_show(monkeypatch, tmp_path)
+    monkeypatch.setattr(erai, "_is_german_dub", lambda path: path.name == "Show - 01.mkv")
 
-    result = asyncio.run(erai.upgrade_show_to_hevc(555, "Show"))
+    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
     assert result["queued"] == 1
     assert result["german_dub_kept"] == 0
     assert state["releases"][replacement.info_hash]["status"] == "queued"
 
 
+def test_a_german_dub_filed_in_the_tvdb_days_is_never_upgraded(monkeypatch, tmp_path):
+    """The dub may sit in a TVDB folder under another name; Shoko's link places it."""
+    state, avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path)
+    season = tmp_path / "shows_anime" / "The Show" / "Season 01"
+    season.mkdir(parents=True)
+    dub = season / "The Show - S01E02.mkv"
+    dub.write_bytes(b"video")
+    monkeypatch.setattr(
+        shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files={str(dub): [(555, 2)]})
+    )
+    monkeypatch.setattr(erai, "_is_german_dub", lambda path: path == dub)
+
+    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+
+    assert result["german_dub_kept"] == 1
+    assert qbit.added == []
+    assert state["canonical"]["anidb:555|2"]["info_hash"] == avc_done.info_hash
+    assert replacement.info_hash not in state["releases"]
+
+
 def test_an_episode_already_in_the_library_is_never_held_for_subtitles(tmp_path, monkeypatch):
-    """A finished Bleach arc sat in review over subtitles it did not need."""
+    """A finished Bleach arc sat in review over subtitles it did not need.
+
+    It is in the TVDB folder as S17E15; Shoko's link says that file is
+    episode 2 of the Ketsubetsu Tan entry.
+    """
     season = tmp_path / "shows_anime" / "Bleach" / "Season 17"
     season.mkdir(parents=True)
-    (season / "Bleach - S17E15.mkv").write_bytes(b"video")
+    filed = season / "Bleach - S17E15.mkv"
+    filed.write_bytes(b"video")
+    monkeypatch.setattr(
+        shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files={str(filed): [(17765, 2)]})
+    )
 
     state = erai._default_state()
     item = entry(
@@ -2337,23 +2253,8 @@ def test_an_episode_already_in_the_library_is_never_held_for_subtitles(tmp_path,
     async def detail(_client, _url):
         raise AssertionError("an episode we already have must cost no Nyaa request")
 
-    async def resolve(_candidate):
-        return (
-            AnimeTVDBMatch(74796, "show", "Bleach", year=2004),
-            SimpleNamespace(season=17, episode=15),
-            None,
-        )
-
-    monkeypatch.setattr(
-        erai,
-        "get_settings",
-        lambda: Settings(
-            anime={"enabled": True},
-            transfer={"anime_shows_dir": tmp_path / "shows_anime"},
-        ),
-    )
+    _admit_as(monkeypatch, tmp_path, show(17765, "Bleach: Sennen Kessen Hen - Ketsubetsu Tan"))
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr(erai, "_resolve", resolve)
     token = erai._DISK_INDEX.set(None)
     try:
         assert asyncio.run(erai._consider(state, item, object())) is False
@@ -2371,30 +2272,15 @@ def test_an_episode_we_do_not_have_still_goes_through_the_subtitle_check(tmp_pat
     async def detail(_client, _url):
         return ("no subtitle section", item.magnet_uri, "Erai-raws")
 
-    async def resolve(_candidate):
-        return (
-            AnimeTVDBMatch(74796, "show", "Bleach", year=2004),
-            SimpleNamespace(season=17, episode=16),
-            None,
-        )
-
-    monkeypatch.setattr(
-        erai,
-        "get_settings",
-        lambda: Settings(
-            anime={"enabled": True},
-            transfer={"anime_shows_dir": tmp_path / "empty"},
-        ),
-    )
+    _admit_as(monkeypatch, tmp_path, show(17765, "Bleach: Sennen Kessen Hen - Ketsubetsu Tan"))
     monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
-    monkeypatch.setattr(erai, "_resolve", resolve)
     token = erai._DISK_INDEX.set(None)
     try:
         assert asyncio.run(erai._consider(state, item, object())) is False
     finally:
         erai._DISK_INDEX.reset(token)
     assert state["releases"][item.info_hash]["status"] == "held"
-
+    assert "German subtitles" in state["releases"][item.info_hash]["reason"]
 
 
 def test_library_cards_of_blacklisted_shows_are_flagged(monkeypatch):
@@ -2403,7 +2289,7 @@ def test_library_cards_of_blacklisted_shows_are_flagged(monkeypatch):
         "_load_policies",
         lambda: {
             "chuuzenji": {"mode": "blacklisted", "anidb_id": 111, "anidb_titles": ["Chuuzenji"]},
-            "old show": {"mode": "blacklisted", "source_title": "Old Show", "tvdb_id": 9},
+            "old show": {"mode": "blacklisted", "source_title": "Old Show"},
             "kept": {"mode": "allowed", "anidb_id": 222},
         },
     )
@@ -2411,8 +2297,8 @@ def test_library_cards_of_blacklisted_shows_are_flagged(monkeypatch):
         {"key": "Chuuzenji", "title": "Chuuzenji", "anidb_id": 111},
         {"key": "Old Show", "title": "Old Show", "anidb_id": None},
         {"key": "Kept", "title": "Kept", "anidb_id": 222},
-        {"key": "Sequel", "title": "Bleach", "anidb_id": 2369, "tvdb_id": 74796},
-        # A TVDB folder of every season is not one blocked AniDB entry...
+        {"key": "Sequel", "title": "Bleach", "anidb_id": 2369},
+        # A folder of every season is not one blocked AniDB entry...
         {"key": "Chuuzenji", "title": "Chuuzenji", "anidb_id": None, "season_count": 3},
         # ...but a folder of that one season is.
         {"key": "Chuuzenji", "title": "Chuuzenji", "anidb_id": None, "season_count": 1},
@@ -2429,20 +2315,3 @@ def test_a_batch_is_held_with_its_own_reason():
     pack = entry("[Erai-raws] Fairy Tail - 100 Years Quest - S01 [1080p][HEVC][Multiple Subtitle]")
     _, _, reason = asyncio.run(erai._resolve_anidb(pack))
     assert reason == erai.BATCH_REASON
-
-
-def test_a_tvdb_show_is_blacklisted_once_every_season_is():
-    from bankai.metadata.anidb import AniDBAnime
-
-    def anime(aid, season):
-        return AniDBAnime(aid, f"A{aid}", None, (), tvdb_id=357019, tvdb_season=season)
-
-    table = SimpleNamespace(by_tvdb={357019: [anime(1, "1"), anime(2, "2"), anime(3, "3"), anime(9, "0")]})
-
-    def policies(*aids):
-        return {f"anidb:{aid}": {"mode": "blacklisted", "anidb_id": aid} for aid in aids}
-
-    # Specials are not needed; one season still wanted keeps the show.
-    assert erai.tvdb_show_blacklisted(357019, policies(1, 2, 3), table=table)
-    assert not erai.tvdb_show_blacklisted(357019, policies(1, 2), table=table)
-    assert not erai.tvdb_show_blacklisted(None, policies(1, 2, 3), table=table)

@@ -366,14 +366,17 @@ export interface TorrentPolicy {
   max_size_gib: number;
 }
 
-export interface AnimeTVDBMatch {
-  tvdb_id: number;
-  kind: 'show' | 'movie';
-  english_title: string;
-  japanese_title: string | null;
-  year: number | null;
+/** The AniDB entry and episode a Nyaa release is, as told from its title. */
+export interface AnimeAniDBMatch {
+  anidb_id: number;
+  title: string;
+  english_title: string | null;
+  /** The AniDB episode; null for a batch or when the title carries none. */
+  episode: number | null;
   poster_url: string | null;
-  aliases: string[];
+  year: number | null;
+  /** anime-offline-database's type: TV, MOVIE, OVA, ONA, SPECIAL. */
+  type: string | null;
 }
 
 export interface AnimeEntry {
@@ -399,7 +402,7 @@ export interface AnimeEntry {
   season: number | null;
   episode: number | null;
   description: string;
-  tvdb: AnimeTVDBMatch | null;
+  anidb: AnimeAniDBMatch | null;
 }
 
 export interface AnimeSearchOptions {
@@ -413,7 +416,6 @@ export interface AnimeSearchOptions {
 }
 
 export interface AnimeSearchPage {
-  configured: boolean;
   items: AnimeEntry[];
   page: number;
   has_next: boolean;
@@ -441,7 +443,6 @@ export interface AnimeReviewItem {
   release_title?: string;
   source_title: string;
   title: string;
-  tvdb_id: number | null;
   year: number | null;
   poster_url: string | null;
   detail_url?: string;
@@ -540,12 +541,11 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 /** The three kinds of root the server library scans. */
 export type ServerDirKind = 'movie' | 'show' | 'anime';
 
-export type EpisodeNumbering = 'season' | 'absolute' | 'absolute_flat';
-/** How a card's episodes are laid out: as chosen, or by its AniDB entries (not a choice). */
-export type CardNumbering = EpisodeNumbering | 'anidb';
+/** How a card's episodes are laid out: by its AniDB entries, or -- folders no
+ *  AniDB entry answers for -- by its files' own numbers. */
+export type CardNumbering = 'anidb' | 'files';
 
 export interface AnimeLibraryShow {
-  /** How this show's file numbers are read: per season, or absolute across arcs. */
   numbering?: CardNumbering;
   /** The AniDB entry the card is (the first, when a folder holds several). */
   anidb_id?: number | null;
@@ -556,9 +556,7 @@ export interface AnimeLibraryShow {
   german_dub_count?: number;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
-  /** The AniDB link was taken from Anime-Lists (the show's first season), not from files. */
-  anidb_auto?: boolean;
-  /** Each TVDB season's AniDB entries, per Anime-Lists; a season split in cours has several. */
+  /** Each tab's AniDB entry. */
   season_anidb?: Record<string, Array<{ anidb_id: number; title: string }>>;
   downloaded_count: number;
   total_count: number;
@@ -569,9 +567,8 @@ export interface AnimeLibraryShow {
   /** Every library folder behind this one card; more than one once merged. */
   folders: string[];
   title: string;
-  /** The romaji name Erai-raws publishes under, for cross-referencing. */
+  /** AniDB's main (romaji) title, when the card is shown under another. */
   source_title: string;
-  tvdb_id: number | null;
   year: number | null;
   poster_url: string | null;
   episode_count: number;
@@ -730,6 +727,8 @@ export interface EpisodeItem {
 
 export interface Job {
   tvdb_id?: number | string | null;
+  /** Anime jobs: the AniDB entry the job files under. */
+  anidb_id?: number | string | null;
   poster_url?: string | null;
   series_title?: string | null;
   id: string;
@@ -979,17 +978,12 @@ export const api = {
     if (options.minSeeders != null) params.set('min_seeders', String(options.minSeeders));
     return request<AnimeSearchPage>(`/api/anime?${params.toString()}`);
   },
-  animeTvdb: (q: string) =>
-    request<{ configured: boolean; items: AnimeTVDBMatch[] }>(`/api/anime/tvdb?q=${encodeURIComponent(q)}`),
   animeDetail: (url: string) =>
     request<{ description: string; magnet_uri: string | null; publisher: string | null }>(
       `/api/anime/detail?url=${encodeURIComponent(url)}`,
     ),
-  animeDownload: (
-    entry: AnimeEntry,
-    match: AnimeTVDBMatch,
-    overrides: { season?: number | null; episode?: number | null } = {},
-  ) =>
+  /** Download a Nyaa release as one AniDB entry; ``episode`` null for a batch or a movie. */
+  animeDownload: (entry: AnimeEntry, anidbId: number, kind: 'show' | 'movie', episode: number | null = null) =>
     request<Job>('/api/anime/download', {
       method: 'POST',
       body: JSON.stringify({
@@ -998,12 +992,9 @@ export const api = {
         detail_url: entry.detail_url,
         magnet_uri: entry.magnet_uri,
         info_hash: entry.info_hash,
-        tvdb_id: match.tvdb_id,
-        kind: match.kind,
-        english_title: match.english_title,
-        year: match.year,
-        season: overrides.season ?? null,
-        episode: overrides.episode ?? null,
+        anidb_id: anidbId,
+        kind,
+        episode,
       }),
     }),
   torrentAction: (jobId: string) =>
@@ -1025,13 +1016,12 @@ export const api = {
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
   animeQueue: (page = 0, pageSize = 100, includeDone = false, filters: AnimeQueueFilters = {}) =>
     remembering<AnimeQueuePage>(animeQueuePath(page, pageSize, includeDone, filters)),
-  animeEpisodeSearch: (tvdbId: number, season: number, episode: number, q?: string) => {
-    const params = new URLSearchParams({ tvdb_id: String(tvdbId), season: String(season), episode: String(episode) });
+  /** Releases of one AniDB episode, each checked to be that episode. */
+  animeEpisodeSearch: (anidbId: number, episode: number, q?: string) => {
+    const params = new URLSearchParams({ anidb_id: String(anidbId), episode: String(episode) });
     if (q) params.set('q', q);
-    return request<{ items: AnimeEntry[]; queries: string[]; match: AnimeTVDBMatch }>(`/api/anime/episode/search?${params}`);
+    return request<{ items: AnimeEntry[]; queries: string[] }>(`/api/anime/episode/search?${params}`);
   },
-  saveAnimeMapping: (releaseTitle: string, tvdbId: number, season?: number, episodeOffset = 0) =>
-    request('/api/anime/mapping', { method: 'POST', body: JSON.stringify({ release_title: releaseTitle, tvdb_id: tvdbId, season, episode_offset: episodeOffset }) }),
   animeReviewReleases: (key: string) =>
     request<{ items: HeldRelease[] }>('/api/anime/review/' + encodeURIComponent(key) + '/releases'),
   markAnimeOwned: (payload: { key?: string; info_hashes?: string[] }, label = '') =>
@@ -1062,11 +1052,6 @@ export const api = {
     }),
   anidbSearch: (q: string) =>
     request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
-  /** How a show's episode numbers are read; kept per show. */
-  setAnimeNumbering: (key: string, tvdbId: number | null, mode: EpisodeNumbering) =>
-    request<{ ok: boolean }>('/api/anime/library/numbering', {
-      method: 'POST', body: JSON.stringify({ key, tvdb_id: tvdbId, mode }),
-    }),
   /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
   removeAnimeLibraryShow: (key: string, label = '') =>
     runAction<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', { key, label }),
@@ -1075,7 +1060,8 @@ export const api = {
     request<Pick<PurgeResult, 'deleted_files' | 'deleted_folders' | 'freed_bytes'>>('/api/anime/library/episodes/delete', {
       method: 'POST', body: JSON.stringify({ key, paths }),
     }),
-  upgradeShowToHevc: (tvdbId: number, title: string) =>
+  /** Queue HEVC replacements for the AVC episodes of a card's AniDB entries. */
+  upgradeShowToHevc: (anidbIds: number[]) =>
     request<{
       ok: boolean;
       queued: number;
@@ -1084,7 +1070,7 @@ export const api = {
       german_dub_kept: number;
     }>(
       '/api/anime/library/upgrade-hevc',
-      { method: 'POST', body: JSON.stringify({ tvdb_id: tvdbId, title }) },
+      { method: 'POST', body: JSON.stringify({ anidb_ids: anidbIds }) },
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),

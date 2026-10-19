@@ -1,8 +1,8 @@
 """Direct Nyaa download path for anime movies and episode packs.
 
 Unlike the dub pipeline, this worker does not extract, sync, transcode, or
-remux.  It downloads the selected Nyaa torrent and copies its video files into
-the normal TVDB/Jellyfin naming layout, marking them approved immediately.
+remux.  It downloads the selected Nyaa torrent and files each video under its
+AniDB entry, numbered as AniDB numbers it, marking them approved immediately.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+
 from pathlib import Path
 from typing import Any
 
@@ -21,133 +21,19 @@ from bankai.backend.transfer import _copy2_with_progress
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata.tvdb import TVDBClient, TVDBEpisode
-from bankai.processor.naming import (
-    render_anidb_episode_path,
-    render_episode_path,
-    render_movie_path,
-)
+from bankai.processor.naming import render_anidb_episode_path, render_movie_path
 from bankai.torrent import actions as torrent_actions
-from bankai.torrent.matcher import find_video_files, parse_se, pick_movie_file
+from bankai.torrent.matcher import find_video_files, pick_movie_file
 from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError, TorrentStatus
 from bankai.web import review
 
 log = get_logger(__name__)
 
 _SIDE_CAR_EXTS = {".ass", ".ssa", ".srt", ".sub", ".vtt"}
-_ANIME_SEASON_EPISODE = re.compile(
-    r"\bS(?P<season>\d{1,2})\s*[-_. ]+\s*(?:E(?:P)?\s*)?(?P<episode>\d{1,4})\b",
-    flags=re.I,
-)
 _ANIME_EPISODE = re.compile(
     r"(?:\b(?:E|EP|Episode)\s*|\s+-\s+)(?P<episode>\d{1,4})(?:v\d+)?\b",
     flags=re.I,
 )
-_SEASON_HINT = re.compile(r"\b(?:S|Season\s*)(?P<season>\d{1,2})\b", flags=re.I)
-
-
-@dataclass(frozen=True, slots=True)
-class EpisodeIdentity:
-    season: int
-    episode: int
-    title: str | None = None
-
-
-def episode_identity(
-    filename: str,
-    *,
-    release_title: str,
-    tvdb_episodes: list[TVDBEpisode],
-    season_override: int | None = None,
-    episode_override: int | None = None,
-) -> EpisodeIdentity | None:
-    if episode_override is not None:
-        if season_override is not None:
-            matched = next(
-                (
-                    item
-                    for item in tvdb_episodes
-                    if item.season == season_override and item.episode == episode_override
-                ),
-                None,
-            )
-            return EpisodeIdentity(
-                season_override,
-                episode_override,
-                matched.name if matched else None,
-            )
-        absolute = next(
-            (item for item in tvdb_episodes if item.absolute_number == episode_override),
-            None,
-        )
-        if absolute:
-            return EpisodeIdentity(absolute.season, absolute.episode, absolute.name)
-        regular = [item for item in tvdb_episodes if item.season > 0]
-        if 0 < episode_override <= len(regular):
-            item = regular[episode_override - 1]
-            return EpisodeIdentity(item.season, item.episode, item.name)
-        return EpisodeIdentity(1, episode_override)
-
-    explicit = parse_se(filename)
-    if explicit:
-        season, episode = explicit
-        if season_override is not None:
-            season = season_override
-        matched = next(
-            (item for item in tvdb_episodes if item.season == season and item.episode == episode),
-            None,
-        )
-        return EpisodeIdentity(season, episode, matched.name if matched else None)
-
-    anime_match = _ANIME_SEASON_EPISODE.search(filename)
-    if anime_match:
-        season = int(anime_match.group("season"))
-        episode = int(anime_match.group("episode"))
-        if season_override is not None:
-            season = season_override
-        matched = next(
-            (item for item in tvdb_episodes if item.season == season and item.episode == episode),
-            None,
-        )
-        return EpisodeIdentity(season, episode, matched.name if matched else None)
-
-    episode_match = _ANIME_EPISODE.search(Path(filename).stem)
-    if not episode_match:
-        return None
-    number = int(episode_match.group("episode"))
-    season_match = _SEASON_HINT.search(release_title)
-    if season_override is not None or season_match:
-        season = (
-            season_override if season_override is not None else int(season_match.group("season"))
-        )
-        matched = next(
-            (item for item in tvdb_episodes if item.season == season and item.episode == number),
-            None,
-        )
-        if matched:
-            return EpisodeIdentity(season, number, matched.name)
-        # Many anime keep absolute numbering in season-labelled Nyaa
-        # releases (for example S02 - 29). Prefer a TVDB absolute match when
-        # there is no such season-relative episode.
-        absolute = next(
-            (item for item in tvdb_episodes if item.absolute_number == number),
-            None,
-        )
-        if absolute:
-            return EpisodeIdentity(absolute.season, absolute.episode, absolute.name)
-        return EpisodeIdentity(season, number)
-
-    absolute = next((item for item in tvdb_episodes if item.absolute_number == number), None)
-    if absolute:
-        return EpisodeIdentity(absolute.season, absolute.episode, absolute.name)
-
-    # Some TVDB series omit absoluteNumber.  The default-order episode list is
-    # still deterministic, so use its non-special ordinal as a final mapping.
-    regular = [item for item in tvdb_episodes if item.season > 0]
-    if 0 < number <= len(regular):
-        item = regular[number - 1]
-        return EpisodeIdentity(item.season, item.episode, item.name)
-    return EpisodeIdentity(1, number)
 
 
 def batch_override(episode_override: int | None, sources: list[Path]) -> int | None:
@@ -183,7 +69,7 @@ def _organize_anidb(
     replace_existing: bool,
     keep_episodes: frozenset[int] = frozenset(),
 ) -> list[Path]:
-    """Stage each video under its AniDB folder, with no TVDB lookup at all.
+    """Stage each video under its AniDB folder.
 
     ``keep_episodes`` are left out: a replacement taken over a whole season
     must not publish over the episodes whose file carries a German dub.
@@ -353,21 +239,6 @@ def _atomic_copy2(
         tmp.unlink(missing_ok=True)
 
 
-async def _tvdb_episode_map(tvdb_id: int) -> list[TVDBEpisode]:
-    settings = get_settings().metadata
-    if not settings.tvdb_enabled or not settings.tvdb_api_key:
-        return []
-    client = TVDBClient(
-        api_key=settings.tvdb_api_key,
-        pin=settings.tvdb_pin,
-        languages=["eng", "jpn"],
-    )
-    try:
-        return await client.series_episodes(tvdb_id)
-    finally:
-        await client.aclose()
-
-
 async def _locate_torrent(
     client: QBittorrentClient,
     *,
@@ -404,10 +275,8 @@ async def download_anime(
     magnet_uri: str,
     info_hash: str,
     media_kind: str,
-    tvdb_id: int,
     english_title: str,
     year: int | None,
-    season_override: int | None = None,
     episode_override: int | None = None,
     anidb_id: int | None = None,
     anidb_title: str | None = None,
@@ -418,6 +287,8 @@ async def download_anime(
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
+    if media_kind == "show" and not anidb_id:
+        raise ValueError("an anime show is filed by its AniDB entry: --anidb-id is required")
     if not info_hash or not re.fullmatch(r"[0-9a-fA-F]{40}", info_hash):
         raise ValueError("Nyaa info hash is invalid")
 
@@ -494,7 +365,7 @@ async def download_anime(
             ).with_suffix(source.suffix.casefold())
             _copy_with_sidecars(source, destination, replace=replace_existing)
             outputs.append(destination)
-        elif anidb_id:
+        else:
             sources = find_video_files(root)
             outputs.extend(
                 _organize_anidb(
@@ -507,49 +378,6 @@ async def download_anime(
                     keep_episodes=keep_episodes,
                 )
             )
-        else:
-            tvdb_episodes = await _tvdb_episode_map(tvdb_id)
-            sources = find_video_files(root)
-            episode_override = batch_override(episode_override, sources)
-            if episode_override is not None and len(sources) != 1:
-                raise RuntimeError(
-                    "a manual episode override requires a torrent containing exactly one video file"
-                )
-            source_total = max(1, len(sources))
-            for source_index, source in enumerate(sources):
-                if require_german_subtitles:
-                    _require_german_subtitles(source)
-                identity = episode_identity(
-                    source.name,
-                    release_title=release_title,
-                    tvdb_episodes=tvdb_episodes,
-                    season_override=season_override,
-                    episode_override=episode_override,
-                )
-                if identity is None:
-                    log.warning("[anime] skipped file with no episode number: %s", source.name)
-                    continue
-                destination = render_episode_path(
-                    library=output.directory,
-                    query=english_title,
-                    series_title=english_title,
-                    season=identity.season,
-                    episode=identity.episode,
-                    episode_title=identity.title,
-                    year_override=str(year) if year else None,
-                    audio_lang="jpn",
-                    include_year=True,
-                    season_folder_template=output.season_folder_template,
-                    file_template=output.series_filename_template,
-                ).with_suffix(source.suffix.casefold())
-                _copy_with_sidecars(
-                    source,
-                    destination,
-                    start_percent=source_index / source_total * 100.0,
-                    end_percent=(source_index + 1) / source_total * 100.0,
-                    replace=replace_existing,
-                )
-                outputs.append(destination)
         if not outputs:
             raise RuntimeError("the selected Nyaa release contained no recognizable anime files")
 
@@ -621,7 +449,6 @@ async def download_anime(
         return {
             "final_path": str(outputs[0]),
             "paths": [str(path) for path in outputs],
-            "tvdb_id": tvdb_id or None,
             "anidb_id": anidb_id,
             "torrent_hash": torrent_hash,
         }
@@ -629,4 +456,4 @@ async def download_anime(
         await qbit.aclose()
 
 
-__all__ = ["EpisodeIdentity", "download_anime", "episode_identity"]
+__all__ = ["anidb_episode_number", "download_anime"]

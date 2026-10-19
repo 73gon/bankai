@@ -22,7 +22,6 @@ import uuid
 from array import array
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -594,11 +593,9 @@ class AnimeDownloadRequest(BaseModel):
     detail_url: str
     magnet_uri: str
     info_hash: str
-    tvdb_id: int
+    anidb_id: int
     kind: str
-    english_title: str
-    year: int | None = None
-    season: int | None = None
+    # The AniDB episode, when the release is one; a batch numbers each file by its name.
     episode: int | None = None
 
 
@@ -1557,7 +1554,6 @@ def create_app() -> Any:
             log.warning("Nyaa search failed: %s", exc)
             raise HTTPException(status_code=502, detail=f"Nyaa search failed: {exc}") from exc
         return {
-            "configured": discover_mod.is_configured(),
             "items": [anime_mod.entry_to_dict(item) for item in result.items],
             "page": result.page,
             "has_next": result.has_next,
@@ -1589,7 +1585,6 @@ def create_app() -> Any:
         "erai_series_policies.json",
         "erai_mappings.json",
         "erai_retry_requests.json",
-        "anime_tvdb_cache.json",
     )
 
     # What Shoko knows: which AniDB entry and episode each file is, and each
@@ -1599,7 +1594,9 @@ def create_app() -> Any:
     async def _shoko_catalog_payload() -> Any:
         from bankai.web import shoko_catalog
 
-        return await shoko_catalog.fetch() or shoko_catalog.Catalog()
+        catalog = await shoko_catalog.fetch() or shoko_catalog.Catalog()
+        await asyncio.to_thread(shoko_catalog.save_links, catalog)
+        return catalog
 
     snaps.add(
         "shoko_catalog",
@@ -1933,46 +1930,16 @@ def create_app() -> Any:
             raise HTTPException(status_code=404, detail="image unavailable") from exc
         return Response(content, media_type=media_type, headers={"Cache-Control": "max-age=86400"})
 
-    @app.post("/api/anime/mapping")
-    async def anime_mapping_select(req: dict) -> dict:
-        title = str(req.get("release_title", "")).strip()
-        try:
-            tvdb_id = int(req.get("tvdb_id", 0))
-            if not title or tvdb_id <= 0:
-                raise ValueError("A release title and TVDB show are required")
-            match = await anime_mod.series_metadata(tvdb_id)
-            season = req.get("season")
-            offset = int(req.get("episode_offset") or 0)
-            if season is not None:
-                season = int(season)
-                from bankai.web.anime_library import episode_roster
-
-                roster = await episode_roster(tvdb_id)
-                if season < 1 or not any(row.season == season for row in roster):
-                    raise ValueError("Season does not exist in TVDB")
-            erai_mod.save_mapping(
-                title,
-                match,
-                season=season,
-                episode_offset=offset,
-                clear_episode_mapping=season is None,
-            )
-            requested = erai_mod.retry_series(title)
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"ok": True, "match": asdict(match), "requested": requested}
-
     @app.get("/api/anime/episode/search")
     async def anime_episode_search(
-        tvdb_id: int = Query(..., gt=0),
-        season: int = Query(..., gt=0),
+        anidb_id: int = Query(..., gt=0),
         episode: int = Query(..., gt=0),
         q: str | None = None,
     ) -> dict:
         from bankai.web.anime_library import search_episode
 
         try:
-            return await search_episode(tvdb_id, season, episode, q)
+            return await search_episode(anidb_id, episode, q)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
@@ -2055,7 +2022,7 @@ def create_app() -> Any:
         # Copies again: queue_covers writes the posters into the rows it gets.
         visible = [dict(row) for row in rows[start : start + page_size]]
         result = {
-            "jobs": await queue_covers(visible),
+            "jobs": await queue_covers(visible, await _catalog()),
             "total": len(rows),
             "counts": counts,
             "page": page,
@@ -2065,22 +2032,6 @@ def create_app() -> Any:
             _queue_pages.clear()
         _queue_pages[view] = (snapshot.built_at, result)
         return result
-
-    @app.post("/api/anime/library/numbering")
-    async def anime_library_numbering(req: dict) -> dict:
-        """How a show's episode numbers are read: per season, or absolute across arcs."""
-        from bankai.web.anime_library import save_numbering
-
-        key = str(req.get("key") or "").strip()
-        if not key:
-            raise HTTPException(status_code=422, detail="key is required")
-        try:
-            await asyncio.to_thread(
-                save_numbering, key=key, tvdb_id=req.get("tvdb_id"), mode=str(req.get("mode") or "")
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"ok": True, "key": key, "mode": req.get("mode")}
 
     @app.post("/api/anime/library/remove")
     async def anime_library_remove(req: dict) -> dict:
@@ -2119,7 +2070,7 @@ def create_app() -> Any:
             result = await erai_mod.blacklist_show(
                 title=str(show.get("title") or key),
                 source_title=source_title,
-                tvdb_id=show.get("tvdb_id"),
+                anidb_ids=list(show.get("anidb_ids") or []),
                 folders=folders,
                 anime=anime,
             )
@@ -2194,13 +2145,14 @@ def create_app() -> Any:
 
     @app.post("/api/anime/library/upgrade-hevc")
     async def anime_library_upgrade_hevc(req: dict) -> dict:
-        """Queue HEVC replacements for one show's published AVC episodes."""
-        tvdb_id = req.get("tvdb_id")
-        english_title = str(req.get("title") or "").strip()
-        if not tvdb_id or not str(tvdb_id).isdigit() or not english_title:
-            raise HTTPException(status_code=422, detail="tvdb_id and title are required")
+        """Queue HEVC replacements for one show's published AVC episodes, by its AniDB entries."""
+        anidb_ids = [int(aid) for aid in req.get("anidb_ids") or [] if str(aid).isdigit()]
+        if not anidb_ids:
+            raise HTTPException(status_code=422, detail="anidb_ids are required")
         try:
-            return await erai_mod.upgrade_show_to_hevc(int(tvdb_id), english_title)
+            return await erai_mod.upgrade_show_to_hevc(anidb_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -2318,7 +2270,6 @@ def create_app() -> Any:
 
     _anime_library_files = _anime_state_files(
         "erai_series_policies.json",
-        "anime_tvdb_cache.json",
         "anime_codecs.json",
         "anime_library_prefs.json",
         "review.json",
@@ -2334,14 +2285,6 @@ def create_app() -> Any:
         min_interval=120.0,
         max_age=600.0,
     )
-
-    @app.get("/api/anime/tvdb")
-    async def anime_tvdb(q: str = Query(..., min_length=2)) -> dict:
-        matches = await anime_mod.tvdb_candidates(q, limit=12)
-        return {
-            "configured": discover_mod.is_configured(),
-            "items": [anime_mod.tvdb_to_dict(item) for item in matches],
-        }
 
     @app.get("/api/update/status")
     async def update_status() -> dict:
@@ -2402,21 +2345,20 @@ def create_app() -> Any:
         return {"description": description, "magnet_uri": magnet, "publisher": publisher}
 
     @app.post("/api/anime/download")
-    def anime_download(req: AnimeDownloadRequest) -> dict:
-        if not req.release_title.strip() or not req.english_title.strip():
-            raise HTTPException(status_code=422, detail="release and English titles are required")
-        if req.tvdb_id <= 0:
-            raise HTTPException(status_code=422, detail="a valid TVDB entry is required")
+    async def anime_download(req: AnimeDownloadRequest) -> dict:
+        """Download one Nyaa release as the AniDB entry picked for it."""
+        from bankai.metadata import anidb as anidb_mod
+        from bankai.metadata import anidb_art
+
+        title = req.release_title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="the release title is required")
         if req.kind not in {"show", "movie"}:
             raise HTTPException(status_code=422, detail="kind must be show or movie")
-        if req.season is not None and req.season < 1:
-            raise HTTPException(status_code=422, detail="season must be positive")
         if req.episode is not None and req.episode < 1:
             raise HTTPException(status_code=422, detail="episode must be positive")
-        if req.kind == "movie" and (req.season is not None or req.episode is not None):
-            raise HTTPException(
-                status_code=422, detail="movies cannot have season or episode overrides"
-            )
+        if req.kind == "movie" and req.episode is not None:
+            raise HTTPException(status_code=422, detail="a movie has no episode")
         if not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url):
             raise HTTPException(
                 status_code=422, detail="anime downloads only accept nyaa.si sources"
@@ -2427,19 +2369,26 @@ def create_app() -> Any:
             f"magnet:?xt=urn:btih:{req.info_hash.casefold()}"
         ):
             raise HTTPException(status_code=422, detail="magnet does not match the Nyaa torrent")
-        erai_mod.save_mapping(
-            req.release_title,
-            anime_mod.AnimeTVDBMatch(
-                tvdb_id=req.tvdb_id,
-                kind=req.kind,
-                english_title=req.english_title.strip(),
-                year=req.year,
-            ),
-        )
+        entry = await anidb_mod.anime(req.anidb_id)
+        if entry is None:
+            raise HTTPException(status_code=422, detail="this AniDB entry is not in AniDB's title list")
+        english = entry.english_title or entry.title
+        episode = req.episode
+        if req.kind == "show" and episode is None:
+            # The release's own number, as the automation reads it, when it is
+            # this entry's; a batch has none and numbers each file by its name.
+            match = anime_mod.anidb_match(
+                title, table=await anidb_mod.index(), mappings=await asyncio.to_thread(erai_mod._load_mappings)
+            )
+            if match and match["anidb_id"] == entry.aid:
+                episode = match["episode"]
+        if req.kind == "show":
+            # Further releases under this name are this entry too.
+            await asyncio.to_thread(erai_mod.save_anidb_mapping, title, entry.as_dict())
         args = [
             "anime-download",
             "--release-title",
-            req.release_title.strip(),
+            title,
             "--torrent-url",
             req.torrent_url.strip(),
             "--detail-url",
@@ -2450,30 +2399,22 @@ def create_app() -> Any:
             req.info_hash.casefold(),
             "--kind",
             req.kind,
-            "--tvdb-id",
-            str(req.tvdb_id),
+            "--anidb-id",
+            str(entry.aid),
+            "--anidb-title",
+            entry.title,
             "--english-title",
-            req.english_title.strip(),
+            english,
         ]
-        if req.year is not None:
-            args.extend(["--year", str(req.year)])
-        if req.season is not None:
-            args.extend(["--season", str(req.season)])
-        if req.episode is not None:
-            args.extend(["--episode", str(req.episode)])
-        detected_season, detected_episode = anime_mod.release_episode_info(req.release_title)
-        season = req.season if req.season is not None else detected_season
-        episode = req.episode if req.episode is not None else detected_episode
-        suffix = ""
-        if season is not None and episode is not None:
-            suffix = f" S{season:02d}E{episode:02d}"
-        elif episode is not None:
-            suffix = f" E{episode:02d}"
-        elif season is not None:
-            suffix = f" S{season:02d}"
-        return webjobs.enqueue(
+        year = anidb_art.facts(entry.aid).get("year")
+        if req.kind == "movie" and year:
+            args.extend(["--year", str(year)])
+        if episode is not None:
+            args.extend(["--episode", str(episode)])
+        return await asyncio.to_thread(
+            webjobs.enqueue,
             kind=req.kind,
-            title=f"{req.english_title.strip()}{suffix}",
+            title=f"{english} - {episode:02d}" if episode is not None else english,
             args=args,
         )
 
@@ -3020,12 +2961,14 @@ def create_app() -> Any:
         in qBittorrent. Starting a second download in any of those cases is
         how one episode ends up as several rows.
         """
-        title = bgjobs_mod.argument_value(args, "--english-title") or ""
-        season = bgjobs_mod.argument_value(args, "--season") or ""
+        aid = bgjobs_mod.argument_value(args, "--anidb-id") or ""
         episode = bgjobs_mod.argument_value(args, "--episode") or ""
-        if title and season.isdigit() and episode.isdigit():
-            on_disk = await asyncio.to_thread(
-                erai_mod._episode_on_disk, title, int(season), int(episode)
+        if aid.isdigit() and episode.isdigit():
+            from bankai.metadata import anidb as anidb_mod
+
+            entry = await anidb_mod.anime(int(aid))
+            on_disk = entry is not None and await asyncio.to_thread(
+                erai_mod._anidb_episode_on_disk, entry, int(episode)
             )
             if on_disk:
                 return "The episode is already in the library"
@@ -3065,6 +3008,22 @@ def create_app() -> Any:
 
         args = list(job.args or [])
         if args and args[0] == "anime-download":
+            from bankai.metadata import anidb as anidb_mod
+            from bankai.web.anidb_migration import anidb_job_args
+
+            # A job from before anime moved to AniDB names its episode by TVDB.
+            converted = (
+                anidb_job_args(args, await anidb_mod.index())
+                if "--tvdb-id" in args and "--anidb-id" not in args
+                else args
+            )
+            if converted is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This job names its episode by TVDB and AniDB cannot place it; "
+                    "find the release again from Anime Search",
+                )
+            args = converted
             handled = await _anime_already_handled(args)
             if handled:
                 await asyncio.to_thread(job.delete)

@@ -11,7 +11,7 @@ from bankai.web import erai, shoko
 
 @pytest.fixture()
 def store(monkeypatch, tmp_path):
-    state = {"releases": {}, "held": [], "series": {}}
+    state = {"releases": {}, "held": [], "anime": {}}
     policies: dict = {}
     retries: dict = {}
     monkeypatch.setattr(erai, "_load_state", lambda: state)
@@ -87,10 +87,16 @@ def test_linking_a_card_covers_every_title_and_catches_held_releases(store):
 
 
 def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatch):
+    """A library card is a whole show: every AniDB entry on it is blocked.
+
+    Exactly those, and the one Shoko matched -- not every entry Anime-Lists
+    files under the same series. A spin-off the card does not hold stays.
+    """
     folder = store["root"] / "Frieren"
     (folder / "Season 01").mkdir(parents=True)
     (folder / "Season 01" / "Frieren - S01E01.mkv").write_bytes(b"x" * 10)
-    store["state"]["series"]["424536"] = {"tvdb_id": 424536, "english_title": "Frieren"}
+    for aid in ("17617", "18886", "19000"):
+        store["state"]["anime"][aid] = {"title": "Sousou no Frieren"}
     store["state"]["releases"]["b" * 40] = {
         "status": "queued",
         "title": "[Erai-raws] Sousou no Frieren - 07 [1080p][HEVC]",
@@ -111,12 +117,14 @@ def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatc
             """<animetitles>
   <anime aid="17617"><title xml:lang="x-jat" type="main">Sousou no Frieren</title></anime>
   <anime aid="18886"><title xml:lang="x-jat" type="main">Sousou no Frieren (2026)</title></anime>
+  <anime aid="19000"><title xml:lang="x-jat" type="main">Sousou no Frieren: Marumaru no Mahou</title></anime>
 </animetitles>"""
         ),
         ET.fromstring(
             """<anime-list>
   <anime anidbid="17617" tvdbid="424536" defaulttvdbseason="1" episodeoffset="0"/>
   <anime anidbid="18886" tvdbid="424536" defaulttvdbseason="2" episodeoffset="0"/>
+  <anime anidbid="19000" tvdbid="424536" defaulttvdbseason="0" episodeoffset="0"/>
 </anime-list>"""
         ),
     )
@@ -131,7 +139,8 @@ def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatc
         erai.blacklist_show(
             title="Frieren",
             source_title="Sousou no Frieren",
-            tvdb_id=424536,
+            # The card's own entries; Shoko's match (17617) is added to them.
+            anidb_ids=[18886],
             folders=[folder],
             anime=FRIEREN,
         )
@@ -139,13 +148,40 @@ def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatc
 
     assert not folder.exists()
     assert result["deleted_files"] == 1
-    # The whole show was removed, so each of its AniDB entries is blocked --
-    # each its own blacklist card, restorable on its own.
+    # Each entry is its own blacklist card, restorable on its own.
     assert {key for key in store["policies"]} == {"anidb:17617", "anidb:18886"}
     assert result["entries"] == [17617, 18886]
     assert store["state"]["releases"]["b" * 40]["status"] == "blacklisted"
-    # Tracked, it would have come back as an empty library card.
-    assert "424536" not in store["state"]["series"]
+    # Taken, it would have come back as an empty library card.
+    assert set(store["state"]["anime"]) == {"19000"}
+
+
+def test_a_show_no_anidb_entry_answers_for_is_blacklisted_by_its_name(store, monkeypatch):
+    """Nothing to block by entry; the name is what its releases will carry."""
+
+    class NoQbit:
+        async def login(self): ...
+        async def list_torrents(self, category=None):
+            return []
+        async def aclose(self): ...
+
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", NoQbit)
+    store["state"]["releases"]["c" * 40] = {
+        "status": "held",
+        "title": "[Erai-raws] Nobody Knows This - 02 [1080p][HEVC]",
+    }
+
+    result = asyncio.run(
+        erai.blacklist_show(
+            title="Nobody Knows This", source_title="Nobody Knows This", anidb_ids=[], folders=[]
+        )
+    )
+
+    assert result["entries"] == []
+    assert list(store["policies"]) == [result["key"]]
+    assert store["policies"][result["key"]]["source_title"] == "Nobody Knows This"
+    assert "anidb_id" not in store["policies"][result["key"]]
+    assert store["state"]["releases"]["c" * 40]["status"] == "blacklisted"
 
 
 def test_the_library_root_itself_is_never_deleted(store):
@@ -255,10 +291,15 @@ def test_best_match_needs_one_exact_title():
 
 
 def test_discard_and_delete_takes_only_the_entry_s_own_episodes(store, monkeypatch):
-    """A show folder holds every season; one AniDB entry's files are only its own."""
+    """A show folder holds every season; one AniDB entry's files are only its own.
+
+    The TVDB-era folder is named after the series, which no AniDB entry is
+    called; Shoko's link for each file says which entry and episode it is.
+    """
     from xml.etree import ElementTree as ET
 
     from bankai.metadata import anidb
+    from bankai.web import anime_library, shoko_catalog
 
     table = anidb.build_index(
         ET.fromstring(
@@ -278,20 +319,23 @@ def test_discard_and_delete_takes_only_the_entry_s_own_episodes(store, monkeypat
     from bankai.config import Settings
 
     monkeypatch.setattr(erai, "get_settings", lambda: Settings(transfer={"anime_shows_dir": str(store["root"])}))
-    store["state"]["series"]["99"] = {"english_title": "Dr. Stone"}
     season = store["root"] / "Dr. Stone" / "Season 04"
     season.mkdir(parents=True)
+    links: dict[str, list[tuple[int, int]]] = {}
     for number in range(1, 25):
-        (season / f"Dr. Stone - S04E{number:02d}.mkv").write_bytes(b"x")
+        path = season / f"Dr. Stone - S04E{number:02d}.mkv"
+        path.write_bytes(b"x")
+        # Season 4 is two AniDB entries of twelve episodes each.
+        links[str(path)] = [(1, number) if number <= 12 else (2, number - 12)]
     (store["root"] / "Dr. Stone" / "Season 03").mkdir()
-    (store["root"] / "Dr. Stone" / "Season 03" / "Dr. Stone - S03E13.mkv").write_bytes(b"x")
+    earlier = store["root"] / "Dr. Stone" / "Season 03" / "Dr. Stone - S03E13.mkv"
+    earlier.write_bytes(b"x")
+    links[str(earlier)] = [(3, 13)]
     own = store["root"] / "Dr. Stone Science Future (2025)"
     own.mkdir()
     (own / "Dr. Stone Science Future (2025) - 25.mkv").write_bytes(b"x")
-    monkeypatch.setattr(
-        "bankai.backend.transfer._existing_show_folder",
-        lambda name, cache, roots=None: store["root"] / "Dr. Stone",
-    )
+    monkeypatch.setattr(shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files=links))
+    monkeypatch.setattr(anime_library, "load_prefs", lambda: {})
 
     picked = sorted(path.name for path in erai.entry_files(2))
 

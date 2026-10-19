@@ -1,8 +1,9 @@
-"""Cached AniDB titles, Anime-Lists episode offsets, and TheXEM scene maps.
+"""Cached AniDB titles and Anime-Lists, the two files AniDB identity is read from.
 
-Title identity and episode identity are separate. An exact AniDB title selects
-its own series/part; its mapping then selects a TVDB episode, never an ordinal
-guess into a similarly named parent series.
+Anime-Lists records, for each AniDB entry, where it sits among the seasons of
+the show it belongs to. That is how a sequel named by season number is found,
+how the entries of one show are ordered, and how files filed by season are
+read as AniDB episodes. It is an offline file; nothing here asks TVDB.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from bankai.cli import bgjobs
 
 _TITLES_URL = "https://anidb.net/api/anime-titles.xml.gz"
 _LIST_URL = "https://raw.githubusercontent.com/Anime-Lists/anime-lists/master/anime-list.xml"
-_XEM = "https://thexem.info/map/"
 _CACHE: dict[str, tuple[float, Any]] = {}
 _LOCK = asyncio.Lock()
 _TTL = 86400
@@ -141,94 +141,3 @@ async def related_titles(tvdb_id: int) -> list[str]:
     return list(
         dict.fromkeys(record.findtext("name") for record in regular if record.findtext("name"))
     )
-
-
-async def scene_names(title: str) -> list[tuple[int, int]]:
-    names = await _resource(
-        "xem_names.json",
-        _XEM + "allNames",
-        params={"origin": "tvdb", "seasonNumbers": "true"},
-    )
-    result = set()
-    for tvdb_id, aliases in (names or {}).items():
-        for entry in aliases:
-            for alias, season in entry.items():
-                if normalise(alias) == normalise(title) and str(season).lstrip("-").isdigit():
-                    result.add((int(tvdb_id), int(season)))
-    return sorted(result)
-
-
-async def mapped_series_ids(title: str) -> list[int]:
-    parts = await anidb_parts(title)
-    if parts:
-        return sorted({part.tvdb_id for part in parts})
-    return sorted({tvdb_id for tvdb_id, _ in await scene_names(title)})
-
-
-def map_part(part: Part, number: int, episodes: list) -> tuple[int, int] | None:
-    targets = set()
-    matched = False
-    for rule in part.record.findall("./mapping-list/mapping"):
-        if rule.get("anidbseason") != "1" or not (rule.get("tvdbseason") or "").isdigit():
-            continue
-        season = int(rule.get("tvdbseason"))
-        for source, target in re.findall(r"(?:^|;)(\d+)-([\d+]+)(?=;|$)", rule.text or ""):
-            if int(source) == number:
-                matched = True
-                # Split episodes require multi-episode import support; fail closed.
-                if "+" in target or int(target) <= 0:
-                    return None
-                targets.add((season, int(target)))
-        start, end = rule.get("start"), rule.get("end")
-        if start and end and int(start) <= number <= int(end):
-            matched = True
-            targets.add((season, number + int(rule.get("offset") or 0)))
-    if not matched:
-        season = part.record.get("defaulttvdbseason", "")
-        offset = int(part.record.get("episodeoffset") or 0)
-        if season == "a":
-            targets.update(
-                (item.season, item.episode)
-                for item in episodes
-                if item.absolute_number == number + offset and item.season > 0
-            )
-        elif season.isdigit() and int(season) > 0:
-            targets.add((int(season), number + offset))
-    if len(targets) != 1:
-        return None
-    target = next(iter(targets))
-    return target if any((item.season, item.episode) == target for item in episodes) else None
-
-
-async def mapped_episode(
-    title: str,
-    number: int,
-    tvdb_id: int,
-    episodes: list,
-) -> tuple[tuple[int, int] | None, bool]:
-    """Return target and whether a published title/part mapping exists."""
-    parts = [part for part in await anidb_parts(title) if part.tvdb_id == tvdb_id]
-    if parts:
-        targets = {map_part(part, number, episodes) for part in parts}
-        return (next(iter(targets)) if len(targets) == 1 else None), True
-    names = [season for mapped_id, season in await scene_names(title) if mapped_id == tvdb_id]
-    if not names:
-        return None, False
-    rows = await _resource(
-        f"xem_{tvdb_id}.json",
-        _XEM + "all",
-        params={"origin": "tvdb", "id": tvdb_id},
-    )
-    targets = set()
-    for row in rows or []:
-        scene, target = row.get("scene") or {}, row.get("tvdb") or {}
-        if (int(scene.get("season", -1)) in names and int(scene.get("episode", -1)) == number) or (
-            -1 in names and int(scene.get("absolute", -1)) == number
-        ):
-            targets.add((int(target.get("season", 0)), int(target.get("episode", 0))))
-    if len(targets) != 1:
-        return None, True
-    target = next(iter(targets))
-    return (
-        target if any((item.season, item.episode) == target for item in episodes) else None
-    ), True

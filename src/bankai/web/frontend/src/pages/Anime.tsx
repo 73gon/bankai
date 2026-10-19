@@ -7,21 +7,22 @@ import {
   Download,
   ExternalLink,
   Film,
+  Link2,
   Search,
   ShieldCheck,
   Tv,
-  Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   api,
+  type AniDBAnime,
   type AnimeEntry,
   type AnimeSearchOptions,
   type AnimeSearchPage,
-  type AnimeTVDBMatch,
 } from '@/lib/api';
+import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -92,19 +93,33 @@ function searchOptions(page: number, filters: Filters): AnimeSearchOptions {
   };
 }
 
-function Poster({ match }: { match: AnimeTVDBMatch | null }) {
+/** The AniDB entry a download is filed under, however it was chosen. */
+type Chosen = {
+  anidb_id: number;
+  title: string;
+  english_title: string | null;
+  year: number | null;
+  type: string | null;
+  poster_url: string | null;
+};
+
+function isMovie(type: string | null | undefined) {
+  return (type ?? '').toUpperCase() === 'MOVIE';
+}
+
+function Poster({ url, title, movie }: { url: string | null | undefined; title: string; movie: boolean }) {
   const [failed, setFailed] = useState(false);
   return (
     <div className='flex aspect-[2/3] w-20 shrink-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black/30 sm:w-24'>
-      {match?.poster_url && !failed ? (
+      {url && !failed ? (
         <img
-          src={api.posterUrl(match.poster_url)}
-          alt={`${match.english_title} poster`}
+          src={api.posterUrl(url)}
+          alt={`${title} poster`}
           className='h-full w-full object-cover'
           loading='lazy'
           onError={() => setFailed(true)}
         />
-      ) : match?.kind === 'movie' ? (
+      ) : movie ? (
         <Film className='text-muted-foreground' />
       ) : (
         <Tv className='text-muted-foreground' />
@@ -140,15 +155,16 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
   return (
     <Card>
       <CardContent className='flex flex-col gap-4 p-4 sm:flex-row sm:items-stretch'>
-        <Poster match={entry.tvdb} />
+        <Poster url={entry.anidb?.poster_url} title={entry.anidb?.title ?? entry.title} movie={isMovie(entry.anidb?.type)} />
         <div className='flex min-w-0 flex-1 flex-col gap-3'>
           <div className='flex flex-col gap-1'>
             <div className='flex flex-wrap items-center gap-2'>
               <h2 className='text-base font-semibold text-foreground'>
-                {entry.tvdb?.english_title ?? 'TVDB match needed'} — Season {entry.season ?? 'N/A'} · Episode {entry.episode ?? 'N/A'}
+                {entry.anidb ? entry.anidb.english_title || entry.anidb.title : 'AniDB match needed'}
+                {entry.anidb?.episode != null && ` — Episode ${entry.anidb.episode}`}
               </h2>
-              {entry.tvdb?.year && <span className='text-sm text-muted-foreground'>{entry.tvdb.year}</span>}
-              {entry.tvdb && <Badge variant='info'>{entry.tvdb.kind === 'movie' ? 'Movie' : 'Show'}</Badge>}
+              {entry.anidb?.year && <span className='text-sm text-muted-foreground'>{entry.anidb.year}</span>}
+              {entry.anidb?.type && <Badge variant='info'>{isMovie(entry.anidb.type) ? 'Movie' : entry.anidb.type}</Badge>}
               {entry.trusted && (
                 <Badge variant='success'>
                   <ShieldCheck data-icon='inline-start' /> Trusted
@@ -165,8 +181,8 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
                 </Tooltip>
               )}
             </div>
-            {entry.tvdb?.japanese_title && (
-              <p className='text-sm text-muted-foreground'>{entry.tvdb.japanese_title}</p>
+            {entry.anidb?.english_title && entry.anidb.english_title !== entry.anidb.title && (
+              <p className='text-sm text-muted-foreground'>{entry.anidb.title}</p>
             )}
           </div>
 
@@ -242,12 +258,11 @@ export default function Anime() {
   const [result, setResult] = useState<AnimeSearchPage | null>(initial ?? null);
   const [loading, setLoading] = useState(!initial);
   const [selectedEntry, setSelectedEntry] = useState<AnimeEntry | null>(null);
-  const [selectedMatch, setSelectedMatch] = useState<AnimeTVDBMatch | null>(null);
-  const [tvdbQuery, setTvdbQuery] = useState('');
-  const [tvdbResults, setTvdbResults] = useState<AnimeTVDBMatch[]>([]);
-  const [tvdbLoading, setTvdbLoading] = useState(false);
+  const [chosen, setChosen] = useState<Chosen | null>(null);
+  const [kind, setKind] = useState<'show' | 'movie'>('show');
+  // The AniDB picker, opened with what to search for first.
+  const [pickFor, setPickFor] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
-  const [manualSeason, setManualSeason] = useState('');
   const [manualEpisode, setManualEpisode] = useState('');
 
   useEffect(() => {
@@ -302,42 +317,39 @@ export default function Anime() {
     setPage(0);
   }
 
-  function openDownload(entry: AnimeEntry) {
-    setSelectedEntry(entry);
-    setSelectedMatch(entry.tvdb);
-    setTvdbResults(entry.tvdb ? [entry.tvdb] : []);
-    setTvdbQuery(entry.tvdb?.english_title ?? '');
-    setManualSeason(entry.season == null ? '' : String(entry.season));
-    setManualEpisode(entry.episode == null ? '' : String(entry.episode));
+  function choose(anime: Chosen) {
+    setChosen(anime);
+    setKind(isMovie(anime.type) ? 'movie' : 'show');
   }
 
-  async function findTvdb() {
-    const clean = tvdbQuery.trim();
-    if (clean.length < 2) return;
-    setTvdbLoading(true);
-    try {
-      const response = await api.animeTvdb(clean);
-      setTvdbResults(response.items);
-      if (response.items.length === 0) toast.info('No TVDB entries matched that title.');
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setTvdbLoading(false);
+  function openDownload(entry: AnimeEntry) {
+    setSelectedEntry(entry);
+    setChosen(null);
+    setManualEpisode(entry.anidb?.episode == null ? '' : String(entry.anidb.episode));
+    if (entry.anidb) {
+      choose(entry.anidb);
+    } else {
+      // Nothing told from the title: the AniDB entry is picked first.
+      setPickFor(entry.title.replace(/^(\s*\[[^\]]+\])+\s*/, '').replace(/\s+-\s+\d+.*$/, ''));
     }
   }
 
+  async function pickAnime(anime: AniDBAnime) {
+    choose(anime);
+    setPickFor(null);
+  }
+
   async function downloadSelected() {
-    if (!selectedEntry || !selectedMatch) return;
+    if (!selectedEntry || !chosen) return;
+    const episode = kind === 'show' && manualEpisode.trim() ? Number.parseInt(manualEpisode, 10) : null;
+    if (episode != null && !(episode >= 1)) {
+      toast.error('The episode must be a positive number.');
+      return;
+    }
     setDownloading(true);
     try {
-      const season = manualSeason.trim() ? Number.parseInt(manualSeason, 10) : null;
-      const episode = manualEpisode.trim() ? Number.parseInt(manualEpisode, 10) : null;
-      if ((season != null && season < 1) || (episode != null && episode < 1)) {
-        toast.error('Season and episode must be positive numbers.');
-        return;
-      }
-      await api.animeDownload(selectedEntry, selectedMatch, { season, episode });
-      toast.success(`${selectedMatch.english_title} was added to the queue from Nyaa.`);
+      await api.animeDownload(selectedEntry, chosen.anidb_id, kind, episode);
+      toast.success(`${chosen.english_title || chosen.title} was added to the queue from Nyaa.`);
       setSelectedEntry(null);
     } catch (error: any) {
       toast.error(error.message);
@@ -350,7 +362,7 @@ export default function Anime() {
     <div className='flex h-full min-h-0 flex-col gap-4 overflow-hidden'>
       <div className='flex flex-wrap items-baseline gap-2'>
         <h1 className='font-serif text-2xl font-semibold tracking-tight'>Anime</h1>
-        <span className='text-sm text-muted-foreground'>— Browse Nyaa and download TVDB-organized anime directly.</span>
+        <span className='text-sm text-muted-foreground'>— Browse Nyaa and download anime filed by its AniDB entry.</span>
       </div>
 
       <Card className='shrink-0'>
@@ -467,98 +479,96 @@ export default function Anime() {
         </div>
       </div>
 
-      <Dialog open={selectedEntry !== null} onOpenChange={(open) => !open && setSelectedEntry(null)}>
-        <DialogContent className='max-h-[90vh] max-w-4xl overflow-y-auto'>
+      <Dialog open={selectedEntry !== null && pickFor === null} onOpenChange={(open) => !open && setSelectedEntry(null)}>
+        <DialogContent className='max-h-[90vh] max-w-2xl overflow-y-auto'>
           <DialogHeader>
-            <DialogTitle>Choose the TVDB anime</DialogTitle>
+            <DialogTitle>Download as this AniDB anime</DialogTitle>
             <DialogDescription>
-              The selected Nyaa torrent is downloaded directly. Shows are renamed into TVDB seasons and episodes; movies are copied as one file. Audio sync and remuxing are skipped.
+              The selected Nyaa torrent is downloaded directly. A show&apos;s episodes are filed under its AniDB entry, numbered as AniDB numbers them; a movie is copied as one file. Audio sync and remuxing are skipped.
             </DialogDescription>
           </DialogHeader>
 
           {selectedEntry && <p className='break-words rounded-md border border-white/10 bg-black/20 p-3 font-mono text-sm text-foreground'>{selectedEntry.title}</p>}
 
-          <div className='flex flex-col gap-2 sm:flex-row'>
-            <Input
-              value={tvdbQuery}
-              onChange={(event) => setTvdbQuery(event.target.value)}
-              onKeyDown={(event) => event.key === 'Enter' && void findTvdb()}
-              placeholder='Correct English or Japanese TVDB title'
-              aria-label='TVDB anime title'
-              className='flex-1'
-            />
-            <Button variant='secondary' onClick={() => void findTvdb()} disabled={tvdbLoading || tvdbQuery.trim().length < 2}>
-              {tvdbLoading ? <Spinner /> : <Search data-icon='inline-start' />} Find TVDB entry
-            </Button>
-          </div>
-
-          <div className='grid gap-3 sm:grid-cols-2'>
-            {tvdbResults.map((match) => {
-              const active = selectedMatch?.tvdb_id === match.tvdb_id && selectedMatch.kind === match.kind;
-              return (
-                <button
-                  type='button'
-                  key={`${match.kind}:${match.tvdb_id}`}
-                  onClick={() => setSelectedMatch(match)}
-                  className={`flex cursor-pointer gap-3 rounded-lg border p-3 text-left transition-colors ${active ? 'border-primary bg-primary/10' : 'border-white/10 bg-black/20 hover:border-white/25'}`}
-                >
-                  <Poster match={match} />
-                  <span className='flex min-w-0 flex-col gap-1'>
-                    <span className='font-medium text-foreground'>{match.english_title}</span>
-                    {match.japanese_title && <span className='text-sm text-muted-foreground'>{match.japanese_title}</span>}
-                    <span className='flex flex-wrap items-center gap-2 text-xs text-muted-foreground'>
-                      {match.kind === 'movie' ? <Film /> : <Tv />}
-                      {match.kind === 'movie' ? 'Movie' : 'Show'}
-                      {match.year && ` · ${match.year}`}
-                      <span>TVDB {match.tvdb_id}</span>
-                    </span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {selectedMatch?.kind === 'show' && (
-            <div className='grid gap-3 sm:grid-cols-2'>
-              <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
-                Season override
-                <Input
-                  type='number'
-                  min='1'
-                  value={manualSeason}
-                  onChange={(event) => setManualSeason(event.target.value)}
-                  placeholder='Automatic'
-                />
-              </label>
-              <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
-                Episode override
-                <Input
-                  type='number'
-                  min='1'
-                  value={manualEpisode}
-                  onChange={(event) => setManualEpisode(event.target.value)}
-                  placeholder='Automatic'
-                />
-              </label>
-              <p className='text-xs text-muted-foreground sm:col-span-2'>
-                Leave either field empty to use the release filename and TVDB numbering. A manual episode applies only when the torrent contains one video file.
-              </p>
+          {chosen ? (
+            <div className='flex gap-3 rounded-lg border border-white/10 bg-black/20 p-3'>
+              <Poster url={chosen.poster_url} title={chosen.title} movie={kind === 'movie'} />
+              <div className='flex min-w-0 flex-1 flex-col gap-1'>
+                <span className='font-medium text-foreground'>{chosen.english_title || chosen.title}</span>
+                {chosen.english_title && chosen.english_title !== chosen.title && <span className='text-sm text-muted-foreground'>{chosen.title}</span>}
+                <span className='font-mono text-xs text-muted-foreground'>
+                  {[chosen.type, chosen.year, 'aid ' + chosen.anidb_id].filter(Boolean).join(' · ')}
+                </span>
+                <div className='mt-auto flex flex-wrap items-center gap-2 pt-2'>
+                  <Button asChild variant='secondary' size='sm'>
+                    <a href={'https://anidb.net/anime/' + chosen.anidb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> AniDB</a>
+                  </Button>
+                  <Button variant='secondary' size='sm' onClick={() => setPickFor(chosen.title)}>
+                    <Link2 data-icon='inline-start' /> Change AniDB anime
+                  </Button>
+                </div>
+              </div>
             </div>
+          ) : (
+            <EmptyState icon={Search} title='No AniDB anime chosen' description='Pick the AniDB entry this release belongs to.' className='py-10' />
           )}
 
-          {tvdbResults.length === 0 && !tvdbLoading && (
-            <EmptyState icon={Users} title='Select a TVDB entry first' description='Search for the anime so its English title, poster, seasons, and episode numbers can be used.' className='py-10' />
+          {chosen && (
+            <div className='grid gap-3 sm:grid-cols-2'>
+              <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
+                Download as
+                <Select value={kind} onValueChange={(value) => setKind(value as 'show' | 'movie')}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value='show'>Show episodes</SelectItem>
+                      <SelectItem value='movie'>Movie</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </label>
+              {kind === 'show' && (
+                <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
+                  AniDB episode
+                  <Input
+                    type='number'
+                    min='1'
+                    value={manualEpisode}
+                    onChange={(event) => setManualEpisode(event.target.value)}
+                    placeholder='From each file name'
+                  />
+                </label>
+              )}
+              {kind === 'show' && (
+                <p className='text-xs text-muted-foreground sm:col-span-2'>
+                  Leave the episode empty for a batch: each file is numbered by its own name. A set episode applies only to a torrent with one video file.
+                </p>
+              )}
+            </div>
           )}
 
           <DialogFooter>
             <Button variant='secondary' onClick={() => setSelectedEntry(null)}>Cancel</Button>
-            <Button onClick={() => void downloadSelected()} disabled={!selectedMatch || downloading}>
+            {!chosen && (
+              <Button variant='secondary' onClick={() => selectedEntry && setPickFor(selectedEntry.title)}>
+                <Search data-icon='inline-start' /> Find on AniDB
+              </Button>
+            )}
+            <Button onClick={() => void downloadSelected()} disabled={!chosen || downloading}>
               {downloading ? <Spinner /> : <Download data-icon='inline-start' />}
-              Download {selectedMatch?.kind === 'movie' ? 'movie' : 'show'}
+              Download {kind === 'movie' ? 'movie' : 'show'}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <AniDBLinkDialog
+        name={pickFor}
+        onClose={() => setPickFor(null)}
+        onPick={pickAnime}
+        title='Choose the AniDB anime'
+        description='The download is filed under the entry you pick, and later releases of this name follow it.'
+        action='Choose'
+      />
     </div>
   );
 }

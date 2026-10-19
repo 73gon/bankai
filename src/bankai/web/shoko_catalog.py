@@ -10,7 +10,10 @@ is, and for each entry, its whole AniDB episode list. The episode listing is
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from bankai.web import shoko
@@ -99,6 +102,42 @@ def build(series: Any, episodes: Any) -> Catalog:
     for links in catalog.files.values():
         links.sort(key=lambda link: link[1])
     return catalog
+
+
+def _links_path() -> Path:
+    from bankai.cli import bgjobs
+
+    return bgjobs.jobs_root().parent / "shoko_file_links.json"
+
+
+def save_links(catalog: Catalog) -> None:
+    """Keep which AniDB episode each file is, for the automation worker.
+
+    The worker is its own process and does not read Shoko's catalogue; with
+    these it places every file on disk by AniDB entry, whatever its folder is
+    called. A catalogue with no files -- Shoko down or empty -- keeps the last.
+    """
+    if not catalog.files:
+        return
+    path = _links_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(catalog.files), encoding="utf-8")
+    tmp.replace(path)
+
+
+def saved_links() -> Catalog | None:
+    """The file links last saved, as a catalogue with no entries; None if none were."""
+    try:
+        raw = json.loads(_links_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    files = {
+        str(path): [(int(aid), int(number)) for aid, number in links]
+        for path, links in raw.items()
+        if isinstance(links, list)
+    }
+    return Catalog(files=files)
 
 
 async def fetch() -> Catalog | None:

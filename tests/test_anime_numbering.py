@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
-from bankai.metadata.tvdb import TVDBEpisode
 from bankai.web import anime_library, erai
+from bankai.web.anime_library import _Episode
 
 
 def _file(folder: str, season: int | None, episode: int | None) -> dict:
@@ -25,10 +23,11 @@ def _file(folder: str, season: int | None, episode: int | None) -> dict:
     }
 
 
-def _roster(count: int) -> list[TVDBEpisode]:
-    # TVDB's own seasons do not match the user's arcs: 3 + 3 here, arcs 2 + 4.
+def _roster(count: int) -> list[_Episode]:
+    # The episode list's own seasons do not match the user's arcs: 3 + 3
+    # here, arcs 2 + 4.
     return [
-        TVDBEpisode(
+        _Episode(
             season=1 if number <= 3 else 2,
             episode=number if number <= 3 else number - 3,
             name=f"Episode {number}",
@@ -39,7 +38,7 @@ def _roster(count: int) -> list[TVDBEpisode]:
     ]
 
 
-def test_absolute_numbers_match_tvdb_across_arc_folders():
+def test_absolute_numbers_match_the_episode_list_across_arc_folders():
     files = [
         _file("Season 01 Land of Waves", 1, 1),
         _file("Season 01 Land of Waves", 1, 2),
@@ -65,14 +64,14 @@ def test_read_per_season_the_same_files_look_mostly_missing():
     files = [_file("Season 02 Chunin Exams", 2, 5)]
     merged = anime_library.merge_episodes(files, _roster(6), ended=True)
     rows = {(row["season_number"], row["episode"]): row for row in merged["episodes"]}
-    # TVDB's episode 5 is S02E02: it reads as missing, and S02E05 has no title.
+    # Episode 5 is listed as S02E02: it reads as missing, and S02E05 has no title.
     assert rows[(2, 2)]["missing"]
     assert rows[(2, 5)].get("episode_title") is None
 
 
 def test_codecs_probed_by_file_numbers_still_count():
     files = [_file("Season 02 Chunin Exams", 2, 5)]
-    # Probed codecs use the file's S02E05; TVDB would call it S02E02.
+    # Probed codecs use the file's S02E05; the episode list would call it S02E02.
     merged = anime_library.merge_episodes_absolute(
         files, _roster(6), ended=True, codecs={(2, 5): "avc"}
     )
@@ -87,37 +86,11 @@ def test_flat_numbering_is_one_list():
     assert [row["episode"] for row in merged["episodes"]] == [1, 2, 3, 4]
 
 
-def test_files_beyond_tvdb_are_still_shown():
+def test_files_beyond_the_episode_list_are_still_shown():
     merged = anime_library.merge_episodes_absolute(
         [_file("Season 01 Land of Waves", 1, 9)], _roster(2), ended=False
     )
     assert 9 in {row["episode"] for row in merged["episodes"] if not row["missing"]}
-
-
-@pytest.fixture
-def prefs_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai.json")
-    return tmp_path
-
-
-def test_numbering_is_kept_per_show_by_tvdb_id_and_key(prefs_dir):
-    anime_library.save_numbering(key="Naruto", tvdb_id=78857, mode="absolute")
-    prefs = anime_library.load_prefs()
-
-    assert anime_library.numbering_for(prefs, tvdb_id=78857, key="anything") == "absolute"
-    assert anime_library.numbering_for(prefs, tvdb_id=None, key="Naruto") == "absolute"
-    assert anime_library.numbering_for(prefs, tvdb_id=1, key="Bleach") == "season"
-
-
-def test_back_to_per_season_drops_the_entry(prefs_dir):
-    anime_library.save_numbering(key="Naruto", tvdb_id=78857, mode="absolute_flat")
-    anime_library.save_numbering(key="Naruto", tvdb_id=78857, mode="season")
-    assert anime_library.load_prefs() == {}
-
-
-def test_unknown_numbering_is_refused(prefs_dir):
-    with pytest.raises(ValueError):
-        anime_library.save_numbering(key="Naruto", tvdb_id=None, mode="sideways")
 
 
 def test_retry_held_can_be_limited_by_reason(monkeypatch):

@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from bankai.metadata.tvdb import TVDBEpisode
-from bankai.processor.anime import _atomic_copy2, episode_identity
+from bankai.processor.anime import _atomic_copy2
 from bankai.web import anime
 from bankai.web.anime import (
     clean_release_title,
@@ -137,7 +136,7 @@ def test_release_episode_info_extracts_common_nyaa_notation(
     assert release_episode_info(title) == expected
 
 
-def test_release_title_is_cleaned_for_tvdb_lookup() -> None:
+def test_release_title_is_cleaned_to_the_show_s_own_name() -> None:
     assert clean_release_title("[SubsPlease] Sousou no Frieren - 27 (1080p) [ABC].mkv") == (
         "Sousou no Frieren"
     )
@@ -147,154 +146,118 @@ def test_release_title_is_cleaned_for_tvdb_lookup() -> None:
     )
 
 
-def test_short_anime_query_does_not_match_a_word_inside_an_unrelated_title() -> None:
-    correct = anime.AnimeTVDBMatch(
-        tvdb_id=424536,
-        kind="show",
-        english_title="Frieren: Beyond Journey's End",
-        aliases=("Sousou no Frieren",),
-    )
-    unrelated = anime.AnimeTVDBMatch(
-        tvdb_id=256256,
-        kind="movie",
-        english_title="Young Ones Are Even Cold in the Summer",
-        japanese_title="Kleine frieren auch im Sommer",
-    )
-    spelling_lookalike = anime.AnimeTVDBMatch(
-        tvdb_id=391612,
-        kind="show",
-        english_title="Labyrinth of Peace",
-        japanese_title="Frieden",
+def _frieren_index():
+    from xml.etree import ElementTree as ET
+
+    from bankai.metadata import anidb
+
+    return anidb.build_index(
+        ET.fromstring(
+            """<animetitles>
+  <anime aid="17617">
+    <title xml:lang="x-jat" type="main">Sousou no Frieren</title>
+    <title xml:lang="en" type="official">Frieren: Beyond Journey's End</title>
+  </anime>
+</animetitles>"""
+        ),
+        ET.fromstring("<anime-list/>"),
     )
 
-    assert anime._match_score("Frieren", correct) > 0.9
-    assert anime._match_score("Sousou no Frieren", correct) > 0.9
-    assert anime._match_score("Frieren", unrelated) < 0.55
-    assert anime._match_score("Frieren", spelling_lookalike) < 0.75
 
-
-def test_episode_identity_maps_absolute_anime_number_to_tvdb() -> None:
-    episodes = [
-        TVDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
-        TVDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
-    ]
-
-    identity = episode_identity(
-        "[Group] Frieren - 29 [1080p].mkv",
-        release_title="[Group] Frieren Season 2",
-        tvdb_episodes=episodes,
-    )
-
-    assert identity is not None
-    assert (identity.season, identity.episode, identity.title) == (2, 1, "A New Journey")
-
-
-def test_episode_identity_uses_tvdb_absolute_order_without_season_hint() -> None:
-    episodes = [
-        TVDBEpisode(season=1, episode=28, absolute_number=28, name="The Height of Magic"),
-        TVDBEpisode(season=2, episode=1, absolute_number=29, name="A New Journey"),
-    ]
-
-    identity = episode_identity(
-        "[Group] Frieren - 29 [1080p].mkv",
-        release_title="[Group] Frieren",
-        tvdb_episodes=episodes,
-    )
-
-    assert identity is not None
-    assert (identity.season, identity.episode, identity.title) == (2, 1, "A New Journey")
-
-
-def test_episode_identity_honors_manual_season_and_episode() -> None:
-    episodes = [
-        TVDBEpisode(season=3, episode=13, absolute_number=41, name="The Calamity"),
-    ]
-
-    identity = episode_identity(
-        "unknown-release-name.mkv",
-        release_title="Bleach",
-        tvdb_episodes=episodes,
-        season_override=3,
-        episode_override=13,
-    )
-
-    assert identity is not None
-    assert (identity.season, identity.episode, identity.title) == (3, 13, "The Calamity")
-
-
-def test_nyaa_page_keeps_every_release_when_only_leading_rows_are_enriched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sample = parse_rss(
-        """<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
-        <title>[Group] Anime - 01 [1080p]</title>
+def _rss_row(title: str):
+    return parse_rss(
+        f"""<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
+        <title>{title}</title>
         <link>https://nyaa.si/download/1.torrent</link><guid>https://nyaa.si/view/1</guid>
         <nyaa:infoHash>0123456789abcdef0123456789abcdef01234567</nyaa:infoHash>
         <nyaa:seeders>10</nyaa:seeders><nyaa:downloads>20</nyaa:downloads>
         <nyaa:size>1 GiB</nyaa:size>
         </item></channel></rss>"""
     )[0]
+
+
+def test_a_release_is_identified_on_anidb_from_its_title_alone() -> None:
+    """The title index is on disk: no request is made to tell what a release is."""
+    match = anime.anidb_match(
+        "[SubsPlease] Sousou no Frieren - 27 (1080p) [ABC].mkv", table=_frieren_index(), mappings={}
+    )
+
+    assert match is not None
+    assert (match["anidb_id"], match["episode"]) == (17617, 27)
+    assert match["english_title"] == "Frieren: Beyond Journey's End"
+
+
+def test_a_name_anidb_does_not_know_is_left_for_the_user_to_place() -> None:
+    assert anime.anidb_match("[Group] Not An Anime - 01 [1080p]", table=_frieren_index(), mappings={}) is None
+
+
+def test_the_user_s_choice_for_a_release_name_wins_over_the_title() -> None:
+    from bankai.web import erai
+
+    title = "[Erai-raws] Frieren Beyond - 03 [1080p]"
+    mappings = {erai._mapping_key(title): {"anidb_id": 17617, "anidb_episode_offset": 28}}
+
+    match = anime.anidb_match(title, table=_frieren_index(), mappings=mappings)
+
+    assert match is not None
+    assert (match["anidb_id"], match["episode"]) == (17617, 31)
+
+
+def test_every_release_on_a_nyaa_page_is_identified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identifying costs nothing, so no row is left without a try, browsing included."""
+    from bankai.metadata import anidb
+    from bankai.web import erai
+
+    sample = _rss_row("[Group] Sousou no Frieren - 01 [1080p]")
     rows = [
-        replace(
-            sample,
-            id=index,
-            info_hash=f"{index:040x}",
-            detail_url=f"https://nyaa.si/view/{index}",
-        )
+        replace(sample, id=index, info_hash=f"{index:040x}", detail_url=f"https://nyaa.si/view/{index}")
         for index in range(1, 76)
     ]
+    table = _frieren_index()
 
     async def fake_fetch(*args: object, **kwargs: object) -> list[anime.NyaaEntry]:
         return rows
 
-    async def fake_enrich(
-        entries: list[anime.NyaaEntry], matches: list[anime.AnimeTVDBMatch]
-    ) -> list[anime.NyaaEntry]:
-        assert len(entries) == 20
-        return entries
+    async def index():
+        return table
 
     monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
-    monkeypatch.setattr(anime, "_enrich_tvdb", fake_enrich)
+    monkeypatch.setattr(anidb, "index", index)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
 
     page = asyncio.run(anime.search(""))
 
     assert len(page.items) == 75
     assert page.has_next is True
+    assert all(item.anidb and item.anidb["anidb_id"] == 17617 for item in page.items)
 
 
-def test_nonempty_anime_search_enriches_every_visible_release(
+def test_a_search_also_asks_nyaa_under_the_anime_s_other_anidb_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    sample = parse_rss(
-        """<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
-        <title>[Group] Bleach - 01 [1080p]</title>
-        <link>https://nyaa.si/download/1.torrent</link><guid>https://nyaa.si/view/1</guid>
-        <nyaa:infoHash>0123456789abcdef0123456789abcdef01234567</nyaa:infoHash>
-        <nyaa:seeders>10</nyaa:seeders><nyaa:downloads>20</nyaa:downloads>
-        <nyaa:size>1 GiB</nyaa:size>
-        </item></channel></rss>"""
-    )[0]
-    rows = [replace(sample, id=index, info_hash=f"{index:040x}") for index in range(1, 36)]
+    """People type the English name; Erai publishes under the romaji one."""
+    from bankai.metadata import anidb
+    from bankai.web import erai
 
-    async def fake_tvdb(*args: object, **kwargs: object) -> list[anime.AnimeTVDBMatch]:
-        return []
+    asked: list[str] = []
+    table = _frieren_index()
 
-    async def fake_fetch(*args: object, **kwargs: object) -> list[anime.NyaaEntry]:
-        return rows
+    async def fake_fetch(client, term, category, page) -> list[anime.NyaaEntry]:
+        asked.append(term)
+        return [_rss_row("[Erai-raws] Sousou no Frieren - 02 [1080p]")]
 
-    async def fake_enrich(
-        entries: list[anime.NyaaEntry], matches: list[anime.AnimeTVDBMatch]
-    ) -> list[anime.NyaaEntry]:
-        assert len(entries) == len(rows)
-        return entries
+    async def index():
+        return table
 
-    monkeypatch.setattr(anime, "tvdb_candidates", fake_tvdb)
     monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
-    monkeypatch.setattr(anime, "_enrich_tvdb", fake_enrich)
+    monkeypatch.setattr(anidb, "index", index)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
 
-    page = asyncio.run(anime.search("Bleach"))
+    page = asyncio.run(anime.search("Frieren: Beyond Journey's End"))
 
-    assert len(page.items) == len(rows)
+    assert sorted(asked) == sorted(["Frieren: Beyond Journey's End", "Sousou no Frieren"])
+    assert page.aliases == ["Frieren: Beyond Journey's End", "Sousou no Frieren"]
+    assert page.items[0].anidb["episode"] == 2
 
 
 def test_erai_suffix_deconstruction_keeps_numbers_inside_the_title() -> None:

@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, MoreHorizontal } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeTVDBMatch, type EpisodeNumbering } from '@/lib/api';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -151,7 +150,6 @@ export default function AnimeLibrary() {
   const [results, setResults] = useState<AnimeEntry[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchMatch, setSearchMatch] = useState<AnimeTVDBMatch | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<AnimeLibraryShow | null>(null);
   const [episodeTarget, setEpisodeTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
@@ -223,10 +221,10 @@ export default function AnimeLibrary() {
   }
 
   async function upgradeToHevc(show: AnimeLibraryShow) {
-    if (!show.tvdb_id) return;
+    if (!show.anidb_ids?.length) return;
     setUpgrading(show.key);
     try {
-      const result = await api.upgradeShowToHevc(show.tvdb_id, show.title);
+      const result = await api.upgradeShowToHevc(show.anidb_ids);
       if (result.queued === 0) {
         toast.info(result.no_replacement > 0
           ? 'No HEVC release is available for the remaining ' + result.no_replacement + ' episode(s)'
@@ -243,16 +241,6 @@ export default function AnimeLibrary() {
       toast.error(error.message);
     } finally {
       setUpgrading(null);
-    }
-  }
-
-  async function setNumbering(show: AnimeLibraryShow, mode: EpisodeNumbering) {
-    try {
-      await api.setAnimeNumbering(show.key, show.tvdb_id ?? null, mode);
-      await openShow(show.key);
-      await load();
-    } catch (error: any) {
-      toast.error(error.message);
     }
   }
 
@@ -300,15 +288,21 @@ export default function AnimeLibrary() {
     }
   }
 
+  /** The AniDB entry a row of the drawer is an episode of: its tab's entry. */
+  function entryOf(show: AnimeLibraryShow, episode: AnimeLibraryEpisode): number | null {
+    if (episode.season_number == null) return null;
+    return show.season_anidb?.[String(episode.season_number)]?.[0]?.anidb_id ?? null;
+  }
+
   async function searchMissing(show: AnimeLibraryShow, episode: AnimeLibraryEpisode, q?: string) {
-    if (!show.tvdb_id || episode.season_number == null || episode.episode == null) return;
+    const anidbId = entryOf(show, episode);
+    if (anidbId == null || episode.episode == null) return;
     setSearchTarget({ show, episode });
     setSearching(true);
     setResults([]);
     try {
-      const result = await api.animeEpisodeSearch(show.tvdb_id, episode.season_number, episode.episode, q);
+      const result = await api.animeEpisodeSearch(anidbId, episode.episode, q);
       setResults(result.items);
-      setSearchMatch(result.match);
       setSearchQuery(q ?? result.queries[0] ?? '');
     } catch (error: any) {
       toast.error(error.message);
@@ -318,10 +312,11 @@ export default function AnimeLibrary() {
   }
 
   async function downloadMissing(entry: AnimeEntry) {
-    if (!searchTarget || !searchMatch) return;
+    const anidbId = searchTarget ? entryOf(searchTarget.show, searchTarget.episode) : null;
+    if (!searchTarget || anidbId == null) return;
     setDownloading(entry.info_hash);
     try {
-      await api.animeDownload(entry, searchMatch, { season: searchTarget.episode.season_number, episode: searchTarget.episode.episode });
+      await api.animeDownload(entry, anidbId, 'show', searchTarget.episode.episode);
       toast.success('Episode added to the Anime queue');
       setSearchTarget(null);
     } catch (error: any) {
@@ -367,15 +362,10 @@ export default function AnimeLibrary() {
   // Read absolutely, a season tab is one of the user's own arc folders: named after it.
   const seasonLabel = (season: number | null) => {
     if (season === null) return 'Other files';
-    if (active?.numbering === 'absolute_flat') return 'All episodes';
     // An AniDB card's tabs are its entries or its season folders, each named.
     if (active?.numbering === 'anidb') {
       const label = active.episodes.find((episode) => episode.season_number === season)?.season;
       if (label) return label;
-    }
-    if (active?.numbering === 'absolute') {
-      const folder = active.episodes.find((episode) => episode.season_number === season)?.season;
-      if (folder) return folder;
     }
     return season === 0 ? 'Specials' : 'Season ' + season;
   };
@@ -429,7 +419,7 @@ export default function AnimeLibrary() {
       </div>
 
       {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : visible.length === 0 ? (
-        <EmptyState icon={HardDrive} title={shows.length ? 'No matching Anime' : 'No Anime in your library yet'} description='Completed and staged episodes are grouped into their TVDB shows.' />
+        <EmptyState icon={HardDrive} title={shows.length ? 'No matching Anime' : 'No Anime in your library yet'} description='Completed and staged episodes are grouped by their AniDB entries.' />
       ) : view === 'grid' ? (
         <div className='min-h-0 flex-1 overflow-y-auto'>
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
@@ -542,7 +532,6 @@ export default function AnimeLibrary() {
                     )}
                     <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
-                      {active.tvdb_id && <Button asChild variant='secondary' size='sm'><a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> TVDB</a></Button>}
                       {!active.anidb_id && (
                         <Button
                           size='sm'
@@ -556,7 +545,7 @@ export default function AnimeLibrary() {
                       {Boolean(active.avc_count) && (
                         <Button
                           size='sm'
-                          disabled={!active.tvdb_id || upgrading === active.key}
+                          disabled={!active.anidb_ids?.length || upgrading === active.key}
                           onClick={() => void upgradeToHevc(active)}
                           title='Download HEVC versions of this show&apos;s AVC episodes and replace them'
                         >
@@ -564,18 +553,6 @@ export default function AnimeLibrary() {
                           {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.avc_count} to HEVC`}
                         </Button>
                       )}
-                      {active.numbering !== 'anidb' && <Select value={active.numbering ?? 'season'} onValueChange={(value) => void setNumbering(active, value as EpisodeNumbering)}>
-                        <SelectTrigger data-size='sm' className='w-60' aria-label='How episode numbers are read' title='How this show&apos;s episode numbers are read'>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            <SelectItem value='season'>Per season (S01E05)</SelectItem>
-                            <SelectItem value='absolute'>Absolute, seasons are arcs</SelectItem>
-                            <SelectItem value='absolute_flat'>Absolute, one list</SelectItem>
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>}
                       <Popover open={menuOpen} onOpenChange={setMenuOpen}>
                         <PopoverTrigger asChild>
                           <Button size='icon' variant='secondary' className='size-8' aria-label='More actions for this show' title='More actions'>
@@ -644,7 +621,7 @@ export default function AnimeLibrary() {
                               </div>
                             </td>
                             <td className='px-3 py-2.5 text-right font-mono text-xs tabular-nums'>{entry.missing ? '—' : formatSize(entry.size)}</td>
-                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={!active.tvdb_id || active.numbering === 'anidb'} aria-label='Search for a release' title={active.numbering === 'anidb' ? 'Searching by AniDB episode is not available yet' : 'Search for a release'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : (
+                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={entryOf(active, entry) == null || entry.tba} aria-label='Search for a release' title={entry.tba ? 'Not aired yet' : 'Search for a release of this AniDB episode'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : (
                               <div className='flex items-center justify-end gap-1.5'>
                                 {entry.staged ? (
                                   <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>
@@ -714,8 +691,8 @@ export default function AnimeLibrary() {
       <Dialog open={Boolean(searchTarget)} onOpenChange={(open) => { if (!open) setSearchTarget(null); }}>
         <DialogContent className='flex h-[90dvh] w-[92vw] max-w-none flex-col overflow-hidden'>
           <DialogHeader>
-            <DialogTitle>Search {searchTarget?.show.title} — S{String(searchTarget?.episode.season_number || 1).padStart(2, '0')}E{String(searchTarget?.episode.episode || 1).padStart(2, '0')}</DialogTitle>
-            <DialogDescription>Choose a release for this TVDB episode. Results are checked against the show's episode mapping.</DialogDescription>
+            <DialogTitle>Search {searchTarget ? seasonLabel(searchTarget.episode.season_number) : ''} — episode {searchTarget?.episode.episode ?? ''}</DialogTitle>
+            <DialogDescription>Choose a release of this AniDB episode. Every result is checked to be this entry's episode.</DialogDescription>
           </DialogHeader>
           <form className='flex gap-2' onSubmit={(event) => { event.preventDefault(); if (searchTarget) void searchMissing(searchTarget.show, searchTarget.episode, searchQuery); }}>
             <Input aria-label='Episode release search' value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className='flex-1' />
@@ -728,7 +705,7 @@ export default function AnimeLibrary() {
                 <Button asChild size='sm' variant='secondary'><a href={entry.detail_url} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> Description</a></Button>
                 <Button size='sm' disabled={Boolean(downloading)} onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> {downloading === entry.info_hash ? 'Queuing…' : 'Download'}</Button>
               </CardContent></Card>)}
-            </div> : <EmptyState icon={Search} title='No matching releases found' description='Try an alternate Erai title above. If numbering is unresolved, select the show mapping in Anime Settings.' />}
+            </div> : <EmptyState icon={Search} title='No matching releases found' description='Try another title above, the way Erai-raws names the show.' />}
           </div>
         </DialogContent>
       </Dialog>

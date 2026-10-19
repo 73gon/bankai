@@ -38,38 +38,69 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A release is downloaded as the AniDB entry picked for it, never by TVDB."""
+    from xml.etree import ElementTree as ET
+
+    from bankai.metadata import anidb
+    from bankai.web import erai
+
+    table = anidb.build_index(
+        ET.fromstring(
+            """<animetitles>
+  <anime aid="17617">
+    <title xml:lang="x-jat" type="main">Sousou no Frieren</title>
+    <title xml:lang="en" type="official">Frieren: Beyond Journey's End</title>
+  </anime>
+</animetitles>"""
+        ),
+        ET.fromstring("<anime-list/>"),
+    )
+
+    async def index():
+        return table
+
     queued: list[dict] = []
+    saved: list[tuple] = []
+    monkeypatch.setattr(anidb, "index", index)
+    monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    monkeypatch.setattr(erai, "save_anidb_mapping", lambda title, anime, **kw: saved.append((title, anime["anidb_id"])))
     monkeypatch.setattr(
         "bankai.web.jobs.enqueue",
         lambda **kwargs: queued.append(kwargs) or {"id": "anime-job", **kwargs},
     )
     body = {
-        "release_title": "[Group] Frieren - 01 [1080p]",
+        "release_title": "[Group] Sousou no Frieren - 01 [1080p]",
         "torrent_url": "https://nyaa.si/download/123.torrent",
         "detail_url": "https://nyaa.si/view/123",
         "magnet_uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Frieren",
         "info_hash": "0123456789abcdef0123456789abcdef01234567",
-        "tvdb_id": 424536,
+        "anidb_id": 17617,
         "kind": "show",
-        "english_title": "Frieren: Beyond Journey's End",
-        "year": 2023,
     }
 
     response = client.post("/api/anime/download", json=body)
 
     assert response.status_code == 200
+    args = queued[0]["args"]
     assert queued[0]["kind"] == "show"
-    assert queued[0]["title"] == "Frieren: Beyond Journey's End E01"
-    assert queued[0]["args"][0] == "anime-download"
-    assert "--tvdb-id" in queued[0]["args"]
+    assert queued[0]["title"] == "Frieren: Beyond Journey's End - 01"
+    assert args[0] == "anime-download"
+    assert "--tvdb-id" not in args
+    assert args[args.index("--anidb-id") + 1] == "17617"
+    assert args[args.index("--anidb-title") + 1] == "Sousou no Frieren"
+    # The episode is the release's own, read the way the automation reads it.
+    assert args[args.index("--episode") + 1] == "1"
+    # Later releases under this name are this entry too.
+    assert saved == [("[Group] Sousou no Frieren - 01 [1080p]", 17617)]
 
-    body["season"] = 3
     body["episode"] = 13
     overridden = client.post("/api/anime/download", json=body)
     assert overridden.status_code == 200
-    assert queued[1]["title"] == "Frieren: Beyond Journey's End S03E13"
-    assert queued[1]["args"][queued[1]["args"].index("--season") + 1] == "3"
+    assert queued[1]["title"] == "Frieren: Beyond Journey's End - 13"
     assert queued[1]["args"][queued[1]["args"].index("--episode") + 1] == "13"
+
+    unknown = client.post("/api/anime/download", json={**body, "anidb_id": 999999})
+    assert unknown.status_code == 422
 
     body["detail_url"] = "https://example.com/view/123"
     rejected = client.post("/api/anime/download", json=body)

@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { Ban, Check, Download, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Subtitles, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
-import { AnimeMappingDialog } from '@/components/AnimeMappingDialog';
 import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AnimePoster } from '@/components/AnimePoster';
@@ -75,7 +74,6 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     markBusy(key, false);
     void load();
   }
-  const [mappingTitle, setMappingTitle] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<AnimeReviewItem | null>(null);
   const [releasesFor, setReleasesFor] = useState<AnimeReviewItem | null>(null);
   const [releases, setReleases] = useState<HeldRelease[]>([]);
@@ -346,7 +344,6 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           {visible.map((item) => {
             const reasons = (item.reasons || [item.reason]).filter(Boolean) as string[];
             const german = reasons.some((reason) => reason.includes('German subtitles'));
-            const tvdb = reasons.some((reason) => reason.includes('TVDB'));
             const batch = reasons.some((reason) => reason.startsWith('Whole-season batch'));
             const count = item.release_count || 1;
             return (
@@ -492,17 +489,6 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         </Button>
                       )}
 
-                      {tvdb && item.release_title && (
-                        <Button
-                          variant='outline'
-                          className='col-span-2'
-                          onClick={() => setMappingTitle(item.release_title || null)}
-                          disabled={busyFor(item.key)}
-                        >
-                          <Search data-icon='inline-start' /> Choose TVDB show
-                        </Button>
-                      )}
-
                       <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={busyFor(item.key)}>
                         <Ban data-icon='inline-start' /> <span className='truncate'>Discard</span>
                       </Button>
@@ -528,7 +514,6 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           })}
         </div>
       )}
-      <AnimeMappingDialog title={mappingTitle} onClose={() => setMappingTitle(null)} onSaved={() => void load()} />
       <Dialog open={eraiFor !== null} onOpenChange={(open) => { if (!open) setEraiFor(null); }}>
         <DialogContent className='flex h-[90dvh] max-h-[90dvh] w-[90vw] max-w-none flex-col'>
           <DialogHeader>

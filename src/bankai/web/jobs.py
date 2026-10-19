@@ -940,7 +940,7 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
         action = torrent_actions.get_request(j.id) if j.status == "running" else None
         row = _display_row(j)
         if anime_only:
-            row["tvdb_id"] = bgjobs.argument_value(j.args, "--tvdb-id")
+            row["anidb_id"] = bgjobs.argument_value(j.args, "--anidb-id")
         row["action_required"] = bool(action and action.get("status") == "waiting")
         out.append(row)
     pending = _context_pending()
@@ -999,7 +999,7 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
         pending_args = {item.id: item.args for item in visible_pending}
         for row in out:
             if row["id"] in pending_args:
-                row["tvdb_id"] = bgjobs.argument_value(pending_args[row["id"]], "--tvdb-id")
+                row["anidb_id"] = bgjobs.argument_value(pending_args[row["id"]], "--anidb-id")
     out.sort(key=lambda r: r["started_at"], reverse=True)
     return out
 

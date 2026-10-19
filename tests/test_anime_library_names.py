@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape
 
 import pytest
 
@@ -10,11 +12,11 @@ from bankai.web.anime_library import _name
 
 
 # Every pair below appeared twice in the library: once as the folder holding
-# the episodes, once as an empty card built from the tracked TVDB title.
+# the episodes, once as an empty card built from the tracked title.
 @pytest.mark.parametrize(
-    "folder_name,tvdb_title",
+    "folder_name,title",
     [
-        # sanitise() drops "?" and ":" from folder names; the TVDB title keeps them.
+        # sanitise() drops "?" and ":" from folder names; the title keeps them.
         (
             "Heroine Saint No, I'm an All-Works Maid (And Proud of It)! (2026)",
             "Heroine? Saint? No, I'm an All-Works Maid (And Proud of It)!",
@@ -32,14 +34,14 @@ from bankai.web.anime_library import _name
         ),
     ],
 )
-def test_a_folder_and_its_tvdb_title_are_the_same_show(folder_name, tvdb_title):
-    assert _name(folder_name) == _name(tvdb_title)
+def test_a_folder_and_its_title_are_the_same_show(folder_name, title):
+    assert _name(folder_name) == _name(title)
 
 
 @pytest.mark.parametrize(
     "source_title,expected",
     [
-        # Erai names a source show per season; TVDB holds one series.
+        # A season is named per season; TVDB holds one series.
         ("Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"),
         ("Some Show Season 2", "Some Show"),
         ("Some Show 3rd Season", "Some Show"),
@@ -52,8 +54,8 @@ def test_a_folder_and_its_tvdb_title_are_the_same_show(folder_name, tvdb_title):
     ],
 )
 def test_the_season_suffix_comes_off_before_the_tvdb_search(source_title, expected):
-    """Left on, it went into the query and the alias comparison, so nothing
-    matched and the card kept its romaji name with no cover."""
+    """Left on, it went into the query and the name comparison, so nothing
+    matched and the Movies & Shows card was left with no cover."""
     from bankai.web.anime_library import _search_title
 
     assert _search_title(source_title) == expected
@@ -71,18 +73,18 @@ def metadata_store(monkeypatch):
     monkeypatch.setattr(discover, "is_configured", lambda: True)
     provider = {"answer": [], "calls": 0}
 
-    async def candidates(query, **kwargs):
+    async def search(query, **kwargs):
         provider["calls"] += 1
         if isinstance(provider["answer"], Exception):
             raise provider["answer"]
         return provider["answer"]
 
-    monkeypatch.setattr(anime_library.anime, "tvdb_candidates", candidates)
+    monkeypatch.setattr(discover, "search", search)
     return provider
 
 
 def test_an_outage_is_not_cached_as_an_answer(metadata_store):
-    """A failure held the show at its romaji name with no cover for a full day."""
+    """A failure held the show at its folder name with no cover for a full day."""
     import asyncio
 
     from bankai.web import anime_library
@@ -118,7 +120,7 @@ def test_an_expired_answer_is_served_while_it_refreshes(metadata_store):
 
     from bankai.web import anime_library
 
-    key = "metadata:v2:show:frieren"
+    key = "metadata:v2:all:show:frieren"
     anime_library._PERSISTENT_CACHE[key] = {
         "saved_at": time.time() - anime_library._PERSISTENT_TTL_SECONDS - 60,
         "value": {"english_title": "Frieren", "tvdb_id": 424536},
@@ -148,30 +150,6 @@ def test_a_name_that_is_only_punctuation_does_not_collapse_to_nothing():
     assert _name("???") != _name("***")
 
 
-def test_episode_codecs_are_read_from_the_release_that_produced_them(monkeypatch):
-    """Probing thousands of files on a slow library disk is not worth it."""
-    from bankai.web import anime_library, erai
-
-    state = erai._default_state()
-    state["releases"] = {
-        "a" * 40: {"status": "done", "title": "[Erai-raws] Show - 01 [1080p][HEVC][ENG]"},
-        "b" * 40: {"status": "done", "title": "[Erai-raws] Show - 02 [1080p CR WEB-DL AVC AAC]"},
-        "c" * 40: {"status": "done", "title": "[Erai-raws] Other - 01 [1080p][HEVC]"},
-    }
-    state["canonical"] = {
-        "555|1|1": {"info_hash": "a" * 40},
-        "555|1|2": {"info_hash": "b" * 40},
-        "999|1|1": {"info_hash": "c" * 40},
-    }
-    monkeypatch.setattr(erai, "_load_state", lambda: state)
-
-    codecs = anime_library.episode_codecs(555)
-    assert codecs == {(1, 1): "hevc", (1, 2): "avc"}
-    # A different series is not mixed in.
-    assert anime_library.episode_codecs(999) == {(1, 1): "hevc"}
-    assert anime_library.episode_codecs(None) == {}
-
-
 def test_merge_episodes_marks_each_episode_with_its_codec():
     from bankai.metadata.tvdb import TVDBEpisode
     from bankai.web.anime_library import merge_episodes
@@ -195,88 +173,69 @@ def test_merge_episodes_marks_each_episode_with_its_codec():
     assert by_number[3]["codec"] is None
 
 
-def test_the_release_state_is_read_once_for_the_whole_library(monkeypatch):
-    """It is a fourteen megabyte file; reading it per show cost twenty seconds."""
-    import asyncio
-    from pathlib import Path
+def _table(*entries):
+    """An AniDB title index of (aid, main title, English title or None)."""
+    from bankai.metadata import anidb
 
-    from bankai.web import anime_library, discover, erai
+    nodes = "".join(
+        f'<anime aid="{aid}"><title xml:lang="x-jat" type="main">{escape(main)}</title>'
+        + (f'<title xml:lang="en" type="official">{escape(english)}</title>' if english else "")
+        + "</anime>"
+        for aid, main, english in entries
+    )
+    return anidb.build_index(ET.fromstring(f"<animetitles>{nodes}</animetitles>"), None)
 
-    reads = []
-    state = erai._default_state()
-    state["releases"] = {
-        f"{n:040x}": {"status": "done", "title": f"[Erai-raws] Show {n} - 01 [1080p][HEVC]"}
-        for n in range(1, 21)
-    }
-    state["canonical"] = {
-        f"{n}|1|1": {"info_hash": f"{n:040x}"} for n in range(1, 21)
-    }
 
-    def load():
-        reads.append(1)
-        return state
-
-    monkeypatch.setattr(erai, "_load_state", load)
-    monkeypatch.setattr(anime_library, "known_ids", lambda: {})
-    monkeypatch.setattr(discover, "is_configured", lambda: False)
-    monkeypatch.setattr(anime_library, "_nfo_id", lambda path: None)
-    monkeypatch.setattr(anime_library, "probed_codecs", lambda files: {})
-    monkeypatch.setattr(anime_library, "german_dubbed_episodes", lambda files: set())
-
-    async def metadata(title, tvdb_id=None):
-        return {"english_title": title, "tvdb_id": tvdb_id}
-
-    monkeypatch.setattr(anime_library, "show_metadata", metadata)
-
-    entries = [
-        {
-            "path": f"/library/Show {n}/Season 01/ep.mkv",
-            "rel_path": f"Show {n}/Season 01/ep.mkv",
-            "name": f"Show {n} - S01E01.mkv",
-            "series": f"Show {n}",
-            "season": "Season 01",
-            "size": 1,
-            "mtime": 0,
-            "staged": False,
-            "stage": "final",
-            "transfer_status": "idle",
-        }
-        for n in range(1, 21)
-    ]
-    shows = asyncio.run(anime_library.group_shows(entries, Path("/library")))
-
-    assert len(shows) == 20
-    # One read for the codec index, whatever the library holds.
-    assert len(reads) == 1
-def _run_library(monkeypatch, folders, *, resolve=None, tracked=(), only_key=None):
+def _run_library(
+    monkeypatch,
+    folders,
+    *,
+    titles=(),
+    taken=None,
+    policies=None,
+    links=None,
+    catalog=None,
+    only_key=None,
+    reads=None,
+):
     """group_shows over a library holding ``folders`` -> {folder: [episode, ...]}.
 
-    ``resolve`` stands in for TVDB: {title: (tvdb_id, english_title)}.
+    ``titles`` stands in for AniDB's title list: (aid, main title, English
+    title or None). ``taken`` is the release state's ``anime``, the AniDB
+    entries the automation took; ``policies`` the user's blacklist; ``links``
+    the folders the user linked to an entry, {folder: aid}.
     """
     import asyncio
     from pathlib import Path
 
-    from bankai.web import anime_library, discover, erai
+    from bankai.metadata import anidb, anidb_art
+    from bankai.web import anime_library, erai
+
+    table = _table(*titles) if titles else None
+
+    async def index():
+        return table
 
     state = erai._default_state()
-    state["series"] = {
-        str(index): {"english_title": title, "tvdb_id": None}
-        for index, title in enumerate(tracked, start=1)
-    }
-    monkeypatch.setattr(erai, "_load_state", lambda: state)
-    monkeypatch.setattr(anime_library, "known_ids", lambda: {})
-    monkeypatch.setattr(discover, "is_configured", lambda: False)
-    monkeypatch.setattr(anime_library, "_nfo_id", lambda path: None)
+    state["anime"] = dict(taken or {})
+
+    def load_state():
+        if reads is not None:
+            reads.append(1)
+        return state
+
+    monkeypatch.setattr(anidb, "index", index)
+    monkeypatch.setattr(erai, "_load_state", load_state)
+    monkeypatch.setattr(erai, "_load_policies", lambda: dict(policies or {}))
+    monkeypatch.setattr(
+        anime_library,
+        "load_prefs",
+        lambda: {f"folder:{folder}": {"anidb_id": aid} for folder, aid in (links or {}).items()},
+    )
     monkeypatch.setattr(anime_library, "probed_codecs", lambda files: {})
     monkeypatch.setattr(anime_library, "german_dubbed_episodes", lambda files: set())
-
-    async def metadata(title, tvdb_id=None):
-        if resolve and title in resolve:
-            found, english = resolve[title]
-            return {"english_title": english, "tvdb_id": found}
-        return {"english_title": title, "tvdb_id": tvdb_id}
-
-    monkeypatch.setattr(anime_library, "show_metadata", metadata)
+    monkeypatch.setattr(anidb_art, "facts", lambda aid: {})
+    monkeypatch.setattr(anidb_art, "cover", lambda aid: None)
 
     entries = [
         {
@@ -295,8 +254,28 @@ def _run_library(monkeypatch, folders, *, resolve=None, tracked=(), only_key=Non
         for name in names
     ]
     return asyncio.run(
-        anime_library.group_shows(entries, Path("/library"), only_key=only_key)
+        anime_library.group_shows(entries, Path("/library"), only_key=only_key, catalog=catalog)
     )
+
+
+ROMAJI = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
+ENGLISH = "Classroom of the Elite"
+CLASSROOM = [(12761, ROMAJI, ENGLISH)]
+
+
+def test_the_release_state_is_read_once_for_the_whole_library(monkeypatch):
+    """It is a fourteen megabyte file; reading it per show cost twenty seconds."""
+    reads: list[int] = []
+    shows = _run_library(
+        monkeypatch,
+        {f"Show {n}": [f"Show {n} - S01E01.mkv"] for n in range(1, 21)},
+        reads=reads,
+    )
+
+    assert len(shows) == 20
+    # One read, for the cards of entries with nothing on disk, whatever the
+    # library holds.
+    assert len(reads) == 1
 
 
 def test_one_show_in_two_folders_is_one_card(monkeypatch):
@@ -318,45 +297,43 @@ def test_one_show_in_two_folders_is_one_card(monkeypatch):
     assert shows[0]["episode_count"] == 2
 
 
-def test_two_names_for_one_series_are_one_card(monkeypatch):
+def test_two_names_for_one_anime_are_one_card(monkeypatch):
     """A romaji folder beside its English one shares no spelling at all.
 
-    Nothing about the two names can be compared; the TVDB id is what says
-    they are the same series.
+    Nothing about the two names can be compared; the AniDB entry both
+    folders' names belong to is what says they are the same anime.
     """
-    romaji = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
-    english = "Classroom of the Elite"
     shows = _run_library(
         monkeypatch,
         {
-            romaji: ["ep - S01E01.mkv"],
-            english: ["ep - S02E01.mkv"],
+            ROMAJI: ["ep - S01E01.mkv"],
+            ENGLISH: ["ep - S01E02.mkv"],
         },
-        resolve={romaji: (337912, english), english: (337912, english)},
+        titles=CLASSROOM,
     )
     assert len(shows) == 1
-    assert shows[0]["title"] == english
-    assert shows[0]["tvdb_id"] == 337912
-    assert sorted(shows[0]["folders"]) == sorted([romaji, english])
+    assert shows[0]["title"] == ENGLISH
+    assert shows[0]["anidb_id"] == 12761
+    assert shows[0]["numbering"] == "anidb"
+    assert sorted(shows[0]["folders"]) == sorted([ROMAJI, ENGLISH])
     assert shows[0]["episode_count"] == 2
 
 
-def test_a_tracked_title_does_not_duplicate_the_folder_it_belongs_to(monkeypatch):
-    """The empty card for a tracked show has to land on its own folder."""
-    romaji = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"
-    english = "Classroom of the Elite"
+def test_an_entry_the_automation_took_does_not_duplicate_the_folder_it_is_in(monkeypatch):
+    """The empty card for a taken entry has to land on its own folder."""
     shows = _run_library(
         monkeypatch,
-        {romaji: ["ep - S03E01.mkv"]},
-        resolve={romaji: (337912, english), english: (337912, english)},
-        tracked=[english],
+        {ROMAJI: ["ep - S01E01.mkv"]},
+        titles=CLASSROOM,
+        taken={"12761": {"title": ROMAJI, "english_title": ENGLISH}},
     )
     assert len(shows) == 1
-    assert shows[0]["title"] == english
+    assert shows[0]["title"] == ENGLISH
+    assert shows[0]["folders"] == [ROMAJI]
 
 
-def test_shows_without_a_tvdb_id_are_not_merged_on_a_guess(monkeypatch):
-    """With no id there is nothing better than the name; separate is correct."""
+def test_shows_without_an_anidb_entry_are_not_merged_on_a_guess(monkeypatch):
+    """With no entry there is nothing better than the name; separate is correct."""
     shows = _run_library(
         monkeypatch,
         {
@@ -365,189 +342,115 @@ def test_shows_without_a_tvdb_id_are_not_merged_on_a_guess(monkeypatch):
         },
     )
     assert len(shows) == 2
+    # Their files, as named: no AniDB entry, no tabs of one.
+    assert {show["numbering"] for show in shows} == {"files"}
+    assert [show["anidb_id"] for show in shows] == [None, None]
+    assert [show["season_anidb"] for show in shows] == [{}, {}]
 
 
 def test_asking_for_one_merged_show_returns_its_folders(monkeypatch):
-    """The card's key is the English title, which need not be a folder name."""
-    romaji = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
-    english = "Classroom of the Elite"
-    folders = {romaji: ["ep - S01E01.mkv"], "Unrelated Show": ["u - S01E01.mkv"]}
-    resolve = {romaji: (337912, english)}
+    """The card is asked for back by its key, one of its folders' names.
 
-    by_key = _run_library(monkeypatch, folders, resolve=resolve, only_key=english)
-    assert len(by_key) == 1
-    assert by_key[0]["folders"] == [romaji]
-
-    # The folder name still works, so a link made before the merge survives.
-    by_folder = _run_library(monkeypatch, folders, resolve=resolve, only_key=romaji)
-    assert len(by_folder) == 1
-    assert by_folder[0]["title"] == english
-@pytest.mark.parametrize(
-    "label,value,expected",
-    [
-        ("romaji", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e", True),
-        ("punctuation", "Fate/stay night: Unlimited Blade Works", True),
-        ("accented latin", "Pok\u00e9mon Kanojo", True),
-        # A blocklist of the scripts I thought of let this one straight
-        # through, and the drawer captioned Demon Slayer in Arabic.
-        ("arabic", "\u0642\u0627\u062a\u0644 \u0627\u0644\u0634\u064a\u0627\u0637\u064a\u0646", False),
-        ("kana and kanji", "\u30a2\u30ab\u30e1\u304c\u65ac\u308b!", False),
-        ("cyrillic", "\u041a\u043b\u0438\u043d\u043e\u043a", False),
-        ("greek", "\u0394\u03b1\u03af\u03bc\u03bf\u03bd\u03b1\u03c2", False),
-        ("digits alone", "2017", False),
-        ("empty", "", False),
-    ],
-)
-def test_a_second_name_must_be_in_letters_you_can_type(label, value, expected):
-    """The name is there to be matched against a release title.
-
-    A script you cannot type does not do that job, whichever script it is.
+    Any other folder merged into it answers too, so a link made before the
+    merge survives.
     """
-    from bankai.web.anime_library import _is_romaji
+    folders = {ROMAJI: ["ep - S01E01.mkv"], ENGLISH: ["ep - S01E02.mkv"], "Unrelated Show": ["u - S01E01.mkv"]}
 
-    assert _is_romaji(value) is expected
-
-
-def test_the_romaji_name_comes_from_the_release_lists_not_tvdb_aliases(monkeypatch):
-    """TVDB aliases are translations into every language, in no useful order.
-
-    Picking from them gave Demon Slayer its Arabic name and Classroom of the
-    Elite the mouthful naming one specific season. The AniDB list is what
-    release groups publish under, and what bankai already searches Nyaa with.
-    """
-    import asyncio
-
-    from bankai.web import anime_library
-
-    async def related(tvdb_id):
-        assert tvdb_id == 1234
-        return ["\u30a2\u30ab\u30e1\u304c\u65ac\u308b!", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"]
-
-    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
-    # The Japanese entry is skipped; the first typeable one is taken.
-    assert asyncio.run(anime_library.romaji_name(1234)) == (
-        "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
+    key = next(
+        show["key"] for show in _run_library(monkeypatch, folders, titles=CLASSROOM) if show["anidb_id"] == 12761
     )
-    assert asyncio.run(anime_library.romaji_name(None)) == ""
+    by_key = _run_library(monkeypatch, folders, titles=CLASSROOM, only_key=key)
+    assert len(by_key) == 1
+    assert sorted(by_key[0]["folders"]) == sorted([ROMAJI, ENGLISH])
+
+    other = ENGLISH if key == ROMAJI else ROMAJI
+    by_folder = _run_library(monkeypatch, folders, titles=CLASSROOM, only_key=other)
+    assert len(by_folder) == 1
+    assert by_folder[0]["title"] == ENGLISH
 
 
-def test_a_second_name_that_repeats_the_title_is_not_printed(monkeypatch):
-    """Akame ga Kill! is already the romaji; printing it twice says nothing.
+def test_entries_the_automation_took_with_nothing_on_disk_still_get_a_card(monkeypatch):
+    """Each from the release state's AniDB entries, unless a folder holds it or
+    it was blacklisted -- which is how one removed from the library leaves it.
+
+    Its key is its AniDB name, and never another card's: the page asks for a
+    card back by its key. Two entries can share an English title, and an
+    entry can share its name with a folder that is another entry.
+    """
+    titles = [
+        (17617, "Sousou no Frieren", "Frieren: Beyond Journey's End"),
+        (18886, "Sousou no Frieren (2026)", "Frieren: Beyond Journey's End"),
+        (17246, "Kusuriya no Hitorigoto", "The Apothecary Diaries"),
+        (17470, "Oshi no Ko", None),
+        (1102, "Hunter x Hunter", None),
+        (8521, "Hunter x Hunter (2011)", "Hunter x Hunter"),
+    ]
+    taken = {
+        "17246": {"title": "Kusuriya no Hitorigoto"},  # on disk
+        "17470": {"title": "Oshi no Ko"},  # blacklisted
+        "17617": {"title": "Sousou no Frieren"},
+        "18886": {"title": "Sousou no Frieren (2026)"},
+        "8521": {"title": "Hunter x Hunter (2011)"},
+    }
+    library = dict(
+        folders={
+            "Kusuriya no Hitorigoto": ["Kusuriya no Hitorigoto - S01E01.mkv"],
+            "Hunter x Hunter": ["Hunter x Hunter - S01E01.mkv"],
+        },
+        titles=titles,
+        taken=taken,
+        policies={"anidb:17470": {"mode": "blacklisted", "anidb_id": 17470}},
+        # Two entries are called "Hunter x Hunter"; the folder is the 1999 one.
+        links={"Hunter x Hunter": 1102},
+    )
+
+    shows = _run_library(monkeypatch, **library)
+    by_key = {show["key"]: show for show in shows}
+
+    assert set(by_key) == {
+        "Kusuriya no Hitorigoto",
+        "Hunter x Hunter",
+        "Frieren: Beyond Journey's End",
+        # Its English title is taken; its own AniDB title is not.
+        "Sousou no Frieren (2026)",
+        # Every name it has is the folder's card's, the year aside.
+        "Hunter x Hunter (AniDB 8521)",
+    }
+    assert len(shows) == len(by_key)
+    placeholders = [show for show in shows if not show["folders"]]
+    assert sorted(show["anidb_id"] for show in placeholders) == [8521, 17617, 18886]
+    assert all(show["episode_count"] == 0 and show["numbering"] == "anidb" for show in placeholders)
+    assert by_key["Hunter x Hunter"]["anidb_id"] == 1102
+
+    # Each key asks for exactly one card back.
+    assert [show["anidb_id"] for show in _run_library(monkeypatch, **library, only_key="Hunter x Hunter")] == [1102]
+
+
+def test_the_anidb_title_is_shown_under_the_name_only_when_it_says_something_else(monkeypatch):
+    """Akame ga Kill! is already the name on the card; printing it twice says nothing.
 
     Compared through the same normalisation the library groups by, so a
-    stray exclamation mark or a trailing year does not sneak a second line
-    back in.
+    stray exclamation mark does not sneak a second line back in. A card shown
+    by its English title keeps the AniDB one, which is what release groups
+    publish under.
     """
-    import asyncio
+    from bankai.web import shoko_catalog
 
-    from bankai.web import anime_library
+    catalog = shoko_catalog.Catalog(
+        entries={8074: shoko_catalog.Entry(aid=8074, title="Akame ga Kill", poster_url=None, episodes=())}
+    )
+    shows = _run_library(
+        monkeypatch,
+        {
+            "Akame ga Kill": ["Akame ga Kill - S01E01.mkv"],
+            "Sousou no Frieren": ["Sousou no Frieren - S01E01.mkv"],
+        },
+        titles=[(8074, "Akame ga Kill!", None), (17617, "Sousou no Frieren", "Frieren: Beyond Journey's End")],
+        catalog=catalog,
+    )
+    by_id = {show["anidb_id"]: show for show in shows}
 
-    async def related(tvdb_id):
-        return ["Akame ga Kill!"]
-
-    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
-    run = asyncio.run
-    assert run(anime_library.second_name(280329, "Akame ga Kill!")) == ""
-    assert run(anime_library.second_name(280329, "Akame ga Kill")) == ""
-    # A genuinely different name is still worth showing.
-    assert run(anime_library.second_name(280329, "Red Eyes Sword")) == "Akame ga Kill!"
-
-
-def test_the_series_name_beats_the_name_of_one_of_its_seasons(monkeypatch):
-    """A card stands for a series, so its second name has to as well.
-
-    Preferring the firsthand Erai name sounded right and was not: Erai
-    publishes each season separately, so the Bleach card was labelled with
-    one late arc and Classroom of the Elite with its fourth season.
-    """
-    import asyncio
-
-    from bankai.web import anime_library
-
-    async def related(tvdb_id):
-        return ["Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"]
-
-    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
-    assert asyncio.run(
-        anime_library.second_name(
-            329822, "Classroom of the Elite", "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"
-        )
-    ) == "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
-
-
-def test_the_erai_name_is_used_when_the_release_list_has_nothing(monkeypatch):
-    import asyncio
-
-    from bankai.web import anime_library
-
-    async def related(tvdb_id):
-        return []
-
-    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
-    assert asyncio.run(
-        anime_library.second_name(1, "Some Show", "Betsu no Namae")
-    ) == "Betsu no Namae"
-
-
-def test_the_erai_name_for_a_series_is_its_shortest_not_its_first():
-    """Bleach was labelled with whichever arc came first out of a dict."""
-    from bankai.web import anime_library, erai
-
-    state = erai._default_state()
-    state["releases"] = {
-        "a" * 40: {"title": "[Erai-raws] Bleach: Sennen Kessen Hen - Kashin Tan - 03 [1080p]"},
-        "b" * 40: {"title": "[Erai-raws] Bleach - 210 [1080p]"},
-        "c" * 40: {"title": "[Erai-raws] Bleach: Sennen Kessen Hen - 01 [1080p]"},
-    }
-    # The late arc is indexed first, as it was on the real server.
-    state["canonical"] = {
-        "74796|7|3": {"info_hash": "a" * 40},
-        "74796|1|210": {"info_hash": "b" * 40},
-        "74796|5|1": {"info_hash": "c" * 40},
-    }
-    assert anime_library.erai_source_titles(state) == {"74796": "Bleach"}
-
-
-def test_a_show_with_no_release_list_entry_gets_no_second_name(monkeypatch):
-    """Better than captioning it with something unusable."""
-    import asyncio
-
-    from bankai.web import anime_library
-
-    async def related(tvdb_id):
-        return ["\u30a2\u30ab\u30e1\u304c\u65ac\u308b!"]
-
-    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", related)
-    assert asyncio.run(anime_library.romaji_name(4321)) == ""
-
-
-def test_the_romaji_lookup_survives_the_mapping_list_being_unreachable(monkeypatch):
-    """The library must still render when AniDB cannot be fetched."""
-    import asyncio
-
-    from bankai.web import anime_library
-
-    async def boom(tvdb_id):
-        raise RuntimeError("anime-list.xml unreachable")
-
-    monkeypatch.setattr(anime_library.anime_mapping, "related_titles", boom)
-    assert asyncio.run(anime_library.romaji_name(1234)) == ""
-
-
-def test_erai_name_beats_a_tvdb_alias(monkeypatch):
-    """What Erai actually published is better evidence than an alias list."""
-    from bankai.web import anime_library, erai
-
-    state = erai._default_state()
-    state["releases"] = {
-        "a" * 40: {
-            "status": "done",
-            "title": "[Erai-raws] Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3 - 05 [1080p]",
-        }
-    }
-    state["canonical"] = {"337912|3|5": {"info_hash": "a" * 40}}
-
-    titles = anime_library.erai_source_titles(state)
-    # The season marker is kept: it is part of how Erai names the show, and
-    # the review page shows the same string.
-    assert titles == {"337912": "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S3"}
+    assert by_id[8074]["title"] == "Akame ga Kill"
+    assert by_id[8074]["source_title"] == ""
+    assert by_id[17617]["title"] == "Frieren: Beyond Journey's End"
+    assert by_id[17617]["source_title"] == "Sousou no Frieren"

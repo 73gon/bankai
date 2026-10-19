@@ -11,23 +11,32 @@ import pytest
 from bankai.config import Settings
 from bankai.metadata import anidb
 from bankai.processor import anime as processor
-from bankai.web import erai
+from bankai.web import anime_library, erai, shoko_catalog
 
 BATCH = "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 12 [1080p][Multiple Subtitle]"
 
 
 @pytest.fixture()
 def library(monkeypatch, tmp_path):
-    """Dr. Stone season 4 in a TVDB folder; AniDB entry 2 is its second half."""
-    state = {"releases": {}, "held": [], "series": {"99": {"english_title": "Dr. Stone"}}, "canonical": {}}
+    """Dr. Stone season 4 in a TVDB folder; AniDB entry 2 is its second half.
+
+    The folder's name is no AniDB title, so Shoko's links are what say which
+    entry and episode each file is: S04E01-12 entry 1, S04E13-24 entry 2.
+    """
+    state = {"releases": {}, "held": [], "canonical": {}, "anime": {}}
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
     root = tmp_path / "shows_anime"
     season = root / "Dr. Stone" / "Season 04"
     season.mkdir(parents=True)
+    links = {}
     for number in range(1, 25):
-        (season / f"Dr. Stone - S04E{number:02d}.mkv").write_bytes(b"old")
+        path = season / f"Dr. Stone - S04E{number:02d}.mkv"
+        path.write_bytes(b"old")
+        links[str(path)] = [(1, number) if number <= 12 else (2, number - 12)]
+    monkeypatch.setattr(shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files=links))
+    monkeypatch.setattr(anime_library, "load_prefs", lambda: {})
     table = anidb.build_index(
         ET.fromstring(
             """<animetitles>
@@ -45,10 +54,6 @@ def library(monkeypatch, tmp_path):
     monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
     monkeypatch.setattr(erai, "get_settings", lambda: Settings(transfer={"anime_shows_dir": str(root)}))
     monkeypatch.setattr(erai, "_series_roots", lambda: [root])
-    monkeypatch.setattr(
-        "bankai.backend.transfer._existing_show_folder",
-        lambda name, cache, roots=None: root / "Dr. Stone",
-    )
     monkeypatch.setattr(erai, "_release_anidb_id", lambda title, **kw: 2)
     monkeypatch.setattr(
         erai.erai_site,
