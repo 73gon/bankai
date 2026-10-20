@@ -3781,12 +3781,70 @@ async def _readd_torrent(qbit: Any, info_hash: str, release: dict[str, Any]) -> 
 
 async def reconcile_releases() -> dict[str, int]:
     """Advance every tracked release one step. Safe to call on a timer."""
+    try:
+        await hold_downloads(hold=not get_settings().anime.enabled)
+    except Exception as exc:
+        log.warning("Could not pause or resume the waiting anime downloads: %s", exc)
     # Its own look at the library, not one left over from an earlier pass.
     token = _DISK_INDEX.set({})
     try:
         return await _reconcile_releases()
     finally:
         _DISK_INDEX.reset(token)
+
+
+def _held_path() -> Path:
+    return _state_path().with_name("erai_downloads_held.json")
+
+
+async def hold_downloads(*, hold: bool) -> int:
+    """Keep bankai's unfinished torrents paused while automatic downloads are off.
+
+    Turning the automation off stops new releases, but the backlog already
+    handed to qBittorrent would go on downloading into whatever space is
+    freed. So while it is off, every unfinished torrent of bankai's category
+    is paused, and which ones is written down; once it is on again, exactly
+    those are resumed -- never one paused by hand. Returns how many changed.
+    """
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    path = _held_path()
+    try:
+        held = set(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        held = set()
+    if not hold and not held:
+        return 0
+    qbit = QBittorrentClient()
+    try:
+        await qbit.login()
+        if hold:
+            torrents = await qbit.list_torrents(category=get_settings().qbittorrent.category)
+            due = [
+                t.hash
+                for t in torrents
+                if t.progress < 1.0
+                and t.hash not in held
+                and not t.state.startswith(("paused", "stopped"))
+                and t.state not in {"error", "missingFiles"}
+            ]
+            if not due:
+                return 0
+            await qbit.pause("|".join(due))
+            held.update(due)
+            log.info("Automatic downloads are off: paused %d waiting anime downloads", len(due))
+            changed = len(due)
+        else:
+            await qbit.resume("|".join(sorted(held)))
+            log.info("Automatic downloads are on: resumed %d anime downloads", len(held))
+            changed, held = len(held), set()
+    finally:
+        await qbit.aclose()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(sorted(held)), encoding="utf-8")
+    tmp.replace(path)
+    return changed
 
 
 async def _reconcile_releases() -> dict[str, int]:
