@@ -17,12 +17,14 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   api,
-  type AniDBAnime,
+  type AniListAnime,
+  type AnimeAniListMatch,
   type AnimeEntry,
   type AnimeSearchOptions,
   type AnimeSearchPage,
 } from '@/lib/api';
-import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
+import { anilistName, anilistUrl, formatLabel } from '@/lib/anilist';
+import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -93,19 +95,45 @@ function searchOptions(page: number, filters: Filters): AnimeSearchOptions {
   };
 }
 
-/** The AniDB entry a download is filed under, however it was chosen. */
+/** The AniList entry a download is filed under, however it was chosen. */
 type Chosen = {
-  anidb_id: number;
-  title: string;
-  english_title: string | null;
-  name?: string | null;
+  anilist_id: number;
+  /** How it is shown: English, else romaji. */
+  name: string;
+  /** The romanised title, as releases are named. */
+  romaji: string | null;
   year: number | null;
-  type: string | null;
-  poster_url: string | null;
+  /** AniList's format: TV, MOVIE, OVA, ... */
+  format: string | null;
+  cover: string | null;
 };
 
-function isMovie(type: string | null | undefined) {
-  return (type ?? '').toUpperCase() === 'MOVIE';
+/** The entry told from a release's title. */
+function fromMatch(match: AnimeAniListMatch): Chosen {
+  return {
+    anilist_id: match.anilist_id,
+    name: match.name || match.title,
+    romaji: match.title,
+    year: match.year ?? null,
+    format: match.format ?? null,
+    cover: match.cover,
+  };
+}
+
+/** The entry picked by hand. */
+function fromPick(anime: AniListAnime): Chosen {
+  return {
+    anilist_id: anime.anilist_id,
+    name: anilistName(anime),
+    romaji: anime.romaji,
+    year: anime.year,
+    format: anime.format,
+    cover: anime.cover,
+  };
+}
+
+function isMovie(format: string | null | undefined) {
+  return (format ?? '').toUpperCase() === 'MOVIE';
 }
 
 function Poster({ url, title, movie }: { url: string | null | undefined; title: string; movie: boolean }) {
@@ -156,16 +184,16 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
   return (
     <Card>
       <CardContent className='flex flex-col gap-4 p-4 sm:flex-row sm:items-stretch'>
-        <Poster url={entry.anidb?.poster_url} title={entry.anidb?.title ?? entry.title} movie={isMovie(entry.anidb?.type)} />
+        <Poster url={entry.anilist?.cover} title={entry.anilist ? entry.anilist.name || entry.anilist.title : entry.title} movie={isMovie(entry.anilist?.format)} />
         <div className='flex min-w-0 flex-1 flex-col gap-3'>
           <div className='flex flex-col gap-1'>
             <div className='flex flex-wrap items-center gap-2'>
               <h2 className='text-base font-semibold text-foreground'>
-                {entry.anidb ? entry.anidb.name || entry.anidb.english_title || entry.anidb.title : 'AniDB match needed'}
-                {entry.anidb?.episode != null && ` — Episode ${entry.anidb.episode}`}
+                {entry.anilist ? entry.anilist.name || entry.anilist.title : 'AniList match needed'}
+                {entry.anilist?.episode != null && ` — Episode ${entry.anilist.episode}`}
               </h2>
-              {entry.anidb?.year && <span className='text-sm text-muted-foreground'>{entry.anidb.year}</span>}
-              {entry.anidb?.type && <Badge variant='info'>{isMovie(entry.anidb.type) ? 'Movie' : entry.anidb.type}</Badge>}
+              {entry.anilist?.year && <span className='text-sm text-muted-foreground'>{entry.anilist.year}</span>}
+              {entry.anilist?.format && <Badge variant='info'>{formatLabel(entry.anilist.format)}</Badge>}
               {entry.trusted && (
                 <Badge variant='success'>
                   <ShieldCheck data-icon='inline-start' /> Trusted
@@ -182,8 +210,8 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
                 </Tooltip>
               )}
             </div>
-            {entry.anidb?.english_title && entry.anidb.english_title !== entry.anidb.title && (
-              <p className='text-sm text-muted-foreground'>{entry.anidb.title}</p>
+            {entry.anilist?.name && entry.anilist.name !== entry.anilist.title && (
+              <p className='text-sm text-muted-foreground'>{entry.anilist.title}</p>
             )}
           </div>
 
@@ -261,7 +289,7 @@ export default function Anime() {
   const [selectedEntry, setSelectedEntry] = useState<AnimeEntry | null>(null);
   const [chosen, setChosen] = useState<Chosen | null>(null);
   const [kind, setKind] = useState<'show' | 'movie'>('show');
-  // The AniDB picker, opened with what to search for first.
+  // The AniList picker, opened with what to search for first.
   const [pickFor, setPickFor] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [manualEpisode, setManualEpisode] = useState('');
@@ -320,23 +348,23 @@ export default function Anime() {
 
   function choose(anime: Chosen) {
     setChosen(anime);
-    setKind(isMovie(anime.type) ? 'movie' : 'show');
+    setKind(isMovie(anime.format) ? 'movie' : 'show');
   }
 
   function openDownload(entry: AnimeEntry) {
     setSelectedEntry(entry);
     setChosen(null);
-    setManualEpisode(entry.anidb?.episode == null ? '' : String(entry.anidb.episode));
-    if (entry.anidb) {
-      choose(entry.anidb);
+    setManualEpisode(entry.anilist?.episode == null ? '' : String(entry.anilist.episode));
+    if (entry.anilist) {
+      choose(fromMatch(entry.anilist));
     } else {
-      // Nothing told from the title: the AniDB entry is picked first.
+      // Nothing told from the title: the AniList entry is picked first.
       setPickFor(entry.title.replace(/^(\s*\[[^\]]+\])+\s*/, '').replace(/\s+-\s+\d+.*$/, ''));
     }
   }
 
-  async function pickAnime(anime: AniDBAnime) {
-    choose(anime);
+  async function pickAnime(anime: AniListAnime) {
+    choose(fromPick(anime));
     setPickFor(null);
   }
 
@@ -349,8 +377,8 @@ export default function Anime() {
     }
     setDownloading(true);
     try {
-      await api.animeDownload(selectedEntry, chosen.anidb_id, kind, episode);
-      toast.success(`${chosen.name || chosen.english_title || chosen.title} was added to the queue from Nyaa.`);
+      await api.animeDownload(selectedEntry, chosen.anilist_id, kind, episode);
+      toast.success(`${chosen.name} was added to the queue from Nyaa.`);
       setSelectedEntry(null);
     } catch (error: any) {
       toast.error(error.message);
@@ -363,7 +391,7 @@ export default function Anime() {
     <div className='flex h-full min-h-0 flex-col gap-4 overflow-hidden'>
       <div className='flex flex-wrap items-baseline gap-2'>
         <h1 className='font-serif text-2xl font-semibold tracking-tight'>Anime</h1>
-        <span className='text-sm text-muted-foreground'>— Browse Nyaa and download anime filed by its AniDB entry.</span>
+        <span className='text-sm text-muted-foreground'>— Browse Nyaa and download anime filed by its AniList entry.</span>
       </div>
 
       <Card className='shrink-0'>
@@ -483,9 +511,9 @@ export default function Anime() {
       <Dialog open={selectedEntry !== null && pickFor === null} onOpenChange={(open) => !open && setSelectedEntry(null)}>
         <DialogContent className='max-h-[90vh] max-w-2xl overflow-y-auto'>
           <DialogHeader>
-            <DialogTitle>Download as this AniDB anime</DialogTitle>
+            <DialogTitle>Download as this AniList entry</DialogTitle>
             <DialogDescription>
-              The selected Nyaa torrent is downloaded directly. A show&apos;s episodes are filed under its AniDB entry, numbered as AniDB numbers them; a movie is copied as one file. Audio sync and remuxing are skipped.
+              The selected Nyaa torrent is downloaded directly. A show&apos;s episodes are filed under its AniList entry, numbered as AniList numbers them; a movie is copied as one file. Audio sync and remuxing are skipped.
             </DialogDescription>
           </DialogHeader>
 
@@ -493,25 +521,25 @@ export default function Anime() {
 
           {chosen ? (
             <div className='flex gap-3 rounded-lg border border-white/10 bg-black/20 p-3'>
-              <Poster url={chosen.poster_url} title={chosen.title} movie={kind === 'movie'} />
+              <Poster url={chosen.cover} title={chosen.name} movie={kind === 'movie'} />
               <div className='flex min-w-0 flex-1 flex-col gap-1'>
-                <span className='font-medium text-foreground'>{chosen.name || chosen.english_title || chosen.title}</span>
-                {chosen.english_title && chosen.english_title !== chosen.title && <span className='text-sm text-muted-foreground'>{chosen.title}</span>}
+                <span className='font-medium text-foreground'>{chosen.name}</span>
+                {chosen.romaji && chosen.romaji !== chosen.name && <span className='text-sm text-muted-foreground'>{chosen.romaji}</span>}
                 <span className='font-mono text-xs text-muted-foreground'>
-                  {[chosen.type, chosen.year, 'aid ' + chosen.anidb_id].filter(Boolean).join(' · ')}
+                  {[formatLabel(chosen.format), chosen.year, 'id ' + chosen.anilist_id].filter(Boolean).join(' · ')}
                 </span>
                 <div className='mt-auto flex flex-wrap items-center gap-2 pt-2'>
                   <Button asChild variant='secondary' size='sm'>
-                    <a href={'https://anidb.net/anime/' + chosen.anidb_id} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> AniDB</a>
+                    <a href={anilistUrl(chosen.anilist_id)} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> AniList</a>
                   </Button>
-                  <Button variant='secondary' size='sm' onClick={() => setPickFor(chosen.title)}>
-                    <Link2 data-icon='inline-start' /> Change AniDB anime
+                  <Button variant='secondary' size='sm' onClick={() => setPickFor(chosen.romaji || chosen.name)}>
+                    <Link2 data-icon='inline-start' /> Change AniList entry
                   </Button>
                 </div>
               </div>
             </div>
           ) : (
-            <EmptyState icon={Search} title='No AniDB anime chosen' description='Pick the AniDB entry this release belongs to.' className='py-10' />
+            <EmptyState icon={Search} title='No AniList entry chosen' description='Pick the AniList entry this release belongs to.' className='py-10' />
           )}
 
           {chosen && (
@@ -530,7 +558,7 @@ export default function Anime() {
               </label>
               {kind === 'show' && (
                 <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
-                  AniDB episode
+                  AniList episode
                   <Input
                     type='number'
                     min='1'
@@ -552,7 +580,7 @@ export default function Anime() {
             <Button variant='secondary' onClick={() => setSelectedEntry(null)}>Cancel</Button>
             {!chosen && (
               <Button variant='secondary' onClick={() => selectedEntry && setPickFor(selectedEntry.title)}>
-                <Search data-icon='inline-start' /> Find on AniDB
+                <Search data-icon='inline-start' /> Find on AniList
               </Button>
             )}
             <Button onClick={() => void downloadSelected()} disabled={!chosen || downloading}>
@@ -562,11 +590,11 @@ export default function Anime() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <AniDBLinkDialog
-        name={pickFor}
+      <AniListPickDialog
+        query={pickFor}
         onClose={() => setPickFor(null)}
         onPick={pickAnime}
-        title='Choose the AniDB anime'
+        title='Choose the AniList entry'
         description='The download is filed under the entry you pick, and later releases of this name follow it.'
         action='Choose'
       />

@@ -37,33 +37,19 @@ from bankai.web.review import ReviewState
 def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    anilist_data,
 ) -> None:
-    """A release is downloaded as the AniDB entry picked for it, never by TVDB."""
-    from xml.etree import ElementTree as ET
-
-    from bankai.metadata import anidb
+    """A release is downloaded as the AniList entry picked for it, never by TVDB."""
     from bankai.web import erai
 
-    table = anidb.build_index(
-        ET.fromstring(
-            """<animetitles>
-  <anime aid="17617">
-    <title xml:lang="x-jat" type="main">Sousou no Frieren</title>
-    <title xml:lang="en" type="official">Frieren: Beyond Journey's End</title>
-  </anime>
-</animetitles>"""
-        ),
-        ET.fromstring("<anime-list/>"),
-    )
-
-    async def index():
-        return table
+    anilist_data.add(154587, "Sousou no Frieren", english="Frieren: Beyond Journey's End", episodes=28)
 
     queued: list[dict] = []
     saved: list[tuple] = []
-    monkeypatch.setattr(anidb, "index", index)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    monkeypatch.setattr(erai, "save_anidb_mapping", lambda title, anime, **kw: saved.append((title, anime["anidb_id"])))
+    monkeypatch.setattr(
+        erai, "save_anilist_mapping", lambda title, anime, **kw: saved.append((title, anime["anilist_id"]))
+    )
     monkeypatch.setattr(
         "bankai.web.jobs.enqueue",
         lambda **kwargs: queued.append(kwargs) or {"id": "anime-job", **kwargs},
@@ -74,7 +60,7 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
         "detail_url": "https://nyaa.si/view/123",
         "magnet_uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Frieren",
         "info_hash": "0123456789abcdef0123456789abcdef01234567",
-        "anidb_id": 17617,
+        "anilist_id": 154587,
         "kind": "show",
     }
 
@@ -86,12 +72,12 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     assert queued[0]["title"] == "Frieren: Beyond Journey's End - 01"
     assert args[0] == "anime-download"
     assert "--tvdb-id" not in args
-    assert args[args.index("--anidb-id") + 1] == "17617"
-    assert args[args.index("--anidb-title") + 1] == "Sousou no Frieren"
+    assert args[args.index("--anilist-id") + 1] == "154587"
+    assert args[args.index("--anilist-title") + 1] == "Frieren: Beyond Journey's End"
     # The episode is the release's own, read the way the automation reads it.
     assert args[args.index("--episode") + 1] == "1"
     # Later releases under this name are this entry too.
-    assert saved == [("[Group] Sousou no Frieren - 01 [1080p]", 17617)]
+    assert saved == [("[Group] Sousou no Frieren - 01 [1080p]", 154587)]
 
     body["episode"] = 13
     overridden = client.post("/api/anime/download", json=body)
@@ -99,7 +85,7 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     assert queued[1]["title"] == "Frieren: Beyond Journey's End - 13"
     assert queued[1]["args"][queued[1]["args"].index("--episode") + 1] == "13"
 
-    unknown = client.post("/api/anime/download", json={**body, "anidb_id": 999999})
+    unknown = client.post("/api/anime/download", json={**body, "anilist_id": 999999})
     assert unknown.status_code == 422
 
     body["detail_url"] = "https://example.com/view/123"

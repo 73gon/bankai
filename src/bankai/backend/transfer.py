@@ -231,17 +231,15 @@ def _destination_for(
             relative = source.relative_to(series_root)
         except ValueError:
             continue
-        destination_root = Path(
-            settings.transfer.anime_shows_dir
-            if kind == "anime"
-            else settings.transfer.shows_dir
-        )
+        if kind == "anime":
+            # bankai lays the anime library out itself (see anime_layout):
+            # staging mirrors it, so a file goes to exactly the same place
+            # below the anime root -- the place the file index knows it by.
+            # Matching an existing folder by name would file it elsewhere.
+            return Path(settings.transfer.anime_shows_dir) / relative
+        destination_root = Path(settings.transfer.shows_dir)
         if relative.parts:
-            existing = _existing_show_folder(
-                relative.parts[0],
-                cache=show_folders,
-                roots=[destination_root] if kind == "anime" else None,
-            )
+            existing = _existing_show_folder(relative.parts[0], cache=show_folders)
             if existing is not None:
                 return existing.joinpath(*relative.parts[1:])
         return destination_root / relative

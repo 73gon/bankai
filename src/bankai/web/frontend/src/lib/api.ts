@@ -127,7 +127,7 @@ export interface EraiRelease {
   /** bankai's status for the torrent, when it has one. */
   status: string | null;
   reason: string | null;
-  /** The AniDB episodes it covers: [n, n] for one episode, a batch's first and last. */
+  /** The AniList episodes it covers: [n, n] for one episode, a batch's first and last. */
   episodes: [number, number] | null;
   /** From the name: Erai marks HEVC, and a release without the mark is AVC. */
   codec: 'hevc' | 'avc';
@@ -141,8 +141,8 @@ export interface ReplacementPlan {
   first: number;
   last: number;
   german: boolean;
-  anidb_id: number;
-  anidb_title: string;
+  anilist_id: number;
+  anilist_title: string;
   held_count: number;
   file_count: number;
   german_dubs_kept: number[];
@@ -366,19 +366,19 @@ export interface TorrentPolicy {
   max_size_gib: number;
 }
 
-/** The AniDB entry and episode a Nyaa release is, as told from its title. */
-export interface AnimeAniDBMatch {
-  anidb_id: number;
+/** The AniList entry and episode a Nyaa release is, as told from its title. */
+export interface AnimeAniListMatch {
+  anilist_id: number;
+  /** The romanised title, as a release would be named. */
   title: string;
-  english_title: string | null;
-  /** How it is shown: AniList's name, when known. */
+  /** How it is shown: English, else romaji. */
   name: string | null;
-  /** The AniDB episode; null for a batch or when the title carries none. */
+  /** The AniList episode; null for a batch or when the title carries none. */
   episode: number | null;
-  poster_url: string | null;
-  year: number | null;
-  /** anime-offline-database's type: TV, MOVIE, OVA, ONA, SPECIAL. */
-  type: string | null;
+  cover: string | null;
+  /** Not in the contract: shown, and used to default to a movie, only when sent. */
+  format?: string | null;
+  year?: number | null;
 }
 
 export interface AnimeEntry {
@@ -404,7 +404,7 @@ export interface AnimeEntry {
   season: number | null;
   episode: number | null;
   description: string;
-  anidb: AnimeAniDBMatch | null;
+  anilist: AnimeAniListMatch | null;
 }
 
 export interface AnimeSearchOptions {
@@ -456,23 +456,27 @@ export interface AnimeReviewItem {
   seasons?: number[];
   /** The per-season decision keys merged into the card. */
   keys?: string[];
-  /** Blacklist: the AniDB anime the card is linked to, if any. */
-  anidb_id?: number | null;
-  anidb_title?: string | null;
+  /** Blacklist: the AniList entry the card is linked to, if any. */
+  anilist_id?: number | null;
+  anilist_title?: string | null;
   linked?: boolean;
   updated_at: number;
 }
 
-export interface AniDBAnime {
-  anidb_id: number;
-  title: string;
-  english_title: string | null;
-  matching_titles: string[];
-  type: string | null;
-  episode_count: number | null;
+/** An AniList entry, as the pick-an-anime dialog lists it. */
+export interface AniListAnime {
+  anilist_id: number;
+  /** How it is shown: English, else romaji. */
+  name: string | null;
+  romaji: string | null;
+  english: string | null;
+  /** AniList's format: TV, TV_SHORT, MOVIE, OVA, ONA, SPECIAL, MUSIC. */
+  format: string | null;
+  episodes: number | null;
   year: number | null;
-  poster_url: string | null;
+  cover: string | null;
 }
+
 export interface AnimeAutomationStatus {
   retry_pending: number;
   rss_url: string;
@@ -543,27 +547,31 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 /** The three kinds of root the server library scans. */
 export type ServerDirKind = 'movie' | 'show' | 'anime';
 
-/** How a card's episodes are laid out: by its AniDB entries, or -- folders no
- *  AniDB entry answers for -- by its files' own numbers. */
-export type CardNumbering = 'anidb' | 'files';
+/** How a card's episodes are laid out: by its AniList entries, or -- folders no
+ *  AniList entry answers for -- by its files' own numbers. */
+export type CardNumbering = 'anilist' | 'files';
 
 export interface AnimeLibraryShow {
   numbering?: CardNumbering;
-  /** The AniDB entry the card is (the first, when a folder holds several). */
-  anidb_id?: number | null;
-  anidb_ids?: number[];
+  /** The AniList entry the card is (the first, when a folder holds several). */
+  anilist_id?: number | null;
+  anilist_ids?: number[];
+  /** Files no AniList entry is known for: offer "Match on AniList". */
+  unmatched?: boolean;
   /** AVC episodes an upgrade could actually replace (dubs are excluded). */
   avc_count?: number;
   hevc_count?: number;
   german_dub_count?: number;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
-  /** Each tab's AniDB entry. */
-  season_anidb?: Record<string, Array<{ anidb_id: number; title: string }>>;
-  /** The Shoko group the card is: its collection, null for a card that is no group. */
+  /** Each tab's AniList entries. */
+  season_anilist?: Record<string, Array<{ anilist_id: number; title: string }>>;
+  /** The bankai collection the card is; null for a card that is in none. */
   collection_id?: number | null;
+  /** The collection was renamed by hand, not named after an entry. */
+  collection_name_custom?: boolean;
   /** The collection's entries in order; the owned ones can name it. */
-  collection_entries?: Array<{ anidb_id: number; title: string; owned: boolean }>;
+  collection_entries?: Array<{ anilist_id: number; title: string; owned: boolean; season?: string | null }>;
   downloaded_count: number;
   total_count: number;
   completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
@@ -573,7 +581,7 @@ export interface AnimeLibraryShow {
   /** Every library folder behind this one card; more than one once merged. */
   folders: string[];
   title: string;
-  /** AniDB's main (romaji) title, when the card is shown under another. */
+  /** AniList's romaji title, when the card is shown under another. */
   source_title: string;
   year: number | null;
   poster_url: string | null;
@@ -584,24 +592,27 @@ export interface AnimeLibraryShow {
   episodes: AnimeLibraryEpisode[];
 }
 
-/** One AniDB entry in a collection's relation graph. */
+/** One AniList entry in a collection's relation graph. */
 export interface CollectionNode {
-  anidb_id: number;
+  anilist_id: number;
   title: string;
-  /** AniDB's main (romaji) title. */
+  /** AniList's romaji title. */
   main_title: string | null;
+  /** AniList's format: TV, TV_SHORT, MOVIE, OVA, ONA, SPECIAL, MUSIC. */
   type: string | null;
   year: number | null;
   first_aired: string | null;
   episodes: number | null;
   /** Episodes of it on disk. */
   on_disk: number;
-  /** Shoko holds it: it is on disk. */
+  /** Some of it is on disk. */
   owned: boolean;
   poster_url: string | null;
   in_collection: boolean;
   /** The entry the collection is named and pictured after. */
   title_entry: boolean;
+  /** Where a member is filed: "Season 2", "Specials"; null for a suggestion. */
+  season: string | null;
   /** Where a suggestion is now: another collection, or none. */
   collection_id: number | null;
   collection_name: string | null;
@@ -612,13 +623,13 @@ export interface CollectionNode {
 export interface CollectionEdge {
   from: number;
   to: number;
-  /** "sequel", "side story", "summary", "alternative setting", ... */
+  /** "sequel", "side story", "summary", "alternative", "spin-off", ... */
   label: string;
   main_line: boolean;
 }
 
 export interface CollectionGraph {
-  /** The Shoko group shown; null for the graph of an entry in no collection. */
+  /** The collection shown; null for the graph of an entry in no collection. */
   collection_id: number | null;
   /** That entry, when the graph is of one entry in no collection. */
   root_aid: number | null;
@@ -777,8 +788,8 @@ export interface EpisodeItem {
 
 export interface Job {
   tvdb_id?: number | string | null;
-  /** Anime jobs: the AniDB entry the job files under. */
-  anidb_id?: number | string | null;
+  /** Anime jobs: the AniList entry the job files under. */
+  anilist_id?: number | string | null;
   poster_url?: string | null;
   series_title?: string | null;
   id: string;
@@ -972,13 +983,11 @@ export const api = {
   // single Bankai process created 50-100 avoidable backend requests per page.
   // Retain the proxy only for legacy/non-HTTPS artwork URLs.
   posterUrl: (url: string) =>
-    // bankai's own images (AniDB covers through Shoko) load as they are: sent
-    // through the poster proxy, which fetches only http(s) addresses, every
-    // card with a Shoko cover showed the placeholder.
+    // bankai's own images load as they are: the poster proxy fetches only
+    // http(s) addresses. AniList's covers (s4.anilist.co) load directly.
     url.startsWith('/')
       ? url
-      : // AniDB's image server refuses another site's referrer: fetched by bankai.
-        url.includes('filmpalast.to/') || url.includes('anidb.net/') || !url.startsWith('https://')
+      : url.includes('filmpalast.to/') || !url.startsWith('https://')
       ? `/api/discover/poster?url=${encodeURIComponent(url)}`
       : url,
 
@@ -1032,8 +1041,8 @@ export const api = {
     request<{ description: string; magnet_uri: string | null; publisher: string | null }>(
       `/api/anime/detail?url=${encodeURIComponent(url)}`,
     ),
-  /** Download a Nyaa release as one AniDB entry; ``episode`` null for a batch or a movie. */
-  animeDownload: (entry: AnimeEntry, anidbId: number, kind: 'show' | 'movie', episode: number | null = null) =>
+  /** Download a Nyaa release as one AniList entry; ``episode`` null for a batch or a movie. */
+  animeDownload: (entry: AnimeEntry, anilistId: number, kind: 'show' | 'movie', episode: number | null = null) =>
     request<Job>('/api/anime/download', {
       method: 'POST',
       body: JSON.stringify({
@@ -1042,7 +1051,7 @@ export const api = {
         detail_url: entry.detail_url,
         magnet_uri: entry.magnet_uri,
         info_hash: entry.info_hash,
-        anidb_id: anidbId,
+        anilist_id: anilistId,
         kind,
         episode,
       }),
@@ -1066,9 +1075,9 @@ export const api = {
   queue: () => request<{ jobs: Job[] }>('/api/queue'),
   animeQueue: (page = 0, pageSize = 100, includeDone = false, filters: AnimeQueueFilters = {}) =>
     remembering<AnimeQueuePage>(animeQueuePath(page, pageSize, includeDone, filters)),
-  /** Releases of one AniDB episode, each checked to be that episode. */
-  animeEpisodeSearch: (anidbId: number, episode: number, q?: string) => {
-    const params = new URLSearchParams({ anidb_id: String(anidbId), episode: String(episode) });
+  /** Releases of one AniList episode, each checked to be that episode. */
+  animeEpisodeSearch: (anilistId: number, episode: number, q?: string) => {
+    const params = new URLSearchParams({ anilist_id: String(anilistId), episode: String(episode) });
     if (q) params.set('q', q);
     return request<{ items: AnimeEntry[]; queries: string[] }>(`/api/anime/episode/search?${params}`);
   },
@@ -1084,73 +1093,83 @@ export const api = {
     runAction<PurgeResult>('/api/anime/review/' + infoHash + '/purge', { delete_files: deleteFiles, label }),
   removeAnimeBlacklist: (key: string, label = '') =>
     runAction<{ ok: boolean; requested: number }>('/api/anime/blacklist/remove', { key, label }),
-  /** Tie a blacklist card to its AniDB anime, so releases match by any AniDB title. */
-  linkAnimeBlacklist: (key: string, anidbId: number) =>
+  /** Tie a blacklist card to its AniList entry, so releases match by any of its titles. */
+  linkAnimeBlacklist: (key: string, anilistId: number) =>
     request<{ ok: boolean; keys: string[]; caught: number }>('/api/anime/blacklist/link', {
-      method: 'POST', body: JSON.stringify({ key, anidb_id: anidbId }),
+      method: 'POST', body: JSON.stringify({ key, anilist_id: anilistId }),
     }),
-  /** Remember which AniDB anime a held show name is; its releases are rechecked. */
-  saveAnidbMapping: (releaseTitle: string, anidbId: number) =>
-    request<{ ok: boolean; requested: number; title: string }>('/api/anime/mapping/anidb', {
-      method: 'POST', body: JSON.stringify({ release_title: releaseTitle, anidb_id: anidbId }),
+  /** Remember which AniList entry a held show name is; its releases are rechecked. */
+  saveAnilistMapping: (releaseTitle: string, anilistId: number) =>
+    request<{ ok: boolean; requested: number; title: string }>('/api/anime/mapping/anilist', {
+      method: 'POST', body: JSON.stringify({ release_title: releaseTitle, anilist_id: anilistId }),
     }),
-  /** AniDB anime by title, through Shoko. */
-  /** Link a library show's folders to an AniDB entry, for the files Shoko has not matched. */
-  linkLibraryShow: (folders: string[], anidbId: number) =>
-    request<{ ok: boolean; folders: string[]; anidb_id: number }>('/api/anime/library/link', {
-      method: 'POST', body: JSON.stringify({ folders, anidb_id: anidbId }),
+  /** An Unmatched card's files become that entry's episodes (by the number in each name), moved into place. */
+  matchLibraryFolders: (folders: string[], anilistId: number) =>
+    request<{ ok: boolean; anilist_id?: number; moved?: number }>('/api/anime/library/match', {
+      method: 'POST', body: JSON.stringify({ folders, anilist_id: anilistId }),
     }),
-  anidbSearch: (q: string) =>
-    request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
+  /** Every file of entry ``fromId`` becomes entry ``toId`` (same episode numbers), moved into place. */
+  rematchEntry: (fromId: number, toId: number) =>
+    request<{ ok: boolean; moved?: number }>('/api/anime/library/rematch', {
+      method: 'POST', body: JSON.stringify({ from_id: fromId, to_id: toId }),
+    }),
+  /** AniList entries by title; also takes an anilist.co link or a numeric id. */
+  anilistSearch: (q: string) =>
+    request<{ items: AniListAnime[] }>('/api/anime/anilist/search?q=' + encodeURIComponent(q)),
   /** A collection's entries and the ones related to them. */
-  collectionGraph: (groupId: number) => request<CollectionGraph>(`/api/anime/collections/${groupId}/graph`),
+  collectionGraph: (collectionId: number) => request<CollectionGraph>(`/api/anime/collections/${collectionId}/graph`),
   /** An entry in no collection, and what it is related to. */
-  entryGraph: (anidbId: number) => request<CollectionGraph>(`/api/anime/entries/${anidbId}/graph`),
+  entryGraph: (anilistId: number) => request<CollectionGraph>(`/api/anime/entries/${anilistId}/graph`),
   /** An entry in no collection into a collection it is related to. */
-  entryMove: (anidbId: number, groupId: number) =>
-    request<{ ok: boolean }>(`/api/anime/entries/${anidbId}/move`, {
-      method: 'POST', body: JSON.stringify({ group_id: groupId }),
+  entryMove: (anilistId: number, collectionId: number) =>
+    request<{ ok: boolean }>(`/api/anime/entries/${anilistId}/move`, {
+      method: 'POST', body: JSON.stringify({ collection_id: collectionId }),
     }),
   /** Entries of a collection into a new one of their own. */
-  collectionSplit: (groupId: number, anidbIds: number[]) =>
-    request<{ ok: boolean; result: number | null }>(`/api/anime/collections/${groupId}/split`, {
-      method: 'POST', body: JSON.stringify({ anidb_ids: anidbIds }),
+  collectionSplit: (collectionId: number, anilistIds: number[]) =>
+    request<{ ok: boolean; result: number | null }>(`/api/anime/collections/${collectionId}/split`, {
+      method: 'POST', body: JSON.stringify({ anilist_ids: anilistIds }),
     }),
   /** One entry out of a collection. */
-  collectionExclude: (groupId: number, anidbId: number) =>
-    request<{ ok: boolean }>(`/api/anime/collections/${groupId}/exclude`, {
-      method: 'POST', body: JSON.stringify({ anidb_id: anidbId }),
+  collectionExclude: (collectionId: number, anilistId: number) =>
+    request<{ ok: boolean }>(`/api/anime/collections/${collectionId}/exclude`, {
+      method: 'POST', body: JSON.stringify({ anilist_id: anilistId }),
     }),
   /** A related entry into a collection. */
-  collectionInclude: (groupId: number, anidbId: number) =>
-    request<{ ok: boolean }>(`/api/anime/collections/${groupId}/include`, {
-      method: 'POST', body: JSON.stringify({ anidb_id: anidbId }),
+  collectionInclude: (collectionId: number, anilistId: number) =>
+    request<{ ok: boolean }>(`/api/anime/collections/${collectionId}/include`, {
+      method: 'POST', body: JSON.stringify({ anilist_id: anilistId }),
     }),
   /** Every entry of another collection into this one. */
-  collectionMerge: (groupId: number, otherId: number) =>
-    request<{ ok: boolean; result: number }>(`/api/anime/collections/${groupId}/merge`, {
-      method: 'POST', body: JSON.stringify({ group_id: otherId }),
+  collectionMerge: (collectionId: number, otherId: number) =>
+    request<{ ok: boolean; result: number }>(`/api/anime/collections/${collectionId}/merge`, {
+      method: 'POST', body: JSON.stringify({ other_id: otherId }),
     }),
-  /** Name a collection after one of its entries on disk. */
-  collectionTitle: (groupId: number, anidbId: number) =>
-    request<{ ok: boolean }>(`/api/anime/collections/${groupId}/title`, {
-      method: 'POST', body: JSON.stringify({ anidb_id: anidbId }),
+  /** Name and picture a collection after one of its entries. */
+  collectionTitle: (collectionId: number, anilistId: number) =>
+    request<{ ok: boolean }>(`/api/anime/collections/${collectionId}/title`, {
+      method: 'POST', body: JSON.stringify({ anilist_id: anilistId }),
     }),
-  /** Name and picture a collection after one of its entries, in Shoko and so in Jellyfin. */
-  setCollectionTitle: (key: string, anidbId: number) =>
-    request<{ ok: boolean; name: string | null; anidb_id: number }>('/api/anime/collections/title', {
-      method: 'POST', body: JSON.stringify({ key, anidb_id: anidbId }),
+  /** Rename a collection by hand; null gives it back AniList's name. */
+  collectionName: (collectionId: number, name: string | null) =>
+    request<{ ok: boolean; name?: string | null }>(`/api/anime/collections/${collectionId}/name`, {
+      method: 'POST', body: JSON.stringify({ name }),
+    }),
+  /** Name and picture a library card's collection after one of its entries, here and in Jellyfin. */
+  setCollectionTitle: (key: string, anilistId: number) =>
+    request<{ ok: boolean; name: string | null; anilist_id: number }>('/api/anime/collections/title', {
+      method: 'POST', body: JSON.stringify({ key, anilist_id: anilistId }),
     }),
   /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
   removeAnimeLibraryShow: (key: string, label = '') =>
-    runAction<PurgeResult & { anidb_id: number | null }>('/api/anime/library/remove', { key, label }),
+    runAction<PurgeResult & { anilist_id: number | null }>('/api/anime/library/remove', { key, label }),
   /** Delete episode files of one show, subtitles with them; only files the library lists under it. */
   deleteAnimeEpisodes: (key: string, paths: string[]) =>
     request<Pick<PurgeResult, 'deleted_files' | 'deleted_folders' | 'freed_bytes'>>('/api/anime/library/episodes/delete', {
       method: 'POST', body: JSON.stringify({ key, paths }),
     }),
-  /** Queue HEVC replacements for the AVC episodes of a card's AniDB entries. */
-  upgradeShowToHevc: (anidbIds: number[]) =>
+  /** Queue HEVC replacements for the AVC episodes of a card's AniList entries. */
+  upgradeShowToHevc: (anilistIds: number[]) =>
     request<{
       ok: boolean;
       queued: number;
@@ -1161,7 +1180,7 @@ export const api = {
       not_probed?: number;
     }>(
       '/api/anime/library/upgrade-hevc',
-      { method: 'POST', body: JSON.stringify({ anidb_ids: anidbIds }) },
+      { method: 'POST', body: JSON.stringify({ anilist_ids: anilistIds }) },
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),

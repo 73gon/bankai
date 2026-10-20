@@ -1,4 +1,4 @@
-"""Show-level Anime library presentation, by AniDB entry.
+"""Show-level Anime library presentation: collections of AniList entries.
 
 Also the TVDB metadata cache and episode lists of the Movies & Shows library
 (mas_library), which keeps TVDB; nothing on the anime side asks TVDB.
@@ -14,7 +14,6 @@ import subprocess
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -546,204 +545,29 @@ def merge_episodes(
     }
 
 
-def _prefs_path() -> Path:
-    return erai._state_path().with_name("anime_library_prefs.json")
 
 
-def load_prefs() -> dict[str, dict]:
-    try:
-        value = json.loads(_prefs_path().read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
+async def search_episode(anilist_id: int, episode: int, query: str | None = None) -> dict:
+    """Releases of one AniList episode: searched by the entry's names, each result checked.
 
-
-def folder_links(prefs: dict[str, dict]) -> dict[str, int]:
-    """The AniDB entry the user linked each library folder to, by folder name."""
-    return {
-        name.split(":", 1)[1]: int(row["anidb_id"])
-        for name, row in prefs.items()
-        if name.startswith("folder:") and str((row or {}).get("anidb_id") or "").isdigit()
-    }
-
-
-def _write_prefs(prefs: dict[str, dict]) -> None:
-    path = _prefs_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
-    tmp.replace(path)
-
-
-def save_folder_link(folders: list[str], anidb_id: int) -> None:
-    """Link library folders to one AniDB entry.
-
-    For the files Shoko has not matched: those it has keep Shoko's answer,
-    which comes from the file itself. The rest were matched by the folder's
-    name alone, which can miss or pick the wrong entry.
-    """
-    prefs = load_prefs()
-    for folder in folders:
-        if folder.strip():
-            prefs[f"folder:{folder}"] = {"anidb_id": int(anidb_id)}
-    _write_prefs(prefs)
-
-
-def merge_episodes_absolute(
-    files: list[dict],
-    roster: list,
-    *,
-    ended: bool,
-    flat: bool = False,
-    codecs: dict[tuple[int, int], str] | None = None,
-    german_dubbed: set[tuple[int, int]] | None = None,
-) -> dict:
-    """merge_episodes for a show whose file numbers count through the whole show.
-
-    Naruto, Bleach, One Piece: kept in season folders that are the user's own
-    arcs, while each file's number is the absolute one -- "Season 02/Naruto -
-    S02E20" is episode 20 overall. Reading that as season 2, episode 20 matched
-    nothing, so the whole show looked missing. Files are matched to TVDB by
-    absolute number; the tabs are the arc folders (or one list, ``flat``), and
-    a missing episode goes to the arc whose range it falls in.
-    """
-    regular = sorted(
-        (item for item in roster if item.season >= 1 and item.episode >= 1),
-        key=lambda item: (item.season, item.episode),
-    )
-    by_absolute = {}
-    for ordinal, item in enumerate(regular, start=1):
-        # Some TVDB series omit absoluteNumber; the default order is still one.
-        by_absolute.setdefault(item.absolute_number or ordinal, item)
-
-    present: dict[int, dict] = {}
-    others: list[dict] = []
-    for row in files:
-        number = row["episode"]
-        if number is None:
-            others.append(row)
-        elif number not in present or present[number]["staged"]:
-            present[number] = row
-
-    arcs: dict[int, tuple[int, int]] = {}
-    folder_names: dict[int, str] = {}
-    for number, row in present.items():
-        arc = row["season_number"] if row["season_number"] is not None else 1
-        low, high = arcs.get(arc, (number, number))
-        arcs[arc] = (min(low, number), max(high, number))
-        folder_names.setdefault(arc, str(row.get("season") or f"Season {arc:02d}"))
-
-    def arc_for(number: int) -> int:
-        if flat or not arcs:
-            return 1
-        for arc, (low, high) in sorted(arcs.items()):
-            if low <= number <= high:
-                return arc
-        following = [arc for arc, (low, _high) in sorted(arcs.items()) if low > number]
-        return following[0] if following else max(arcs)
-
-    today = date.today().isoformat()
-    rows: dict[int, dict] = {}
-    for number, item in by_absolute.items():
-        future = bool(item.aired and item.aired[:10] > today)
-        tba = future or (not item.aired and not ended)
-        arc = arc_for(number)
-        if number in present:
-            row = present[number]
-            rows[number] = {
-                **row,
-                "season_number": 1 if flat else (row["season_number"] if row["season_number"] is not None else 1),
-                "episode_title": item.name,
-                "aired": item.aired,
-                "tba": False,
-                "missing": False,
-                # Probed codecs go by the file's own numbers, published ones by TVDB's.
-                "codec": (codecs or {}).get((row["season_number"], number))
-                or (codecs or {}).get((item.season, item.episode)),
-                # By the file's own numbers, before any renumbering for display.
-                "german_dub": bool(german_dubbed and (row["season_number"], number) in german_dubbed),
-            }
-        else:
-            rows[number] = {
-                "path": "",
-                "rel_path": "",
-                "name": item.name or "TBA",
-                "episode_title": item.name,
-                "series": "",
-                "season": "All episodes" if flat else folder_names.get(arc, f"Season {arc:02d}"),
-                "season_number": arc,
-                "episode": number,
-                "size": 0,
-                "mtime": 0,
-                "staged": False,
-                "stage": "missing",
-                "transfer_status": "idle",
-                "aired": item.aired,
-                "tba": tba,
-                "missing": True,
-                "codec": None,
-                "german_dub": False,
-            }
-    for number, row in present.items():
-        # Beyond what TVDB lists yet: still downloaded, still shown.
-        if number not in rows:
-            rows[number] = {
-                **row,
-                "season_number": 1 if flat else (row["season_number"] or 1),
-                "missing": False,
-                "tba": False,
-                "codec": (codecs or {}).get((row["season_number"], number)),
-                "german_dub": bool(german_dubbed and (row["season_number"], number) in german_dubbed),
-            }
-    if flat:
-        for row in rows.values():
-            row["season"] = "All episodes"
-    counted = list(rows.values())
-    downloaded = sum(not row.get("missing", False) and not row["staged"] for row in counted)
-    outstanding = [row for row in counted if row.get("missing", False) or row["staged"]]
-    future_only = outstanding and all(row.get("tba", False) for row in outstanding)
-    state = (
-        "empty" if downloaded == 0
-        else "upcoming" if future_only
-        else "partial" if outstanding
-        else "complete"
-    )
-    if not roster and downloaded:
-        state = "unknown"
-    return {
-        "episodes": sorted(
-            [*rows.values(), *others],
-            key=lambda row: (row["season_number"] or 0, row["episode"] or 0, row["name"]),
-        ),
-        "downloaded_count": downloaded,
-        "total_count": len(counted),
-        "completion_state": state,
-        "finished": ended and state == "complete",
-        "metadata_available": bool(roster),
-    }
-
-
-async def search_episode(anidb_id: int, episode: int, query: str | None = None) -> dict:
-    """Releases of one AniDB episode: searched by the entry's names, each result checked.
-
-    The names are AniDB's and the ones Erai has published this entry under,
+    The names are AniList's and the ones Erai has published this entry under,
     each searched as "Name" "- 05". Every result is identified as the
     automation would and kept only if it is this entry's episode.
     """
     import httpx
 
-    from bankai.metadata import anidb as anidb_mod
+    from bankai.metadata import anilist
 
-    table = await anidb_mod.index()
-    entry = table.anime.get(int(anidb_id)) if table is not None else None
+    table = await anilist.index()
+    entry = table.anime.get(int(anilist_id)) if table is not None else None
     if entry is None:
-        raise ValueError("This AniDB entry is not in AniDB's title list")
+        raise ValueError("This AniList entry is not in the title index")
     state = await asyncio.to_thread(erai._load_state)
     mappings = await asyncio.to_thread(erai._load_mappings)
     terms = [query] if query else []
     if not terms:
-        names = [entry.title, entry.english_title]
-        prefix = f"anidb:{entry.aid}|"
+        names = [entry.title, entry.english]
+        prefix = f"anilist:{entry.id}|"
         for release in (state.get("releases") or {}).values():
             if str(release.get("canonical") or "").startswith(prefix):
                 parsed = erai._erai_name_episode(str(release.get("title") or ""))
@@ -773,10 +597,10 @@ async def search_episode(anidb_id: int, episode: int, query: str | None = None) 
             by_hash.update({row.info_hash: row for row in batch})
     items = []
     for release in by_hash.values():
-        match = anime.anidb_match(release.title, table=table, mappings=mappings)
-        if not match or match["anidb_id"] != entry.aid or match["episode"] != episode:
+        match = anime.anilist_match(release.title, table=table, mappings=mappings)
+        if not match or match["anilist_id"] != entry.id or match["episode"] != episode:
             continue
-        items.append(anime.entry_to_dict(replace(release, anidb=match, episode=episode)))
+        items.append(anime.entry_to_dict(replace(release, anilist=match, episode=episode)))
     return {
         "items": sorted(
             items, key=lambda row: (-erai._resolution(erai._entry_from_dict(row)), -row["seeders"])
@@ -800,92 +624,20 @@ def _display_title(titles: list[str], english: str = "") -> str:
     return sorted(titles, key=lambda value: (-len(value), value))[0]
 
 
-# -- AniDB identity in the library ---------------------------------------------
+# -- The anime library: collections of AniList entries ---------------------------
 #
-# A card is one AniDB entry, or the several entries one folder holds (Bleach:
-# Thousand-Year Blood War keeps its four cours as season folders). TVDB made
-# Bleach and its sequel one series of 416 episodes; AniDB makes Bleach 366,
-# and each cour its own entry. Which entry a file is comes from Shoko's link
-# for it, else from its season folder's name ("Season 02 - Sennen Kessen Hen -
-# Ketsubetsu Tan"), else from the show folder's name. Each entry's episode
-# list comes from Shoko, else -- for an entry Shoko does not hold -- is its
-# episode count from anime-offline-database, numbers without titles.
-
-# "Season 02 - Sennen Kessen Hen - Ketsubetsu Tan" -> the entry's own title.
-_SEASON_FOLDER = re.compile(r"^\s*Season\s*\d+\s*[-–:]\s*(?P<title>.+?)\s*$", re.IGNORECASE)
-
-
-def _resolve_name(table: Any, names: list[str], memo: dict[str, int | None]) -> int | None:
-    from bankai.metadata import anidb
-
-    for name in names:
-        name = name.strip()
-        if not name:
-            continue
-        if name not in memo:
-            resolution = anidb.resolve_in(table, name)
-            memo[name] = resolution.anime.aid if resolution.anime else None
-        if memo[name] is not None:
-            return memo[name]
-    return None
-
-
-def assign_entries(
-    files: list[dict], *, catalog: Any, table: Any, links: dict[str, int] | None = None
-) -> None:
-    """Set each file's ``anidb_id`` and, when Shoko linked it, ``anidb_episode``.
-
-    Shoko's link first; then the entry the user linked the folder to; then
-    the folder's name.
-    """
-    memo: dict[str, int | None] = {}
-    for row in files:
-        shoko = catalog.files.get(str(row.get("path"))) if catalog is not None else None
-        if shoko:
-            row["anidb_id"], row["anidb_episode"] = shoko[0]
-            continue
-        row["anidb_episode"] = None
-        row["anidb_id"] = None
-        folder = str(row.get("series") or "")
-        if links and folder in links:
-            row["anidb_id"] = links[folder]
-            continue
-        if table is None:
-            continue
-        season = _SEASON_FOLDER.match(str(row.get("season") or ""))
-        if season:
-            base = re.split(r"\s+-\s+|:\s*", folder, maxsplit=1)[0]
-            # The season folder may carry only the part after the show's name.
-            row["anidb_id"] = _resolve_name(
-                table, [season["title"], f"{base} {season['title']}", f"{folder} {season['title']}"], memo
-            )
-        if row["anidb_id"] is None:
-            row["anidb_id"] = _resolve_name(table, [folder], memo)
-
-
-def anidb_episode_of(row: dict, anime: Any) -> int | None:
-    """The file's episode number within its AniDB entry.
-
-    Shoko's link says it outright. Otherwise the number in the file name is
-    taken as the entry's own, unless it counts through a season the entry only
-    starts partway into, as Anime-Lists records: TYBW's second cour is filed
-    as S17E14-26, AniDB episodes 1-13.
-    """
-    if row.get("anidb_episode"):
-        return int(row["anidb_episode"])
-    season, episode = row.get("season_number"), row.get("episode")
-    if episode is None:
-        return None
-    tvdb_season = getattr(anime, "tvdb_season", None) or ""
-    offset = int(getattr(anime, "tvdb_offset", 0) or 0)
-    if offset and tvdb_season.isdigit() and season == int(tvdb_season) and episode > offset:
-        return episode - offset
-    return episode
+# A card is a collection (see anime_collections): one show, however many
+# AniList entries -- seasons, cours, movies -- it holds, kept in one folder.
+# Which entry and episode each file is comes from the file index
+# (anime_files), written when the file was published, moved into place or
+# matched by hand; never guessed from a folder's name. A file the index does
+# not know sits on an "Unmatched" card of its folder until it is matched on
+# AniList. Each entry is one tab, its episodes AniList's.
 
 
 @dataclass(frozen=True)
 class _Episode:
-    """One episode as the merge functions read it; TVDB's episodes have the same shape."""
+    """One episode as merge_episodes reads it; TVDB's episodes have the same shape."""
 
     season: int
     episode: int
@@ -894,103 +646,98 @@ class _Episode:
     absolute_number: int | None = None
 
 
-def merge_episodes_anidb(
+@dataclass(frozen=True)
+class EntryEpisode:
+    number: int
+    title: str | None = None
+    aired: str | None = None
+
+
+def roster(aid: int) -> list[EntryEpisode] | None:
+    """An entry's episodes as AniList lists them; None when it does not say how many.
+
+    AniList's air dates reach back only so far. An episode of a finished
+    entry without one has aired all the same: it is dated by the entry's start.
+    """
+    from bankai.metadata import anilist
+
+    rows = anilist.episodes(aid)
+    if not rows:
+        return None
+    started = anilist.media(aid).get("start") if anilist.finished(aid) else None
+    return [EntryEpisode(n, title, aired or started) for n, title, aired in rows]
+
+
+def merge_entry_episodes(
     rows: list[dict],
     entries: list[tuple[int, str, list | None, bool]],
     *,
     codecs: dict[tuple[int, int], str] | None = None,
     german_dubbed: set[tuple[int, int]] | None = None,
 ) -> dict:
-    """Episodes of a card made of AniDB entries; ``rows`` are prepared by the caller.
+    """Episodes of a card made of AniList entries, one tab per entry.
 
-    One entry: tabs are the season folders it is kept in (Bleach's arcs), as
-    with absolute numbering. Several: one tab per entry, each counted
-    against its own episode list. ``entries`` are (aid, tab label, episode
-    list or None when unknown, finished), in display order.
+    ``rows`` are the card's files, ``season_number`` the tab of their entry
+    and ``episode`` its own number. ``entries`` are (AniList id, tab label,
+    episode list or None when unknown, finished), in tab order.
     """
     today = date.today().isoformat()
 
-    def ended(roster: list | None, finished: bool) -> bool:
-        return finished or (bool(roster) and all(ep.aired and ep.aired[:10] <= today for ep in roster))
+    def ended(listed: list | None, finished: bool) -> bool:
+        return finished or (bool(listed) and all(ep.aired and ep.aired[:10] <= today for ep in listed))
 
-    if len(entries) == 1:
-        _aid, _label, roster, finished = entries[0]
-        items = [
-            _Episode(season=1, episode=ep.number, absolute_number=ep.number, name=ep.title, aired=ep.aired)
-            for ep in roster or []
-        ]
-        merged = merge_episodes_absolute(
-            rows, items, ended=ended(roster, finished), codecs=codecs, german_dubbed=german_dubbed
-        )
-        merged["metadata_available"] = roster is not None and bool(roster)
-        return merged
     items = [
         _Episode(season=index, episode=ep.number, name=ep.title, aired=ep.aired)
-        for index, (_aid, _label, roster, _finished) in enumerate(entries, start=1)
-        for ep in roster or []
+        for index, (_aid, _label, listed, _finished) in enumerate(entries, start=1)
+        for ep in listed or []
     ]
     merged = merge_episodes(
         rows,
         items,
-        ended=all(ended(roster, finished) for _aid, _label, roster, finished in entries),
+        ended=all(ended(listed, finished) for _aid, _label, listed, finished in entries),
         codecs=codecs,
         german_dubbed=german_dubbed,
     )
-    labels = {index: label for index, (_aid, label, _roster, _finished) in enumerate(entries, start=1)}
+    labels = {index: label for index, (_aid, label, _listed, _finished) in enumerate(entries, start=1)}
     for row in merged["episodes"]:
         if row.get("season_number") in labels:
             row["season"] = labels[row["season_number"]]
-    merged["metadata_available"] = any(roster for _aid, _label, roster, _finished in entries)
+    merged["metadata_available"] = any(listed for _aid, _label, listed, _finished in entries)
     return merged
 
 
-def prepare_anidb_rows(files: list[dict], order: list[int], table: Any) -> list[dict]:
-    """Copies of a card's files, numbered for merge_episodes_anidb.
+_KINDS = {"TV": "TV", "MOVIE": "Movie", "OVA": "OVA", "ONA": "ONA", "SPECIAL": "Special", "MUSIC": "Music"}
 
-    One entry: season_number is the season folder's place, episode the AniDB
-    number. Several: season_number is the entry's place. A file whose entry is
-    not among them lands in "Other files".
+
+def tab_labels(order: list[int], collection: str | None) -> dict[int, str]:
+    """Each entry's tab name, without the collection's own: "Attack on Titan Season 2" -> "Season 2".
+
+    Two tabs of one name -- a show and its OVA both "Attack on Titan" -- are
+    told apart by what they are and when.
     """
-    place = {aid: index for index, aid in enumerate(order, start=1)}
-    anime = getattr(table, "anime", {}) if table is not None else {}
-    single = len(order) == 1
-    folders = sorted({str(row.get("season") or "") for row in files})
-    folder_place = {name: index for index, name in enumerate(folders, start=1)}
-    prepared = []
-    for row in files:
-        aid = row.get("anidb_id")
-        number = anidb_episode_of(row, anime.get(aid)) if aid in place else None
-        if number is None:
-            prepared.append({**row, "season_number": None, "episode": None})
-            continue
-        prepared.append(
-            {
-                **row,
-                "season_number": folder_place[str(row.get("season") or "")] if single else place[aid],
-                "season": row.get("season") or "Episodes",
-                "episode": number,
-            }
-        )
-    return prepared
+    from collections import Counter
 
-
-def _entry_name(aid: int, catalog: Any, known: dict) -> str:
-    """An entry's name as shown: AniList's, else Shoko's, else AniDB's."""
     from bankai.metadata import anilist
 
-    entry = catalog.entries.get(aid) if catalog is not None else None
-    anime_entry = known.get(aid)
-    return anilist.name(aid) or (entry.title if entry else None) or (
-        (anime_entry.english_title or anime_entry.title) if anime_entry else f"AniDB {aid}"
-    )
+    labels = {
+        aid: anime_collections.short_label(anime_collections.entry_name(aid), collection) for aid in order
+    }
+    counts = Counter(labels.values())
+    for aid, label in labels.items():
+        if counts[label] > 1:
+            extra = ", ".join(str(part) for part in (_KINDS.get(anilist.kind(aid) or ""), anilist.year(aid)) if part)
+            labels[aid] = f"{label} ({extra or aid})"
+    return labels
 
 
-def _entry_cover(aid: int, catalog: Any) -> str | None:
-    """An entry's cover: AniList's, else Shoko's, else anime-offline-database's."""
-    from bankai.metadata import anidb_art, anilist
-
-    entry = catalog.entries.get(aid) if catalog is not None else None
-    return anilist.cover(aid) or (entry.poster_url if entry else None) or anidb_art.cover(aid)
+def _unique(key: str, taken: set[str]) -> str:
+    """A card key no other card has: the page asks for a card back by it."""
+    candidate, number = key, 2
+    while _name(candidate) in taken:
+        candidate = f"{key} ({number})"
+        number += 1
+    taken.add(_name(candidate))
+    return candidate
 
 
 async def group_shows(
@@ -999,359 +746,259 @@ async def group_shows(
     *,
     include_episodes: bool = True,
     only_key: str | None = None,
-    catalog: Any = None,
 ) -> list[dict]:
-    """One card per show, however many folders and spellings it arrived under.
+    """One card per collection, and one per folder of files no AniList entry is known for.
 
-    Grouping used to key on the raw folder name, so a show sitting in two
-    folders got two cards -- "Show" beside "Show (2024)", or a romaji folder
-    beside its English one. Identity is now decided twice: the normalised
-    name catches the pairs that differ in punctuation or a trailing year, and
-    the AniDB entry most of a folder's files are catches the pairs that share
-    no spelling at all. Folders of different AniDB entries stay apart: Bleach
-    and its sequel. ``catalog`` is Shoko's (see shoko_catalog).
+    A collection with nothing on disk still has a card while the automation
+    follows one of its entries, unless that entry was blacklisted, which is
+    how one removed from the library leaves it.
     """
-    from collections import Counter
+    from bankai.metadata import anilist
+    from bankai.web import anime_files, anime_layout
 
-    from bankai.metadata import anidb as anidb_mod
-    from bankai.metadata import anidb_art
-    from bankai.web.shoko_catalog import EntryEpisode
-
-    table = None
-    with suppress(Exception):
-        table = await anidb_mod.index()
-    known = getattr(table, "anime", {}) if table is not None else {}
-    buckets: dict[str, dict] = {}
-    for entry in entries:
-        season, episode = parse_se(entry["name"]) or (None, None)
-        bucket = buckets.setdefault(_name(entry["series"]), {"titles": [], "files": []})
-        if entry["series"] not in bucket["titles"]:
-            bucket["titles"].append(entry["series"])
-        bucket["files"].append({**entry, "season_number": season, "episode": episode})
-    prefs = await asyncio.to_thread(load_prefs)
-    await asyncio.to_thread(
-        assign_entries,
-        [row for bucket in buckets.values() for row in bucket["files"]],
-        catalog=catalog,
-        table=table,
-        links=folder_links(prefs),
-    )
-
-    merged: dict[str, dict] = {}
-    for name, bucket in buckets.items():
-        aids = Counter(row["anidb_id"] for row in bucket["files"] if row.get("anidb_id"))
-        # The entry most of its files are; a tie goes to the older entry.
-        primary = min(aids, key=lambda aid: (-aids[aid], aid)) if aids else None
-        slot = merged.setdefault(
-            f"anidb:{primary}" if primary else f"name:{name}",
-            {"titles": [], "files": [], "aids": Counter()},
-        )
-        slot["titles"].extend(bucket["titles"])
-        slot["files"].extend(bucket["files"])
-        slot["aids"].update(aids)
-    for slot in merged.values():
-        slot["titles"] = sorted(dict.fromkeys(slot["titles"]))
-        slot["folders"] = slot["titles"]
-        slot["key"] = _display_title(slot["titles"])
-
-    # One read of the release state for the whole page: it is a fourteen
-    # megabyte file.
+    index = await asyncio.to_thread(anime_files.load)
+    store = await asyncio.to_thread(anime_collections.load)
+    # One read of the release state for the whole page: it is a large file.
     state = await asyncio.to_thread(erai._load_state)
-    blocked = erai._policy_anidb_ids(await asyncio.to_thread(erai._load_policies))
+    blocked = erai._policy_anilist_ids(await asyncio.to_thread(erai._load_policies))
+    folder_of = anime_layout.folder_names(store)
+    of = store.of()
 
-    # Collections: the cards of one Shoko group are one card, named after the
-    # group, and the group's sequels and prequels not on disk are its missing
-    # tabs. Without Shoko's groups, cards stay as their folders made them.
-    collections = anime_collections.assign(
-        catalog, await asyncio.to_thread(anime_collections.load_places)
-    )
-    titles = await asyncio.to_thread(anime_collections.load_titles)
-    groups = getattr(catalog, "groups", None) or {}
-    if collections.of:
-        regrouped: dict[str, dict] = {}
-        for identity, slot in merged.items():
-            aids = slot["aids"]
-            primary = min(aids, key=lambda aid: (-aids[aid], aid)) if aids else None
-            group = collections.of.get(primary) if primary is not None else None
-            if group is None:
-                regrouped[identity] = slot
-                continue
-            target = regrouped.setdefault(
-                f"group:{group}",
-                {"titles": [], "folders": [], "files": [], "aids": Counter(), "collection_id": group},
+    slots: dict[str, dict] = {}
+
+    def slot_for(aid: int) -> dict:
+        cid = of.get(aid)
+        identity = f"collection:{cid}" if cid is not None else f"entry:{aid}"
+        return slots.setdefault(
+            identity, {"cid": cid, "aids": [] if cid is not None else [aid], "files": [], "folders": set()}
+        )
+
+    for entry in entries:
+        rel = anime_files.key(entry["path"])
+        pairs = index.get(rel) if rel else None
+        if pairs:
+            aid, number = pairs[0]
+            slot = slot_for(aid)
+            slot["files"].append({**entry, "anilist_id": aid, "anilist_episode": number})
+        else:
+            slot = slots.setdefault(
+                f"unmatched:{entry['series']}",
+                {"cid": None, "aids": [], "files": [], "folders": set(), "unmatched": True},
             )
-            target["titles"].extend(slot["titles"])
-            target["folders"].extend(slot["folders"])
-            target["files"].extend(slot["files"])
-            target["aids"].update(slot["aids"])
-        merged = regrouped
-        on_disk = {aid for slot in merged.values() for aid in slot["aids"]}
-        for aid, group in sorted(collections.of.items()):
-            slot = merged.get(f"group:{group}")
-            if slot is not None and aid not in on_disk and aid not in blocked:
-                slot["aids"][aid] = 0
-        keys: set[str] = set()
-        for identity, slot in merged.items():
-            group = groups.get(slot.get("collection_id"))
-            if group is None:
-                keys.add(_name(slot["key"]))
-                continue
-            slot["main_aid"] = anime_collections.title_entry(group, titles)
-            # The group's name is the card's; its key must still be its own.
-            key = group.name if _name(group.name) not in keys else f"{group.name} ({group.id})"
-            slot["key"] = key
-            slot["titles"] = sorted(dict.fromkeys([key, *slot["titles"]]))
-            slot["folders"] = sorted(dict.fromkeys(slot["folders"]))
-            keys.add(_name(key))
-    else:
-        keys = {_name(slot["key"]) for slot in merged.values()}
+            season, episode = parse_se(entry["name"]) or (None, None)
+            slot["files"].append({**entry, "season_number": season, "episode": episode})
+        slot["folders"].add(entry["series"])
+    for raw in state.get("anime") or {}:
+        if str(raw).isdigit() and int(raw) not in blocked:
+            slot_for(int(raw))
 
-    # An AniDB entry the automation took with nothing on disk still gets a
-    # card -- its collection's, if it has one -- unless it was blacklisted,
-    # which is how one removed from the library leaves it.
-    covered = {aid for slot in merged.values() for aid in slot["aids"]}
-    for raw, record in (state.get("anime") or {}).items():
-        if not str(raw).isdigit() or int(raw) in covered or int(raw) in blocked:
-            continue
-        aid = int(raw)
-        home = merged.get(f"group:{collections.of.get(aid)}")
-        if home is not None:
-            home["aids"][aid] = 0
-            covered.add(aid)
-            continue
-        anime_entry = known.get(aid)
-        names = [
-            (anime_entry.english_title or anime_entry.title) if anime_entry else None,
-            anime_entry.title if anime_entry else None,
-            str(record.get("english_title") or record.get("title") or "") or None,
-        ]
-        # Its key must not be another card's: the page asks for a card back by it.
-        key = next((name for name in names if name and _name(name) not in keys), None)
-        if key is None:
-            key = f"{next((name for name in names if name), 'AniDB')} (AniDB {aid})"
-        keys.add(_name(key))
-        covered.add(aid)
-        merged[f"anidb:{aid}"] = {
-            "titles": [key], "folders": [], "files": [], "aids": Counter({aid: 0}), "key": key,
-        }
+    taken: set[str] = set()
+    for identity in sorted(slots, key=lambda value: (not value.startswith("collection:"), value)):
+        slot = slots[identity]
+        if slot["cid"] is not None:
+            row = store.collections[slot["cid"]]
+            slot["title"] = anime_collections.name(row)
+            slot["key"] = _unique(folder_of.get(slot["cid"]) or slot["title"], taken)
+        elif slot.get("unmatched"):
+            folder = identity.split(":", 1)[1]
+            slot["title"] = folder
+            # Its folder's name -- unless a collection's folder is called so,
+            # holding a few files the index does not know beside its own.
+            slot["key"] = _unique(folder if _name(folder) not in taken else f"{folder} (unmatched)", taken)
+        else:
+            slot["title"] = anime_collections.entry_name(slot["aids"][0])
+            slot["key"] = _unique(slot["title"], taken)
 
     if only_key is not None:
         wanted = _name(only_key)
-        merged = {
-            identity: slot
-            for identity, slot in merged.items()
-            if wanted == _name(slot["key"]) or wanted in {_name(t) for t in slot["titles"]}
-        }
+        slots = {identity: slot for identity, slot in slots.items() if _name(slot["key"]) == wanted}
 
-    def anidb_card(slot: dict) -> dict:
-        """The AniDB entries behind a card: display order, episode lists, tab labels."""
-        aids = list(slot["aids"])
-        rosters: dict[int, list | None] = {}
-        finished: dict[int, bool] = {}
-        for aid in aids:
-            entry = catalog.entries.get(aid) if catalog is not None else None
-            facts = anidb_art.facts(aid)
-            finished[aid] = facts.get("status") == "FINISHED"
-            if entry is not None and entry.episodes:
-                rosters[aid] = list(entry.episodes)
-            elif facts.get("episodes"):
-                # Not in Shoko's collection: how many episodes it has, no more.
-                rosters[aid] = [EntryEpisode(n, None, None) for n in range(1, int(facts["episodes"]) + 1)]
-            else:
-                rosters[aid] = None
-
-        def first_aired(aid: int) -> str:
-            dates = [ep.aired for ep in rosters.get(aid) or [] if ep.aired]
-            year = anidb_art.facts(aid).get("year")
-            return min(dates) if dates else str(year) if year else "9999"
-
-        def folders_of(aid: int) -> set[str]:
-            return {str(row.get("season") or "") for row in slot["files"] if row.get("anidb_id") == aid}
-
-        # The sequel chain prequel to sequel, then side stories and specials;
-        # by air date alone a 2013 OVA sat between seasons one and two.
-        order = anime_collections.sequel_order(
-            aids,
-            getattr(catalog, "relations", None) or [],
-            lambda aid: (first_aired(aid), min(folders_of(aid), default="")),
-        )
-        # Each tab is its entry, named without the collection's own name.
-        # Named after season folders, two cours sharing one were two "Season 03".
-        collection = slot["key"] if slot.get("collection_id") is not None else None
-        labels = {
-            aid: anime_collections.short_label(_entry_name(aid, catalog, known), collection)
-            for aid in order
-        }
-        # Two tabs of one name -- a show and its OVA both "Attack on Titan" --
-        # are told apart by what they are and when.
-        counts = Counter(labels.values())
-        for aid, label in labels.items():
-            if counts[label] > 1:
-                facts = anidb_art.facts(aid)
-                kind = {"TV": "TV", "MOVIE": "Movie", "OVA": "OVA", "ONA": "ONA", "SPECIAL": "Special"}.get(
-                    str(facts.get("type") or "").upper()
-                )
-                year = first_aired(aid)[:4] if first_aired(aid) != "9999" else None
-                extra = ", ".join(part for part in (kind, year) if part)
-                labels[aid] = f"{label} ({extra or aid})"
-        return {"order": order, "rosters": rosters, "labels": labels, "finished": finished}
-
-    def build(slot: dict) -> dict:
-        files = slot["files"]
-        title = slot["key"]
-        card = anidb_card(slot) if slot["aids"] else None
-        if card is not None:
-            rows = prepare_anidb_rows(files, card["order"], table)
-            # Keyed as the rows are numbered: the tab, then the AniDB episode.
-            merged_episodes = merge_episodes_anidb(
-                rows,
-                [
-                    (aid, card["labels"][aid], card["rosters"][aid], card["finished"][aid])
-                    for aid in card["order"]
-                ],
-                codecs=probed_codecs(rows),
-                german_dubbed=german_dubbed_episodes(rows),
-            )
-            numbering = "anidb"
-        else:
-            # No AniDB entry answers for these folders: their files, as named.
-            merged_episodes = merge_episodes(
-                files,
-                [],
-                ended=False,
-                codecs=probed_codecs(files),
-                german_dubbed=german_dubbed_episodes(files),
-            )
-            numbering = "files"
-        display_title = title
-        source_title = ""
-        poster_url = None
-        year = None
-        anidb_id = None
-        if card is not None:
-            # The collection's title entry names the card and lends it its
-            # cover, else the first entry: AniDB's own cover, from Shoko or
-            # else anime-offline-database.
-            main = slot.get("main_aid")
-            anidb_id = main if main in card["order"] else card["order"][0]
-            entry = catalog.entries.get(anidb_id) if catalog is not None else None
-            anime_entry = known.get(anidb_id)
-            if slot.get("collection_id") is not None:
-                display_title = title  # the collection's own name
-            elif entry is not None or anime_entry is not None:
-                display_title = _entry_name(anidb_id, catalog, known)
-            if anime_entry is not None and not _same_name(anime_entry.title, display_title):
-                source_title = anime_entry.title
-            poster_url = _entry_cover(anidb_id, catalog)
-            aired = [ep.aired for ep in card["rosters"].get(anidb_id) or [] if ep.aired]
-            year = int(min(aired)[:4]) if aired else anidb_art.facts(anidb_id).get("year")
-        result = {
-            "key": title,
-            # Every folder behind this one card, so the page can ask for the
-            # right files back after two of them were merged.
-            "folders": slot["folders"],
-            "title": display_title,
-            "source_title": source_title,
-            "anidb_id": anidb_id,
-            "anidb_ids": card["order"] if card is not None else [],
-            # The Shoko group the card is, and its entries: the ones Shoko
-            # holds can be picked to name and picture the collection.
-            "collection_id": slot.get("collection_id"),
-            "collection_entries": [
-                {
-                    "anidb_id": aid,
-                    "title": _entry_name(aid, catalog, known),
-                    "owned": catalog is not None and aid in catalog.entries,
-                }
-                for aid in (card["order"] if card is not None else [])
-            ],
+    def counts(rows: list[dict]) -> dict:
+        episodes = rows
+        return {
             "avc_count": sum(
-                1
-                for row in merged_episodes["episodes"]
+                1 for row in episodes
                 # A German dub is irreplaceable, so it is not on offer.
                 if row.get("codec") == "avc" and not row.get("german_dub")
             ),
             "hevc_count": sum(
-                1
-                for row in merged_episodes["episodes"]
-                if row.get("codec") == "hevc" and not row.get("german_dub")
+                1 for row in episodes if row.get("codec") == "hevc" and not row.get("german_dub")
             ),
             # The top tier, whatever its codec: each episode is counted in one
             # of the three, so together they never exceed the episodes on disk.
-            "german_dub_count": sum(
-                1 for row in merged_episodes["episodes"] if row.get("german_dub")
-            ),
-            "numbering": numbering,
-            "year": year,
-            "poster_url": poster_url,
+            "german_dub_count": sum(1 for row in episodes if row.get("german_dub")),
+        }
+
+    def build(slot: dict) -> dict:
+        files = slot["files"]
+        base = {
+            "key": slot["key"],
+            "folders": sorted(slot["folders"]),
+            "title": slot["title"],
             "episode_count": len(files),
-            "season_count": len(
-                {
-                    row["season_number"]
-                    for row in merged_episodes["episodes"]
-                    if row["season_number"] is not None
-                }
-            ),
             "size": sum(row["size"] for row in files),
             "staged_count": sum(row["staged"] for row in files),
-            **merged_episodes,
-            "season_anidb": {},
         }
-        if card is not None:
-            # A card of AniDB entries: its tabs are the entries, or -- one
-            # entry kept in season folders -- that entry's folders.
-            def entry_link(aid: int) -> list[dict]:
-                return [{"anidb_id": aid, "title": _entry_name(aid, catalog, known)}]
-
-            tabs = {row["season_number"] for row in result["episodes"] if row["season_number"] is not None}
-            result["season_anidb"] = (
-                {str(tab): entry_link(card["order"][0]) for tab in tabs}
-                if len(card["order"]) == 1
-                else {str(index): entry_link(aid) for index, aid in enumerate(card["order"], start=1)}
+        if slot.get("unmatched"):
+            merged = merge_episodes(
+                files, [], ended=False, codecs=probed_codecs(files), german_dubbed=german_dubbed_episodes(files)
             )
+            result = {
+                **base,
+                "source_title": "",
+                "unmatched": True,
+                "anilist_id": None,
+                "anilist_ids": [],
+                "collection_id": None,
+                "collection_name_custom": False,
+                "collection_entries": [],
+                "numbering": "files",
+                "year": None,
+                "poster_url": None,
+                "season_count": len({row["season_number"] for row in merged["episodes"] if row["season_number"] is not None}),
+                **counts(merged["episodes"]),
+                **merged,
+                "season_anilist": {},
+            }
+        else:
+            row = store.collections.get(slot["cid"]) if slot["cid"] is not None else None
+            on_disk: dict[int, int] = {}
+            for file in files:
+                on_disk[file["anilist_id"]] = max(on_disk.get(file["anilist_id"], 0), file["anilist_episode"])
+            if row is not None:
+                placing = anime_collections.plan(row, episodes_on_disk=lambda aid: on_disk.get(aid, 0), store=store)
+                order = placing.order()
+                main = row.title if row.title in order else order[0]
+                seasons = {
+                    aid: (f"Season {number}" if number else None) for aid, number in placing.seasons.items()
+                }
+                seasons.update({aid: "Specials" for aid in placing.specials})
+            else:
+                order = list(slot["aids"])
+                main = order[0]
+                seasons = {}
+            labels = tab_labels(order, slot["title"] if row is not None else None)
+            place = {aid: number for number, aid in enumerate(order, start=1)}
+            rows = []
+            for file in files:
+                aid = file["anilist_id"]
+                if aid not in place:
+                    rows.append({**file, "season_number": None, "episode": None})
+                    continue
+                rows.append({**file, "season_number": place[aid], "season": labels[aid], "episode": file["anilist_episode"]})
+            merged = merge_entry_episodes(
+                rows,
+                [(aid, labels[aid], roster(aid), anilist.finished(aid)) for aid in order],
+                codecs=probed_codecs(rows),
+                german_dubbed=german_dubbed_episodes(rows),
+            )
+            romaji = anilist.media(main).get("romaji")
+            result = {
+                **base,
+                "source_title": romaji if romaji and not _same_name(romaji, slot["title"]) else "",
+                "unmatched": False,
+                "anilist_id": main,
+                "anilist_ids": order,
+                "collection_id": slot["cid"],
+                "collection_name_custom": bool(row is not None and row.name),
+                "collection_entries": [
+                    {
+                        "anilist_id": aid,
+                        "title": anime_collections.entry_name(aid),
+                        "owned": aid in on_disk,
+                        "season": seasons.get(aid),
+                    }
+                    for aid in order
+                ],
+                "numbering": "anilist",
+                "year": anilist.year(main),
+                "poster_url": anilist.cover(main),
+                "season_count": len({r["season_number"] for r in merged["episodes"] if r["season_number"] is not None}),
+                **counts(merged["episodes"]),
+                **merged,
+                "season_anilist": {
+                    str(number): [{"anilist_id": aid, "title": anime_collections.entry_name(aid)}]
+                    for aid, number in place.items()
+                },
+            }
         if not include_episodes:
             result["episodes"] = []
         return result
 
-    shows = await asyncio.to_thread(lambda: [build(slot) for slot in merged.values()])
+    shows = await asyncio.to_thread(lambda: [build(slot) for slot in slots.values()])
     return sorted(shows, key=lambda row: row["title"].casefold())
 
 
-async def queue_covers(rows: list[dict], catalog: Any = None) -> list[dict]:
-    """Each queue row's cover and name, by the AniDB entry its job files under."""
-    from bankai.metadata import anidb as anidb_mod
+async def queue_covers(rows: list[dict]) -> list[dict]:
+    """Each queue row's cover and name, by the AniList entry its job files under."""
+    from bankai.metadata import anilist
 
-    table = await anidb_mod.index()
-    known = getattr(table, "anime", {}) if table is not None else {}
     for row in rows:
-        raw = str(row.get("anidb_id") or "")
+        raw = str(row.get("anilist_id") or "")
         if not raw.isdigit():
             continue
         aid = int(raw)
-        entry = catalog.entries.get(aid) if catalog is not None else None
-        row["poster_url"] = _entry_cover(aid, catalog)
-        if entry is not None or aid in known:
-            row["series_title"] = _entry_name(aid, catalog, known)
+        row["poster_url"] = anilist.cover(aid)
+        if anilist.name(aid):
+            row["series_title"] = anilist.name(aid)
     return rows
 
 
-async def enrich_review_rows(rows: list[dict], catalog: Any = None) -> list[dict]:
-    """Each review or blacklist card's name, year and cover, from its AniDB entry.
+async def enrich_review_rows(rows: list[dict]) -> list[dict]:
+    """Each review or blacklist card's name, year and cover, from its AniList entry.
 
-    A card that is one AniDB entry shows that entry's name and cover -- from
-    AniList, else Shoko, else anime-offline-database. One that no entry
-    answers for yet is shown by its Erai name until one is chosen for it.
+    A card that is one AniList entry shows that entry's name and cover. One
+    that no entry answers for yet is shown by its Erai name until one is
+    chosen for it.
     """
-    from bankai.metadata import anidb_art, anilist
+    from bankai.metadata import anilist
 
     for row in rows:
         row.pop("tvdb_id", None)
-        if not str(row.get("anidb_id") or "").isdigit():
+        if not str(row.get("anilist_id") or "").isdigit():
             row["title"] = row["source_title"]
-            row["poster_url"] = row.get("anidb_poster_url")
+            row["poster_url"] = row.get("anilist_poster_url")
             continue
-        aid = int(row["anidb_id"])
-        row["title"] = anilist.name(aid) or row.get("english_title") or row.get("anidb_title") or row["source_title"]
-        row["year"] = anidb_art.facts(aid).get("year")
-        row["poster_url"] = _entry_cover(aid, catalog) or row.get("anidb_poster_url")
+        aid = int(row["anilist_id"])
+        row["title"] = anilist.name(aid) or row.get("english_title") or row.get("anilist_title") or row["source_title"]
+        row["year"] = anilist.year(aid)
+        row["poster_url"] = anilist.cover(aid) or row.get("anilist_poster_url")
     return rows
+
+
+# -- Matching by hand ------------------------------------------------------------
+
+
+def match_files(paths: list[Path], anilist_id: int) -> dict:
+    """Files no entry was known for become one entry's episodes, by the number in each name.
+
+    Returns the files matched and the ones whose name carries no episode number.
+    """
+    from bankai.processor.anime import episode_number
+    from bankai.web import anime_files
+
+    matched, skipped = [], []
+    with anime_files.editing() as rows:
+        for path in paths:
+            rel = anime_files.key(path)
+            numbered = parse_se(path.name)
+            number = numbered[1] if numbered else episode_number(path.name)
+            if rel is None or not number:
+                skipped.append(str(path))
+                continue
+            rows[rel] = [(int(anilist_id), int(number))]
+            matched.append(str(path))
+    return {"matched": matched, "skipped": skipped}
+
+
+def rematch_entry(from_id: int, to_id: int) -> int:
+    """Every file of one entry becomes another's, episode for episode. Returns how many."""
+    from bankai.web import anime_files
+
+    moved = 0
+    with anime_files.editing() as rows:
+        for rel, pairs in rows.items():
+            if any(aid == int(from_id) for aid, _episode in pairs):
+                rows[rel] = [(int(to_id) if aid == int(from_id) else aid, episode) for aid, episode in pairs]
+                moved += 1
+    return moved

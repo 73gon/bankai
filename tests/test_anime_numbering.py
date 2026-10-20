@@ -1,4 +1,4 @@
-"""Shows kept in arc folders whose file numbers count through the whole show."""
+"""Episode numbering: files read per season against an episode list, and held releases rechecked by reason."""
 
 from __future__ import annotations
 
@@ -38,28 +38,6 @@ def _roster(count: int) -> list[_Episode]:
     ]
 
 
-def test_absolute_numbers_match_the_episode_list_across_arc_folders():
-    files = [
-        _file("Season 01 Land of Waves", 1, 1),
-        _file("Season 01 Land of Waves", 1, 2),
-        _file("Season 02 Chunin Exams", 2, 3),
-        _file("Season 02 Chunin Exams", 2, 5),
-    ]
-    merged = anime_library.merge_episodes_absolute(files, _roster(6), ended=True)
-    rows = {row["episode"]: row for row in merged["episodes"]}
-
-    assert merged["downloaded_count"] == 4
-    assert merged["total_count"] == 6
-    assert merged["completion_state"] == "partial"
-    # "S02E05" is episode 5 overall, not season 2 episode 5.
-    assert rows[5]["episode_title"] == "Episode 5" and not rows[5]["missing"]
-    # A gap goes to the arc whose range holds it, named after its folder.
-    assert rows[4]["missing"] and rows[4]["season_number"] == 2
-    assert rows[4]["season"] == "Season 02 Chunin Exams"
-    # Past the last file: the last arc.
-    assert rows[6]["missing"] and rows[6]["season_number"] == 2
-
-
 def test_read_per_season_the_same_files_look_mostly_missing():
     files = [_file("Season 02 Chunin Exams", 2, 5)]
     merged = anime_library.merge_episodes(files, _roster(6), ended=True)
@@ -67,30 +45,6 @@ def test_read_per_season_the_same_files_look_mostly_missing():
     # Episode 5 is listed as S02E02: it reads as missing, and S02E05 has no title.
     assert rows[(2, 2)]["missing"]
     assert rows[(2, 5)].get("episode_title") is None
-
-
-def test_codecs_probed_by_file_numbers_still_count():
-    files = [_file("Season 02 Chunin Exams", 2, 5)]
-    # Probed codecs use the file's S02E05; the episode list would call it S02E02.
-    merged = anime_library.merge_episodes_absolute(
-        files, _roster(6), ended=True, codecs={(2, 5): "avc"}
-    )
-    assert next(row for row in merged["episodes"] if row["episode"] == 5)["codec"] == "avc"
-
-
-def test_flat_numbering_is_one_list():
-    files = [_file("Season 01 Land of Waves", 1, 1), _file("Season 02 Chunin Exams", 2, 3)]
-    merged = anime_library.merge_episodes_absolute(files, _roster(4), ended=True, flat=True)
-    assert {row["season_number"] for row in merged["episodes"]} == {1}
-    assert {row["season"] for row in merged["episodes"]} == {"All episodes"}
-    assert [row["episode"] for row in merged["episodes"]] == [1, 2, 3, 4]
-
-
-def test_files_beyond_the_episode_list_are_still_shown():
-    merged = anime_library.merge_episodes_absolute(
-        [_file("Season 01 Land of Waves", 1, 9)], _roster(2), ended=False
-    )
-    assert 9 in {row["episode"] for row in merged["episodes"] if not row["missing"]}
 
 
 def test_retry_held_can_be_limited_by_reason(monkeypatch):

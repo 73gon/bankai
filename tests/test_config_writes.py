@@ -23,14 +23,14 @@ def test_a_write_lands_in_the_working_directory_config_in_use(tmp_path, monkeypa
     reset_settings_cache()
 
     assert active_config_path() == work / "config.toml"
-    path, _ = _set_config_value("shoko.api_key", "secret")
+    path, _ = _set_config_value("vpn.api_key", "secret")
 
     assert path == work / "config.toml"
     assert not (tmp_path / "xdg" / "bankai" / "config.toml").exists()
     written = tomllib.loads((work / "config.toml").read_text(encoding="utf-8"))
     # The existing settings survive beside the new one.
     assert written["qbittorrent"]["url"] == "http://127.0.0.1:8080"
-    assert written["shoko"]["api_key"] == "secret"
+    assert written["vpn"]["api_key"] == "secret"
     reset_settings_cache()
 
 

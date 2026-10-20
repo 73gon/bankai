@@ -4,57 +4,43 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 import pytest
 
-from bankai.config import Settings
-from bankai.metadata import anidb
-from bankai.processor import anime as processor
-from bankai.web import anime_library, erai, shoko_catalog
+from bankai.config import reset_settings_cache
+from bankai.web import anime_files, erai
 
 BATCH = "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 12 [1080p][Multiple Subtitle]"
 
 
 @pytest.fixture()
-def library(monkeypatch, tmp_path):
-    """Dr. Stone season 4 in a TVDB folder; AniDB entry 2 is its second half.
+def library(monkeypatch, tmp_path, anilist_data):
+    """Dr. Stone's season in an old folder; AniList entry 1002 is its second cour.
 
-    The folder's name is no AniDB title, so Shoko's links are what say which
-    entry and episode each file is: S04E01-12 entry 1, S04E13-24 entry 2.
+    The folder's name is no AniList title, so the file index is what says
+    which entry and episode each file is: S04E01-12 entry 1001, S04E13-24
+    entry 1002.
     """
+    root = tmp_path / "shows_anime"
+    staging = tmp_path / "staging"
+    monkeypatch.setenv("BANKAI_TRANSFER__ANIME_SHOWS_DIR", str(root))
+    monkeypatch.setenv("BANKAI_OUTPUT__DIRECTORY", str(staging))
+    reset_settings_cache()
+    anilist_data.add(1001, "Dr. Stone: Science Future", episodes=12, start="2025-01-09",
+                     relations=[(1002, "SEQUEL")])
+    anilist_data.add(1002, "Dr. Stone: Science Future Dai 2 Cour", episodes=12, start="2025-07-10",
+                     synonyms=["Dr. Stone: Science Future (2025)"], relations=[(1001, "PREQUEL")])
     state = {"releases": {}, "held": [], "canonical": {}, "anime": {}}
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    root = tmp_path / "shows_anime"
     season = root / "Dr. Stone" / "Season 04"
     season.mkdir(parents=True)
-    links = {}
-    for number in range(1, 25):
-        path = season / f"Dr. Stone - S04E{number:02d}.mkv"
-        path.write_bytes(b"old")
-        links[str(path)] = [(1, number) if number <= 12 else (2, number - 12)]
-    monkeypatch.setattr(shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files=links))
-    monkeypatch.setattr(anime_library, "load_prefs", lambda: {})
-    table = anidb.build_index(
-        ET.fromstring(
-            """<animetitles>
-  <anime aid="1"><title xml:lang="x-jat" type="main">Dr. Stone: Science Future</title></anime>
-  <anime aid="2"><title xml:lang="x-jat" type="main">Dr. Stone: Science Future (2025)</title></anime>
-</animetitles>"""
-        ),
-        ET.fromstring(
-            """<anime-list>
-  <anime anidbid="1" tvdbid="99" defaulttvdbseason="4" episodeoffset="0"/>
-  <anime anidbid="2" tvdbid="99" defaulttvdbseason="4" episodeoffset="12"/>
-</anime-list>"""
-        ),
-    )
-    monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(transfer={"anime_shows_dir": str(root)}))
-    monkeypatch.setattr(erai, "_series_roots", lambda: [root])
-    monkeypatch.setattr(erai, "_release_anidb_id", lambda title, **kw: 2)
+    with anime_files.editing() as rows:
+        for number in range(1, 25):
+            path = season / f"Dr. Stone - S04E{number:02d}.mkv"
+            path.write_bytes(b"old")
+            rows[anime_files.key(path)] = [(1001, number) if number <= 12 else (1002, number - 12)]
     monkeypatch.setattr(
         erai.erai_site,
         "lookup",
@@ -62,7 +48,8 @@ def library(monkeypatch, tmp_path):
     )
     # Episode 3 of the entry, S04E15 on disk, carries a German dub.
     monkeypatch.setattr(erai, "_is_german_dub", lambda path: path.name.endswith("S04E15.mkv"))
-    return {"state": state, "root": root, "season": season}
+    yield {"state": state, "root": root, "staging": staging / "Shows", "season": season}
+    reset_settings_cache()
 
 
 def held(state, info_hash, title):
@@ -75,48 +62,56 @@ def test_a_batch_replaces_its_held_episodes_and_files_but_never_a_german_dub(lib
     # Outside the batch's episodes: stays in review.
     held(library["state"], "3" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 13 [1080p HEVC][Multiple Subtitle].mkv")
 
-    plan = erai._replacement_plan("anidb:2", "a" * 40)
+    plan = erai._replacement_plan("anilist:1002", "a" * 40)
 
     assert (plan["first"], plan["last"], plan["batch"], plan["german"]) == (1, 12, True, True)
+    assert (plan["anilist_id"], plan["anilist_title"]) == (1002, "Dr. Stone: Science Future Dai 2 Cour")
     assert sorted(plan["held"]) == ["1" * 40, "2" * 40]
     assert plan["german_dubs_kept"] == [3]
-    # The entry's half of the TVDB season, S04E13-S04E24, less the dubbed one.
+    # The entry's half of the old folder, S04E13-S04E24, less the dubbed one.
     names = sorted(Path(row["path"]).name for row in plan["files"])
     assert names == [f"Dr. Stone - S04E{n:02d}.mkv" for n in range(13, 25) if n != 15]
 
 
 def test_a_release_of_another_entry_is_refused(library, monkeypatch):
-    monkeypatch.setattr(erai, "_release_anidb_id", lambda title, **kw: 1)
-    with pytest.raises(ValueError, match="not the AniDB entry of this card"):
-        erai._replacement_plan("anidb:2", "a" * 40)
+    monkeypatch.setattr(erai, "_release_anilist_id", lambda title, **kw: 1001)
+    with pytest.raises(ValueError, match="not the AniList entry of this card"):
+        erai._replacement_plan("anilist:1002", "a" * 40)
 
 
 def test_a_release_already_downloading_is_refused(library):
     library["state"]["releases"]["a" * 40] = {"status": "downloading", "title": BATCH}
     with pytest.raises(ValueError, match="already downloading"):
-        erai._replacement_plan("anidb:2", "a" * 40)
+        erai._replacement_plan("anilist:1002", "a" * 40)
+
+
+def _recorded(path: Path, episode: int) -> dict:
+    stat = path.stat()
+    return {"path": str(path), "episode": episode, "size": stat.st_size, "mtime": stat.st_mtime}
+
+
+def _published(root: Path, rel: str, pairs) -> Path:
+    path = root.joinpath(*rel.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"new")
+    anime_files.record(path, pairs)
+    return path
 
 
 def test_the_old_files_go_once_the_new_ones_are_published(library):
     season, root = library["season"], library["root"]
-
-    def recorded(name, episode):
-        stat = (season / name).stat()
-        return {"path": str(season / name), "episode": episode, "size": stat.st_size, "mtime": stat.st_mtime}
-
     release = {
-        "anidb_id": 2,
+        "anilist_id": 1002,
         "replace_files": [
-            recorded("Dr. Stone - S04E13.mkv", 1),
-            recorded("Dr. Stone - S04E14.mkv", 2),
-            recorded("Dr. Stone - S04E16.mkv", 4),
+            _recorded(season / "Dr. Stone - S04E13.mkv", 1),
+            _recorded(season / "Dr. Stone - S04E14.mkv", 2),
+            _recorded(season / "Dr. Stone - S04E16.mkv", 4),
         ],
         "replaced_holds": ["1" * 40],
     }
-    own = root / "Dr. Stone Science Future (2025)"
-    own.mkdir()
-    (own / "Dr. Stone Science Future (2025) - 01.mkv").write_bytes(b"new")
-    (own / "Dr. Stone Science Future (2025) - 04.mkv").write_bytes(b"new")
+    show = "Dr. Stone Science Future"
+    _published(root, f"{show}/Season 02/{show} - S02E01.mkv", [(1002, 1)])
+    _published(root, f"{show}/Season 02/{show} - S02E04.mkv", [(1002, 4)])
     # Episode 4's old file changed since it was recorded: not the one to remove.
     changed = season / "Dr. Stone - S04E16.mkv"
     os.utime(changed, (1, 1))
@@ -129,6 +124,22 @@ def test_the_old_files_go_once_the_new_ones_are_published(library):
     assert (season / "Dr. Stone - S04E14.mkv").exists()
     assert changed.exists()
     assert "replace_files" not in release
+    # The removed file leaves the file index; the new one is what it knows.
+    assert anime_files.on_disk(1002)[1] == [root / show / "Season 02" / f"{show} - S02E01.mkv"]
+    assert "Dr. Stone/Season 04/Dr. Stone - S04E13.mkv" not in anime_files.load()
+
+
+def test_an_old_file_whose_new_copy_is_staged_at_its_place_keeps_its_record(library):
+    """The layout puts the new file where the old one is: the staged copy is that key now."""
+    season = library["season"]
+    old = season / "Dr. Stone - S04E14.mkv"
+    release = {"anilist_id": 1002, "replace_files": [_recorded(old, 2)]}
+    staged = _published(library["staging"], "Dr. Stone/Season 04/Dr. Stone - S04E14.mkv", [(1002, 2)])
+
+    assert erai._finish_replacement(release) == 1
+
+    assert not old.exists()
+    assert anime_files.on_disk(1002)[2] == [staged]
 
 
 def test_a_replacement_that_fails_for_good_puts_the_episodes_back_in_review(library):
@@ -140,28 +151,6 @@ def test_a_replacement_that_fails_for_good_puts_the_episodes_back_in_review(libr
 
     assert state["releases"]["1" * 40]["status"] == "held"
     assert "replaced_holds" not in release
-
-
-def test_a_kept_episode_is_not_published(tmp_path, monkeypatch):
-    sources = []
-    for number in (5, 6):
-        source = tmp_path / "dl" / f"[Erai-raws] Sousou no Frieren - {number:02d} [1080p][HEVC].mkv"
-        source.parent.mkdir(exist_ok=True)
-        source.write_bytes(b"video")
-        sources.append(source)
-    monkeypatch.setattr(processor, "_atomic_copy2", lambda src, dst, **kw: Path(dst).write_bytes(Path(src).read_bytes()))
-
-    outputs = processor._organize_anidb(
-        sources,
-        title="Sousou no Frieren",
-        episode_override=None,
-        library=tmp_path / "library",
-        require_german_subtitles=False,
-        replace_existing=True,
-        keep_episodes=frozenset({6}),
-    )
-
-    assert [path.name for path in outputs] == ["Sousou no Frieren - 05.mkv"]
 
 
 @pytest.mark.parametrize(
@@ -235,7 +224,7 @@ def test_a_batch_held_for_the_card_is_planned_from_its_own_release(library):
     held(library["state"], "c" * 40, title)
     held(library["state"], "1" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 05 [1080p HEVC][Multiple Subtitle].mkv")
 
-    plan = erai._replacement_plan("anidb:2", "c" * 40)
+    plan = erai._replacement_plan("anilist:1002", "c" * 40)
 
     assert (plan["name"], plan["first"], plan["last"], plan["german"]) == (title, 1, 12, True)
     # The batch itself is the release being taken, not one it replaces.
@@ -254,11 +243,30 @@ def test_holds_whose_episodes_are_all_in_the_library_leave_review(library, monke
     held(state, "1" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 02 [1080p HEVC][Multiple Subtitle].mkv")
     held(state, "2" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 03 [1080p HEVC][Multiple Subtitle]")
     held(state, "3" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 05 [1080p HEVC][Multiple Subtitle]")
-    on_disk = {1, 2, 3}
-    monkeypatch.setattr(erai, "_anidb_episode_on_disk", lambda anime, episode: episode in on_disk)
+    on_disk = {(1002, 1), (1002, 2), (1002, 3)}
+    monkeypatch.setattr(erai, "_episode_on_disk", lambda aid, episode: (aid, episode) in on_disk)
 
     assert erai._settle_holds_on_disk(state) == 2
 
     statuses = {h[0]: r["status"] for h, r in state["releases"].items()}
     # Episode 2 and the 01-03 batch are in the library; 04 and 05 are not.
     assert statuses == {"1": "existing", "2": "existing", "3": "held"}
+
+
+def test_a_hold_numbered_past_its_entry_is_checked_as_the_sequel_s_episode(library, monkeypatch):
+    state = library["state"]
+    held(state, "1" * 40, "[Erai-raws] Dr. Stone Science Future - 13 [1080p HEVC][Multiple Subtitle].mkv")
+    monkeypatch.setattr(erai, "_episode_on_disk", lambda aid, episode: (aid, episode) == (1002, 1))
+
+    assert erai._settle_holds_on_disk(state) == 1
+
+
+def test_holds_are_settled_from_the_file_index_itself(library):
+    """The old folder's files are entry 1002's episodes 1-12, by the index."""
+    state = library["state"]
+    held(state, "1" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 05 [1080p HEVC][Multiple Subtitle].mkv")
+    token = erai._DISK_INDEX.set({})
+    try:
+        assert erai._settle_holds_on_disk(state) == 1
+    finally:
+        erai._DISK_INDEX.reset(token)

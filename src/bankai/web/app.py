@@ -593,9 +593,9 @@ class AnimeDownloadRequest(BaseModel):
     detail_url: str
     magnet_uri: str
     info_hash: str
-    anidb_id: int
+    anilist_id: int
     kind: str
-    # The AniDB episode, when the release is one; a batch numbers each file by its name.
+    # The AniList episode, when the release is one; a batch numbers each file by its name.
     episode: int | None = None
 
 
@@ -1587,78 +1587,22 @@ def create_app() -> Any:
         "erai_retry_requests.json",
     )
 
-    # What Shoko knows: which AniDB entry and episode each file is, and each
-    # entry's episode list and cover. ~10 s to read, so refreshed every few
-    # minutes rather than per page, and not invalidated by the pages' own
-    # changes, which it does not depend on.
-    async def _shoko_catalog_payload() -> Any:
-        from bankai.web import shoko_catalog
-
-        catalog = await shoko_catalog.fetch() or shoko_catalog.Catalog()
-        await asyncio.to_thread(shoko_catalog.save_links, catalog)
-        # Choices made in the relation graph for entries since downloaded go
-        # to Shoko now; read again so the cards show where they went.
-        from bankai.web import anime_collections
-
-        try:
-            if await anime_collections.apply_places(catalog):
-                catalog = await shoko_catalog.fetch() or catalog
-        except Exception as exc:
-            log.warning("Could not apply collection choices to Shoko: %s", exc)
-        # The entries shown but not on disk, with their own relations, so a
-        # chain of seasons not downloaded yet is seen whole.
-        await asyncio.to_thread(shoko_catalog.add_known_relations, catalog)
-        shown: set[int] = set(catalog.entries)
-        try:
-            if catalog.groups:
-                found = anime_collections.assign(
-                    catalog, await asyncio.to_thread(anime_collections.load_places)
-                )
-                state = await asyncio.to_thread(erai_mod._load_state)
-                wanted = {aid for aid in found.of if aid not in catalog.entries}
-                wanted |= {int(aid) for aid in state.get("anime") or {} if str(aid).isdigit()}
-                shown |= wanted
-                await shoko_catalog.fill_relations(catalog, wanted)
-        except Exception as exc:
-            log.warning("Could not learn the relations of entries not on disk: %s", exc)
-        # AniList's names and covers for what is shown, and the collections
-        # named after them in Shoko, so Jellyfin shows the same names.
-        from bankai.metadata import anilist
-
-        try:
-            await anilist.ensure(shown)
-            await anime_collections.sync_names(catalog)
-        except Exception as exc:
-            log.warning("Could not take AniList's names: %s", exc)
-        return catalog
-
-    snaps.add(
-        "shoko_catalog",
-        _shoko_catalog_payload,
-        inputs=lambda: _library_generation(),
-        min_interval=300.0,
-        max_age=900.0,
-        encode=False,
-    )
-
     def _library_generation() -> int:
         from bankai.web import library_walk
 
         return library_walk.generation()
 
-    async def _catalog() -> Any:
-        """Shoko's catalogue, or None while Shoko cannot be read."""
-        with suppress(Exception):
-            return (await snaps["shoko_catalog"].get()).value
-        return None
+    def _anilist_stamp() -> tuple:
+        """AniList's data as kept: names, covers, episodes and relations all come from it."""
+        from bankai.metadata import anilist, offline
 
-    def _covers_stamp() -> tuple:
-        from bankai.metadata import anidb_art
-
-        try:
-            return (anidb_art._store().stat().st_mtime_ns,)
-        except OSError:
-            return (None,)
+        stamps: list[int | None] = []
+        for path in (anilist._media_store(), offline._store()):
+            try:
+                stamps.append(path.stat().st_mtime_ns)
+            except OSError:
+                stamps.append(None)
+        return tuple(stamps)
 
     async def _automation_payload() -> dict:
         return await asyncio.to_thread(erai_mod.status)
@@ -1685,19 +1629,16 @@ def create_app() -> Any:
         return erai_mod.retry_held(reason)
 
     async def _review_payload() -> dict:
-        from bankai.metadata import anidb
+        from bankai.metadata import anilist
         from bankai.web.anime_library import enrich_review_rows
 
-        # Cards are AniDB entries; the title index has to be loaded to tell.
-        table = await anidb.index()
-        rows = await enrich_review_rows(
-            await asyncio.to_thread(erai_mod.review_items, None, table), await _catalog()
-        )
+        # Cards are AniList entries; the title index has to be built to tell.
+        table = await anilist.index()
+        rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.review_items, None, table))
         return {"items": rows}
 
     def _review_inputs() -> tuple:
-        # Covers come from Shoko's catalogue and anime-offline-database too.
-        return (_anime_inputs(), snaps["shoko_catalog"].built_at, _covers_stamp())
+        return (_anime_inputs(), _anilist_stamp())
 
     snaps.add(
         "anime_review", _review_payload, inputs=_review_inputs, tags={"anime", "review"},
@@ -1831,12 +1772,12 @@ def create_app() -> Any:
             card = await erai_mod.review_card(info_hash)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if delete_files and not card.startswith("anidb:"):
-            # One card is one season, and without its AniDB entry there is no
+        if delete_files and not card.startswith("anilist:"):
+            # One card is one season, and without its AniList entry there is no
             # telling which files of the show folder are that season's.
             raise HTTPException(
                 status_code=422,
-                detail="Choose this show's AniDB anime first, so only its own files are deleted",
+                detail="Choose this show's AniList entry first, so only its own files are deleted",
             )
 
         async def purge(action: Any) -> dict:
@@ -1871,9 +1812,7 @@ def create_app() -> Any:
     async def _blacklist_payload() -> dict:
         from bankai.web.anime_library import enrich_review_rows
 
-        rows = await enrich_review_rows(
-            await asyncio.to_thread(erai_mod.blacklist_items), await _catalog()
-        )
+        rows = await enrich_review_rows(await asyncio.to_thread(erai_mod.blacklist_items))
         return {"items": rows}
 
     snaps.add(
@@ -1901,79 +1840,69 @@ def create_app() -> Any:
             path="/api/anime/blacklist/remove", work=restore,
         )
 
+    async def _anilist_entry(raw: object) -> Any:
+        """The AniList entry a request names, or a 422."""
+        from bankai.metadata import anilist
+
+        if not str(raw or "").isdigit():
+            raise HTTPException(status_code=422, detail="anilist_id is required")
+        entry = await anilist.anime(int(raw))  # type: ignore[arg-type]
+        if entry is None:
+            raise HTTPException(status_code=422, detail="AniList has no such anime")
+        return entry
+
+    def _anime_choice(entry: Any) -> dict:
+        """An entry as the automation keeps a choice: its titles to match releases by."""
+        from bankai.metadata import anilist
+
+        return {**entry.as_dict(), "title": entry.title, "poster_url": anilist.cover(entry.id)}
+
     @app.post("/api/anime/blacklist/link")
     async def anime_blacklist_link(req: dict) -> dict:
-        """Tie a blacklist card to its AniDB anime, so its releases are matched by title."""
-        from bankai.web import shoko
-
+        """Tie a blacklist card to its AniList entry, so its releases are matched by title."""
         key = str(req.get("key") or "")
-        anidb_id = req.get("anidb_id")
-        if not key or not str(anidb_id or "").isdigit():
-            raise HTTPException(status_code=422, detail="key and anidb_id are required")
+        if not key:
+            raise HTTPException(status_code=422, detail="key and anilist_id are required")
+        entry = await _anilist_entry(req.get("anilist_id"))
         try:
-            anime = await shoko.anidb_anime(int(anidb_id))
-            return await asyncio.to_thread(erai_mod.link_blacklist, key, anime)
-        except shoko.ShokoError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            return await asyncio.to_thread(erai_mod.link_blacklist, key, _anime_choice(entry))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @app.post("/api/anime/mapping/anidb")
-    async def anime_mapping_anidb(req: dict) -> dict:
-        """Remember which AniDB anime a held show name is, and recheck its releases."""
-        from bankai.web import shoko
-
+    @app.post("/api/anime/mapping/anilist")
+    async def anime_mapping_anilist(req: dict) -> dict:
+        """Remember which AniList entry a held show name is, and recheck its releases."""
         release_title = str(req.get("release_title") or "").strip()
-        anidb_id = req.get("anidb_id")
-        if not release_title or not str(anidb_id or "").isdigit():
-            raise HTTPException(status_code=422, detail="release_title and anidb_id are required")
-        try:
-            anime = await shoko.anidb_anime(int(anidb_id))
-        except shoko.ShokoError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        key = await asyncio.to_thread(erai_mod.save_anidb_mapping, release_title, anime)
+        if not release_title:
+            raise HTTPException(status_code=422, detail="release_title and anilist_id are required")
+        entry = await _anilist_entry(req.get("anilist_id"))
+        key = await asyncio.to_thread(erai_mod.save_anilist_mapping, release_title, _anime_choice(entry))
         requested = await asyncio.to_thread(erai_mod.retry_series, release_title)
-        return {"ok": True, "key": key, "requested": requested, "title": anime.get("title")}
+        return {"ok": True, "key": key, "requested": requested, "title": entry.name}
 
-    @app.get("/api/anime/anidb/search")
-    async def anime_anidb_search(q: str = Query(..., min_length=1, max_length=200)) -> dict:
-        """AniDB anime by title, through Shoko's local copy of AniDB's title list."""
-        from bankai.metadata import anidb_art
-        from bankai.web import shoko
+    @app.get("/api/anime/anilist/search")
+    async def anime_anilist_search(q: str = Query(..., min_length=1, max_length=200)) -> dict:
+        """AniList entries by title -- or by an anilist.co link or id -- for picking one by hand."""
+        from bankai.metadata import anilist
 
         try:
-            items = await shoko.search_anidb(q)
-        except shoko.ShokoError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        # Shoko has images only for anime in its collection; the rest -- most
-        # of what is searched for here -- take anime-offline-database's cover.
-        for item in items:
-            item["poster_url"] = item.get("poster_url") or anidb_art.cover(item.get("anidb_id"))
-        return {"items": items}
-
-    @app.get("/api/anime/anidb/image/{source}/{kind}/{image_id}")
-    async def anime_anidb_image(source: str, kind: str, image_id: str) -> Response:
-        """A Shoko image, fetched with bankai's key so the browser needs none."""
-        from bankai.web import shoko
-
-        if not all(part.isalnum() for part in (source, kind, image_id)):
-            raise HTTPException(status_code=422, detail="invalid image reference")
-        try:
-            content, media_type = await shoko.image(source, kind, image_id)
+            items = await anilist.search(q)
         except Exception as exc:
-            raise HTTPException(status_code=404, detail="image unavailable") from exc
-        return Response(content, media_type=media_type, headers={"Cache-Control": "max-age=86400"})
+            raise HTTPException(status_code=502, detail=f"AniList search failed: {exc}") from exc
+        for item in items:
+            item["poster_url"] = item.get("cover")
+        return {"items": items}
 
     @app.get("/api/anime/episode/search")
     async def anime_episode_search(
-        anidb_id: int = Query(..., gt=0),
+        anilist_id: int = Query(..., gt=0),
         episode: int = Query(..., gt=0),
         q: str | None = None,
     ) -> dict:
         from bankai.web.anime_library import search_episode
 
         try:
-            return await search_episode(anidb_id, episode, q)
+            return await search_episode(anilist_id, episode, q)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
@@ -2056,7 +1985,7 @@ def create_app() -> Any:
         # Copies again: queue_covers writes the posters into the rows it gets.
         visible = [dict(row) for row in rows[start : start + page_size]]
         result = {
-            "jobs": await queue_covers(visible, await _catalog()),
+            "jobs": await queue_covers(visible),
             "total": len(rows),
             "counts": counts,
             "page": page,
@@ -2072,9 +2001,10 @@ def create_app() -> Any:
         """Delete a show from the library, remove its torrents, and blacklist it.
 
         The show is looked up here from its card key, never taken as paths from
-        the request: what gets deleted is decided by the library itself.
+        the request: what gets deleted is decided by the library itself. A
+        collection is its own folder; every AniList entry of it is blacklisted.
         """
-        from bankai.web import library_walk, shoko
+        from bankai.web import anime_collections, anime_files, library_walk
 
         key = str(req.get("key") or "").strip()
         if not key:
@@ -2088,32 +2018,30 @@ def create_app() -> Any:
                 raise ValueError("show not found in the library")
             root = Path(listing["root"])
             folders = [root / name for name in show.get("folders") or [] if name]
-            source_title = str(show.get("source_title") or show.get("title") or "")
-            anime = None
-            if shoko.configured():
-                action.detail = "Finding it on AniDB"
-                with suppress(Exception):
-                    anime = shoko.best_match(
-                        await shoko.search_anidb(source_title or show["title"]),
-                        source_title,
-                        str(show.get("title") or ""),
-                    )
+            entries = [int(aid) for aid in show.get("anilist_ids") or []]
             action.detail = f"Blacklisting it and deleting {len(folders)} folder" + (
                 "" if len(folders) == 1 else "s"
             )
             result = await erai_mod.blacklist_show(
                 title=str(show.get("title") or key),
-                source_title=source_title,
-                anidb_ids=list(show.get("anidb_ids") or []),
+                source_title=str(show.get("source_title") or show.get("title") or ""),
+                anilist_ids=entries,
                 folders=folders,
-                anime=anime,
             )
+
+            def forget() -> None:
+                # Gone from disk: out of the index, and the collection with it.
+                with anime_files.editing() as rows:
+                    for rel in [rel for rel, pairs in rows.items() if pairs[0][0] in entries]:
+                        if not anime_files.existing(rel):
+                            del rows[rel]
+                if show.get("collection_id") is not None:
+                    with anime_collections.editing() as store:
+                        store.collections.pop(int(show["collection_id"]), None)
+
+            await asyncio.to_thread(forget)
             library_walk.mark_stale()
-            if shoko.configured():
-                action.detail = "Telling Shoko"
-                with suppress(Exception):
-                    await shoko.forget_missing_files()
-            return {**result, "anidb_id": (anime or {}).get("anidb_id")}
+            return {**result, "anilist_id": show.get("anilist_id")}
 
         return await _run_action(
             req, kind="remove", title="Remove and blacklist: " + _label(req, key),
@@ -2127,7 +2055,7 @@ def create_app() -> Any:
         The paths only pick among the files the library itself lists under the
         show; a path it does not list is refused rather than deleted.
         """
-        from bankai.web import library_walk, shoko
+        from bankai.web import anime_files, library_walk
 
         key = str(req.get("key") or "").strip()
         wanted = {str(raw) for raw in req.get("paths") or [] if str(raw).strip()}
@@ -2156,7 +2084,7 @@ def create_app() -> Any:
                         sidecar
                         for sidecar in path.parent.iterdir()
                         if sidecar.name.startswith(path.stem + ".")
-                        and sidecar.suffix.casefold() in {".ass", ".ssa", ".srt", ".sub", ".vtt"}
+                        and sidecar.suffix.casefold() in {".ass", ".ssa", ".srt", ".sub", ".vtt", ".nfo"}
                     )
             return files
 
@@ -2171,209 +2099,299 @@ def create_app() -> Any:
             # A staged copy keeps a tombstone, as in the movie library.
             if episodes[raw].get("staged"):
                 review_mod.set_stage(raw, "deleted")
+            rel = anime_files.key(raw)
+            if rel is not None and not await asyncio.to_thread(anime_files.existing, rel):
+                await asyncio.to_thread(anime_files.forget, raw)
         library_walk.mark_stale()
-        if shoko.configured():
-            with suppress(Exception):
-                await shoko.forget_missing_files()
         return result
 
     @app.post("/api/anime/library/upgrade-hevc")
     async def anime_library_upgrade_hevc(req: dict) -> dict:
-        """Queue HEVC replacements for one show's published AVC episodes, by its AniDB entries."""
-        anidb_ids = [int(aid) for aid in req.get("anidb_ids") or [] if str(aid).isdigit()]
-        if not anidb_ids:
-            raise HTTPException(status_code=422, detail="anidb_ids are required")
+        """Queue HEVC replacements for one show's published AVC episodes, by its AniList entries."""
+        anilist_ids = [int(aid) for aid in req.get("anilist_ids") or [] if str(aid).isdigit()]
+        if not anilist_ids:
+            raise HTTPException(status_code=422, detail="anilist_ids are required")
         try:
-            return await erai_mod.upgrade_show_to_hevc(anidb_ids)
+            return await erai_mod.upgrade_show_to_hevc(anilist_ids)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    @app.post("/api/anime/collections/title")
-    async def anime_collection_title(req: dict) -> dict:
-        """Name and picture a collection after one of its entries, in Shoko and so in Jellyfin.
+    def _episodes_on_disk() -> Callable[[int], int]:
+        """How far each entry's files go, for the graph's counts and the Season 00 blocks."""
+        from bankai.web import anime_files
 
-        The card is looked up by its key, and the entry must be one Shoko holds
-        in that card's own group: the request picks, the library decides.
-        """
+        held = anime_files.by_entry(anime_files.load())
+        return lambda aid: len(held.get(aid, {}))
+
+    async def _collection_graph(cid: int | None, *, root_aid: int | None = None) -> dict:
+        """A collection's graph -- or an entry's in none -- or a 404 / 409."""
         from bankai.web import anime_collections
 
-        key = str(req.get("key") or "").strip()
-        aid = req.get("anidb_id")
-        if not key or not str(aid or "").isdigit():
-            raise HTTPException(status_code=422, detail="key and anidb_id are required")
-        listing = await _anime_library_payload(show=key)
-        show = next((row for row in listing.get("shows") or [] if row.get("collection_id")), None)
-        catalog = await _catalog()
-        member = next(
-            (row for row in (show or {}).get("collection_entries") or [] if row["anidb_id"] == int(aid)),
-            None,
-        )
-        if show is None or member is None or catalog is None:
-            raise HTTPException(status_code=404, detail="that entry is not one of this collection's")
+        store = await asyncio.to_thread(anime_collections.load)
+        if cid is not None and cid not in store.collections:
+            raise HTTPException(status_code=404, detail="there is no such collection")
+        counted = await asyncio.to_thread(_episodes_on_disk)
         try:
-            group = await anime_collections.set_title_entry(
-                catalog, show["collection_id"], int(aid), member["title"]
+            return await asyncio.to_thread(
+                anime_collections.graph, store, cid, root_aid=root_aid, episodes_on_disk=counted
             )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Shoko did not take it: {exc}") from exc
-        # Shoko's name for the group follows; the next page load reads it.
-        snaps["shoko_catalog"].invalidate()
-        snaps["anime_library"].invalidate()
-        return {"ok": True, "name": (group or {}).get("Name"), "anidb_id": int(aid)}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    async def _collection_graph(group_id: int) -> tuple[Any, dict]:
-        """A collection's catalogue and graph, or a 404 when Shoko has no such group."""
-        from bankai.metadata import anidb as anidb_mod
-        from bankai.web import anime_collections
+    async def _collection_change(change: Callable[[Any], Any]) -> dict:
+        """Change the collections, then lay the ones changed out again on disk.
 
-        catalog = await _catalog()
-        if catalog is None or group_id not in catalog.groups:
-            raise HTTPException(status_code=404, detail="Shoko has no such collection")
-        table = await anidb_mod.index()
-        places = await asyncio.to_thread(anime_collections.load_places)
-        titles = await asyncio.to_thread(anime_collections.load_titles)
-        graph = await asyncio.to_thread(
-            anime_collections.graph, catalog, group_id, table=table, places=places, titles=titles
-        )
-        return catalog, graph
+        ``change`` gets the store, under the state lock, and returns what to
+        answer and the collections it changed.
+        """
+        from bankai.web import anime_collections, anime_layout, library_walk
 
-    async def _collection_change(work: Any) -> dict:
-        """Run one change to a collection; what Shoko answers is the page's to show."""
+        def apply() -> tuple[Any, set[int]]:
+            with anime_collections.editing() as store:
+                answer, changed = change(store)
+                for cid in changed:
+                    if cid in store.collections:
+                        anime_collections.settle_specials(store.collections[cid])
+                return answer, changed
+
         try:
-            result = await work
+            answer, changed = await asyncio.to_thread(apply)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except HTTPException:
-            raise
+        layout: dict = {}
+        try:
+            layout = await anime_layout.relayout(set(changed), label="collection")
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Shoko did not take it: {exc}") from exc
-        snaps["shoko_catalog"].invalidate()
+            log.warning("Could not lay the changed collections out: %s", exc)
+        if layout.get("moved"):
+            library_walk.mark_stale()
         snaps["anime_library"].invalidate()
-        return {"ok": True, "result": result}
+        return {"ok": True, "result": answer, "moved": layout.get("moved", 0)}
 
-    def _picked(req: dict, field_name: str = "anidb_id") -> int:
+    def _picked(req: dict, field_name: str = "anilist_id") -> int:
         raw = req.get(field_name)
         if not str(raw or "").isdigit():
             raise HTTPException(status_code=422, detail=f"{field_name} is required")
         return int(raw)
 
-    async def _entry_graph(aid: int) -> dict:
-        """The graph of an entry not on disk and in no collection, or a 404."""
-        from bankai.metadata import anidb as anidb_mod
+    def _with_files() -> set[int]:
+        from bankai.web import anime_files
+
+        return set(anime_files.by_entry(anime_files.load()))
+
+    @app.post("/api/anime/collections/title")
+    async def anime_collection_title(req: dict) -> dict:
+        """Name and picture a collection after one of its entries, as the library card asks."""
         from bankai.web import anime_collections
 
-        catalog = await _catalog()
-        if catalog is None or not catalog.groups:
-            raise HTTPException(status_code=404, detail="Shoko's collections cannot be read")
-        table = await anidb_mod.index()
-        places = await asyncio.to_thread(anime_collections.load_places)
-        try:
-            return await asyncio.to_thread(
-                anime_collections.graph, catalog, None, table=table, places=places, root_aid=aid
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        key = str(req.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail="key and anilist_id are required")
+        aid = _picked(req)
+        listing = await _anime_library_payload(show=key)
+        show = next((row for row in listing.get("shows") or [] if row.get("collection_id")), None)
+        if show is None or aid not in {row["anilist_id"] for row in show.get("collection_entries") or []}:
+            raise HTTPException(status_code=404, detail="that entry is not one of this collection's")
+        cid = int(show["collection_id"])
+
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.set_title(store, cid, aid)
+            return anime_collections.name(store.collections[cid]), {cid}
+
+        result = await _collection_change(change)
+        return {"ok": True, "name": result["result"], "anilist_id": aid}
 
     @app.get("/api/anime/entries/{aid}/graph")
     async def anime_entry_graph(aid: int) -> dict:
         """An entry in no collection, and what it is related to."""
-        return await _entry_graph(aid)
+        return await _collection_graph(None, root_aid=aid)
 
     @app.post("/api/anime/entries/{aid}/move")
     async def anime_entry_move(aid: int, req: dict) -> dict:
         """An entry in no collection into one of the collections it is related to."""
         from bankai.web import anime_collections
 
-        graph = await _entry_graph(aid)
-        target = _picked(req, "group_id")
+        graph = await _collection_graph(None, root_aid=aid)
+        target = _picked(req, "collection_id")
         if target not in {node["collection_id"] for node in graph["nodes"] if node["collection_id"]}:
             raise HTTPException(status_code=422, detail="that collection is not related to this entry")
 
-        async def move() -> int:
-            await asyncio.to_thread(anime_collections.place, [aid], target)
-            return target
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.include(store, target, aid)
+            return target, {target}
 
-        return await _collection_change(move())
+        return await _collection_change(change)
 
-    @app.get("/api/anime/collections/{group_id}/graph")
-    async def anime_collection_graph(group_id: int) -> dict:
+    @app.get("/api/anime/collections/{cid}/graph")
+    async def anime_collection_graph(cid: int) -> dict:
         """A collection's entries and the entries related to them, as nodes and edges."""
-        return (await _collection_graph(group_id))[1]
+        return await _collection_graph(cid)
 
-    @app.post("/api/anime/collections/{group_id}/split")
-    async def anime_collection_split(group_id: int, req: dict) -> dict:
+    @app.post("/api/anime/collections/{cid}/split")
+    async def anime_collection_split(cid: int, req: dict) -> dict:
         """Entries of a collection into a new one of their own."""
         from bankai.web import anime_collections
 
-        catalog, graph = await _collection_graph(group_id)
-        wanted = {int(aid) for aid in req.get("anidb_ids") or [] if str(aid).isdigit()}
-        members = {node["anidb_id"] for node in graph["nodes"] if node["in_collection"]}
+        graph = await _collection_graph(cid)
+        wanted = {int(aid) for aid in req.get("anilist_ids") or [] if str(aid).isdigit()}
+        members = {node["anilist_id"] for node in graph["nodes"] if node["in_collection"]}
         if not wanted or not wanted <= members:
             raise HTTPException(status_code=422, detail="pick entries of this collection to split off")
         if wanted == members:
             raise HTTPException(status_code=422, detail="that is the whole collection; nothing would be split")
-        return await _collection_change(anime_collections.split(catalog, group_id, sorted(wanted)))
 
-    @app.post("/api/anime/collections/{group_id}/exclude")
-    async def anime_collection_exclude(group_id: int, req: dict) -> dict:
-        """One entry out of a collection: on disk into a group of its own, else into none."""
+        def change(store: Any) -> tuple[Any, set[int]]:
+            new = anime_collections.split(store, cid, sorted(wanted))
+            return new, {cid, new}
+
+        return await _collection_change(change)
+
+    @app.post("/api/anime/collections/{cid}/exclude")
+    async def anime_collection_exclude(cid: int, req: dict) -> dict:
+        """One entry out of a collection: with files, into one of its own; without, into none."""
         from bankai.web import anime_collections
 
-        catalog, graph = await _collection_graph(group_id)
+        graph = await _collection_graph(cid)
         aid = _picked(req)
-        members = {node["anidb_id"] for node in graph["nodes"] if node["in_collection"]}
+        members = {node["anilist_id"] for node in graph["nodes"] if node["in_collection"]}
         if aid not in members or members == {aid}:
             raise HTTPException(status_code=422, detail="that entry is not one this collection can lose")
-        return await _collection_change(anime_collections.split(catalog, group_id, [aid]))
+        with_files = await asyncio.to_thread(_with_files)
 
-    @app.post("/api/anime/collections/{group_id}/include")
-    async def anime_collection_include(group_id: int, req: dict) -> dict:
+        def change(store: Any) -> tuple[Any, set[int]]:
+            new = anime_collections.exclude(store, cid, [aid], with_files=with_files)
+            return new, {cid} | ({new} if new is not None else set())
+
+        return await _collection_change(change)
+
+    @app.post("/api/anime/collections/{cid}/include")
+    async def anime_collection_include(cid: int, req: dict) -> dict:
         """Pull a related entry into a collection."""
         from bankai.web import anime_collections
 
-        catalog, graph = await _collection_graph(group_id)
+        graph = await _collection_graph(cid)
         aid = _picked(req)
-        suggested = {node["anidb_id"] for node in graph["nodes"] if not node["in_collection"]}
-        if aid not in suggested:
+        nodes = {node["anilist_id"]: node for node in graph["nodes"] if not node["in_collection"]}
+        if aid not in nodes:
             raise HTTPException(status_code=422, detail="that entry is not related to this collection")
-        return await _collection_change(anime_collections.include(catalog, group_id, aid))
+        source = nodes[aid].get("collection_id")
 
-    @app.post("/api/anime/collections/{group_id}/merge")
-    async def anime_collection_merge(group_id: int, req: dict) -> dict:
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.include(store, cid, aid)
+            return aid, {cid} | ({source} if source else set())
+
+        return await _collection_change(change)
+
+    @app.post("/api/anime/collections/{cid}/merge")
+    async def anime_collection_merge(cid: int, req: dict) -> dict:
         """Every entry of another collection into this one."""
         from bankai.web import anime_collections
 
-        catalog, _graph = await _collection_graph(group_id)
-        return await _collection_change(anime_collections.merge(catalog, group_id, _picked(req, "group_id")))
+        await _collection_graph(cid)
+        other = _picked(req, "other_id")
 
-    @app.post("/api/anime/collections/{group_id}/title")
-    async def anime_collection_title_entry(group_id: int, req: dict) -> dict:
-        """Name and picture a collection after one of its entries on disk."""
+        def change(store: Any) -> tuple[Any, set[int]]:
+            return anime_collections.merge(store, cid, other), {cid}
+
+        return await _collection_change(change)
+
+    @app.post("/api/anime/collections/{cid}/title")
+    async def anime_collection_title_entry(cid: int, req: dict) -> dict:
+        """Name and picture a collection after one of its entries; its seasons follow that entry's chain."""
         from bankai.web import anime_collections
 
-        catalog, graph = await _collection_graph(group_id)
+        graph = await _collection_graph(cid)
         aid = _picked(req)
-        node = next((row for row in graph["nodes"] if row["anidb_id"] == aid and row["in_collection"]), None)
-        if node is None:
+        if not any(row["anilist_id"] == aid and row["in_collection"] for row in graph["nodes"]):
             raise HTTPException(status_code=422, detail="only an entry of this collection can name it")
-        return await _collection_change(
-            anime_collections.set_title_entry(catalog, group_id, aid, node["title"])
-        )
 
-    @app.post("/api/anime/library/link")
-    async def anime_library_link(req: dict) -> dict:
-        """Link a show's folders to an AniDB entry, for the files Shoko has not matched."""
-        from bankai.web.anime_library import save_folder_link
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.set_title(store, cid, aid)
+            return anime_collections.name(store.collections[cid]), {cid}
 
-        folders = [str(name) for name in req.get("folders") or [] if str(name).strip()]
-        anidb_id = req.get("anidb_id")
-        if not folders or not str(anidb_id or "").isdigit():
-            raise HTTPException(status_code=422, detail="folders and anidb_id are required")
-        await asyncio.to_thread(save_folder_link, folders, int(anidb_id))
+        return await _collection_change(change)
+
+    @app.post("/api/anime/collections/{cid}/name")
+    async def anime_collection_name(cid: int, req: dict) -> dict:
+        """Name a collection by hand -- its folder and Jellyfin's show follow -- or (null) by AniList again."""
+        from bankai.web import anime_collections
+
+        await _collection_graph(cid)
+        raw = req.get("name")
+        name = str(raw).strip()[:200] if raw is not None else None
+
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.set_name(store, cid, name)
+            return anime_collections.name(store.collections[cid]), {cid}
+
+        result = await _collection_change(change)
+        return {**result, "name": result["result"]}
+
+    async def _relayout_entries(aids: set[int]) -> dict:
+        """Entries just matched by hand: into their collections, and their files into place."""
+        from bankai.web import anime_collections, anime_layout, library_walk
+
+        await anime_layout.ensure_metadata(aids)
+
+        def regroup() -> set[int]:
+            with anime_collections.editing() as store:
+                anime_collections.join(sorted(aids), store)
+                cids = {store.collection_of(aid).id for aid in aids if store.collection_of(aid)}
+                for cid in cids:
+                    anime_collections.settle_specials(store.collections[cid])
+                return cids
+
+        cids = await asyncio.to_thread(regroup)
+        result = await anime_layout.relayout(cids, label="match")
+        library_walk.mark_stale()
         snaps["anime_library"].invalidate()
-        return {"ok": True, "folders": folders, "anidb_id": int(anidb_id)}
+        return result
+
+    @app.post("/api/anime/library/match")
+    async def anime_library_match(req: dict) -> dict:
+        """The files of an Unmatched card become one AniList entry's episodes, and move into place.
+
+        The folders only pick among the files the library itself shows on an
+        Unmatched card; the episode is the number in each file's name.
+        """
+        from bankai.web.anime_library import match_files
+
+        folders = {str(name) for name in req.get("folders") or [] if str(name).strip()}
+        if not folders:
+            raise HTTPException(status_code=422, detail="folders and anilist_id are required")
+        entry = await _anilist_entry(req.get("anilist_id"))
+        listing = await _anime_library_payload(include_entries=True)
+        unmatched = {name for row in listing.get("shows") or [] if row.get("unmatched") for name in row["folders"]}
+        if not folders <= unmatched:
+            raise HTTPException(status_code=422, detail="only the folders of an Unmatched card can be matched")
+        from bankai.web import anime_files
+
+        index = await asyncio.to_thread(anime_files.load)
+        paths = [
+            Path(row["path"])
+            for row in listing.get("entries") or []
+            if row["series"] in folders and (anime_files.key(row["path"]) or "") not in index
+        ]
+        result = await asyncio.to_thread(match_files, paths, entry.id)
+        layout = await _relayout_entries({entry.id}) if result["matched"] else {}
+        return {"ok": True, "anilist_id": entry.id, **result, "moved": layout.get("moved", 0)}
+
+    @app.post("/api/anime/library/rematch")
+    async def anime_library_rematch(req: dict) -> dict:
+        """Every file of one AniList entry becomes another's, episode for episode, and moves into place."""
+        from bankai.web.anime_library import rematch_entry
+
+        source = _picked(req, "from_id")
+        entry = await _anilist_entry(req.get("to_id"))
+        if entry.id == source:
+            raise HTTPException(status_code=422, detail="that is the same entry")
+        count = await asyncio.to_thread(rematch_entry, source, entry.id)
+        if not count:
+            raise HTTPException(status_code=422, detail="that entry has no files to rematch")
+        layout = await _relayout_entries({entry.id})
+        return {"ok": True, "anilist_id": entry.id, "files": count, "moved": layout.get("moved", 0)}
 
     @app.get("/api/anime/library", response_model=None)
     async def anime_library(
@@ -2442,7 +2460,6 @@ def create_app() -> Any:
             root,
             include_episodes=show is not None,
             only_key=show,
-            catalog=await _catalog(),
         )
         erai_mod.mark_blacklisted_shows(shows)
         # A blacklisted show with nothing on disk is just a list of episodes
@@ -2467,20 +2484,13 @@ def create_app() -> Any:
     def _anime_library_inputs() -> tuple:
         from bankai.web import library_walk
 
-        return (
-            library_walk.generation(),
-            _anime_library_files(),
-            snaps["shoko_catalog"].built_at,
-            _covers_stamp(),
-        )
+        return (library_walk.generation(), _anime_library_files(), _anilist_stamp())
 
     _anime_library_files = _anime_state_files(
         "erai_series_policies.json",
         "anime_codecs.json",
-        "anime_library_prefs.json",
-        "anime_collection_places.json",
-        "anime_collection_titles.json",
-        "anime_collection_names.json",
+        "anime_files.json",
+        "anime_collections.json",
         "review.json",
     )
     snaps.add(
@@ -2555,9 +2565,8 @@ def create_app() -> Any:
 
     @app.post("/api/anime/download")
     async def anime_download(req: AnimeDownloadRequest) -> dict:
-        """Download one Nyaa release as the AniDB entry picked for it."""
-        from bankai.metadata import anidb as anidb_mod
-        from bankai.metadata import anidb_art
+        """Download one Nyaa release as the AniList entry picked for it."""
+        from bankai.metadata import anilist
 
         title = req.release_title.strip()
         if not title:
@@ -2578,22 +2587,22 @@ def create_app() -> Any:
             f"magnet:?xt=urn:btih:{req.info_hash.casefold()}"
         ):
             raise HTTPException(status_code=422, detail="magnet does not match the Nyaa torrent")
-        entry = await anidb_mod.anime(req.anidb_id)
+        entry = await anilist.anime(req.anilist_id)
         if entry is None:
-            raise HTTPException(status_code=422, detail="this AniDB entry is not in AniDB's title list")
-        english = entry.english_title or entry.title
+            raise HTTPException(status_code=422, detail="AniList has no such anime")
+        english = entry.name
         episode = req.episode
         if req.kind == "show" and episode is None:
             # The release's own number, as the automation reads it, when it is
             # this entry's; a batch has none and numbers each file by its name.
-            match = anime_mod.anidb_match(
-                title, table=await anidb_mod.index(), mappings=await asyncio.to_thread(erai_mod._load_mappings)
+            match = anime_mod.anilist_match(
+                title, table=await anilist.index(), mappings=await asyncio.to_thread(erai_mod._load_mappings)
             )
-            if match and match["anidb_id"] == entry.aid:
+            if match and match["anilist_id"] == entry.id:
                 episode = match["episode"]
         if req.kind == "show":
             # Further releases under this name are this entry too.
-            await asyncio.to_thread(erai_mod.save_anidb_mapping, title, entry.as_dict())
+            await asyncio.to_thread(erai_mod.save_anilist_mapping, title, _anime_choice(entry))
         args = [
             "anime-download",
             "--release-title",
@@ -2608,14 +2617,14 @@ def create_app() -> Any:
             req.info_hash.casefold(),
             "--kind",
             req.kind,
-            "--anidb-id",
-            str(entry.aid),
-            "--anidb-title",
-            entry.title,
+            "--anilist-id",
+            str(entry.id),
+            "--anilist-title",
+            entry.name,
             "--english-title",
             english,
         ]
-        year = anidb_art.facts(entry.aid).get("year")
+        year = anilist.year(entry.id)
         if req.kind == "movie" and year:
             args.extend(["--year", str(year)])
         if episode is not None:
@@ -3170,15 +3179,10 @@ def create_app() -> Any:
         in qBittorrent. Starting a second download in any of those cases is
         how one episode ends up as several rows.
         """
-        aid = bgjobs_mod.argument_value(args, "--anidb-id") or ""
+        aid = bgjobs_mod.argument_value(args, "--anilist-id") or ""
         episode = bgjobs_mod.argument_value(args, "--episode") or ""
         if aid.isdigit() and episode.isdigit():
-            from bankai.metadata import anidb as anidb_mod
-
-            entry = await anidb_mod.anime(int(aid))
-            on_disk = entry is not None and await asyncio.to_thread(
-                erai_mod._anidb_episode_on_disk, entry, int(episode)
-            )
+            on_disk = await asyncio.to_thread(erai_mod._episode_on_disk, int(aid), int(episode))
             if on_disk:
                 return "The episode is already in the library"
 
@@ -3217,19 +3221,15 @@ def create_app() -> Any:
 
         args = list(job.args or [])
         if args and args[0] == "anime-download":
-            from bankai.metadata import anidb as anidb_mod
-            from bankai.web.anidb_migration import anidb_job_args
+            from bankai.web.anilist_migration import anilist_job_args
 
-            # A job from before anime moved to AniDB names its episode by TVDB.
-            converted = (
-                anidb_job_args(args, await anidb_mod.index())
-                if "--tvdb-id" in args and "--anidb-id" not in args
-                else args
-            )
+            # A job from before anime moved to AniList names its episode by
+            # AniDB, or by TVDB before that.
+            converted = anilist_job_args(args) if "--anilist-id" not in args else args
             if converted is None:
                 raise HTTPException(
                     status_code=409,
-                    detail="This job names its episode by TVDB and AniDB cannot place it; "
+                    detail="This job names its episode by AniDB or TVDB and AniList cannot place it; "
                     "find the release again from Anime Search",
                 )
             args = converted

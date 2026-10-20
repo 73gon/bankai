@@ -1,8 +1,9 @@
 """Direct Nyaa download path for anime movies and episode packs.
 
 Unlike the dub pipeline, this worker does not extract, sync, transcode, or
-remux.  It downloads the selected Nyaa torrent and files each video under its
-AniDB entry, numbered as AniDB numbers it, marking them approved immediately.
+remux.  It downloads the selected Nyaa torrent and files each video as an
+episode of its AniList entry, where the library layout puts that episode
+(see anime_layout), marking them approved immediately.
 """
 
 from __future__ import annotations
@@ -13,19 +14,20 @@ import os
 import re
 import shutil
 import subprocess
-
-from pathlib import Path
+from contextlib import suppress
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from bankai.backend.transfer import _copy2_with_progress
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.processor.naming import render_anidb_episode_path, render_movie_path
+from bankai.metadata import anilist
+from bankai.processor.naming import render_movie_path
 from bankai.torrent import actions as torrent_actions
 from bankai.torrent.matcher import find_video_files, pick_movie_file
 from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError, TorrentStatus
-from bankai.web import review
+from bankai.web import anime_files, anime_layout, review
 
 log = get_logger(__name__)
 
@@ -51,48 +53,73 @@ def batch_override(episode_override: int | None, sources: list[Path]) -> int | N
     return episode_override
 
 
-def anidb_episode_number(filename: str, *, episode_override: int | None = None) -> int | None:
-    """The AniDB episode a file is: its own number, as Erai numbers per AniDB entry."""
+def episode_number(filename: str, *, episode_override: int | None = None) -> int | None:
+    """The episode a file is: its own number, as Erai numbers per AniList entry."""
     if episode_override is not None:
         return episode_override
     match = _ANIME_EPISODE.search(Path(filename).stem)
     return int(match.group("episode")) if match else None
 
 
-def _organize_anidb(
+def _staged_path(key: str, suffix: str) -> Path:
+    """Where a file of this layout key is staged, with the file's own suffix."""
+    return anime_files.staging_root().joinpath(*PurePosixPath(key).parts).with_suffix(suffix.casefold())
+
+
+async def _organize_show(
     sources: list[Path],
     *,
-    title: str,
+    anilist_id: int,
     episode_override: int | None,
-    library: Path,
     require_german_subtitles: bool,
     replace_existing: bool,
     keep_episodes: frozenset[int] = frozenset(),
-) -> list[Path]:
-    """Stage each video under its AniDB folder.
+) -> list[tuple[Path, int, int]]:
+    """Stage each video where the layout puts its episode, and say so in the file index.
 
-    ``keep_episodes`` are left out: a replacement taken over a whole season
-    must not publish over the episodes whose file carries a German dub.
+    Returns each staged file with the AniList entry and episode it is.
+    A batch numbered straight through -- a second cour's first episode
+    called "13" -- has each file past its entry's end settled into the
+    sequel, as the automation settles a single release. ``keep_episodes``
+    are left out: a replacement taken over a whole season must not publish
+    over the episodes whose file carries a German dub.
     """
     if episode_override is not None and len(sources) != 1:
         raise RuntimeError(
             "a manual episode override requires a torrent containing exactly one video file"
         )
-    outputs: list[Path] = []
-    total = max(1, len(sources))
-    for index, source in enumerate(sources):
-        episode = anidb_episode_number(source.name, episode_override=episode_override)
+    # The entry, its relations and its sequels: what settling and the layout read.
+    await anime_layout.ensure_metadata([anilist_id])
+    entry = await anilist.anime(anilist_id)
+    placed: list[tuple[Path, int, int]] = []
+    for source in sources:
+        episode = episode_number(source.name, episode_override=episode_override)
         if episode is None:
             log.warning("[anime] skipped file with no episode number: %s", source.name)
             continue
         if episode in keep_episodes:
             log.info("[anime] episode %d kept as it is (German dub): %s", episode, source.name)
             continue
+        aid, number = anilist_id, episode
+        if episode_override is None and entry is not None:
+            settled, number = anilist.settle_in(entry, episode)
+            aid = settled.id
+            if aid != anilist_id:
+                log.info("[anime] %s is episode %d of its sequel, AniList %d", source.name, number, aid)
+        placed.append((source, aid, number))
+    targets: dict[int, dict[int, str]] = {}
+    for aid in dict.fromkeys(aid for _source, aid, _number in placed):
+        numbers = sorted({number for _source, other, number in placed if other == aid})
+        targets[aid] = await anime_layout.place_new(aid, numbers)
+    outputs: list[tuple[Path, int, int]] = []
+    total = max(1, len(placed))
+    for index, (source, aid, number) in enumerate(placed):
+        key = targets[aid].get(number)
+        if not key:
+            raise RuntimeError(f"the library layout has no place for AniList {aid} episode {number}")
         if require_german_subtitles:
             _require_german_subtitles(source)
-        destination = render_anidb_episode_path(
-            library=library, title=title, episode=episode
-        ).with_suffix(source.suffix.casefold())
+        destination = _staged_path(key, source.suffix)
         _copy_with_sidecars(
             source,
             destination,
@@ -100,8 +127,32 @@ def _organize_anidb(
             end_percent=(index + 1) / total * 100.0,
             replace=replace_existing,
         )
-        outputs.append(destination)
+        anime_files.record(destination, [(aid, number)])
+        outputs.append((destination, aid, number))
     return outputs
+
+
+def _current_paths(published: list[tuple[Path, int, int]]) -> list[Path]:
+    """Where each published file is now: a re-layout may have renamed it.
+
+    Followed by its episode in the file index, under the same root.
+    """
+    current: list[Path] = []
+    for path, aid, episode in published:
+        if path.exists():
+            current.append(path)
+            continue
+        root = next(
+            (base for base in (anime_files.anime_root(), anime_files.staging_root()) if path.is_relative_to(base)),
+            None,
+        )
+        moved = [
+            candidate
+            for candidate in anime_files.on_disk(aid).get(episode, [])
+            if root is None or candidate.is_relative_to(root)
+        ]
+        current.append(moved[0] if moved else path)
+    return current
 
 
 def _mapped_path(raw: str) -> Path:
@@ -278,8 +329,8 @@ async def download_anime(
     english_title: str,
     year: int | None,
     episode_override: int | None = None,
-    anidb_id: int | None = None,
-    anidb_title: str | None = None,
+    anilist_id: int | None = None,
+    anilist_title: str | None = None,
     require_german_subtitles: bool = False,
     cleanup_torrent: bool = False,
     replace_existing: bool = False,
@@ -287,8 +338,8 @@ async def download_anime(
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
-    if media_kind == "show" and not anidb_id:
-        raise ValueError("an anime show is filed by its AniDB entry: --anidb-id is required")
+    if media_kind == "show" and not anilist_id:
+        raise ValueError("an anime show is filed by its AniList entry: --anilist-id is required")
     if not info_hash or not re.fullmatch(r"[0-9a-fA-F]{40}", info_hash):
         raise ValueError("Nyaa info hash is invalid")
 
@@ -347,6 +398,8 @@ async def download_anime(
         log.info('BANKAI_STAGE step=2 total=%d key=organize label="Organize"', total_steps)
         root = _download_root(status)
         outputs: list[Path] = []
+        # Each show file with the AniList entry and episode it is.
+        episodes: list[tuple[Path, int, int]] = []
         output = settings.output
         if media_kind == "movie":
             source = pick_movie_file(root)
@@ -367,17 +420,16 @@ async def download_anime(
             outputs.append(destination)
         else:
             sources = find_video_files(root)
-            outputs.extend(
-                _organize_anidb(
-                    sources,
-                    title=anidb_title or english_title,
-                    episode_override=batch_override(episode_override, sources),
-                    library=output.directory,
-                    require_german_subtitles=require_german_subtitles,
-                    replace_existing=replace_existing,
-                    keep_episodes=keep_episodes,
-                )
+            log.info("[anime] filing as AniList %d: %s", anilist_id, anilist_title or english_title)
+            episodes = await _organize_show(
+                sources,
+                anilist_id=int(anilist_id),
+                episode_override=batch_override(episode_override, sources),
+                require_german_subtitles=require_german_subtitles,
+                replace_existing=replace_existing,
+                keep_episodes=keep_episodes,
             )
+            outputs.extend(path for path, _aid, _episode in episodes)
         if not outputs:
             raise RuntimeError("the selected Nyaa release contained no recognizable anime files")
 
@@ -401,6 +453,14 @@ async def download_anime(
             # Publish external subtitles first: a failed subtitle copy must
             # never leave a newly published video without its verified track.
             items = await asyncio.to_thread(plan_transfer, outputs, kind="anime")
+            if replace_existing and media_kind == "show":
+                # An upgrade is published over the episode it replaces: the
+                # layout puts it at the same place, where Transfer would
+                # otherwise skip it as already there. The staged copy stays
+                # until it has moved, so a failed move loses nothing.
+                for item in items:
+                    with suppress(OSError):
+                        item.destination.unlink(missing_ok=True)
             for item in items:
                 for sidecar in item.source.parent.glob(f"{item.source.stem}.*"):
                     if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
@@ -433,7 +493,23 @@ async def download_anime(
                         sidecar.unlink()
                 review.set_stage(item.source, "transferred")
                 review.set_transfer(item.source, "done", percent=100)
-            outputs = [item.destination for item in [*result.transferred, *result.skipped]]
+            moved = {item.source: item.destination for item in [*result.transferred, *result.skipped]}
+            outputs = list(moved.values())
+            episodes = [(moved[path], aid, episode) for path, aid, episode in episodes if path in moved]
+
+        if episodes:
+            # Its collection laid out again: NFO files for the new episodes,
+            # and any renumbering their arrival brings.
+            collections = {
+                cid for aid in {aid for _path, aid, _episode in episodes}
+                if (cid := anime_layout.collection_of_entry(aid)) is not None
+            }
+            try:
+                await anime_layout.relayout(collections)
+            except Exception as exc:
+                # Published either way; the next layout pass catches up.
+                log.warning("[anime] could not lay out the collection: %s", exc)
+            outputs = _current_paths(episodes)
 
         owned_by_bankai = cleanup_torrent or require_german_subtitles or not existed_before
         if settings.paths.cleanup_after_success and torrent_hash and owned_by_bankai:
@@ -449,11 +525,11 @@ async def download_anime(
         return {
             "final_path": str(outputs[0]),
             "paths": [str(path) for path in outputs],
-            "anidb_id": anidb_id,
+            "anilist_id": anilist_id,
             "torrent_hash": torrent_hash,
         }
     finally:
         await qbit.aclose()
 
 
-__all__ = ["anidb_episode_number", "download_anime"]
+__all__ = ["download_anime", "episode_number"]

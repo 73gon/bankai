@@ -330,27 +330,19 @@ def test_rss_setting_rejects_non_erai_nyaa_feeds(client: TestClient, url: str) -
     assert response.status_code == 422
 
 
-def test_queue_cover_comes_from_the_job_s_anidb_entry(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+def test_queue_cover_comes_from_the_job_s_anilist_entry(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, anilist_data
 ) -> None:
     """A season's own cover, not one poster for every season of the show."""
-    from bankai.metadata import anidb, anidb_art
-
-    entry = anidb.AniDBAnime(
-        aid=17765, title="Bleach: Sennen Kessen Hen - Ketsubetsu Tan",
-        english_title="Bleach: Thousand-Year Blood War - The Separation", titles=(),
-    )
-
-    async def index():
-        return anidb._Index(anime={entry.aid: entry}, exact={}, loose={}, by_tvdb={})
-
-    monkeypatch.setattr(anidb, "index", index)
-    monkeypatch.setattr(
-        anidb_art, "cover", lambda aid: "https://example.com/tybw2.jpg" if int(aid) == 17765 else None
+    anilist_data.add(
+        159322,
+        "Bleach: Sennen Kessen-hen - Ketsubetsu-tan",
+        english="Bleach: Thousand-Year Blood War - The Separation",
+        cover="https://example.com/tybw2.jpg",
     )
     monkeypatch.setattr(
         "bankai.web.jobs.anime_snapshot",
-        lambda: [{"id": "anime", "title": "Bleach - 02", "anidb_id": "17765"}],
+        lambda: [{"id": "anime", "title": "Bleach - 02", "anilist_id": "159322"}],
     )
     row = client.get("/api/anime/queue").json()["jobs"][0]
     assert row["poster_url"] == "https://example.com/tybw2.jpg"
@@ -404,25 +396,16 @@ def test_staged_and_duplicate_files_do_not_inflate_download_count():
     assert result["episodes"][0]["path"] == "final"
 
 
-def test_missing_episode_search_keeps_only_that_anidb_episode(monkeypatch):
+def test_missing_episode_search_keeps_only_that_anilist_episode(monkeypatch, anilist_data):
     """Searched by the entry's names, each result checked to be this very episode."""
     from dataclasses import replace
-    from xml.etree import ElementTree as ET
 
-    from bankai.metadata import anidb
     from bankai.web import anime, anime_library, erai
 
-    table = anidb.build_index(
-        ET.fromstring(
-            """<animetitles>
-  <anime aid="17765"><title xml:lang="x-jat" type="main">Bleach: Sennen Kessen Hen - Ketsubetsu Tan</title></anime>
-</animetitles>"""
-        ),
-        ET.fromstring("<anime-list/>"),
-    )
+    anilist_data.add(159322, "Bleach: Sennen Kessen-hen - Ketsubetsu-tan", episodes=13)
     sample = anime.NyaaEntry(
         1,
-        "[Erai-raws] Bleach: Sennen Kessen Hen - Ketsubetsu Tan - 01 [1080p][MultiSub]",
+        "[Erai-raws] Bleach: Sennen Kessen-hen - Ketsubetsu-tan - 01 [1080p][MultiSub]",
         "https://nyaa.si/download/1.torrent",
         "https://nyaa.si/view/1",
         "magnet:?xt=urn:btih:" + "1" * 40,
@@ -443,9 +426,6 @@ def test_missing_episode_search_keeps_only_that_anidb_episode(monkeypatch):
     )
     searched = []
 
-    async def index():
-        return table
-
     async def fetch(client, query, *args):
         searched.append(query)
         return [
@@ -453,14 +433,13 @@ def test_missing_episode_search_keeps_only_that_anidb_episode(monkeypatch):
             replace(sample, id=2, info_hash="2" * 40, title=sample.title.replace(" - 01", " - 02")),
         ]
 
-    monkeypatch.setattr(anidb, "index", index)
     monkeypatch.setattr(anime, "_fetch_rss", fetch)
     monkeypatch.setattr(erai, "_load_state", erai._default_state)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
-    result = asyncio.run(anime_library.search_episode(17765, 1))
-    assert searched == ['"Bleach: Sennen Kessen Hen - Ketsubetsu Tan" "- 01"']
+    result = asyncio.run(anime_library.search_episode(159322, 1))
+    assert searched == ['"Bleach: Sennen Kessen-hen - Ketsubetsu-tan" "- 01"']
     assert len(result["items"]) == 1
-    assert result["items"][0]["anidb"]["anidb_id"] == 17765
+    assert result["items"][0]["anilist"]["anilist_id"] == 159322
     assert result["items"][0]["episode"] == 1
 
 

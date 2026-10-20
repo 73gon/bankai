@@ -111,7 +111,7 @@ export function ReplaceDialog({
           <ul className='flex flex-col gap-1.5 text-sm'>
             <li>
               Downloads {episodesLabel([plan.first, plan.last])} of{' '}
-              <span className='font-medium text-foreground'>{plan.anidb_title}</span>
+              <span className='font-medium text-foreground'>{plan.anilist_title}</span>
               {plan.german ? ', with German subtitles as listed for it.' : '. No German subtitles are listed for it; it is taken as it is.'}
             </li>
             <li>{plan.held_count ? `Replaces ${plan.held_count} held release${plan.held_count === 1 ? '' : 's'} in review.` : 'No other held release of this card falls in its episodes.'}</li>

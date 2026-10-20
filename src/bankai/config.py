@@ -229,18 +229,6 @@ class VpnSettings(BaseModel):
     api_key: str = ""
 
 
-class ShokoSettings(BaseModel):
-    """Shoko Server, bankai's source of AniDB data for anime.
-
-    Shoko already holds AniDB's full title list and caches anime data within
-    AniDB's rate limits, so bankai asks it rather than AniDB directly. The key
-    comes from ``bankai shoko login``, which never stores the password.
-    """
-
-    url: str = "http://127.0.0.1:8111"
-    api_key: str = ""
-
-
 class WebSettings(BaseModel):
     """Settings for the bankai web UI / HTTP API server."""
 
@@ -289,7 +277,6 @@ class Settings(BaseSettings):
     notifications: NotificationsSettings = Field(default_factory=NotificationsSettings)
     web: WebSettings = Field(default_factory=WebSettings)
     vpn: VpnSettings = Field(default_factory=VpnSettings)
-    shoko: ShokoSettings = Field(default_factory=ShokoSettings)
 
     @classmethod
     def settings_customise_sources(

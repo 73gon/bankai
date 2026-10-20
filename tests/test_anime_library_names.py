@@ -1,14 +1,12 @@
-"""Show identity used to group the anime library."""
+"""Names in the library: how a show is told apart, and what each tab of a card is called."""
 
 from __future__ import annotations
 
 import time
-from xml.etree import ElementTree as ET
-from xml.sax.saxutils import escape
 
 import pytest
 
-from bankai.web.anime_library import _name
+from bankai.web.anime_library import _name, tab_labels
 
 
 # Every pair below appeared twice in the library: once as the folder holding
@@ -173,288 +171,50 @@ def test_merge_episodes_marks_each_episode_with_its_codec():
     assert by_number[3]["codec"] is None
 
 
-def _table(*entries):
-    """An AniDB title index of (aid, main title, English title or None)."""
-    from bankai.metadata import anidb
-
-    nodes = "".join(
-        f'<anime aid="{aid}"><title xml:lang="x-jat" type="main">{escape(main)}</title>'
-        + (f'<title xml:lang="en" type="official">{escape(english)}</title>' if english else "")
-        + "</anime>"
-        for aid, main, english in entries
-    )
-    return anidb.build_index(ET.fromstring(f"<animetitles>{nodes}</animetitles>"), None)
+# -- Tabs: one per AniList entry of a collection ------------------------------------------
 
 
-def _run_library(
-    monkeypatch,
-    folders,
-    *,
-    titles=(),
-    taken=None,
-    policies=None,
-    links=None,
-    catalog=None,
-    only_key=None,
-    reads=None,
-    places=None,
-):
-    """group_shows over a library holding ``folders`` -> {folder: [episode, ...]}.
+def test_a_tab_is_named_without_the_collections_own_name(anilist_data):
+    anilist_data.add(1, "Shingeki no Kyojin", english="Attack on Titan", start="2013-04-07")
+    anilist_data.add(2, "Shingeki no Kyojin Season 2", english="Attack on Titan Season 2", start="2017-04-01")
+    anilist_data.add(3, "Shingeki no Kyojin OVA", english="Attack on Titan: Lost Girls", format="OVA")
 
-    ``titles`` stands in for AniDB's title list: (aid, main title, English
-    title or None). ``taken`` is the release state's ``anime``, the AniDB
-    entries the automation took; ``policies`` the user's blacklist; ``links``
-    the folders the user linked to an entry, {folder: aid}.
-    """
-    import asyncio
-    from pathlib import Path
-
-    from bankai.metadata import anidb, anidb_art
-    from bankai.web import anime_library, erai
-
-    table = _table(*titles) if titles else None
-
-    async def index():
-        return table
-
-    state = erai._default_state()
-    state["anime"] = dict(taken or {})
-
-    def load_state():
-        if reads is not None:
-            reads.append(1)
-        return state
-
-    monkeypatch.setattr(anidb, "index", index)
-    monkeypatch.setattr(erai, "_load_state", load_state)
-    monkeypatch.setattr(erai, "_load_policies", lambda: dict(policies or {}))
-    monkeypatch.setattr(
-        anime_library,
-        "load_prefs",
-        lambda: {f"folder:{folder}": {"anidb_id": aid} for folder, aid in (links or {}).items()},
-    )
-    monkeypatch.setattr(anime_library, "probed_codecs", lambda files: {})
-    monkeypatch.setattr(anime_library, "german_dubbed_episodes", lambda files: set())
-    monkeypatch.setattr(anidb_art, "facts", lambda aid: {})
-    monkeypatch.setattr(anidb_art, "cover", lambda aid: None)
-    from bankai.web import anime_collections
-
-    monkeypatch.setattr(anime_collections, "load_places", lambda: dict(places or {}))
-
-    entries = [
-        {
-            "path": f"/library/{folder}/Season 01/{name}",
-            "rel_path": f"{folder}/Season 01/{name}",
-            "name": name,
-            "series": folder,
-            "season": "Season 01",
-            "size": 1,
-            "mtime": 0,
-            "staged": False,
-            "stage": "final",
-            "transfer_status": "idle",
-        }
-        for folder, names in folders.items()
-        for name in names
-    ]
-    return asyncio.run(
-        anime_library.group_shows(entries, Path("/library"), only_key=only_key, catalog=catalog)
-    )
+    assert tab_labels([1, 2, 3], "Attack on Titan") == {1: "Attack on Titan", 2: "Season 2", 3: "Lost Girls"}
 
 
-ROMAJI = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e"
-ENGLISH = "Classroom of the Elite"
-CLASSROOM = [(12761, ROMAJI, ENGLISH)]
+def test_without_a_collection_a_tab_is_its_entrys_whole_name(anilist_data):
+    anilist_data.add(2, "Shingeki no Kyojin Season 2", english="Attack on Titan Season 2")
+    anilist_data.add(4, "Kimi no Na wa.")
+
+    assert tab_labels([2, 4], None) == {2: "Attack on Titan Season 2", 4: "Kimi no Na wa."}
 
 
-def test_the_release_state_is_read_once_for_the_whole_library(monkeypatch):
-    """It is a fourteen megabyte file; reading it per show cost twenty seconds."""
-    reads: list[int] = []
-    shows = _run_library(
-        monkeypatch,
-        {f"Show {n}": [f"Show {n} - S01E01.mkv"] for n in range(1, 21)},
-        reads=reads,
-    )
+def test_two_tabs_of_one_name_are_told_apart_by_what_they_are(anilist_data):
+    anilist_data.add(1, "Shingeki no Kyojin", english="Attack on Titan", start="2013-04-07")
+    anilist_data.add(2, "Shingeki no Kyojin OVA", english="Attack on Titan", format="OVA", start="2013-12-09")
+    anilist_data.add(3, "Shingeki no Kyojin Movie", english="Attack on Titan", format="MOVIE", start="2013-12-09")
 
-    assert len(shows) == 20
-    # One read, for the cards of entries with nothing on disk, whatever the
-    # library holds.
-    assert len(reads) == 1
-
-
-def test_one_show_in_two_folders_is_one_card(monkeypatch):
-    """The folder name was the group key, so a second folder was a second card.
-
-    Normalising the name only ever decided whether to add an empty card for a
-    tracked title; it never merged two folders that both held episodes.
-    """
-    shows = _run_library(
-        monkeypatch,
-        {
-            "Show": ["Show - S01E01.mkv"],
-            "Show (2024)": ["Show - S01E02.mkv"],
-        },
-    )
-    assert len(shows) == 1
-    assert sorted(shows[0]["folders"]) == ["Show", "Show (2024)"]
-    # Both folders' episodes end up on the one card.
-    assert shows[0]["episode_count"] == 2
-
-
-def test_two_names_for_one_anime_are_one_card(monkeypatch):
-    """A romaji folder beside its English one shares no spelling at all.
-
-    Nothing about the two names can be compared; the AniDB entry both
-    folders' names belong to is what says they are the same anime.
-    """
-    shows = _run_library(
-        monkeypatch,
-        {
-            ROMAJI: ["ep - S01E01.mkv"],
-            ENGLISH: ["ep - S01E02.mkv"],
-        },
-        titles=CLASSROOM,
-    )
-    assert len(shows) == 1
-    assert shows[0]["title"] == ENGLISH
-    assert shows[0]["anidb_id"] == 12761
-    assert shows[0]["numbering"] == "anidb"
-    assert sorted(shows[0]["folders"]) == sorted([ROMAJI, ENGLISH])
-    assert shows[0]["episode_count"] == 2
-
-
-def test_an_entry_the_automation_took_does_not_duplicate_the_folder_it_is_in(monkeypatch):
-    """The empty card for a taken entry has to land on its own folder."""
-    shows = _run_library(
-        monkeypatch,
-        {ROMAJI: ["ep - S01E01.mkv"]},
-        titles=CLASSROOM,
-        taken={"12761": {"title": ROMAJI, "english_title": ENGLISH}},
-    )
-    assert len(shows) == 1
-    assert shows[0]["title"] == ENGLISH
-    assert shows[0]["folders"] == [ROMAJI]
-
-
-def test_shows_without_an_anidb_entry_are_not_merged_on_a_guess(monkeypatch):
-    """With no entry there is nothing better than the name; separate is correct."""
-    shows = _run_library(
-        monkeypatch,
-        {
-            "Grand Blue": ["a - S01E01.mkv"],
-            "Grand Blue Dreaming": ["b - S01E01.mkv"],
-        },
-    )
-    assert len(shows) == 2
-    # Their files, as named: no AniDB entry, no tabs of one.
-    assert {show["numbering"] for show in shows} == {"files"}
-    assert [show["anidb_id"] for show in shows] == [None, None]
-    assert [show["season_anidb"] for show in shows] == [{}, {}]
-
-
-def test_asking_for_one_merged_show_returns_its_folders(monkeypatch):
-    """The card is asked for back by its key, one of its folders' names.
-
-    Any other folder merged into it answers too, so a link made before the
-    merge survives.
-    """
-    folders = {ROMAJI: ["ep - S01E01.mkv"], ENGLISH: ["ep - S01E02.mkv"], "Unrelated Show": ["u - S01E01.mkv"]}
-
-    key = next(
-        show["key"] for show in _run_library(monkeypatch, folders, titles=CLASSROOM) if show["anidb_id"] == 12761
-    )
-    by_key = _run_library(monkeypatch, folders, titles=CLASSROOM, only_key=key)
-    assert len(by_key) == 1
-    assert sorted(by_key[0]["folders"]) == sorted([ROMAJI, ENGLISH])
-
-    other = ENGLISH if key == ROMAJI else ROMAJI
-    by_folder = _run_library(monkeypatch, folders, titles=CLASSROOM, only_key=other)
-    assert len(by_folder) == 1
-    assert by_folder[0]["title"] == ENGLISH
-
-
-def test_entries_the_automation_took_with_nothing_on_disk_still_get_a_card(monkeypatch):
-    """Each from the release state's AniDB entries, unless a folder holds it or
-    it was blacklisted -- which is how one removed from the library leaves it.
-
-    Its key is its AniDB name, and never another card's: the page asks for a
-    card back by its key. Two entries can share an English title, and an
-    entry can share its name with a folder that is another entry.
-    """
-    titles = [
-        (17617, "Sousou no Frieren", "Frieren: Beyond Journey's End"),
-        (18886, "Sousou no Frieren (2026)", "Frieren: Beyond Journey's End"),
-        (17246, "Kusuriya no Hitorigoto", "The Apothecary Diaries"),
-        (17470, "Oshi no Ko", None),
-        (1102, "Hunter x Hunter", None),
-        (8521, "Hunter x Hunter (2011)", "Hunter x Hunter"),
-    ]
-    taken = {
-        "17246": {"title": "Kusuriya no Hitorigoto"},  # on disk
-        "17470": {"title": "Oshi no Ko"},  # blacklisted
-        "17617": {"title": "Sousou no Frieren"},
-        "18886": {"title": "Sousou no Frieren (2026)"},
-        "8521": {"title": "Hunter x Hunter (2011)"},
+    assert tab_labels([1, 2, 3], "Attack on Titan") == {
+        1: "Attack on Titan (TV, 2013)",
+        2: "Attack on Titan (OVA, 2013)",
+        3: "Attack on Titan (Movie, 2013)",
     }
-    library = dict(
-        folders={
-            "Kusuriya no Hitorigoto": ["Kusuriya no Hitorigoto - S01E01.mkv"],
-            "Hunter x Hunter": ["Hunter x Hunter - S01E01.mkv"],
-        },
-        titles=titles,
-        taken=taken,
-        policies={"anidb:17470": {"mode": "blacklisted", "anidb_id": 17470}},
-        # Two entries are called "Hunter x Hunter"; the folder is the 1999 one.
-        links={"Hunter x Hunter": 1102},
-    )
 
-    shows = _run_library(monkeypatch, **library)
-    by_key = {show["key"]: show for show in shows}
 
-    assert set(by_key) == {
-        "Kusuriya no Hitorigoto",
-        "Hunter x Hunter",
-        "Frieren: Beyond Journey's End",
-        # Its English title is taken; its own AniDB title is not.
-        "Sousou no Frieren (2026)",
-        # Every name it has is the folder's card's, the year aside.
-        "Hunter x Hunter (AniDB 8521)",
+def test_two_tabs_of_one_name_and_kind_are_told_apart_by_year(anilist_data):
+    anilist_data.add(136, "Hunter x Hunter", start="1999-10-16")
+    anilist_data.add(11061, "Hunter x Hunter (2011)", english="Hunter x Hunter", start="2011-10-02")
+    anilist_data.add(5, "Fullmetal Alchemist", start="2003-10-04")
+
+    assert tab_labels([136, 11061, 5], None) == {
+        136: "Hunter x Hunter (TV, 1999)",
+        11061: "Hunter x Hunter (TV, 2011)",
+        5: "Fullmetal Alchemist",
     }
-    assert len(shows) == len(by_key)
-    placeholders = [show for show in shows if not show["folders"]]
-    assert sorted(show["anidb_id"] for show in placeholders) == [8521, 17617, 18886]
-    assert all(show["episode_count"] == 0 and show["numbering"] == "anidb" for show in placeholders)
-    assert by_key["Hunter x Hunter"]["anidb_id"] == 1102
-
-    # Each key asks for exactly one card back.
-    assert [show["anidb_id"] for show in _run_library(monkeypatch, **library, only_key="Hunter x Hunter")] == [1102]
 
 
-def test_the_anidb_title_is_shown_under_the_name_only_when_it_says_something_else(monkeypatch):
-    """Akame ga Kill! is already the name on the card; printing it twice says nothing.
+def test_two_tabs_nothing_is_known_of_are_told_apart_by_their_ids(anilist_data):
+    anilist_data.add(7, "Same Name", format=None, start=None, fetched=False)
+    anilist_data.add(8, "Same Name", format=None, start=None, fetched=False)
 
-    Compared through the same normalisation the library groups by, so a
-    stray exclamation mark does not sneak a second line back in. A card shown
-    by its English title keeps the AniDB one, which is what release groups
-    publish under.
-    """
-    from bankai.web import shoko_catalog
-
-    catalog = shoko_catalog.Catalog(
-        entries={8074: shoko_catalog.Entry(aid=8074, title="Akame ga Kill", poster_url=None, episodes=())}
-    )
-    shows = _run_library(
-        monkeypatch,
-        {
-            "Akame ga Kill": ["Akame ga Kill - S01E01.mkv"],
-            "Sousou no Frieren": ["Sousou no Frieren - S01E01.mkv"],
-        },
-        titles=[(8074, "Akame ga Kill!", None), (17617, "Sousou no Frieren", "Frieren: Beyond Journey's End")],
-        catalog=catalog,
-    )
-    by_id = {show["anidb_id"]: show for show in shows}
-
-    assert by_id[8074]["title"] == "Akame ga Kill"
-    assert by_id[8074]["source_title"] == ""
-    assert by_id[17617]["title"] == "Frieren: Beyond Journey's End"
-    assert by_id[17617]["source_title"] == "Sousou no Frieren"
+    assert tab_labels([7, 8], None) == {7: "Same Name (7)", 8: "Same Name (8)"}

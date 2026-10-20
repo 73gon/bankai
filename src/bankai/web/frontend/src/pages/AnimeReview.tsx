@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Ban, Check, Download, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Subtitles, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, pagePaths, recall, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
-import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
+import { api, pagePaths, recall, type AniListAnime, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
+import { anilistName, anilistUrl } from '@/lib/anilist';
+import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Badge } from '@/components/ui/badge';
@@ -35,14 +36,14 @@ function storedView(): View {
 export default function AnimeReview({ blacklist = false }: { blacklist?: boolean }) {
   const [view, setView] = useState<View>(storedView);
   const [linkTarget, setLinkTarget] = useState<AnimeReviewItem | null>(null);
-  // A held show whose AniDB anime the user picks, for review rather than the blacklist.
-  const [anidbFor, setAnidbFor] = useState<AnimeReviewItem | null>(null);
+  // A held show whose AniList entry the user picks, for review rather than the blacklist.
+  const [entryFor, setEntryFor] = useState<AnimeReviewItem | null>(null);
   // The show whose Erai-raws releases are open in a dialog, by the name Erai gives it.
   // The card the Erai-raws dialog was opened from, and the name it searches for.
   const [eraiFor, setEraiFor] = useState<{ query: string; item: AnimeReviewItem } | null>(null);
   // A batch held for a card, being considered for download.
   const [batchFor, setBatchFor] = useState<{ item: AnimeReviewItem; candidate: ReplaceCandidate } | null>(null);
-  // Blacklist only: every card, those tied to an AniDB anime, or those not yet.
+  // Blacklist only: every card, those tied to an AniList entry, or those not yet.
   const [linkFilter, setLinkFilter] = useState<'all' | 'linked' | 'unlinked'>('all');
   const listPath = blacklist ? pagePaths.animeBlacklist : pagePaths.animeReview;
   // Started from the last answer this browser saw, refreshed straight after.
@@ -81,7 +82,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
 
   const visible = !blacklist || linkFilter === 'all'
     ? items
-    : items.filter((item) => Boolean(item.linked ?? item.anidb_id) === (linkFilter === 'linked'));
+    : items.filter((item) => Boolean(item.linked ?? item.anilist_id) === (linkFilter === 'linked'));
 
   async function openReleases(item: AnimeReviewItem) {
     setReleasesFor(item);
@@ -161,23 +162,23 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     }
   }, [view]);
 
-  async function chooseAnidb(anime: { anidb_id: number; title: string }) {
-    if (!anidbFor?.release_title) return;
+  async function chooseEntry(anime: AniListAnime) {
+    if (!entryFor?.release_title) return;
     try {
-      const result = await api.saveAnidbMapping(anidbFor.release_title, anime.anidb_id);
-      toast.success(anidbFor.source_title + ' is ' + anime.title + ' · ' + result.requested + ' releases rechecking');
-      setAnidbFor(null);
+      const result = await api.saveAnilistMapping(entryFor.release_title, anime.anilist_id);
+      toast.success(entryFor.source_title + ' is ' + anilistName(anime) + ' · ' + result.requested + ' releases rechecking');
+      setEntryFor(null);
       void load();
     } catch (error: any) {
       toast.error(error.message);
     }
   }
 
-  async function link(anime: { anidb_id: number; title: string }) {
+  async function link(anime: AniListAnime) {
     if (!linkTarget) return;
     try {
-      const result = await api.linkAnimeBlacklist(linkTarget.key, anime.anidb_id);
-      toast.success('Linked to ' + anime.title + (result.caught ? ' · ' + result.caught + ' more releases blacklisted' : ''));
+      const result = await api.linkAnimeBlacklist(linkTarget.key, anime.anilist_id);
+      toast.success('Linked to ' + anilistName(anime) + (result.caught ? ' · ' + result.caught + ' more releases blacklisted' : ''));
       setLinkTarget(null);
       void load();
     } catch (error: any) {
@@ -259,7 +260,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           <h1 className='font-serif text-3xl font-semibold'>{blacklist ? 'Blacklist' : 'Held for review'}</h1>
           <p className='text-sm text-muted-foreground'>{blacklist
             ? 'Shows here are ignored permanently until you restore them.'
-            : 'One card per AniDB entry, which is one season or cour. A decision applies to that entry only.'}</p>
+            : 'One card per AniList entry, which is one season or cour. A decision applies to that entry only.'}</p>
         </div>
         {!blacklist && <Button variant='secondary' onClick={() => void retryAll()} disabled={pending.has('all') || items.length === 0}>
           <RefreshCw data-icon='inline-start' /> Recheck everything
@@ -293,7 +294,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
               <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
                 <th className='px-3 py-2.5 font-medium'>Show</th>
                 <th className='px-3 py-2.5 font-medium'>Erai name</th>
-                <th className='px-3 py-2.5 font-medium'>AniDB</th>
+                <th className='px-3 py-2.5 font-medium'>AniList</th>
                 <th className='px-3 py-2.5 text-right font-medium'>Actions</th>
               </tr>
             </thead>
@@ -312,7 +313,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                   <td className='px-3 py-2 font-mono text-xs text-muted-foreground'>{item.source_title}</td>
                   <td className='px-3 py-2'>
                     {item.linked
-                      ? <a className='text-xs underline underline-offset-4' href={'https://anidb.net/anime/' + item.anidb_id} target='_blank' rel='noreferrer'>{item.anidb_title || 'aid ' + item.anidb_id}</a>
+                      ? <a className='text-xs underline underline-offset-4' href={anilistUrl(item.anilist_id!)} target='_blank' rel='noreferrer'>{item.anilist_title || 'id ' + item.anilist_id}</a>
                       : <Badge variant='warning'>Not linked</Badge>}
                   </td>
                   <td className='px-3 py-2'>
@@ -364,16 +365,16 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       <Button
                         size='icon'
                         variant={item.linked ? 'secondary' : 'default'}
-                        title={item.linked ? 'Linked to AniDB: ' + (item.anidb_title || item.anidb_id) + '. Relink' : 'Not recognised: link to AniDB'}
-                        aria-label={(item.linked ? 'Relink ' : 'Link ') + item.title + ' to AniDB'}
+                        title={item.linked ? 'Linked to AniList: ' + (item.anilist_title || item.anilist_id) + '. Relink' : 'Not recognised: link to AniList'}
+                        aria-label={(item.linked ? 'Relink ' : 'Link ') + item.title + ' to AniList'}
                         onClick={() => setLinkTarget(item)}
                         disabled={busyFor(item.key)}
                       >
                         <Link2 />
                       </Button>
-                      {item.anidb_id && (
-                        <Button asChild size='icon' variant='secondary' title={'On AniDB: ' + (item.anidb_title || 'aid ' + item.anidb_id)}>
-                          <a href={'https://anidb.net/anime/' + item.anidb_id} target='_blank' rel='noreferrer' aria-label={item.title + ' on AniDB'}>
+                      {item.anilist_id && (
+                        <Button asChild size='icon' variant='secondary' title={'On AniList: ' + (item.anilist_title || 'id ' + item.anilist_id)}>
+                          <a href={anilistUrl(item.anilist_id)} target='_blank' rel='noreferrer' aria-label={item.title + ' on AniList'}>
                             <ExternalLink />
                           </a>
                         </Button>
@@ -409,7 +410,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       </p>
                     )}
                     <div className='grid grid-cols-2 gap-1.5 [&>button]:min-w-0'>
-                      {/* Nyaa, AniDB when the card knows its entry, then Recheck. */}
+                      {/* Nyaa, AniList when the card knows its entry, then Recheck. */}
                       <div className='col-span-2 flex gap-1.5'>
                         {item.detail_url && (
                           <Button asChild variant='outline' className='min-w-0 flex-1 px-1.5 text-xs'>
@@ -418,15 +419,15 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                             </a>
                           </Button>
                         )}
-                        {item.anidb_id && (
+                        {item.anilist_id && (
                           <Button asChild variant='outline' className='min-w-0 flex-1 px-1.5 text-xs'>
                             <a
-                              href={'https://anidb.net/anime/' + item.anidb_id}
+                              href={anilistUrl(item.anilist_id)}
                               target='_blank'
                               rel='noreferrer'
-                              title={'On AniDB: ' + (item.anidb_title || 'aid ' + item.anidb_id)}
+                              title={'On AniList: ' + (item.anilist_title || 'id ' + item.anilist_id)}
                             >
-                              AniDB
+                              AniList
                             </a>
                           </Button>
                         )}
@@ -482,10 +483,10 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <Button
                           variant='outline'
                           className='col-span-2'
-                          onClick={() => setAnidbFor(item)}
+                          onClick={() => setEntryFor(item)}
                           disabled={busyFor(item.key)}
                         >
-                          <Search data-icon='inline-start' /> {item.anidb_id ? 'Change AniDB anime' : 'Choose AniDB anime'}
+                          <Search data-icon='inline-start' /> {item.anilist_id ? 'Change AniList entry' : 'Choose AniList entry'}
                         </Button>
                       )}
 
@@ -495,8 +496,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       <Button
                         variant='destructive'
                         onClick={() => setPurgeTarget(item)}
-                        disabled={busyFor(item.key) || !item.anidb_id}
-                        title={item.anidb_id ? undefined : 'Choose the AniDB anime first, so only its own files are deleted'}
+                        disabled={busyFor(item.key) || !item.anilist_id}
+                        title={item.anilist_id ? undefined : 'Choose the AniList entry first, so only its own files are deleted'}
                       >
                         <Trash2 data-icon='inline-start' /> <span className='truncate'>Discard and delete</span>
                       </Button>
@@ -525,7 +526,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
               key={eraiFor.item.key}
               embedded
               initialQuery={eraiFor.query}
-              replaceFor={{ key: eraiFor.item.key, label: eraiFor.item.anidb_title || eraiFor.item.title }}
+              replaceFor={{ key: eraiFor.item.key, label: eraiFor.item.anilist_title || eraiFor.item.title }}
               onReplaced={() => void load()}
             />
           )}
@@ -534,7 +535,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       {batchFor && (
         <ReplaceDialog
           cardKey={batchFor.item.key}
-          label={batchFor.item.anidb_title || batchFor.item.title}
+          label={batchFor.item.anilist_title || batchFor.item.title}
           candidate={batchFor.candidate}
           verb='Download batch'
           onClose={() => setBatchFor(null)}
@@ -543,15 +544,18 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           onQueued={() => void load()}
         />
       )}
-      <AniDBLinkDialog
-        name={linkTarget ? linkTarget.source_title || linkTarget.title : null}
+      <AniListPickDialog
+        query={linkTarget ? linkTarget.source_title || linkTarget.title : null}
         onClose={() => setLinkTarget(null)}
         onPick={link}
       />
-      <AniDBLinkDialog
-        name={anidbFor ? anidbFor.source_title || anidbFor.title : null}
-        onClose={() => setAnidbFor(null)}
-        onPick={chooseAnidb}
+      <AniListPickDialog
+        query={entryFor ? entryFor.source_title || entryFor.title : null}
+        onClose={() => setEntryFor(null)}
+        onPick={chooseEntry}
+        title='Choose the AniList entry'
+        description="Releases of this name are filed under the entry you pick from then on; the held ones are rechecked now."
+        action='Choose'
       />
 
       {/* Sixty-three releases would have made one card taller than the page,

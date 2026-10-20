@@ -36,7 +36,9 @@ src/bankai/
     schema.sql               SQLite schema for the job queue
     state.py                 DB helpers
   metadata/
-    tvdb.py                  TVDB v4 metadata / alias resolver
+    tvdb.py                  TVDB v4 metadata / alias resolver (Movies & Shows only)
+    anilist.py               Anime identity: AniList API cache, title index, resolve/settle
+    offline.py               anime-offline-database per AniList id (titles, AniDB cross map)
   processor/
     extractor.py             Playwright / yt-dlp German stream downloader
     pipeline.py              Orchestrates all four stages end-to-end
@@ -449,7 +451,26 @@ ssh keller "cd C:\bankai; git fetch --all; git reset --hard origin/main"
 
 ---
 
-## 15. Things that must NOT happen
+## 15. Anime library (AniList)
+
+Anime is identified by **AniList** alone (AniDB, Shoko and TVDB are gone from the
+anime side since Oct 2026). An AniList entry is one season or cour; a release is
+an entry plus its own episode number.
+
+| Piece | Where | What |
+| ----- | ----- | ---- |
+| Identity | `metadata/anilist.py` | title index over anime-offline-database + AniList API cache (`anime_metadata/anilist_media.json`, batches of 50, weekly); `resolve_in` (season markers walk SEQUEL chains), `settle_in` (episode past an entry's end -> its sequel) |
+| File index | `web/anime_files.py` | `anime_files.json`: path relative to the anime root (same under `<staging>/Shows`) -> `[(anilist_id, episode)]`. Written on publish, layout moves, deletes, manual match. Never guess identity from folder names. |
+| Collections | `web/anime_collections.py` | `anime_collections.json`, bankai-owned: members, title entry, custom name, Season 00 order. New entries join by SEQUEL/PREQUEL; side stories by hand in the relation graph. |
+| Disk layout | `web/anime_layout.py` | `<root>/<Collection>/Season NN/<Collection> - SxxEyy.mkv`; main line = Season 1..n, every other member a Season 00 block. Writes `tvshow.nfo`, `season.nfo`, episode `.nfo`, posters (skipped under 2 GiB free). Renames are journaled in `anime_layout_moves/`; `bankai anime layout-undo <file>` reverts one run. |
+| Upkeep | `web/anime_maintenance.py` | scheduler pass every 5 min: offline DB weekly, AniList refresh a few batches per pass, joins/extends collections, re-lays out collections whose fingerprint changed. |
+| Migration | `web/anilist_migration.py` | `bankai anime migrate-anilist [--dry-run]` — one-off from AniDB/Shoko; backups in `anilist_migration_backup/`. |
+
+Keys: canonical `anilist:<id>|<ep>`, blacklist/review cards `anilist:<id>`, job
+args `--anilist-id/--anilist-title`. Jellyfin's anime library reads the NFO files
+(NFO reader only, no online metadata fetchers).
+
+## 16. Things that must NOT happen
 
 - **Never push code that breaks `poetry run pytest -q`** (target 107 pass).
 - **Never restart `bankai-web` while a real job is running** — it kills the job.
@@ -460,6 +481,8 @@ ssh keller "cd C:\bankai; git fetch --all; git reset --hard origin/main"
   `review_mod.set_stage(path, "deleted")` so the Deleted badge persists.
 - **Never use bare string substrings to detect German audio tracks** — always
   use whole-word tokenisation (see §11).
+- **Never identify an anime file by its folder name** — the file index
+  (`anime_files.json`) says what each file is; the layout decides folders.
 - **Never add `autoprefixer` or `tailwindcss` v3 back** — the project is on
   Tailwind v4 (`@tailwindcss/postcss`); a `tailwind.config.js` would conflict
   with `@theme inline`.

@@ -1,4 +1,4 @@
-"""Removing a show from the library, and blacklisting by AniDB title."""
+"""Removing a show from the library, and blacklisting by AniList title."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ import asyncio
 
 import pytest
 
-from bankai.web import erai, shoko
+from bankai.config import reset_settings_cache
+from bankai.web import anime_files, erai
 
 
 @pytest.fixture()
@@ -24,35 +25,48 @@ def store(monkeypatch, tmp_path):
     monkeypatch.setattr(erai, "_SHOW_KEYS_CACHE", None)
     root = tmp_path / "shows_anime"
     root.mkdir()
-    monkeypatch.setattr(erai, "_series_roots", lambda: [root])
-    monkeypatch.setattr(erai, "series_files", lambda title: [])
-    return {"state": state, "policies": policies, "root": root}
+    staging = tmp_path / "staging"
+    monkeypatch.setenv("BANKAI_TRANSFER__ANIME_SHOWS_DIR", str(root))
+    monkeypatch.setenv("BANKAI_OUTPUT__DIRECTORY", str(staging))
+    reset_settings_cache()
+    yield {"state": state, "policies": policies, "root": root, "staging": staging / "Shows"}
+    reset_settings_cache()
 
 
+# An entry as the pick-an-anime dialog offers it (anilist.as_choice).
 FRIEREN = {
-    "anidb_id": 17617,
-    "title": "Sousou no Frieren",
-    "english_title": "Frieren: Beyond Journey's End",
-    "matching_titles": ["Sousou no Frieren", "Frieren: Beyond Journey's End"],
-    "poster_url": "/api/anime/anidb/image/AniDB/Poster/1",
+    "anilist_id": 154587,
+    "name": "Frieren: Beyond Journey's End",
+    "romaji": "Sousou no Frieren",
+    "english": "Frieren: Beyond Journey's End",
+    "format": "TV",
+    "cover": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/154587.jpg",
 }
 
 
-def test_a_release_under_another_anidb_title_is_blacklisted(store):
-    """Erai names releases after AniDB's romaji title; the card may carry another."""
-    store["policies"]["anidb:17617"] = {
+def indexed(root, rel: str, pairs, data: bytes = b"x"):
+    path = root.joinpath(*rel.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    anime_files.record(path, pairs)
+    return path
+
+
+def test_a_release_under_another_anilist_title_is_blacklisted(store):
+    """Erai names releases after the romaji title; the card may carry the English one."""
+    store["policies"]["anilist:154587"] = {
         "mode": "blacklisted",
-        "anidb_id": 17617,
+        "anilist_id": 154587,
         "source_title": "Frieren: Beyond Journey's End",
-        "anidb_titles": FRIEREN["matching_titles"],
+        "anilist_titles": ["Sousou no Frieren", "Frieren: Beyond Journey's End"],
     }
     assert erai._title_blacklisted("[Erai-raws] Sousou no Frieren - 03 [1080p][HEVC]")
-    # The second season is an AniDB entry of its own and is not blocked with it.
+    # The second season is an AniList entry of its own and is not blocked with it.
     assert not erai._title_blacklisted("[Erai-raws] Sousou no Frieren 2nd Season - 01 [1080p]")
     assert not erai._title_blacklisted("[Erai-raws] Spy x Family - 01 [1080p]")
 
 
-def test_a_decision_from_before_anidb_entries_still_blocks_the_whole_show(store):
+def test_a_decision_made_by_name_still_blocks_the_whole_show(store):
     store["policies"]["sousou no frieren"] = {"mode": "blacklisted", "source_title": "Sousou no Frieren"}
     assert erai._title_blacklisted("[Erai-raws] Sousou no Frieren 2nd Season - 01 [1080p]")
 
@@ -60,14 +74,14 @@ def test_a_decision_from_before_anidb_entries_still_blocks_the_whole_show(store)
 def test_two_names_of_one_anime_are_one_blacklist_card(store):
     store["policies"].update(
         {
-            "sousou no frieren": {"mode": "blacklisted", "source_title": "Sousou no Frieren", "anidb_id": 17617},
-            "frieren": {"mode": "blacklisted", "source_title": "Frieren", "anidb_id": 17617},
+            "sousou no frieren": {"mode": "blacklisted", "source_title": "Sousou no Frieren", "anilist_id": 154587},
+            "frieren": {"mode": "blacklisted", "source_title": "Frieren", "anilist_id": 154587},
             "spy x family": {"mode": "blacklisted", "source_title": "Spy x Family"},
         }
     )
     cards = erai.blacklist_items()
     assert len(cards) == 2
-    frieren = next(card for card in cards if card.get("anidb_id") == 17617)
+    frieren = next(card for card in cards if card.get("anilist_id") == 154587)
     assert sorted(frieren["keys"]) == ["frieren", "sousou no frieren"]
     assert frieren["linked"] is True
 
@@ -83,20 +97,29 @@ def test_linking_a_card_covers_every_title_and_catches_held_releases(store):
 
     assert result["caught"] == 1
     assert store["state"]["releases"]["a" * 40]["status"] == "blacklisted"
-    assert store["policies"]["frieren"]["anidb_id"] == 17617
+    policy = store["policies"]["frieren"]
+    assert policy["anilist_id"] == 154587
+    assert policy["anilist_title"] == "Frieren: Beyond Journey's End"
+    assert policy["anilist_titles"] == ["Sousou no Frieren", "Frieren: Beyond Journey's End"]
+    assert policy["anilist_poster_url"] == FRIEREN["cover"]
 
 
-def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatch):
-    """A library card is a whole show: every AniDB entry on it is blocked.
+def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatch, anilist_data):
+    """A library card is a whole show: every AniList entry on it is blocked.
 
-    Exactly those, and the one Shoko matched -- not every entry Anime-Lists
-    files under the same series. A spin-off the card does not hold stays.
+    Exactly those, and the one picked for it -- not every entry related to
+    them. A side story the card does not hold stays.
     """
-    folder = store["root"] / "Frieren"
-    (folder / "Season 01").mkdir(parents=True)
-    (folder / "Season 01" / "Frieren - S01E01.mkv").write_bytes(b"x" * 10)
-    for aid in ("17617", "18886", "19000"):
-        store["state"]["anime"][aid] = {"title": "Sousou no Frieren"}
+    anilist_data.add(154587, "Sousou no Frieren", english="Frieren: Beyond Journey's End",
+                     relations=[(182255, "SEQUEL"), (170068, "SIDE_STORY", "SPECIAL")])
+    anilist_data.add(182255, "Sousou no Frieren 2nd Season", relations=[(154587, "PREQUEL")], start="2026-01-01")
+    anilist_data.add(170068, "Sousou no Frieren: Marumaru no Mahou", format="SPECIAL",
+                     relations=[(154587, "PARENT")])
+    show = "Frieren Beyond Journey's End"
+    folder = store["root"] / show
+    indexed(store["root"], f"{show}/Season 01/{show} - S01E01.mkv", [(154587, 1)], b"x" * 10)
+    for aid in ("154587", "182255", "170068"):
+        store["state"]["anime"][aid] = {"anilist_id": int(aid), "name": "Sousou no Frieren"}
     store["state"]["releases"]["b" * 40] = {
         "status": "queued",
         "title": "[Erai-raws] Sousou no Frieren - 07 [1080p][HEVC]",
@@ -104,43 +127,18 @@ def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatc
 
     class NoQbit:
         async def login(self): ...
-        async def remove(self, info_hash, delete_files): ...
+        async def list_torrents(self, category=None):
+            return []
         async def aclose(self): ...
 
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", NoQbit)
-    from xml.etree import ElementTree as ET
-
-    from bankai.metadata import anidb
-
-    table = anidb.build_index(
-        ET.fromstring(
-            """<animetitles>
-  <anime aid="17617"><title xml:lang="x-jat" type="main">Sousou no Frieren</title></anime>
-  <anime aid="18886"><title xml:lang="x-jat" type="main">Sousou no Frieren (2026)</title></anime>
-  <anime aid="19000"><title xml:lang="x-jat" type="main">Sousou no Frieren: Marumaru no Mahou</title></anime>
-</animetitles>"""
-        ),
-        ET.fromstring(
-            """<anime-list>
-  <anime anidbid="17617" tvdbid="424536" defaulttvdbseason="1" episodeoffset="0"/>
-  <anime anidbid="18886" tvdbid="424536" defaulttvdbseason="2" episodeoffset="0"/>
-  <anime anidbid="19000" tvdbid="424536" defaulttvdbseason="0" episodeoffset="0"/>
-</anime-list>"""
-        ),
-    )
-
-    async def index():
-        return table
-
-    monkeypatch.setattr(anidb, "index", index)
-    monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
 
     result = asyncio.run(
         erai.blacklist_show(
             title="Frieren",
             source_title="Sousou no Frieren",
-            # The card's own entries; Shoko's match (17617) is added to them.
-            anidb_ids=[18886],
+            # The card's own entries; the one picked for it (154587) is added to them.
+            anilist_ids=[182255],
             folders=[folder],
             anime=FRIEREN,
         )
@@ -149,14 +147,17 @@ def test_removing_a_show_blacklists_it_and_deletes_its_folders(store, monkeypatc
     assert not folder.exists()
     assert result["deleted_files"] == 1
     # Each entry is its own blacklist card, restorable on its own.
-    assert {key for key in store["policies"]} == {"anidb:17617", "anidb:18886"}
-    assert result["entries"] == [17617, 18886]
+    assert set(store["policies"]) == {"anilist:154587", "anilist:182255"}
+    assert store["policies"]["anilist:182255"]["anilist_titles"] == ["Sousou no Frieren 2nd Season"]
+    assert result["entries"] == [154587, 182255]
     assert store["state"]["releases"]["b" * 40]["status"] == "blacklisted"
     # Taken, it would have come back as an empty library card.
-    assert set(store["state"]["anime"]) == {"19000"}
+    assert set(store["state"]["anime"]) == {"170068"}
+    # What was deleted is out of the file index.
+    assert anime_files.load() == {}
 
 
-def test_a_show_no_anidb_entry_answers_for_is_blacklisted_by_its_name(store, monkeypatch):
+def test_a_show_no_anilist_entry_answers_for_is_blacklisted_by_its_name(store, monkeypatch):
     """Nothing to block by entry; the name is what its releases will carry."""
 
     class NoQbit:
@@ -173,14 +174,14 @@ def test_a_show_no_anidb_entry_answers_for_is_blacklisted_by_its_name(store, mon
 
     result = asyncio.run(
         erai.blacklist_show(
-            title="Nobody Knows This", source_title="Nobody Knows This", anidb_ids=[], folders=[]
+            title="Nobody Knows This", source_title="Nobody Knows This", anilist_ids=[], folders=[]
         )
     )
 
     assert result["entries"] == []
     assert list(store["policies"]) == [result["key"]]
     assert store["policies"][result["key"]]["source_title"] == "Nobody Knows This"
-    assert "anidb_id" not in store["policies"][result["key"]]
+    assert "anilist_id" not in store["policies"][result["key"]]
     assert store["state"]["releases"]["c" * 40]["status"] == "blacklisted"
 
 
@@ -194,152 +195,54 @@ def test_the_library_root_itself_is_never_deleted(store):
     assert result["deleted_folders"] == []
 
 
-def test_shoko_results_keep_only_titles_worth_matching():
-    row = {
-        "ID": 17617,
-        "Title": "Sousou no Frieren",
-        "Type": "TV",
-        "EpisodeCount": 28,
-        "AirDate": "2023-09-29",
-        "Titles": [
-            {"Name": "Frieren: Beyond Journey's End", "Language": "en", "Type": "Official"},
-            {"Name": "Frieren", "Language": "en", "Type": "Short"},
-            {"Name": "葬送のフリーレン", "Language": "ja", "Type": "Official"},
-        ],
-        "Poster": {"ID": 5, "Source": "AniDB", "Type": "Poster", "RelativeFilepath": "AniDB/5.jpg"},
-    }
-    anime = shoko._anime(row)
-    assert anime["anidb_id"] == 17617
-    assert anime["english_title"] == "Frieren: Beyond Journey's End"
-    assert anime["year"] == 2023
-    # The short name "Frieren" would match other shows; it is left out.
-    assert "Frieren" not in anime["matching_titles"]
-    assert "Sousou no Frieren" in anime["matching_titles"]
-    assert anime["poster_url"] == "/api/anime/anidb/image/AniDB/Poster/5"
+def test_no_folder_is_found_by_name(store):
+    """bankai lays the library out: only the folders and files named are deleted."""
+    (store["root"] / "Test Show" / "Season 01").mkdir(parents=True)
+    (store["root"] / "Test Show" / "Season 01" / "Test Show - S01E01.mkv").write_bytes(b"x")
+
+    result = asyncio.run(erai.purge_series("k", english_title="Test Show", delete_files=True))
+
+    assert result["deleted_files"] == 0
+    assert (store["root"] / "Test Show" / "Season 01" / "Test Show - S01E01.mkv").exists()
 
 
-def test_search_is_exact_first_and_fuzzy_only_as_the_fallback(monkeypatch):
-    """Fuzzy pads results with loose neighbours; exact answers when it can."""
-    calls: list[dict] = []
+def test_discard_and_delete_takes_only_the_entry_s_own_episodes(store):
+    """A show folder holds every season; one AniList entry's files are only its own.
 
-    async def fake_get(path, /, **params):
-        calls.append(params)
-        if params["fuzzy"] == "false" and params["query"] == "Frieren":
-            return {"List": [{"ID": 17617, "Title": "Sousou no Frieren", "Titles": []}]}
-        if params["fuzzy"] == "true":
-            return {"List": [{"ID": 1, "Title": "Friern Typo Match", "Titles": []}]}
-        return {"List": []}
-
-    monkeypatch.setattr(shoko, "_get", fake_get)
-    found = asyncio.run(shoko.search_anidb("Frieren"))
-    assert [row["anidb_id"] for row in found] == [17617]
-    assert [c["fuzzy"] for c in calls] == ["false"]
-    # AniDB's whole title list, not only what the Shoko collection holds.
-    assert calls[0]["local"] == "false"
-
-    calls.clear()
-    assert [row["anidb_id"] for row in asyncio.run(shoko.search_anidb("Friern"))] == [1]
-    assert [c["fuzzy"] for c in calls] == ["false", "true"]
-
-
-def test_an_english_synonym_stands_in_where_anidb_has_no_official_english_title():
-    row = {
-        "ID": 2736,
-        "Title": "Some Display Title",
-        "Titles": [
-            {"Name": "One Piece: Taose! Kaizoku Ganzack", "Language": "x-jat", "Type": "Main"},
-            {"Name": "One Piece: Defeat the Pirate Ganzack!", "Language": "en", "Type": "Synonym"},
-        ],
-    }
-    anime = shoko._anime(row)
-    # The romaji main title, not Shoko's display title.
-    assert anime["title"] == "One Piece: Taose! Kaizoku Ganzack"
-    assert anime["english_title"] == "One Piece: Defeat the Pirate Ganzack!"
-    # A synonym is shown, never matched on.
-    assert "One Piece: Defeat the Pirate Ganzack!" not in anime["matching_titles"]
-
-
-@pytest.mark.parametrize(
-    "query",
-    ["17617", " aid 17617 ", "aid:17617", "https://anidb.net/anime/17617", "https://anidb.net/perl-bin/animedb.pl?show=anime&aid=17617"],
-)
-def test_an_anidb_id_or_link_is_looked_up_by_id(monkeypatch, query):
-    calls: list[dict] = []
-
-    async def fake_get(path, /, **params):
-        calls.append(params)
-        return {"List": [{"ID": 17617, "Title": "Sousou no Frieren", "Titles": []}]}
-
-    monkeypatch.setattr(shoko, "_get", fake_get)
-    found = asyncio.run(shoko.search_anidb(query))
-    assert [row["anidb_id"] for row in found] == [17617]
-    assert calls[0]["searchById"] == "true" and calls[0]["query"] == "17617"
-
-
-def test_a_poster_shoko_never_downloaded_is_not_offered():
-    """For an anime outside the collection Shoko holds no file and answers 404."""
-    assert shoko.poster_path({"ID": 17617, "Source": "AniDB", "Type": "Poster", "RelativeFilepath": None}) is None
-
-
-def test_best_match_needs_one_exact_title():
-    results = [
-        {"anidb_id": 1, "matching_titles": ["Sousou no Frieren"]},
-        {"anidb_id": 2, "matching_titles": ["Sousou no Frieren: Marumaru no Mahou"]},
-    ]
-    assert shoko.best_match(results, "Sousou no Frieren")["anidb_id"] == 1
-    assert shoko.best_match(results, "Nothing like it") is None
-
-
-def test_discard_and_delete_takes_only_the_entry_s_own_episodes(store, monkeypatch):
-    """A show folder holds every season; one AniDB entry's files are only its own.
-
-    The TVDB-era folder is named after the series, which no AniDB entry is
-    called; Shoko's link for each file says which entry and episode it is.
+    The old folder is named after the series, which no entry is called; the
+    file index says which entry and episode each file is. A staged copy is
+    the entry's too; a file of a likely name the index does not know is not.
     """
-    from xml.etree import ElementTree as ET
-
-    from bankai.metadata import anidb
-    from bankai.web import anime_library, shoko_catalog
-
-    table = anidb.build_index(
-        ET.fromstring(
-            """<animetitles>
-  <anime aid="1"><title xml:lang="x-jat" type="main">Dr. Stone: Science Future</title></anime>
-  <anime aid="2"><title xml:lang="x-jat" type="main">Dr. Stone: Science Future (2025)</title></anime>
-</animetitles>"""
-        ),
-        ET.fromstring(
-            """<anime-list>
-  <anime anidbid="1" tvdbid="99" defaulttvdbseason="4" episodeoffset="0"/>
-  <anime anidbid="2" tvdbid="99" defaulttvdbseason="4" episodeoffset="12"/>
-</anime-list>"""
-        ),
-    )
-    monkeypatch.setattr(anidb, "_INDEX", ((0, 0), table))
-    from bankai.config import Settings
-
-    monkeypatch.setattr(erai, "get_settings", lambda: Settings(transfer={"anime_shows_dir": str(store["root"])}))
-    season = store["root"] / "Dr. Stone" / "Season 04"
-    season.mkdir(parents=True)
-    links: dict[str, list[tuple[int, int]]] = {}
     for number in range(1, 25):
-        path = season / f"Dr. Stone - S04E{number:02d}.mkv"
-        path.write_bytes(b"x")
-        # Season 4 is two AniDB entries of twelve episodes each.
-        links[str(path)] = [(1, number) if number <= 12 else (2, number - 12)]
-    (store["root"] / "Dr. Stone" / "Season 03").mkdir()
-    earlier = store["root"] / "Dr. Stone" / "Season 03" / "Dr. Stone - S03E13.mkv"
-    earlier.write_bytes(b"x")
-    links[str(earlier)] = [(3, 13)]
-    own = store["root"] / "Dr. Stone Science Future (2025)"
-    own.mkdir()
-    (own / "Dr. Stone Science Future (2025) - 25.mkv").write_bytes(b"x")
-    monkeypatch.setattr(shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files=links))
-    monkeypatch.setattr(anime_library, "load_prefs", lambda: {})
+        indexed(store["root"], f"Dr. Stone/Season 04/Dr. Stone - S04E{number:02d}.mkv",
+                [(1001, number) if number <= 12 else (1002, number - 12)])
+    indexed(store["root"], "Dr. Stone/Season 03/Dr. Stone - S03E13.mkv", [(3, 13)])
+    staged = indexed(store["staging"], "Dr. Stone/Season 05/Dr. Stone - S05E13.mkv", [(1002, 13)])
+    stray = store["root"] / "Dr. Stone Science Future Dai 2 Cour" / "Dr. Stone Science Future Dai 2 Cour - 14.mkv"
+    stray.parent.mkdir()
+    stray.write_bytes(b"x")
 
-    picked = sorted(path.name for path in erai.entry_files(2))
+    picked = erai.entry_files(1002)
 
-    # Part 2 of season 4 is episodes 13-24 there, plus its own folder.
-    assert picked == sorted(
-        [f"Dr. Stone - S04E{n:02d}.mkv" for n in range(13, 25)] + ["Dr. Stone Science Future (2025) - 25.mkv"]
+    assert sorted(path.name for path in picked) == sorted(
+        [f"Dr. Stone - S04E{n:02d}.mkv" for n in range(13, 25)] + [staged.name]
     )
+
+
+def test_deleting_an_episode_takes_its_companions_and_its_record(store):
+    show = "Test Show"
+    video = indexed(store["root"], f"{show}/Season 02/{show} - S02E01.mkv", [(7, 1)])
+    for extra in (".nfo", ".de.ass", "-thumb.jpg"):
+        video.with_name(video.stem + extra).write_bytes(b"x")
+    (video.parent / "season.nfo").write_bytes(b"x")
+    (video.parent / "poster.jpg").write_bytes(b"x")
+    kept = indexed(store["root"], f"{show}/Season 01/{show} - S01E01.mkv", [(6, 1)])
+
+    result = erai._delete_series_files(delete_files=True, extra_folders=None, extra_files=[video])
+
+    assert result["deleted_files"] == 1
+    # Season 02 held nothing else but the layout's own files: it goes; the show stays.
+    assert not video.parent.exists()
+    assert kept.exists()
+    assert str(video.parent) in result["deleted_folders"]
+    assert list(anime_files.load()) == [f"{show}/Season 01/{show} - S01E01.mkv"]

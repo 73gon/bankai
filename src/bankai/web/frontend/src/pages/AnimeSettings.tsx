@@ -10,7 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 
 const LABELS: Record<string, { label: string; description: string; suffix?: string }> = {
-  'transfer.anime_shows_dir': { label: 'Anime library folder', description: 'Dedicated Jellyfin Anime destination; each show is filed under its AniDB entry.' },
+  'transfer.anime_shows_dir': { label: 'Anime library folder', description: 'Dedicated Jellyfin Anime destination; bankai lays each show out by its AniList entries and writes NFO files for Jellyfin.' },
   'anime.rss_url': { label: 'Nyaa Erai-raws RSS URL', description: 'The actual uploader feed. Only HTTPS Nyaa RSS for Erai-raws is accepted; this is not Erai-raws website RSS.' },
   'anime.enabled': { label: 'Automatic downloads', description: 'Follow the Nyaa Erai-raws uploader RSS and process its historical catalogue.' },
   'anime.backfill_enabled': { label: 'Historical backfill', description: 'Index all 2160p and 1080p releases first, then use 720p only for missing old episodes.' },
@@ -132,7 +132,7 @@ export default function AnimeSettings() {
       )}
 
       <Card>
-        <CardHeader><CardTitle>Download policy</CardTitle><CardDescription>Every automatic item requires a trusted Erai uploader, explicit German subtitle evidence, an unambiguous AniDB match, and post-download subtitle verification.</CardDescription></CardHeader>
+        <CardHeader><CardTitle>Download policy</CardTitle><CardDescription>Every automatic item requires a trusted Erai uploader, explicit German subtitle evidence, an unambiguous AniList match, and post-download subtitle verification.</CardDescription></CardHeader>
         <CardContent className='grid gap-5 md:grid-cols-2'>
           {rows.map((row) => {
             const meta = LABELS[row.key] || { label: row.key, description: '' };

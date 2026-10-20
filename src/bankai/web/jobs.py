@@ -446,10 +446,9 @@ _LIBRARY_WALK_SECONDS = 60.0
 # Superseded and month-old finished jobs are moved out of the jobs directory,
 # which every snapshot visits; see bgjobs.archive_finished_jobs.
 _JOB_ARCHIVE_SECONDS = 3600.0
-# How often Shoko is told which AniDB episode each newly published file is.
-_SHOKO_LINK_SECONDS = 600.0
-# How often to see whether AniDB's cover art map is due its weekly refresh.
-_ANIDB_ART_SECONDS = 6 * 3600.0
+# How often the anime library's AniList data and layout are brought up to
+# date, a little at a time; see anime_maintenance.
+_ANIME_METADATA_SECONDS = 300.0
 # How often Erai-raws' feeds are read for new releases and their subtitles.
 _ERAI_SITE_SECONDS = 600.0
 
@@ -460,9 +459,8 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "release_reconcile": ("Publish finished downloads", _RELEASE_RECONCILE_SECONDS),
     "library_walk": ("Check the libraries for changes", _LIBRARY_WALK_SECONDS),
     "codec_sweep": ("Identify episode encodes", _CODEC_SWEEP_SECONDS),
-    "shoko_link": ("Link new episodes in Shoko", _SHOKO_LINK_SECONDS),
+    "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
-    "anidb_art": ("Refresh AniDB cover art", _ANIDB_ART_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
@@ -519,20 +517,10 @@ def running_operations() -> list[dict]:
 
 
 async def _refresh_library() -> None:
-    """Keep the library tree current, and tell Shoko when the anime side changed.
+    """Keep the library tree current."""
+    from bankai.web import library_walk
 
-    Shoko cannot notice new, moved or removed files on the Windows drive by
-    itself, so a change seen here -- a download, a file added by hand, a
-    renamed folder -- is what triggers its scan.
-    """
-    from pathlib import Path
-
-    from bankai.web import library_walk, shoko_link
-
-    changed = await asyncio.to_thread(library_walk.refresh_all)
-    anime_root = str(Path(get_settings().transfer.anime_shows_dir))
-    if anime_root in changed and await shoko_link.scan_import_folder():
-        log.info("Anime library changed; asked Shoko to scan it")
+    await asyncio.to_thread(library_walk.refresh_all)
 
 
 def _archive_jobs() -> int:
@@ -557,24 +545,25 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
     next_archive_pass = 0.0
-    next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS
-    link_task: asyncio.Future | None = None
-    next_art_pass = time.monotonic() + 30.0
-    art_task: asyncio.Future | None = None
+    next_metadata_pass = time.monotonic() + 30.0
+    metadata_task: asyncio.Future | None = None
     next_erai_pass = time.monotonic() + 20.0
     erai_task: asyncio.Future | None = None
     _pass_due("library_walk", next_walk_pass)
-    _pass_due("shoko_link", next_link_pass)
-    _pass_due("anidb_art", next_art_pass)
+    _pass_due("anime_metadata", next_metadata_pass)
     _pass_due("erai_site", next_erai_pass)
     while True:
-        if time.monotonic() >= next_art_pass and (art_task is None or art_task.done()):
-            next_art_pass = time.monotonic() + _ANIDB_ART_SECONDS
-            _pass_due("anidb_art", next_art_pass)
-            from bankai.metadata import anidb_art
+        # Off to the side: AniList is asked a few times a pass, and laying
+        # out a collection is renames over 9p.
+        if time.monotonic() >= next_metadata_pass and (metadata_task is None or metadata_task.done()):
+            next_metadata_pass = time.monotonic() + _ANIME_METADATA_SECONDS
+            _pass_due("anime_metadata", next_metadata_pass)
+            if metadata_task is not None and metadata_task.exception() is not None:
+                log.warning("anime metadata pass failed: %r", metadata_task.exception())
+            from bankai.web import anime_maintenance
 
-            art_task = asyncio.ensure_future(anidb_art.refresh())
-            _pass_task("anidb_art", art_task)
+            metadata_task = asyncio.ensure_future(anime_maintenance.run())
+            _pass_task("anime_metadata", metadata_task)
         if time.monotonic() >= next_erai_pass and (erai_task is None or erai_task.done()):
             next_erai_pass = time.monotonic() + _ERAI_SITE_SECONDS
             _pass_due("erai_site", next_erai_pass)
@@ -584,16 +573,6 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
 
             erai_task = asyncio.ensure_future(erai_site.refresh())
             _pass_task("erai_site", erai_task)
-        # Also off to the side: Shoko calls, and AniDB behind them, are slow.
-        if time.monotonic() >= next_link_pass and (link_task is None or link_task.done()):
-            next_link_pass = time.monotonic() + _SHOKO_LINK_SECONDS
-            _pass_due("shoko_link", next_link_pass)
-            if link_task is not None and link_task.exception() is not None:
-                log.warning("Shoko linking failed: %s", link_task.exception())
-            from bankai.web import erai as erai_links
-
-            link_task = asyncio.ensure_future(erai_links.link_in_shoko())
-            _pass_task("shoko_link", link_task)
         if time.monotonic() >= next_archive_pass:
             next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
             _pass_due("job_archive", next_archive_pass)
@@ -940,7 +919,7 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
         action = torrent_actions.get_request(j.id) if j.status == "running" else None
         row = _display_row(j)
         if anime_only:
-            row["anidb_id"] = bgjobs.argument_value(j.args, "--anidb-id")
+            row["anilist_id"] = bgjobs.argument_value(j.args, "--anilist-id")
         row["action_required"] = bool(action and action.get("status") == "waiting")
         out.append(row)
     pending = _context_pending()
@@ -999,7 +978,7 @@ def snapshot(*, anime_only: bool = False) -> list[dict]:
         pending_args = {item.id: item.args for item in visible_pending}
         for row in out:
             if row["id"] in pending_args:
-                row["anidb_id"] = bgjobs.argument_value(pending_args[row["id"]], "--anidb-id")
+                row["anilist_id"] = bgjobs.argument_value(pending_args[row["id"]], "--anilist-id")
     out.sort(key=lambda r: r["started_at"], reverse=True)
     return out
 

@@ -1,4 +1,4 @@
-"""Nyaa-only anime catalogue, each release identified on AniDB.
+"""Nyaa-only anime catalogue, each release identified on AniList.
 
 Nyaa exposes a stable RSS representation for browse/search results.  We use
 that feed for the cheap list operation and only open individual detail pages
@@ -56,9 +56,9 @@ class NyaaEntry:
     season: int | None = None
     episode: int | None = None
     description: str = ""
-    # The AniDB entry and episode it is, when that can be told offline:
-    # {anidb_id, title, english_title, episode, poster_url, year, type}.
-    anidb: dict | None = None
+    # The AniList entry and episode it is, when that can be told offline:
+    # {anilist_id, title (romaji), name, episode, cover, format, year}.
+    anilist: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,15 +300,14 @@ def _normalise(value: str) -> str:
     return " ".join(re.findall(r"\w+", value.casefold(), flags=re.UNICODE))
 
 
-def anidb_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | None:
-    """The AniDB entry and episode a release is, from the title index; no network.
+def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | None:
+    """The AniList entry and episode a release is, from the title index; no network.
 
     The user's choice for its name first, as the automation does; else the
-    name as AniDB has it, its episode settled into the right part of a split
-    season. None when no single entry answers for the name.
+    name as AniList has it, its episode settled into the right part of a
+    split season. None when no single entry answers for the name.
     """
-    from bankai.metadata import anidb as anidb_mod
-    from bankai.metadata import anidb_art, anilist
+    from bankai.metadata import anilist
     from bankai.web import erai
 
     if table is None:
@@ -317,38 +316,37 @@ def anidb_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | N
     name = parsed[0] if parsed else clean_release_title(title)
     number = parsed[1] if parsed else release_episode_info(title)[1]
     saved = mappings.get(erai._mapping_key(title)) or {}
-    if str(saved.get("anidb_id") or "").isdigit():
-        entry = table.anime.get(int(saved["anidb_id"]))
+    if str(saved.get("anilist_id") or "").isdigit():
+        entry = table.anime.get(int(saved["anilist_id"]))
         if number is not None:
-            number += int(saved.get("anidb_episode_offset") or 0)
+            number += int(saved.get("anilist_episode_offset") or 0)
     else:
-        entry = anidb_mod.resolve_in(table, name).anime
+        entry = anilist.resolve_in(table, name).anime
         if entry is not None and number is not None:
-            entry, number = anidb_mod.settle_episode(table, entry, number)
+            entry, number = anilist.settle_in(entry, number)
     if entry is None:
         return None
-    facts = anidb_art.facts(entry.aid)
     return {
-        "anidb_id": entry.aid,
+        "anilist_id": entry.id,
         "title": entry.title,
-        "english_title": entry.english_title,
-        # How it is shown: AniList's name for it, when known.
-        "name": anilist.name(entry.aid),
+        # How it is shown: English, else romaji.
+        "name": entry.name,
         "episode": number,
-        "poster_url": anilist.cover(entry.aid) or anidb_art.cover(entry.aid),
-        "year": facts.get("year"),
-        "type": facts.get("type"),
+        "cover": anilist.cover(entry.id),
+        # TV, MOVIE, OVA...: the download dialog files a MOVIE as a movie.
+        "format": anilist.kind(entry.id),
+        "year": anilist.year(entry.id),
     }
 
 
-async def _enrich_anidb(entries: list[NyaaEntry]) -> list[NyaaEntry]:
-    from bankai.metadata import anidb as anidb_mod
+async def _enrich_anilist(entries: list[NyaaEntry]) -> list[NyaaEntry]:
+    from bankai.metadata import anilist
     from bankai.web import erai
 
-    table = await anidb_mod.index()
+    table = await anilist.index()
     mappings = await asyncio.to_thread(erai._load_mappings)
     return [
-        replace(entry, anidb=anidb_match(entry.title, table=table, mappings=mappings))
+        replace(entry, anilist=anilist_match(entry.title, table=table, mappings=mappings))
         for entry in entries
     ]
 
@@ -394,13 +392,13 @@ async def search(
         category = "1_0"
     aliases: list[str] = [query.strip()] if query.strip() else []
     if query.strip():
-        from bankai.metadata import anidb as anidb_mod
+        from bankai.metadata import anilist
 
-        # The anime's other names on AniDB widen the search: Erai publishes
+        # The anime's other names on AniList widen the search: Erai publishes
         # under the romaji title, people type the English one.
-        table = await anidb_mod.index()
-        found = anidb_mod.resolve_in(table, query.strip()).anime if table is not None else None
-        for value in (found.title, found.english_title) if found is not None else ():
+        table = await anilist.index()
+        found = anilist.resolve_in(table, query.strip()).anime if table is not None else None
+        for value in (found.title, found.english) if found is not None else ():
             if value and value.casefold() not in {item.casefold() for item in aliases}:
                 aliases.append(value)
     queries = aliases or [""]
@@ -460,10 +458,10 @@ async def search(
         )
     ]
     items.sort(key=lambda entry: (entry.seeders, entry.downloads), reverse=True)
-    # Every row is identified: AniDB's title index is on disk, so it costs
-    # no requests. A row it cannot place is still downloadable once an AniDB
-    # entry is picked for it.
-    items = await _enrich_anidb(items)
+    # Every row is identified: AniList's title index is on disk, so it costs
+    # no requests. A row it cannot place is still downloadable once an
+    # AniList entry is picked for it.
+    items = await _enrich_anilist(items)
     has_next = any(len(batch) >= _RSS_PAGE_SIZE for batch in batches)
     return AnimeSearchPage(items=items, page=page, has_next=has_next, aliases=aliases)
 
@@ -475,7 +473,7 @@ def entry_to_dict(entry: NyaaEntry) -> dict:
 __all__ = [
     "AnimeSearchPage",
     "NyaaEntry",
-    "anidb_match",
+    "anilist_match",
     "clean_release_title",
     "detail",
     "entry_to_dict",

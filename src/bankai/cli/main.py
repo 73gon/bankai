@@ -76,12 +76,8 @@ metadata_app = typer.Typer(
     name="metadata", help="Inspect metadata providers.", no_args_is_help=True
 )
 web_app = typer.Typer(name="web", help="Run and manage the web UI.", no_args_is_help=True)
-shoko_app = typer.Typer(
-    name="shoko", help="Connect bankai to Shoko Server for AniDB data.", no_args_is_help=True
-)
 anime_app = typer.Typer(name="anime", help="Anime automation.", no_args_is_help=True)
 app.add_typer(anime_app, name="anime")
-app.add_typer(shoko_app, name="shoko")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
 app.add_typer(background_app, name="background")
@@ -1460,44 +1456,6 @@ def _set_config_value(
     return path, cur[parts[-1]]
 
 
-@shoko_app.command("login")
-def shoko_login(
-    username: str = typer.Option("Default", "--user", help="Shoko Server username."),
-    url: str = typer.Option("", "--url", help="Shoko Server URL; defaults to shoko.url."),
-) -> None:
-    """Get an API key for bankai from Shoko. Only the key is saved, never the password."""
-    from bankai.web import shoko
-
-    if url:
-        _set_config_value("shoko.url", url)
-    password = typer.prompt(f"Shoko password for {username}", hide_input=True, default="",
-                            show_default=False)
-    try:
-        key = asyncio.run(shoko.login(username, password))
-    except Exception as exc:
-        console.print(f"[red]Shoko login failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-    path, _ = _set_config_value("shoko.api_key", key)
-    console.print(f"[green]Connected to Shoko.[/green] API key saved to {path}")
-
-
-@shoko_app.command("status")
-def shoko_status() -> None:
-    """Check that bankai can reach Shoko and search AniDB through it."""
-    from bankai.web import shoko
-
-    if not shoko.configured():
-        console.print("[yellow]Not connected.[/yellow] Run: bankai shoko login")
-        raise typer.Exit(code=1)
-    try:
-        found = asyncio.run(shoko.search_anidb("Frieren", limit=1))
-    except Exception as exc:
-        console.print(f"[red]Shoko unreachable or key rejected:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-    sample = found[0]["title"] if found else "no result"
-    console.print(f"[green]Connected.[/green] AniDB search works (Frieren -> {sample})")
-
-
 @config_app.command("edit")
 def config_edit() -> None:
     """Open the config in $EDITOR."""
@@ -1707,18 +1665,39 @@ def web_serve(
     run_server(host=host, port=port)
 
 
-@anime_app.command("migrate-anidb")
-def anime_migrate_anidb(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Only report what would change"),
+@anime_app.command("migrate-anilist")
+def anime_migrate_anilist(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only work it out and write the report"),
 ) -> None:
-    """Move the TVDB-era anime state over to AniDB; run with the automation stopped."""
-    from bankai.web.anidb_migration import migrate
+    """Move the anime library and state from AniDB and Shoko to AniList; run with the automation stopped."""
+    from bankai.web.anilist_migration import migrate
 
     report = asyncio.run(migrate(dry_run=dry_run))
-    for kind, count in sorted(report.items()):
+    files, collections, layout = report["files"], report["collections"], report["layout"]
+    console.print(f"files: {files['matched']} of {files['total']} placed {files['how']}, {files['unmatched']} unmatched")
+    console.print(
+        f"collections: {collections['total']} ({collections['from_shoko_groups']} from Shoko groups, "
+        f"{collections['made_or_joined_by_relations']} by relations)"
+    )
+    console.print(
+        f"layout: {layout['moves']} renames, {layout['already_in_place']} in place, "
+        f"{layout['duplicate_count']} duplicates; folders {layout['folders_before']} -> {layout['folders_after']}"
+    )
+    for kind, count in sorted(report["state"].items()):
         console.print(f"{count:>6}  {kind}")
+    console.print(f"report: {report['report_file']}")
     if dry_run:
         console.print("[yellow]dry run: nothing was changed[/yellow]")
+
+
+@anime_app.command("layout-undo")
+def anime_layout_undo(
+    log_file: Path = typer.Argument(..., help="A file from anime_layout_moves/ in the state directory"),
+) -> None:
+    """Put back the renames of one layout run, last first."""
+    from bankai.web.anime_layout import undo
+
+    console.print(f"{undo(log_file)} files put back")
 
 
 @anime_app.command("worker")
@@ -2346,18 +2325,18 @@ def anime_download(
     magnet_uri: str = typer.Option(..., "--magnet-uri"),
     info_hash: str = typer.Option(..., "--info-hash"),
     media_kind: str = typer.Option(..., "--kind", help="show | movie"),
-    # Accepted and ignored: jobs queued before anime moved to AniDB carry them.
+    # Accepted and ignored: jobs queued in the TVDB days carry them.
     _tvdb_id: int = typer.Option(0, "--tvdb-id", hidden=True),
     english_title: str = typer.Option(..., "--english-title"),
     year: int | None = typer.Option(None, "--year"),
     _season: int | None = typer.Option(None, "--season", hidden=True),
     episode: int | None = typer.Option(None, "--episode"),
-    anidb_id: int | None = typer.Option(None, "--anidb-id"),
-    anidb_title: str | None = typer.Option(None, "--anidb-title"),
+    anilist_id: int | None = typer.Option(None, "--anilist-id"),
+    anilist_title: str | None = typer.Option(None, "--anilist-title"),
     require_german_subtitles: bool = typer.Option(False, "--require-german-subtitles"),
     replace_existing: bool = typer.Option(False, "--replace-existing"),
     cleanup_torrent: bool = typer.Option(False, "--cleanup-torrent"),
-    keep_episode: list[int] = typer.Option([], "--keep-episode", help="AniDB episode not to publish"),
+    keep_episode: list[int] = typer.Option([], "--keep-episode", help="AniList episode not to publish"),
 ) -> None:
     """Download a selected Nyaa release and organize it without syncing."""
     from bankai.processor.anime import download_anime
@@ -2366,8 +2345,8 @@ def anime_download(
     if not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url):
         console.print("[red]anime downloads only accept nyaa.si sources[/red]")
         raise typer.Exit(code=1)
-    if media_kind == "show" and not anidb_id:
-        console.print("[red]an anime show download needs --anidb-id[/red]")
+    if media_kind == "show" and not anilist_id:
+        console.print("[red]an anime show download needs --anilist-id[/red]")
         raise typer.Exit(code=1)
 
     async def go() -> None:
@@ -2382,8 +2361,8 @@ def anime_download(
                 english_title=english_title,
                 year=year,
                 episode_override=episode,
-                anidb_id=anidb_id,
-                anidb_title=anidb_title,
+                anilist_id=anilist_id,
+                anilist_title=anilist_title,
                 require_german_subtitles=require_german_subtitles,
                 cleanup_torrent=cleanup_torrent,
                 replace_existing=replace_existing,

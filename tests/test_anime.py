@@ -146,22 +146,14 @@ def test_release_title_is_cleaned_to_the_show_s_own_name() -> None:
     )
 
 
-def _frieren_index():
-    from xml.etree import ElementTree as ET
-
-    from bankai.metadata import anidb
-
-    return anidb.build_index(
-        ET.fromstring(
-            """<animetitles>
-  <anime aid="17617">
-    <title xml:lang="x-jat" type="main">Sousou no Frieren</title>
-    <title xml:lang="en" type="official">Frieren: Beyond Journey's End</title>
-  </anime>
-</animetitles>"""
-        ),
-        ET.fromstring("<anime-list/>"),
-    )
+@pytest.fixture()
+def frieren(anilist_data):
+    """AniList's title index holding Frieren: a 28-episode season with a sequel."""
+    anilist_data.add(154587, "Sousou no Frieren", english="Frieren: Beyond Journey's End", episodes=28,
+                     start="2023-09-29", relations=[(182255, "SEQUEL")])
+    anilist_data.add(182255, "Sousou no Frieren 2nd Season", episodes=10, start="2026-01-16",
+                     relations=[(154587, "PREQUEL")])
+    return anilist_data.index()
 
 
 def _rss_row(title: str):
@@ -176,36 +168,48 @@ def _rss_row(title: str):
     )[0]
 
 
-def test_a_release_is_identified_on_anidb_from_its_title_alone() -> None:
+def test_a_release_is_identified_on_anilist_from_its_title_alone(frieren) -> None:
     """The title index is on disk: no request is made to tell what a release is."""
-    match = anime.anidb_match(
-        "[SubsPlease] Sousou no Frieren - 27 (1080p) [ABC].mkv", table=_frieren_index(), mappings={}
+    match = anime.anilist_match(
+        "[SubsPlease] Sousou no Frieren - 27 (1080p) [ABC].mkv", table=frieren, mappings={}
     )
 
-    assert match is not None
-    assert (match["anidb_id"], match["episode"]) == (17617, 27)
-    assert match["english_title"] == "Frieren: Beyond Journey's End"
+    assert match == {
+        "anilist_id": 154587,
+        "title": "Sousou no Frieren",
+        "name": "Frieren: Beyond Journey's End",
+        "episode": 27,
+        "cover": None,
+        "format": "TV",
+        "year": 2023,
+    }
 
 
-def test_a_name_anidb_does_not_know_is_left_for_the_user_to_place() -> None:
-    assert anime.anidb_match("[Group] Not An Anime - 01 [1080p]", table=_frieren_index(), mappings={}) is None
+def test_an_episode_past_the_season_s_end_is_the_sequel_s(frieren) -> None:
+    match = anime.anilist_match("[SubsPlease] Sousou no Frieren - 30 (1080p).mkv", table=frieren, mappings={})
+
+    assert (match["anilist_id"], match["episode"]) == (182255, 2)
 
 
-def test_the_user_s_choice_for_a_release_name_wins_over_the_title() -> None:
+def test_a_name_anilist_does_not_know_is_left_for_the_user_to_place(frieren) -> None:
+    assert anime.anilist_match("[Group] Not An Anime - 01 [1080p]", table=frieren, mappings={}) is None
+
+
+def test_the_user_s_choice_for_a_release_name_wins_over_the_title(frieren) -> None:
     from bankai.web import erai
 
     title = "[Erai-raws] Frieren Beyond - 03 [1080p]"
-    mappings = {erai._mapping_key(title): {"anidb_id": 17617, "anidb_episode_offset": 28}}
+    mappings = {erai._mapping_key(title): {"anilist_id": 154587, "anilist_episode_offset": 28}}
 
-    match = anime.anidb_match(title, table=_frieren_index(), mappings=mappings)
+    match = anime.anilist_match(title, table=frieren, mappings=mappings)
 
     assert match is not None
-    assert (match["anidb_id"], match["episode"]) == (17617, 31)
+    # Taken as chosen: the offset is the user's, not settled any further.
+    assert (match["anilist_id"], match["episode"]) == (154587, 31)
 
 
-def test_every_release_on_a_nyaa_page_is_identified(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_every_release_on_a_nyaa_page_is_identified(monkeypatch: pytest.MonkeyPatch, frieren) -> None:
     """Identifying costs nothing, so no row is left without a try, browsing included."""
-    from bankai.metadata import anidb
     from bankai.web import erai
 
     sample = _rss_row("[Group] Sousou no Frieren - 01 [1080p]")
@@ -213,51 +217,42 @@ def test_every_release_on_a_nyaa_page_is_identified(monkeypatch: pytest.MonkeyPa
         replace(sample, id=index, info_hash=f"{index:040x}", detail_url=f"https://nyaa.si/view/{index}")
         for index in range(1, 76)
     ]
-    table = _frieren_index()
 
     async def fake_fetch(*args: object, **kwargs: object) -> list[anime.NyaaEntry]:
         return rows
 
-    async def index():
-        return table
-
     monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
-    monkeypatch.setattr(anidb, "index", index)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
 
     page = asyncio.run(anime.search(""))
 
     assert len(page.items) == 75
     assert page.has_next is True
-    assert all(item.anidb and item.anidb["anidb_id"] == 17617 for item in page.items)
+    assert all(item.anilist and item.anilist["anilist_id"] == 154587 for item in page.items)
+    # What the API sends: the match under "anilist".
+    assert anime.entry_to_dict(page.items[0])["anilist"]["name"] == "Frieren: Beyond Journey's End"
 
 
-def test_a_search_also_asks_nyaa_under_the_anime_s_other_anidb_names(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_search_also_asks_nyaa_under_the_anime_s_other_anilist_names(
+    monkeypatch: pytest.MonkeyPatch, frieren
 ) -> None:
     """People type the English name; Erai publishes under the romaji one."""
-    from bankai.metadata import anidb
     from bankai.web import erai
 
     asked: list[str] = []
-    table = _frieren_index()
 
     async def fake_fetch(client, term, category, page) -> list[anime.NyaaEntry]:
         asked.append(term)
         return [_rss_row("[Erai-raws] Sousou no Frieren - 02 [1080p]")]
 
-    async def index():
-        return table
-
     monkeypatch.setattr(anime, "_fetch_rss", fake_fetch)
-    monkeypatch.setattr(anidb, "index", index)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
 
     page = asyncio.run(anime.search("Frieren: Beyond Journey's End"))
 
     assert sorted(asked) == sorted(["Frieren: Beyond Journey's End", "Sousou no Frieren"])
     assert page.aliases == ["Frieren: Beyond Journey's End", "Sousou no Frieren"]
-    assert page.items[0].anidb["episode"] == 2
+    assert page.items[0].anilist["episode"] == 2
 
 
 def test_erai_suffix_deconstruction_keeps_numbers_inside_the_title() -> None:

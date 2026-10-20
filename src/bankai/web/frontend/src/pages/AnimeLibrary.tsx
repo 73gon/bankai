@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
+import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
+import { anilistName, anilistUrl } from '@/lib/anilist';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,7 +13,7 @@ import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/u
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
-import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
+import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph';
 import { Meter, rampParts } from '@/components/ui/meter';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
@@ -126,6 +127,29 @@ function Progress({ show }: { show: AnimeLibraryShow }) {
   );
 }
 
+/** A card of files no AniList entry is known for: offered "Match on AniList". */
+function isUnmatched(show: AnimeLibraryShow) {
+  return show.unmatched ?? !show.anilist_id;
+}
+
+type EntryRef = { anilist_id: number; title: string };
+
+/** What the AniList picker is open for: an Unmatched card's folders, or one entry of a card to swap. */
+type PickTarget =
+  | { mode: 'match'; show: AnimeLibraryShow }
+  | { mode: 'rematch'; show: AnimeLibraryShow; from: EntryRef };
+
+/** The entry "Change AniList entry" swaps: the open tab's, when the tab is one entry. */
+function tabEntry(show: AnimeLibraryShow, tab: string): EntryRef | null {
+  const here = show.season_anilist?.[tab] ?? [];
+  if (here.length === 1) return here[0];
+  // A card of one entry whose tabs name none: that entry.
+  if (here.length === 0 && (show.anilist_ids?.length ?? 0) <= 1 && show.anilist_id != null) {
+    return { anilist_id: show.anilist_id, title: show.source_title || show.title };
+  }
+  return null;
+}
+
 export default function AnimeLibrary() {
   // Started from the last answer this browser saw, refreshed straight after.
   const [shows, setShows] = useState<AnimeLibraryShow[]>(() => recall<{ shows: AnimeLibraryShow[] }>(pagePaths.animeLibrary)?.shows ?? []);
@@ -133,14 +157,20 @@ export default function AnimeLibrary() {
   const [query, setQuery] = useState('');
   // Blacklisted shows still on disk are hidden unless asked for.
   const [showBlacklisted, setShowBlacklisted] = useState(false);
-  // Only the shows not yet linked to an AniDB entry.
-  const [onlyUnlinked, setOnlyUnlinked] = useState(false);
+  // Only the cards no AniList entry is known for.
+  const [onlyUnmatched, setOnlyUnmatched] = useState(false);
   const [view, setView] = useState<View>(storedView);
   const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedShow, setSelectedShow] = useState<AnimeLibraryShow | null>(null);
-  // The show whose folders are being linked to an AniDB entry.
-  const [linkFor, setLinkFor] = useState<AnimeLibraryShow | null>(null);
+  // What the AniList picker is open for.
+  const [pickFor, setPickFor] = useState<PickTarget | null>(null);
+  // The open season tab of the drawer, and the card it was opened on.
+  const [tab, setTab] = useState<{ key: string; value: string } | null>(null);
+  // The collection being renamed, and the name typed for it.
+  const [renameFor, setRenameFor] = useState<AnimeLibraryShow | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   // Only a spinner with nothing to show: otherwise the held answer stays up while it refreshes.
   const [loading, setLoading] = useState(() => recall(pagePaths.animeLibrary) === undefined);
@@ -168,16 +198,31 @@ export default function AnimeLibrary() {
     }
   }, [view]);
 
-  async function load(rescan = false) {
+  async function load(rescan = false): Promise<AnimeLibraryShow[] | null> {
     if (rescan) setLoading(true);
     try {
       const result = await api.animeLibrary(rescan);
-      setShows(result.shows.filter((show) => !removing.current.has(show.key)));
+      const fresh = result.shows.filter((show) => !removing.current.has(show.key));
+      setShows(fresh);
       setRoot(result.root);
+      return fresh;
     } catch (error: any) {
       toast.error(error.message);
+      return null;
     } finally {
       setLoading(false);
+    }
+  }
+
+  /** After a change that may rename the open card: open the card it became, or close the drawer. */
+  async function reopen(find: (show: AnimeLibraryShow) => boolean) {
+    const fresh = await load();
+    const card = fresh?.find(find);
+    if (card) {
+      await openShow(card.key);
+    } else {
+      setSelected(null);
+      setSelectedShow(null);
     }
   }
 
@@ -195,15 +240,28 @@ export default function AnimeLibrary() {
     }
   }
 
-  async function linkShow(anime: AniDBAnime) {
-    if (!linkFor) return;
-    const show = linkFor;
+  /** The picked entry: an Unmatched card's files become its episodes, or one entry's files move to it. */
+  async function pickEntry(anime: AniListAnime) {
+    const target = pickFor;
+    if (!target) return;
+    const name = anilistName(anime);
     try {
-      await api.linkLibraryShow(show.folders?.length ? show.folders : [show.key], anime.anidb_id);
-      toast.success(show.title + ' is linked to ' + anime.title);
-      setLinkFor(null);
-      void load();
-      if (selected === show.key) void openShow(show.key);
+      if (target.mode === 'match') {
+        const folders = target.show.folders?.length ? target.show.folders : [target.show.key];
+        await api.matchLibraryFolders(folders, anime.anilist_id);
+        toast.success(target.show.title + ' matched to ' + name);
+      } else {
+        if (target.from.anilist_id === anime.anilist_id) {
+          toast.info(target.from.title + ' is already that entry');
+          return;
+        }
+        await api.rematchEntry(target.from.anilist_id, anime.anilist_id);
+        toast.success(target.from.title + ' is now ' + name + '; its files are moved to match');
+      }
+      setPickFor(null);
+      // The card is named after its entries, so it may come back under another key.
+      if (selected) await reopen((show) => show.anilist_id === anime.anilist_id || Boolean(show.anilist_ids?.includes(anime.anilist_id)));
+      else void load();
     } catch (error: any) {
       toast.error(error.message);
     }
@@ -224,10 +282,10 @@ export default function AnimeLibrary() {
   }
 
   async function upgradeToHevc(show: AnimeLibraryShow) {
-    if (!show.anidb_ids?.length) return;
+    if (!show.anilist_ids?.length) return;
     setUpgrading(show.key);
     try {
-      const result = await api.upgradeShowToHevc(show.anidb_ids);
+      const result = await api.upgradeShowToHevc(show.anilist_ids);
       if (result.queued === 0) {
         // Say what was found, not what is assumed: "already HEVC" only when it is.
         toast.info(result.no_replacement > 0
@@ -279,19 +337,42 @@ export default function AnimeLibrary() {
     }
   }
 
-  /** Name the collection after one of its entries; Shoko renames the group, Jellyfin follows. */
-  async function setTitle(show: AnimeLibraryShow, anidbId: number) {
+  /** Name and picture the collection after one of its entries; the library and Jellyfin follow. */
+  async function setTitle(show: AnimeLibraryShow, anilistId: number) {
     setTitling(true);
     try {
-      const result = await api.setCollectionTitle(show.key, anidbId);
+      const result = await api.setCollectionTitle(show.key, anilistId);
       toast.success('Collection now shown as ' + (result.name || 'the chosen entry'));
-      await load();
-      // The card's key is its name, which just changed.
-      await openShow(result.name || show.key);
+      // The card's key is its name, which may just have changed.
+      const cid = show.collection_id;
+      await reopen((card) => (cid != null ? card.collection_id === cid : card.key === (result.name || show.key)));
     } catch (error: any) {
       toast.error(error.message);
     } finally {
       setTitling(false);
+    }
+  }
+
+  function openRename(show: AnimeLibraryShow) {
+    setRenameValue(show.title);
+    setRenameFor(show);
+  }
+
+  /** A name of the user's own for the collection; null gives it back AniList's. */
+  async function renameCollection(name: string | null) {
+    const show = renameFor;
+    if (!show || show.collection_id == null) return;
+    const cid = show.collection_id;
+    setRenaming(true);
+    try {
+      const result = await api.collectionName(cid, name);
+      toast.success(name ? 'Collection renamed to ' + name : 'Collection named after AniList again' + (result.name ? ': ' + result.name : ''));
+      setRenameFor(null);
+      await reopen((card) => card.collection_id === cid);
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setRenaming(false);
     }
   }
 
@@ -312,20 +393,20 @@ export default function AnimeLibrary() {
     }
   }
 
-  /** The AniDB entry a row of the drawer is an episode of: its tab's entry. */
+  /** The AniList entry a row of the drawer is an episode of: its tab's entry. */
   function entryOf(show: AnimeLibraryShow, episode: AnimeLibraryEpisode): number | null {
     if (episode.season_number == null) return null;
-    return show.season_anidb?.[String(episode.season_number)]?.[0]?.anidb_id ?? null;
+    return show.season_anilist?.[String(episode.season_number)]?.[0]?.anilist_id ?? null;
   }
 
   async function searchMissing(show: AnimeLibraryShow, episode: AnimeLibraryEpisode, q?: string) {
-    const anidbId = entryOf(show, episode);
-    if (anidbId == null || episode.episode == null) return;
+    const anilistId = entryOf(show, episode);
+    if (anilistId == null || episode.episode == null) return;
     setSearchTarget({ show, episode });
     setSearching(true);
     setResults([]);
     try {
-      const result = await api.animeEpisodeSearch(anidbId, episode.episode, q);
+      const result = await api.animeEpisodeSearch(anilistId, episode.episode, q);
       setResults(result.items);
       setSearchQuery(q ?? result.queries[0] ?? '');
     } catch (error: any) {
@@ -336,11 +417,11 @@ export default function AnimeLibrary() {
   }
 
   async function downloadMissing(entry: AnimeEntry) {
-    const anidbId = searchTarget ? entryOf(searchTarget.show, searchTarget.episode) : null;
-    if (!searchTarget || anidbId == null) return;
+    const anilistId = searchTarget ? entryOf(searchTarget.show, searchTarget.episode) : null;
+    if (!searchTarget || anilistId == null) return;
     setDownloading(entry.info_hash);
     try {
-      await api.animeDownload(entry, anidbId, 'show', searchTarget.episode.episode);
+      await api.animeDownload(entry, anilistId, 'show', searchTarget.episode.episode);
       toast.success('Episode added to the Anime queue');
       setSearchTarget(null);
     } catch (error: any) {
@@ -354,7 +435,7 @@ export default function AnimeLibrary() {
   const visible = useMemo(() => {
     const matched = shows.filter((show) =>
       (showBlacklisted || !show.blacklisted)
-      && (!onlyUnlinked || !show.anidb_id)
+      && (!onlyUnmatched || isUnmatched(show))
       && show.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
     if (!sort) return matched;
     const pick = LIBRARY_SORTERS[sort.key];
@@ -367,9 +448,9 @@ export default function AnimeLibrary() {
       }
       return (a === b ? 0 : a < b ? -1 : 1) * factor;
     });
-  }, [shows, query, sort, showBlacklisted, onlyUnlinked]);
+  }, [shows, query, sort, showBlacklisted, onlyUnmatched]);
   const blacklistedCount = useMemo(() => shows.filter((show) => show.blacklisted).length, [shows]);
-  const unlinkedCount = useMemo(() => shows.filter((show) => !show.anidb_id && (showBlacklisted || !show.blacklisted)).length, [shows, showBlacklisted]);
+  const unmatchedCount = useMemo(() => shows.filter((show) => isUnmatched(show) && (showBlacklisted || !show.blacklisted)).length, [shows, showBlacklisted]);
   const totals = useMemo(() => visible.reduce((acc, show) => ({
     size: acc.size + show.size,
     episodes: acc.episodes + show.episode_count,
@@ -383,11 +464,14 @@ export default function AnimeLibrary() {
 
   const active = selectedShow;
   const seasons = active ? Array.from(new Set(active.episodes.map((episode) => episode.season_number))).sort((a, b) => (a ?? -1) - (b ?? -1)) : [];
+  // Another card opens on its first tab; a refreshed one stays where it was, while that tab is still there.
+  const openTab = tab && tab.key === active?.key && seasons.map(String).includes(tab.value) ? tab.value : String(seasons[0]);
+  const swappable = active && !isUnmatched(active) ? tabEntry(active, openTab) : null;
   // Read absolutely, a season tab is one of the user's own arc folders: named after it.
   const seasonLabel = (season: number | null) => {
     if (season === null) return 'Other files';
-    // An AniDB card's tabs are its entries or its season folders, each named.
-    if (active?.numbering === 'anidb') {
+    // An AniList card's tabs are its entries or its season folders, each named.
+    if (active?.numbering === 'anilist') {
       const label = active.episodes.find((episode) => episode.season_number === season)?.season;
       if (label) return label;
     }
@@ -407,14 +491,14 @@ export default function AnimeLibrary() {
             <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
             <Input aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} className='w-60 pl-9' />
           </div>
-          {(unlinkedCount > 0 || onlyUnlinked) && (
+          {(unmatchedCount > 0 || onlyUnmatched) && (
             <Button
-              variant={onlyUnlinked ? 'default' : 'secondary'}
-              aria-pressed={onlyUnlinked}
-              onClick={() => setOnlyUnlinked((current) => !current)}
-              title='Shows not linked to an AniDB entry yet; link them from their details'
+              variant={onlyUnmatched ? 'default' : 'secondary'}
+              aria-pressed={onlyUnmatched}
+              onClick={() => setOnlyUnmatched((current) => !current)}
+              title='Files no AniList entry is known for; match them on AniList from their details'
             >
-              <Link2 data-icon='inline-start' /> Not linked ({unlinkedCount})
+              <Link2 data-icon='inline-start' /> Unmatched ({unmatchedCount})
             </Button>
           )}
           {blacklistedCount > 0 && (
@@ -443,7 +527,7 @@ export default function AnimeLibrary() {
       </div>
 
       {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : visible.length === 0 ? (
-        <EmptyState icon={HardDrive} title={shows.length ? 'No matching Anime' : 'No Anime in your library yet'} description='Completed and staged episodes are grouped by their AniDB entries.' />
+        <EmptyState icon={HardDrive} title={shows.length ? 'No matching Anime' : 'No Anime in your library yet'} description='Completed and staged episodes are grouped into collections of AniList entries.' />
       ) : view === 'grid' ? (
         <div className='min-h-0 flex-1 overflow-y-auto'>
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
@@ -455,7 +539,7 @@ export default function AnimeLibrary() {
                   <div className='relative block w-full'>
                     <AnimePoster url={show.poster_url} title={show.title} />
                     {show.blacklisted && <Badge variant='destructive' className='absolute left-2 top-2 bg-background/85 backdrop-blur-sm'>Blacklisted</Badge>}
-                    {!show.anidb_id && <Badge variant='warning' className='absolute right-2 top-2 bg-background/85 backdrop-blur-sm' title='Not linked to an AniDB entry yet'>No AniDB</Badge>}
+                    {isUnmatched(show) && <Badge variant='warning' className='absolute right-2 top-2 bg-background/85 backdrop-blur-sm' title='No AniList entry is known for these files: match it from its details'>Unmatched</Badge>}
                     <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/75 to-transparent px-3 pb-2.5 pt-10 text-left text-sm font-medium leading-tight text-white'>{show.title}</span>
                   </div>
                   {/* The completion colour, as the rule between the cover and
@@ -517,7 +601,7 @@ export default function AnimeLibrary() {
                         <span className='text-xs text-muted-foreground'>{tone.label}</span>
                         {show.staged_count > 0 && <Badge variant='warning'>{show.staged_count} staged</Badge>}
                         {show.blacklisted && <Badge variant='destructive'>Blacklisted</Badge>}
-                        {!show.anidb_id && <Badge variant='warning' title='Not linked to an AniDB entry yet'>No AniDB</Badge>}
+                        {isUnmatched(show) && <Badge variant='warning' title='No AniList entry is known for these files: match it from its details'>Unmatched</Badge>}
                       </div>
                     </td>
                   </tr>
@@ -539,7 +623,7 @@ export default function AnimeLibrary() {
         </footer>
       )}
 
-      <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); } }}>
+      <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); setTab(null); } }}>
         <DrawerContent aria-describedby={undefined} className='md:w-3/4'>
           {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner /></div>}
           {active && (
@@ -556,22 +640,22 @@ export default function AnimeLibrary() {
                     )}
                     <p className='text-xs text-muted-foreground'>{active.downloaded_count}/{active.total_count} episodes · {active.season_count} seasons · {formatSize(active.size)}</p>
                     <div className='flex flex-wrap items-center gap-2'>
-                      {/* First, always: every card is an AniDB entry now, so the
-                          tabs' own links no longer stand in for it. */}
-                      {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries; each tab links its own' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
-                      {(active.collection_id != null || active.anidb_id != null) && (
+                      {/* First, always: every matched card is an AniList entry, so the
+                          tabs' own links do not stand in for it. */}
+                      {active.anilist_id && <Button asChild variant='secondary' size='sm'><a href={anilistUrl(active.anilist_id)} target='_blank' rel='noreferrer' title={(active.anilist_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anilist_ids!.length + ' AniList entries; each tab links its own' : 'This show on AniList'}><ExternalLink data-icon='inline-start' /> AniList</a></Button>}
+                      {(active.collection_id != null || active.anilist_id != null) && (
                         <Button
                           size='sm'
                           variant='secondary'
-                          onClick={() => setGraphFor(active.collection_id != null ? { group: active.collection_id } : { entry: active.anidb_id! })}
-                          title='How this collection&apos;s entries relate on AniDB: split, merge, pull entries in'
+                          onClick={() => setGraphFor(active.collection_id != null ? { collection: active.collection_id } : { entry: active.anilist_id! })}
+                          title='How this collection&apos;s entries relate on AniList: split, merge, pull entries in'
                         >
                           <Network data-icon='inline-start' /> Relations
                         </Button>
                       )}
                       {(active.collection_entries?.length ?? 0) > 1 && active.collection_id != null && (
                         <Select
-                          value={String(active.anidb_id ?? '')}
+                          value={String(active.anilist_id ?? '')}
                           onValueChange={(value) => void setTitle(active, Number(value))}
                           disabled={titling}
                         >
@@ -579,34 +663,48 @@ export default function AnimeLibrary() {
                             data-size='sm'
                             className='w-72'
                             aria-label='Which entry the collection is shown as'
-                            title='The entry this collection is named and pictured after, here and in Jellyfin'
+                            title={active.collection_name_custom
+                              ? 'The entry this collection is pictured after; its name is your own'
+                              : 'The entry this collection is named and pictured after, here and in Jellyfin'}
                           >
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectGroup>
                               {active.collection_entries!.map((entry) => (
-                                <SelectItem key={entry.anidb_id} value={String(entry.anidb_id)}>
-                                  Shown as: {entry.title}{entry.owned ? '' : ' (not downloaded)'}
+                                <SelectItem key={entry.anilist_id} value={String(entry.anilist_id)}>
+                                  Shown as: {entry.title}{entry.season ? ' · ' + entry.season : ''}{entry.owned ? '' : ' (not downloaded)'}
                                 </SelectItem>
                               ))}
                             </SelectGroup>
                           </SelectContent>
                         </Select>
                       )}
-                      {!active.anidb_id && (
+                      {active.collection_id != null && (
                         <Button
                           size='sm'
-                          onClick={() => setLinkFor(active)}
-                          title='Pick the AniDB entry of this show: for its files Shoko has not matched, and those still to come'
+                          variant='secondary'
+                          onClick={() => openRename(active)}
+                          title={active.collection_name_custom
+                            ? 'Renamed by hand: rename it again, or give it back AniList\'s name'
+                            : 'Give the collection a name of your own, for its folder and in Jellyfin'}
                         >
-                          <Link2 data-icon='inline-start' /> Link to AniDB
+                          <Pencil data-icon='inline-start' /> Rename
+                        </Button>
+                      )}
+                      {isUnmatched(active) && (
+                        <Button
+                          size='sm'
+                          onClick={() => setPickFor({ mode: 'match', show: active })}
+                          title='Pick the AniList entry these files are: each becomes its episode by the number in its name, and is moved into place'
+                        >
+                          <Link2 data-icon='inline-start' /> Match on AniList
                         </Button>
                       )}
                       {Boolean(active.avc_count) && (
                         <Button
                           size='sm'
-                          disabled={!active.anidb_ids?.length || upgrading === active.key}
+                          disabled={!active.anilist_ids?.length || upgrading === active.key}
                           onClick={() => void upgradeToHevc(active)}
                           title='Download HEVC versions of this show&apos;s AVC episodes and replace them'
                         >
@@ -617,14 +715,18 @@ export default function AnimeLibrary() {
                       {/* Straight on the header, not in a menu: a dialog opened from a
                           popover item was dismissed by the popover closing, so
                           "Remove and blacklist" never asked and never removed. */}
-                      {active.anidb_id && (
+                      {!isUnmatched(active) && active.anilist_id != null && (
                         <Button
                           size='sm'
                           variant='secondary'
-                          onClick={() => setLinkFor(active)}
-                          title='Pick another AniDB entry for this show'
+                          onClick={() => swappable
+                            ? setPickFor({ mode: 'rematch', show: active, from: swappable })
+                            : toast.info('This tab holds several AniList entries: change one with the pencil beside its name')}
+                          title={swappable
+                            ? 'Pick another AniList entry for ' + swappable.title + '; its files move with it'
+                            : 'This tab holds several entries: change one with the pencil beside its name'}
                         >
-                          <Search data-icon='inline-start' /> Change AniDB anime
+                          <Search data-icon='inline-start' /> Change AniList entry
                         </Button>
                       )}
                       <Button
@@ -639,25 +741,38 @@ export default function AnimeLibrary() {
                   </div>
                 </div>
               </DrawerHeader>
-              <Tabs key={active.key} defaultValue={String(seasons[0])} className='flex min-h-0 flex-1 flex-col'>
+              <Tabs value={openTab} onValueChange={(value) => setTab({ key: active.key, value })} className='flex min-h-0 flex-1 flex-col'>
                 <TabsList className='flex h-auto flex-wrap justify-start px-5 pt-3'>
                   {seasons.map((season) => <TabsTrigger key={String(season)} value={String(season)}>{seasonLabel(season)}</TabsTrigger>)}
                 </TabsList>
                 {seasons.map((season) => (
                   <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>
-                    {season !== null && (active.season_anidb?.[String(season)]?.length ?? 0) > 0 && (
+                    {season !== null && (active.season_anilist?.[String(season)]?.length ?? 0) > 0 && (
                       <p className='flex flex-wrap items-center gap-x-3 gap-y-1 pt-3 text-xs text-muted-foreground'>
-                        <span>AniDB:</span>
-                        {active.season_anidb![String(season)].map((entry) => (
-                          <a
-                            key={entry.anidb_id}
-                            href={'https://anidb.net/anime/' + entry.anidb_id}
-                            target='_blank'
-                            rel='noreferrer'
-                            className='inline-flex items-center gap-1 text-foreground underline-offset-4 hover:underline'
-                          >
-                            {entry.title} <ExternalLink className='size-3' />
-                          </a>
+                        <span>AniList:</span>
+                        {active.season_anilist![String(season)].map((entry) => (
+                          <span key={entry.anilist_id} className='inline-flex items-center gap-0.5'>
+                            <a
+                              href={anilistUrl(entry.anilist_id)}
+                              target='_blank'
+                              rel='noreferrer'
+                              className='inline-flex items-center gap-1 text-foreground underline-offset-4 hover:underline'
+                            >
+                              {entry.title} <ExternalLink className='size-3' />
+                            </a>
+                            {!isUnmatched(active) && (
+                              <Button
+                                size='icon'
+                                variant='ghost'
+                                className='size-6 text-muted-foreground'
+                                aria-label={'Change the AniList entry of ' + entry.title}
+                                title='Pick another AniList entry for these files; they move with it'
+                                onClick={() => setPickFor({ mode: 'rematch', show: active, from: entry })}
+                              >
+                                <Pencil className='size-3' />
+                              </Button>
+                            )}
+                          </span>
                         ))}
                       </p>
                     )}
@@ -675,7 +790,7 @@ export default function AnimeLibrary() {
                               </div>
                             </td>
                             <td className='px-3 py-2.5 text-right font-mono text-xs tabular-nums'>{entry.missing ? '—' : formatSize(entry.size)}</td>
-                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={entryOf(active, entry) == null || entry.tba} aria-label='Search for a release' title={entry.tba ? 'Not aired yet' : 'Search for a release of this AniDB episode'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : (
+                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={entryOf(active, entry) == null || entry.tba} aria-label='Search for a release' title={entry.tba ? 'Not aired yet' : 'Search for a release of this AniList episode'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : (
                               <div className='flex items-center justify-end gap-1.5'>
                                 {entry.staged ? (
                                   <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>
@@ -746,7 +861,7 @@ export default function AnimeLibrary() {
         <DialogContent className='flex h-[90dvh] w-[92vw] max-w-none flex-col overflow-hidden'>
           <DialogHeader>
             <DialogTitle>Search {searchTarget ? seasonLabel(searchTarget.episode.season_number) : ''} — episode {searchTarget?.episode.episode ?? ''}</DialogTitle>
-            <DialogDescription>Choose a release of this AniDB episode. Every result is checked to be this entry's episode.</DialogDescription>
+            <DialogDescription>Choose a release of this AniList episode. Every result is checked to be this entry's episode.</DialogDescription>
           </DialogHeader>
           <form className='flex gap-2' onSubmit={(event) => { event.preventDefault(); if (searchTarget) void searchMissing(searchTarget.show, searchTarget.episode, searchQuery); }}>
             <Input aria-label='Episode release search' value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className='flex-1' />
@@ -763,7 +878,53 @@ export default function AnimeLibrary() {
           </div>
         </DialogContent>
       </Dialog>
-      <AniDBLinkDialog name={linkFor ? linkFor.source_title || linkFor.title : null} onClose={() => setLinkFor(null)} onPick={linkShow} />
+      <AniListPickDialog
+        query={pickFor ? (pickFor.mode === 'match' ? pickFor.show.source_title || pickFor.show.title : pickFor.from.title) : null}
+        onClose={() => setPickFor(null)}
+        onPick={pickEntry}
+        title={pickFor?.mode === 'rematch' ? 'Change the AniList entry of ' + pickFor.from.title : 'Match on AniList'}
+        description={pickFor?.mode === 'rematch'
+          ? 'Its files become the picked entry, with the same episode numbers, and are moved into place.'
+          : "This card's files become the picked entry's episodes, by the number in each file name, and are moved into place."}
+        action={pickFor?.mode === 'rematch' ? 'Change' : 'Match'}
+      />
+      <Dialog open={renameFor !== null} onOpenChange={(open) => { if (!open && !renaming) setRenameFor(null); }}>
+        <DialogContent className='max-w-md'>
+          <DialogHeader>
+            <DialogTitle>Rename collection</DialogTitle>
+            <DialogDescription>
+              The name its folder, its episode files and Jellyfin show it under.
+              {renameFor?.collection_name_custom ? ' It carries a name of your own now.' : " It carries AniList's name now."}
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            id='rename-collection'
+            onSubmit={(event) => {
+              event.preventDefault();
+              const name = renameValue.trim();
+              if (name) void renameCollection(name);
+            }}
+          >
+            <Input aria-label='Collection name' value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus />
+          </form>
+          <DialogFooter className='gap-2 sm:justify-between sm:space-x-0'>
+            <Button
+              variant='secondary'
+              disabled={renaming || !renameFor?.collection_name_custom}
+              onClick={() => void renameCollection(null)}
+              title={renameFor?.collection_name_custom ? 'Drop your name: the collection is named after its title entry on AniList again' : 'It already carries AniList\'s name'}
+            >
+              <RotateCcw data-icon='inline-start' /> Use AniList&apos;s name
+            </Button>
+            <div className='flex gap-2'>
+              <Button variant='secondary' onClick={() => setRenameFor(null)} disabled={renaming}>Cancel</Button>
+              <Button type='submit' form='rename-collection' disabled={renaming || !renameValue.trim() || renameValue.trim() === renameFor?.title}>
+                {renaming ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <CollectionGraph
         target={graphFor}
         onClose={() => setGraphFor(null)}

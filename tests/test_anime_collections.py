@@ -1,597 +1,654 @@
-"""Collections: the AniDB entries of one show kept together as one library card."""
+"""Collections: the AniList entries of one show, kept together by bankai."""
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
+import json
 
 import pytest
-from fastapi.testclient import TestClient
 
-from bankai.web import anime_collections
-from bankai.web.shoko_catalog import Catalog, Entry, EntryEpisode, Group, build
-from tests.test_anime_library_names import _run_library
+from bankai.web import anime_collections as collections
+from bankai.web.anime_collections import Store
+
+# Attack on Titan: four TV entries in one sequel chain, and an OVA beside the first.
+S1, S2, S3, S3P2, OVA, MOVIE = 16498, 20958, 99147, 104578, 18397, 20291
+# Demon Slayer: a movie between two TV seasons.
+KNY1, MUGEN, KNY2 = 101922, 112151, 142329
 
 
-def _entry(aid: int, title: str, group: int, *, series: int | None = None, episodes: int = 2) -> Entry:
-    return Entry(
-        aid=aid,
-        title=title,
-        poster_url=None,
-        episodes=tuple(EntryEpisode(n, None, "2020-01-01") for n in range(1, episodes + 1)),
-        series_id=series if series is not None else aid,
-        group_id=group,
+@pytest.fixture
+def titan(anilist_data):
+    anilist_data.add(
+        S1, "Shingeki no Kyojin", english="Attack on Titan", episodes=25, start="2013-04-07",
+        relations=[(S2, "SEQUEL"), (OVA, "SIDE_STORY", "OVA"), (MOVIE, "SIDE_STORY", "MOVIE")],
     )
-
-
-def test_shoko_s_listings_give_each_series_its_group_and_each_entry_its_relations() -> None:
-    catalog = build(
-        {"List": [{"IDs": {"AniDB": 16188, "ID": 262, "TopLevelGroup": 238, "ParentGroup": 238}, "Name": "A Couple of Cuckoos"}]},
-        {"List": []},
-        {"List": [
-            {"IDs": {"ID": 238, "MainAnime": 16188, "ParentGroup": None}, "Name": "A Couple of Cuckoos", "HasCustomName": False},
-            {"IDs": {"ID": 239, "MainAnime": 1, "ParentGroup": 238}, "Name": "a sub-group"},
-        ]},
-        {"List": [{"IDs": {"AniDB": 16188}, "RelatedIDs": {"AniDB": 18773}, "Type": "Sequel"}]},
+    anilist_data.add(
+        OVA, "Shingeki no Kyojin OVA", english="Attack on Titan OVA", format="OVA", episodes=8,
+        start="2013-12-09", relations=[(S1, "PARENT")],
     )
-
-    assert catalog.entries[16188].series_id == 262
-    assert catalog.entries[16188].group_id == 238
-    # A sub-group is part of its top-level group, not a collection of its own.
-    assert set(catalog.groups) == {238}
-    assert catalog.groups[238].main_aid == 16188
-    assert catalog.relations == [(16188, 18773, "Sequel")]
-
-
-def test_sequels_and_prequels_join_through_entries_not_on_disk() -> None:
-    """Season 2 and 3 are not downloaded, and a special sits between them."""
-    catalog = Catalog(
-        entries={1: _entry(1, "Show", 10)},
-        groups={10: Group(10, "Show", 1)},
-        relations=[
-            (1, 2, "Sequel"), (2, 1, "Prequel"),
-            (2, 3, "Sequel"),  # the special between the seasons
-            (3, 4, "Sequel"),
-            (1, 9, "SideStory"),  # a spin-off movie: not the main line
-        ],
+    anilist_data.add(
+        MOVIE, "Shingeki no Kyojin Movie 1: Guren no Yumiya", english="Attack on Titan: Crimson Bow and Arrow",
+        format="MOVIE", episodes=1, start="2014-11-22", relations=[(S1, "PARENT")],
     )
-
-    found = anime_collections.assign(catalog)
-
-    assert found.members(10) == [1, 2, 3, 4]
-    assert 9 not in found.of
-
-
-def test_groups_shoko_made_are_kept_and_an_entry_between_two_joins_the_nearer() -> None:
-    catalog = Catalog(
-        entries={1: _entry(1, "Show", 10), 5: _entry(5, "Show II", 20)},
-        groups={10: Group(10, "Show", 1), 20: Group(20, "Show II", 5)},
-        relations=[(1, 2, "Sequel"), (2, 3, "Sequel"), (3, 4, "Sequel"), (4, 5, "Sequel")],
+    anilist_data.add(
+        S2, "Shingeki no Kyojin Season 2", english="Attack on Titan Season 2", episodes=12, start="2017-04-01",
+        relations=[(S1, "PREQUEL"), (S3, "SEQUEL")],
     )
-
-    found = anime_collections.assign(catalog)
-
-    # Shoko put 1 and 5 in two groups; that is not undone here.
-    assert (found.of[1], found.of[5]) == (10, 20)
-    assert (found.of[2], found.of[4]) == (10, 20)
-    # Equally far from both: the older group, the same answer every time.
-    assert found.of[3] == 10
-
-
-def test_without_shoko_s_groups_nothing_is_collected() -> None:
-    assert anime_collections.assign(None).of == {}
-    assert anime_collections.assign(Catalog(entries={1: _entry(1, "Show", 10)})).of == {}
-
-
-def test_a_show_s_season_folders_become_one_card_with_its_missing_sequel_as_a_tab(monkeypatch) -> None:
-    """Two seasons in two folders, the third not downloaded: one card, three tabs."""
-    catalog = Catalog(
-        entries={
-            101: _entry(101, "Kaguya-sama", 7, series=1),
-            102: _entry(102, "Kaguya-sama 2", 7, series=2),
-        },
-        groups={7: Group(7, "Kaguya-sama: Love Is War", 101)},
-        relations=[(101, 102, "Sequel"), (102, 103, "Sequel"), (101, 900, "SideStory")],
-        files={
-            "/library/Kaguya-sama/Season 01/Kaguya-sama - 01.mkv": [(101, 1)],
-            "/library/Kaguya-sama 2/Season 01/Kaguya-sama 2 - 01.mkv": [(102, 1)],
-        },
+    anilist_data.add(
+        S3, "Shingeki no Kyojin Season 3", english="Attack on Titan Season 3", episodes=12, start="2018-07-23",
+        relations=[(S2, "PREQUEL"), (S3P2, "SEQUEL")],
     )
-    shows = _run_library(
-        monkeypatch,
-        {"Kaguya-sama": ["Kaguya-sama - 01.mkv"], "Kaguya-sama 2": ["Kaguya-sama 2 - 01.mkv"]},
-        titles=[(101, "Kaguya-sama", None), (102, "Kaguya-sama 2", None), (103, "Kaguya-sama 3", None)],
-        catalog=catalog,
+    anilist_data.add(
+        S3P2, "Shingeki no Kyojin Season 3 Part 2", english="Attack on Titan Season 3 Part 2", episodes=10,
+        start="2019-04-29", relations=[(S3, "PREQUEL")],
     )
-
-    assert len(shows) == 1
-    card = shows[0]
-    assert card["title"] == card["key"] == "Kaguya-sama: Love Is War"
-    assert card["collection_id"] == 7
-    assert card["anidb_id"] == 101  # the group's title entry
-    assert sorted(card["folders"]) == ["Kaguya-sama", "Kaguya-sama 2"]
-    assert [entry["anidb_id"] for entry in card["collection_entries"]] == [101, 102, 103]
-    assert [entry["owned"] for entry in card["collection_entries"]] == [True, True, False]
-    # The side-story movie stays out.
-    assert 900 not in card["anidb_ids"]
+    return anilist_data
 
 
-def test_a_blacklisted_sequel_is_not_offered_as_missing(monkeypatch) -> None:
-    catalog = Catalog(
-        entries={101: _entry(101, "Show", 7)},
-        groups={7: Group(7, "Show", 101)},
-        relations=[(101, 102, "Sequel")],
-        files={"/library/Show/Season 01/Show - 01.mkv": [(101, 1)]},
+@pytest.fixture
+def demon_slayer(anilist_data):
+    anilist_data.add(
+        KNY1, "Kimetsu no Yaiba", english="Demon Slayer: Kimetsu no Yaiba", episodes=26, start="2019-04-06",
+        relations=[(MUGEN, "SEQUEL", "MOVIE")],
     )
-
-    shows = _run_library(
-        monkeypatch,
-        {"Show": ["Show - 01.mkv"]},
-        titles=[(101, "Show", None), (102, "Show 2", None)],
-        policies={"anidb:102": {"mode": "blacklisted", "anidb_id": 102}},
-        catalog=catalog,
+    anilist_data.add(
+        MUGEN, "Kimetsu no Yaiba Movie: Mugen Ressha-hen", english="Demon Slayer: Mugen Train", format="MOVIE",
+        episodes=1, start="2020-10-16", relations=[(KNY1, "PREQUEL"), (KNY2, "SEQUEL", "TV")],
     )
-
-    assert shows[0]["anidb_ids"] == [101]
-
-
-def test_a_taken_entry_of_a_collection_is_its_tab_not_a_card_of_its_own(monkeypatch) -> None:
-    catalog = Catalog(
-        entries={101: _entry(101, "Show", 7)},
-        groups={7: Group(7, "Show", 101)},
-        relations=[(101, 102, "Sequel")],
-        files={"/library/Show/Season 01/Show - 01.mkv": [(101, 1)]},
+    anilist_data.add(
+        KNY2, "Kimetsu no Yaiba: Yuukaku-hen", english="Demon Slayer: Entertainment District Arc", episodes=11,
+        start="2021-12-05", relations=[(MUGEN, "PREQUEL")],
     )
+    return anilist_data
 
-    shows = _run_library(
-        monkeypatch,
-        {"Show": ["Show - 01.mkv"]},
-        titles=[(101, "Show", None), (102, "Show 2", None), (555, "Other", None)],
-        taken={"102": {"anidb_id": 102, "title": "Show 2"}, "555": {"anidb_id": 555, "title": "Other"}},
-        catalog=catalog,
-    )
 
-    assert sorted(show["key"] for show in shows) == ["Other", "Show"]
-    assert next(show for show in shows if show["key"] == "Show")["anidb_ids"] == [101, 102]
-
-
-def test_naming_a_collection_writes_shoko_s_preferred_series_after_a_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from bankai.web import shoko
-
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    sent: list[tuple] = []
-
-    async def get(endpoint, /, **params):
-        if endpoint == "/api/v3/Group":
-            return {"List": [{"IDs": {"ID": 7}, "Name": "Old", "HasCustomName": False}]}
-        if endpoint == "/api/v3/Series":
-            return {"List": [{"IDs": {"ID": 2, "ParentGroup": 7}, "Name": "Season 2"}]}
-        return {"IDs": {"ID": 7}, "Name": "Season 2"}
+def _titan_collection(store: Store) -> collections.Collection:
+    collections.join([S1], store)
+    row = store.collection_of(S1)
+    assert row is not None
+    return row
 
-    async def send(method, endpoint, /, *, json_body=None, **params):
-        sent.append((method, endpoint, json_body))
-        return True
 
-    monkeypatch.setattr(shoko, "_get", get)
-    monkeypatch.setattr(shoko, "_send", send)
+# -- Joining -------------------------------------------------------------------------
 
-    group = asyncio.run(anime_collections.set_title(7, 2))
 
-    assert group["Name"] == "Season 2"
-    assert sent == [("PATCH", "/api/v3/Group/7", [{"op": "replace", "path": "/PreferredSeriesID", "value": 2}])]
-    snapshots = list((tmp_path / "bankai" / "shoko_groups").glob("groups-*.json"))
-    assert len(snapshots) == 1 and '"Old"' in snapshots[0].read_text(encoding="utf-8")
+def test_an_entry_joins_with_its_whole_sequel_chain(titan) -> None:
+    store = Store()
 
+    changed = collections.join([S1], store)
 
-@pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from bankai.config import reset_settings_cache
-    from bankai.web.app import create_app
+    assert changed == {1}
+    row = store.collections[1]
+    assert sorted(row.members) == sorted([S1, S2, S3, S3P2])
+    assert row.title == S1
+    # Side stories and recaps stay out until pulled in by hand.
+    assert OVA not in row.members and MOVIE not in row.members
 
-    monkeypatch.setenv("BANKAI_CONFIG", str(tmp_path / "config.toml"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setenv("BANKAI_ANIME__ENABLED", "false")
-    reset_settings_cache()
-    with TestClient(create_app()) as value:
-        yield value
-    reset_settings_cache()
 
+def test_a_later_season_joining_first_still_names_the_collection_after_the_first(titan) -> None:
+    store = Store()
 
-def test_only_an_entry_of_the_card_s_own_group_can_name_it(client: TestClient) -> None:
-    """The request picks among the collection's entries; it never names a group itself."""
-    response = client.post("/api/anime/collections/title", json={"key": "Nothing here", "anidb_id": 5})
-    assert response.status_code == 404
-    assert client.post("/api/anime/collections/title", json={"key": "x"}).status_code == 422
+    collections.join([S3], store)
 
+    row = store.collection_of(S3)
+    assert row is not None and row.title == S1
+    assert sorted(row.members) == sorted([S1, S2, S3, S3P2])
 
-# -- Phase 2: the relation graph and changing a collection ---------------------
 
+def test_an_entry_joins_the_collection_its_prequel_is_in(titan) -> None:
+    store = Store()
+    store.create([S1])
 
-def _kaguya() -> Catalog:
-    """Two seasons on disk in one group, a third not on disk, a side story and a sequel elsewhere."""
-    return Catalog(
-        entries={
-            101: _entry(101, "Kaguya-sama", 7, series=1),
-            102: _entry(102, "Kaguya-sama 2", 7, series=2),
-            300: _entry(300, "Kaguya-sama Movie", 9, series=3),
-        },
-        groups={7: Group(7, "Kaguya-sama", 101), 9: Group(9, "Kaguya-sama Movie", 300)},
-        relations=[
-            (101, 102, "Sequel"), (102, 101, "Prequel"),
-            (102, 103, "Sequel"),
-            (101, 200, "SideStory"), (200, 101, "MainStory"),
-            (103, 300, "Sequel"),
-        ],
-        files={"/library/a.mkv": [(101, 1)], "/library/b.mkv": [(102, 1)]},
-    )
+    changed = collections.join([S3], store)
 
+    assert changed == {1}
+    assert sorted(store.collections[1].members) == sorted([S1, S2, S3, S3P2])
+    assert len(store.collections) == 1
 
-def test_the_graph_is_the_collection_and_what_is_related_to_it() -> None:
-    found = anime_collections.graph(_kaguya(), 7)
 
-    nodes = {node["anidb_id"]: node for node in found["nodes"]}
-    assert {aid for aid, node in nodes.items() if node["in_collection"]} == {101, 102, 103}
-    # The side story is a suggestion; so is the movie, a sequel kept elsewhere.
-    assert {aid for aid, node in nodes.items() if not node["in_collection"]} == {200, 300}
-    assert nodes[101]["title_entry"] and nodes[101]["owned"] and nodes[101]["on_disk"] == 1
-    assert not nodes[103]["owned"]
-    # Each link once, read the same way round whichever end listed it.
-    assert sorted((e["from"], e["to"], e["label"]) for e in found["edges"]) == [
-        (101, 102, "sequel"), (101, 200, "side story"), (102, 103, "sequel"), (103, 300, "sequel"),
-    ]
+def test_an_entry_already_in_a_collection_changes_nothing(titan) -> None:
+    store = Store()
+    _titan_collection(store)
 
+    assert collections.join([S2], store) == set()
 
-def test_a_sequel_kept_in_another_collection_is_offered_to_be_merged() -> None:
-    nodes = {node["anidb_id"]: node for node in anime_collections.graph(_kaguya(), 7)["nodes"]}
 
-    assert nodes[300]["in_collection"] is False
-    assert (nodes[300]["collection_id"], nodes[300]["collection_name"]) == (9, "Kaguya-sama Movie")
+def test_an_entry_kept_out_by_hand_stops_the_chain(titan) -> None:
+    store = Store(alone={S2})
 
+    assert collections.chain(S1, store) == [S1]
+    collections.join([S1], store)
+    assert store.collections[1].members == [S1]
 
-def test_an_entry_not_on_disk_taken_out_takes_what_is_reached_only_through_it() -> None:
-    """Cutting a prequel off cuts off the prequels behind it as well."""
-    catalog = Catalog(
-        entries={1: _entry(1, "Precure 5", 10)},
-        groups={10: Group(10, "Precure 5", 1)},
-        relations=[(1, 2, "Prequel"), (2, 3, "Prequel")],
-    )
 
-    assert anime_collections.assign(catalog).members(10) == [1, 2, 3]
-    cut = anime_collections.assign(catalog, {2: None})
-    assert cut.members(10) == [1]
-    assert cut.alone == {2}
+def test_an_entry_kept_out_by_hand_joins_when_asked_for_itself(titan) -> None:
+    store = Store(alone={S1})
 
+    collections.join([S1], store)
 
-def test_an_entry_not_on_disk_can_be_pulled_into_a_collection() -> None:
-    found = anime_collections.assign(_kaguya(), {200: 7})
-    assert 200 in found.members(7)
+    assert S1 not in store.alone
+    assert store.collection_of(S1) is not None
 
 
-@pytest.fixture()
-def shoko_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
-    from bankai.web import shoko
+def test_an_entry_in_another_collection_stops_the_chain(titan) -> None:
+    store = Store()
+    store.create([S3])
 
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    sent: list[tuple] = []
+    assert collections.chain(S1, store) == [S1, S2]
 
-    async def get(endpoint, /, **params):
-        return {"List": []}
 
-    async def send(method, endpoint, /, *, json_body=None, **params):
-        sent.append((method, endpoint, json_body))
-        return {"IDs": {"ID": 77}} if method == "POST" else True
+def test_at_equal_distance_the_older_collection_is_joined(titan) -> None:
+    store = Store()
+    store.create([S1])
+    store.create([S3])
 
-    monkeypatch.setattr(shoko, "_get", get)
-    monkeypatch.setattr(shoko, "_send", send)
-    return sent
+    assert collections.nearest(S2, store) == 1
 
 
-def test_splitting_makes_a_new_shoko_group_and_the_entries_not_on_disk_follow(shoko_calls) -> None:
-    created = asyncio.run(anime_collections.split(_kaguya(), 7, [102, 103]))
+def test_a_chain_running_through_several_shows_is_named_after_the_entry_that_joined(anilist_data) -> None:
+    """PreCure's series follow one another as sequels; the first is not what the later ones are called."""
+    anilist_data.add(1, "Futari wa Pretty Cure", episodes=49, start="2004-02-01", relations=[(2, "SEQUEL")])
+    anilist_data.add(2, "Futari wa Pretty Cure Max Heart", episodes=47, start="2005-02-06",
+                     relations=[(1, "PREQUEL"), (3, "SEQUEL")])
+    anilist_data.add(3, "Yes! Precure 5", episodes=49, start="2007-02-04", relations=[(2, "PREQUEL")])
+    store = Store()
 
-    assert created == 77
-    assert shoko_calls == [("POST", "/api/v3/Group", {"SeriesIDs": [2]})]
-    assert anime_collections.load_places() == {103: 77}
+    collections.join([3], store)
 
+    row = store.collection_of(3)
+    assert sorted(row.members) == [1, 2, 3]
+    assert row.title == 3
+    assert collections.name(row) == "Yes! Precure 5"
 
-def test_splitting_off_only_entries_not_on_disk_puts_them_in_no_collection(shoko_calls) -> None:
-    assert asyncio.run(anime_collections.split(_kaguya(), 7, [103])) is None
-    assert shoko_calls == []
-    assert anime_collections.load_places() == {103: None}
 
+def test_a_collection_is_named_after_the_first_season_of_the_show_that_joined(anilist_data) -> None:
+    """"Mr. Osomatsu", not its 3rd season -- and not the 1988 "Osomatsu-kun" the chain starts from."""
+    anilist_data.add(1, "Osomatsu-kun", episodes=86, start="1988-02-13", relations=[(2, "SEQUEL")])
+    anilist_data.add(2, "Osomatsu-san", english="Mr. Osomatsu", episodes=25, start="2015-10-06",
+                     relations=[(1, "PREQUEL"), (3, "SEQUEL")])
+    anilist_data.add(3, "Osomatsu-san 2nd Season", english="Mr. Osomatsu 2nd Season", episodes=25,
+                     start="2017-10-03", relations=[(2, "PREQUEL"), (4, "SEQUEL")])
+    anilist_data.add(4, "Osomatsu-san 3rd Season", english="Mr. Osomatsu 3rd Season", episodes=25,
+                     start="2020-10-13", relations=[(3, "PREQUEL")])
+    store = Store()
 
-def test_pulling_in_moves_a_series_in_shoko_or_keeps_the_choice_until_it_is_downloaded(shoko_calls) -> None:
-    asyncio.run(anime_collections.include(_kaguya(), 7, 300))
-    asyncio.run(anime_collections.include(_kaguya(), 7, 200))
+    collections.join([4], store)
 
-    assert shoko_calls == [("PATCH", "/api/v3/Series/3/Move/7", None)]
-    assert anime_collections.load_places() == {200: 7}
+    row = store.collection_of(4)
+    assert sorted(row.members) == [1, 2, 3, 4]
+    assert (row.title, collections.name(row)) == (2, "Mr. Osomatsu")
+    assert collections.first_of_show([1, 2, 3, 4], 1) == 1
+    # Nothing of the same show to go by: the entry itself.
+    assert collections.first_of_show([1], 4) == 4
 
 
-def test_merging_moves_every_series_of_the_other_collection(shoko_calls) -> None:
-    anime_collections.place([555], 9)
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("Dorohedoro Season 2", "dorohedoro"),
+        ("Shingeki no Kyojin Season 3 Part 2", "shingeki no kyojin"),
+        ("Attack on Titan: Final Season", "attack on titan"),
+        ("Hunter x Hunter (2011)", "hunter x hunter"),
+        ("Overlord IV", "overlord"),
+        ("Kaguya-sama wa Kokurasetai 2nd Season", "kaguya sama wa kokurasetai"),
+        ("86", "86"),
+    ],
+)
+def test_a_titles_stem_is_the_show_without_its_season(title, expected) -> None:
+    assert collections.stem(title) == expected
 
-    moved = asyncio.run(anime_collections.merge(_kaguya(), 7, 9))
 
-    assert moved == 1
-    assert shoko_calls == [("PATCH", "/api/v3/Series/3/Move/7", None)]
-    # A choice made for the merged collection follows it.
-    assert anime_collections.load_places() == {555: 7}
+def test_two_entries_are_one_show_when_one_name_begins_the_other(titan, anilist_data) -> None:
+    anilist_data.add(5, "Yes! Precure 5", episodes=49, start="2007-02-04")
 
+    assert collections.same_show(S1, S3P2)
+    assert collections.same_show(S1, OVA)
+    assert not collections.same_show(S1, 5)
 
-def test_a_choice_is_handed_to_shoko_once_the_entry_is_downloaded(shoko_calls) -> None:
-    """Pulled in while not on disk; Shoko then grouped it by its own rules."""
-    anime_collections.place([300], 7)
-    anime_collections.place([102], None)
 
-    moved = asyncio.run(anime_collections.apply_places(_kaguya()))
+def test_an_entry_with_no_sequels_or_prequels_is_a_collection_of_its_own(titan) -> None:
+    store = Store()
 
-    assert moved == 2
-    assert ("PATCH", "/api/v3/Series/3/Move/7", None) in shoko_calls
-    assert ("POST", "/api/v3/Group", {"SeriesIDs": [2]}) in shoko_calls
-    # Shoko keeps them from here.
-    assert anime_collections.load_places() == {}
+    collections.join([OVA], store)
 
+    assert store.collection_of(OVA).members == [OVA]
 
-def test_without_shoko_s_catalogue_there_is_no_collection_to_change(client: TestClient) -> None:
-    assert client.get("/api/anime/collections/7/graph").status_code == 404
-    assert client.post("/api/anime/collections/7/include", json={"anidb_id": 999}).status_code == 404
 
+def test_a_sequel_announced_since_joins_its_shows_collection(anilist_data) -> None:
+    anilist_data.add(1, "Show", episodes=12, start="2020-01-01", relations=[(2, "SEQUEL")])
+    anilist_data.add(2, "Show 2", episodes=12, start="2021-01-01", relations=[(1, "PREQUEL")])
+    store = Store()
+    collections.join([1], store)
 
-def test_the_graph_actions_take_only_entries_of_that_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The request picks among the graph's own entries; anything else is refused."""
-    from bankai.config import reset_settings_cache
-    from bankai.web import anime_collections as collections_mod
-    from bankai.web import shoko_catalog
-    from bankai.web.app import create_app
+    anilist_data.add(2, "Show 2", episodes=12, start="2021-01-01", relations=[(1, "PREQUEL"), (3, "SEQUEL")])
+    anilist_data.add(3, "Show 3", episodes=12, start="2022-01-01", relations=[(2, "PREQUEL")])
 
-    async def fetch():
-        return _kaguya()
+    assert collections.extend(store) == {1}
+    assert store.collections[1].members == [1, 2, 3]
+    assert collections.extend(store) == set()
 
-    async def nothing_to_apply(catalog):
-        return 0
 
-    monkeypatch.setenv("BANKAI_CONFIG", str(tmp_path / "config.toml"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setenv("BANKAI_ANIME__ENABLED", "false")
-    monkeypatch.setattr(shoko_catalog, "fetch", fetch)
-    monkeypatch.setattr(collections_mod, "apply_places", nothing_to_apply)
-    reset_settings_cache()
-    with TestClient(create_app()) as client:
-        graph = client.get("/api/anime/collections/7/graph").json()
-        assert graph["name"] == "Kaguya-sama"
-        assert {node["anidb_id"] for node in graph["nodes"]} == {101, 102, 103, 200, 300}
-        # A member is not a suggestion, and the whole collection is not a split.
-        assert client.post("/api/anime/collections/7/include", json={"anidb_id": 101}).status_code == 422
-        assert client.post("/api/anime/collections/7/split", json={"anidb_ids": [101, 102, 103]}).status_code == 422
-        assert client.post("/api/anime/collections/7/split", json={"anidb_ids": [200]}).status_code == 422
-        # Only an entry of the collection can name it; a related one cannot.
-        assert client.post("/api/anime/collections/7/title", json={"anidb_id": 200}).status_code == 422
-        # Pulling in an entry not on disk is kept here, with no call to Shoko.
-        assert client.post("/api/anime/collections/7/include", json={"anidb_id": 200}).status_code == 200
-        assert collections_mod.load_places() == {200: 7}
-    reset_settings_cache()
+# -- Seasons and Season 00 ---------------------------------------------------------------
 
 
-def test_tabs_follow_the_sequel_chain_then_the_side_stories() -> None:
-    """By air date alone a 2013 OVA came between a show's first and second season."""
-    aired = {1: "2013-04", 2: "2017-04", 3: "2018-07", 4: "2019-04", 9: "2013-12", 8: "2023-11"}
-    relations = [
-        (1, 2, "Sequel"), (2, 3, "Sequel"), (4, 3, "Prequel"),
-        (1, 9, "SideStory"), (4, 8, "SideStory"),
-    ]
+def test_the_main_line_is_its_seasons_in_sequel_order(titan) -> None:
+    store = Store()
+    row = store.create([S3P2, OVA, S1, S3, S2], title=S1)
 
-    order = anime_collections.sequel_order([9, 4, 8, 2, 1, 3], relations, lambda aid: aired[aid])
+    placing = collections.plan(row)
 
-    assert order == [1, 2, 3, 4, 9, 8]
+    assert placing.seasons == {S1: 1, S2: 2, S3: 3, S3P2: 4}
+    assert placing.specials == {OVA: 0}
+    assert placing.order() == [S1, S2, S3, S3P2, OVA]
+    assert placing.place(S3P2, 5) == (4, 5)
+    assert placing.place(OVA, 3) == (0, 3)
+    assert placing.place(12345, 1) is None
 
 
-def test_a_tab_is_named_without_the_collection_s_own_name() -> None:
-    assert anime_collections.short_label("Attack on Titan Season 2", "Attack on Titan") == "Season 2"
-    assert anime_collections.short_label("Attack on Titan: The Final Season", "Attack on Titan") == "The Final Season"
-    # Nothing left over: the whole name, not an empty tab.
-    assert anime_collections.short_label("Attack on Titan", "Attack on Titan") == "Attack on Titan"
-    assert anime_collections.short_label("Junior High", "Attack on Titan") == "Junior High"
+def test_a_prequel_made_later_is_the_season_after_the_ones_already_there(anilist_data) -> None:
+    """Seasons are counted as they aired, not by AniList's story order."""
+    anilist_data.add(1, "Show", episodes=12, start="2015-01-01", relations=[(2, "PREQUEL")])
+    anilist_data.add(2, "Show: Origins", episodes=12, start="2018-01-01", relations=[(1, "SEQUEL")])
+    store = Store()
+    collections.join([1], store)
 
+    assert collections.plan(store.collection_of(1)).seasons == {1: 1, 2: 2}
 
-def test_a_related_entry_in_another_collection_brings_that_whole_collection() -> None:
-    """Seen whole, it reads as another collection, not as one stray entry."""
-    catalog = _kaguya()
-    catalog.entries[301] = _entry(301, "Kaguya-sama Movie 2", 9, series=4)
-    catalog.relations.append((300, 301, "Sequel"))
 
-    nodes = {node["anidb_id"]: node for node in anime_collections.graph(catalog, 7)["nodes"]}
+def test_a_movie_between_two_seasons_is_a_special(demon_slayer) -> None:
+    store = Store()
+    collections.join([KNY1], store)
+    row = store.collection_of(KNY1)
 
-    assert nodes[301]["collection_id"] == 9 and nodes[301]["in_collection"] is False
-    edges = anime_collections.graph(catalog, 7)["edges"]
-    assert {"from": 300, "to": 301, "label": "sequel", "main_line": True} in edges
+    placing = collections.plan(row)
 
+    assert sorted(row.members) == sorted([KNY1, MUGEN, KNY2])
+    assert placing.seasons == {KNY1: 1, KNY2: 2}
+    assert placing.specials == {MUGEN: 0}
 
-def test_a_season_not_downloaded_can_name_the_collection(shoko_calls) -> None:
-    """Shoko's group takes its name; bankai keeps which entry it is, for the cover."""
-    asyncio.run(anime_collections.set_title_entry(_kaguya(), 7, 103, "Kaguya-sama 3"))
 
-    assert shoko_calls[-1] == (
-        "PATCH",
-        "/api/v3/Group/7",
-        [
-            {"op": "replace", "path": "/Name", "value": "Kaguya-sama 3"},
-            {"op": "replace", "path": "/HasCustomName", "value": True},
-        ],
-    )
-    assert anime_collections.load_titles() == {7: 103}
-    group = _kaguya().groups[7]
-    assert anime_collections.title_entry(group, anime_collections.load_titles()) == 103
+def test_a_movie_left_out_of_the_collection_still_links_the_seasons_around_it(demon_slayer) -> None:
+    store = Store(alone={MUGEN})
+    row = store.create([KNY1, KNY2], title=KNY1)
 
-    # Back to a season on disk: Shoko names the group after it again.
-    asyncio.run(anime_collections.set_title_entry(_kaguya(), 7, 102, "Kaguya-sama 2"))
+    assert collections.plan(row, store=store).seasons == {KNY1: 1, KNY2: 2}
 
-    assert shoko_calls[-1] == (
-        "PATCH",
-        "/api/v3/Group/7",
-        [
-            {"op": "replace", "path": "/PreferredSeriesID", "value": 2},
-            {"op": "replace", "path": "/HasCustomName", "value": False},
-        ],
-    )
-    assert anime_collections.load_titles() == {}
 
+def test_season_00_blocks_follow_air_date_and_are_as_long_as_their_entries(titan) -> None:
+    store = Store()
+    row = store.create([S1, MOVIE, OVA], title=S1)
 
-def test_an_entry_of_another_collection_cannot_name_this_one(shoko_calls) -> None:
+    assert collections.plan(row).specials == {OVA: 0, MOVIE: 8}
+    # More on disk than AniList lists: the block is as long as what is there.
+    assert collections.plan(row, episodes_on_disk=lambda aid: 10 if aid == OVA else 0).specials == {OVA: 0, MOVIE: 10}
+
+
+def test_a_special_of_unknown_length_takes_one_place(anilist_data) -> None:
+    anilist_data.add(1, "Show", episodes=12, start="2020-01-01")
+    anilist_data.add(2, "Show Special", format="SPECIAL", episodes=None, start="2020-06-01")
+    anilist_data.add(3, "Show Movie", format="MOVIE", episodes=1, start="2021-01-01")
+    store = Store()
+    row = store.create([1, 2, 3], title=1)
+
+    assert collections.plan(row).specials == {2: 0, 3: 1}
+
+
+def test_a_newcomer_special_goes_after_the_specials_already_given(titan) -> None:
+    store = Store()
+    row = store.create([S1, MOVIE], title=S1)
+    collections.settle_specials(row)
+    assert row.specials == [MOVIE]
+
+    # The OVA aired before the movie, but the movie's place is already on disk.
+    collections.include(store, row.id, OVA)
+
+    assert collections.plan(row).specials == {MOVIE: 0, OVA: 1}
+    collections.settle_specials(row)
+    assert row.specials == [MOVIE, OVA]
+
+
+def test_without_an_order_given_the_specials_go_by_air_date(titan) -> None:
+    store = Store()
+    row = store.create([S1, MOVIE, OVA], title=S1)
+
+    collections.settle_specials(row)
+
+    assert row.specials == [OVA, MOVIE]
+
+
+def test_the_sequel_chain_comes_first_and_the_rest_by_air_date() -> None:
+    relations = [(1, 2, "SEQUEL"), (3, 4, "SEQUEL"), (5, 4, "PREQUEL")]
+    aired = {1: "2001", 2: "2002", 3: "2010", 4: "2011", 5: "2012", 6: "2000"}
+
+    order = collections.sequel_order([1, 2, 3, 4, 5, 6], relations, aired=aired.__getitem__)
+
+    # The longest chain is the spine, prequel to sequel; the rest as they aired.
+    assert order == [3, 4, 5, 6, 1, 2]
+
+
+def test_a_tab_is_named_without_the_collections_own_name() -> None:
+    assert collections.short_label("Attack on Titan Season 2", "Attack on Titan") == "Season 2"
+    assert collections.short_label("Attack on Titan: Junior High", "attack on titan") == "Junior High"
+    assert collections.short_label("Attack on Titan", "Attack on Titan") == "Attack on Titan"
+    assert collections.short_label("Kimi no Na wa.", "Attack on Titan") == "Kimi no Na wa."
+    assert collections.short_label("Attack on Titan Season 2", None) == "Attack on Titan Season 2"
+
+
+# -- Changes by hand ---------------------------------------------------------------------
+
+
+def test_split_takes_entries_into_a_collection_of_their_own(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+
+    new = collections.split(store, row.id, [S3P2, S3])
+
+    assert sorted(store.collections[new].members) == sorted([S3, S3P2])
+    assert store.collections[new].title == S3
+    assert sorted(row.members) == sorted([S1, S2])
+    # Held elsewhere now: the sequel chain does not pull them back.
+    assert collections.extend(store) == set()
+
+
+@pytest.mark.parametrize(
+    "aids,message",
+    [([OVA], "none of these"), ([S1, S2, S3, S3P2], "empty")],
+)
+def test_split_refuses_what_is_not_there_or_would_leave_nothing(titan, aids, message) -> None:
+    store = Store()
+    row = _titan_collection(store)
+
+    with pytest.raises(ValueError, match=message):
+        collections.split(store, row.id, aids)
     with pytest.raises(ValueError):
-        asyncio.run(anime_collections.set_title_entry(_kaguya(), 7, 300, "Movie"))
-    assert shoko_calls == []
+        collections.split(store, 99, [S1])
 
 
-def test_an_entry_in_no_collection_has_a_graph_of_its_own_to_move_from() -> None:
-    """Cut out of every collection, it is still related to them, and can go into one."""
-    found = anime_collections.graph(_kaguya(), None, places={103: None}, root_aid=103)
+def test_an_entry_excluded_without_files_is_kept_out_of_every_collection(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
 
-    nodes = {node["anidb_id"]: node for node in found["nodes"]}
-    assert found["collection_id"] is None and found["root_aid"] == 103
-    assert nodes[103]["in_collection"] and nodes[103]["title_entry"]
-    # Its prequel's collection and its sequel's are both offered, whole.
-    assert {nodes[102]["collection_id"], nodes[300]["collection_id"]} == {7, 9}
-    assert 101 in nodes
+    assert collections.exclude(store, row.id, [S3P2], with_files=set()) is None
+
+    assert S3P2 in store.alone
+    assert S3P2 not in row.members
+    assert collections.extend(store) == set()
 
 
-def test_an_entry_in_a_collection_is_opened_through_it() -> None:
+def test_an_entry_excluded_with_files_goes_to_a_collection_of_its_own(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+
+    new = collections.exclude(store, row.id, [S3P2], with_files={S3P2})
+
+    assert new is not None and store.collections[new].members == [S3P2]
+    assert S3P2 not in store.alone
+    with pytest.raises(ValueError, match="empty"):
+        collections.exclude(store, new, [S3P2], with_files={S3P2})
+
+
+def test_include_pulls_an_entry_from_another_collection(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+    other = store.create([OVA])
+
+    collections.include(store, row.id, OVA)
+
+    assert OVA in row.members
+    # Emptied, the other collection is gone.
+    assert other.id not in store.collections
+
+
+def test_include_takes_an_entry_kept_out_by_hand_back_in(titan) -> None:
+    store = Store(alone={MOVIE})
+    row = _titan_collection(store)
+
+    collections.include(store, row.id, MOVIE)
+    collections.include(store, row.id, MOVIE)
+
+    assert row.members.count(MOVIE) == 1
+    assert MOVIE not in store.alone
     with pytest.raises(ValueError):
-        anime_collections.graph(_kaguya(), None, root_aid=103)
+        collections.include(store, 99, MOVIE)
 
 
-def test_relations_are_learned_for_entries_shoko_holds_no_series_for(shoko_calls, monkeypatch) -> None:
-    """A record Shoko lacks is fetched by it, within a few per run; answers are kept."""
-    from bankai.web import shoko, shoko_catalog
+def test_merge_moves_every_entry_of_the_other_collection(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+    other = collections.split(store, row.id, [S3, S3P2])
 
-    calls: list[tuple] = []
+    assert collections.merge(store, row.id, other) == 2
 
-    async def send(method, endpoint, /, *, json_body=None, **params):
-        calls.append((method, endpoint))
-        if endpoint.endswith("/Relations"):
-            if endpoint == "/api/v3/Series/AniDB/500/Relations" and ("POST", "/api/v3/Series/AniDB/500/Refresh") not in calls:
-                return None  # no record until Shoko fetched it
-            aid = int(endpoint.split("/")[-2])
-            return [{"IDs": {"AniDB": aid}, "RelatedIDs": {"AniDB": aid + 1}, "Type": "Sequel"}]
-        return True
-
-    monkeypatch.setattr(shoko, "_send", send)
-    catalog = _kaguya()
-
-    learned = asyncio.run(shoko_catalog.fill_relations(catalog, {101, 103, 500, 600}))
-
-    # 101 is on disk and 103's links are listed already: neither is asked about.
-    assert learned == 2
-    assert ("GET", "/api/v3/Series/AniDB/103/Relations") not in calls
-    # 600 has a record, 500 had to be fetched by Shoko first.
-    assert ("POST", "/api/v3/Series/AniDB/600/Refresh") not in calls
-    assert ("POST", "/api/v3/Series/AniDB/500/Refresh") in calls
-    assert (500, 501, "Sequel") in catalog.relations and (600, 601, "Sequel") in catalog.relations
-
-    # Kept: the next refresh adds them without asking again.
-    calls.clear()
-    fresh = _kaguya()
-    asyncio.run(shoko_catalog.fill_relations(fresh, {500, 600}))
-    assert calls == []
-    assert (500, 501, "Sequel") in fresh.relations
+    assert other not in store.collections
+    assert sorted(row.members) == sorted([S1, S2, S3, S3P2])
+    with pytest.raises(ValueError):
+        collections.merge(store, row.id, row.id)
+    with pytest.raises(ValueError):
+        collections.merge(store, row.id, 99)
 
 
-# -- AniList names ---------------------------------------------------------------
+def test_the_title_entry_can_be_any_member(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+
+    collections.set_title(store, row.id, S2)
+
+    assert collections.name(row) == "Attack on Titan Season 2"
+    with pytest.raises(ValueError):
+        collections.set_title(store, row.id, OVA)
 
 
-@pytest.fixture()
-def anilist_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """AniList knows entry 101 as "Kaguya-sama: Love Is War"."""
-    from bankai.metadata import anidb_art, anilist
+def test_a_name_given_by_hand_wins_until_it_is_cleared(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
 
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    monkeypatch.setattr(anidb_art, "facts", lambda aid: {"anilist": 1000 + int(aid)})
-    rows = {1101: {"english": "Kaguya-sama: Love Is War", "romaji": "Kaguya-sama wa Kokurasetai", "cover": "https://s4.anilist.co/1101.jpg"}}
-    monkeypatch.setattr(anilist, "_load", lambda: rows)
-    return rows
+    collections.set_name(store, row.id, "  Shingeki  ")
+    assert collections.name(row) == "Shingeki"
 
-
-def test_anilist_names_an_entry_in_english_else_romaji(anilist_names) -> None:
-    from bankai.metadata import anilist
-
-    assert anilist.name(101) == "Kaguya-sama: Love Is War"
-    anilist_names[1101]["english"] = None
-    assert anilist.name(101) == "Kaguya-sama wa Kokurasetai"
-    assert anilist.cover(101) == "https://s4.anilist.co/1101.jpg"
-    assert anilist.name(555) is None
+    collections.set_name(store, row.id, "   ")
+    assert row.name is None
+    collections.set_name(store, row.id, None)
+    assert collections.name(row) == "Attack on Titan"
+    with pytest.raises(ValueError):
+        collections.set_name(store, 99, "x")
 
 
-def test_collections_are_named_after_anilist_in_shoko_but_not_over_a_hand_given_name(anilist_names, shoko_calls) -> None:
-    catalog = _kaguya()
-    catalog.groups[9] = Group(9, "My own name", 300, has_custom_name=True)
+def test_a_collection_is_named_in_english_else_romaji_else_by_its_offline_title(anilist_data) -> None:
+    anilist_data.add(1, "Sousou no Frieren", english="Frieren: Beyond Journey's End")
+    anilist_data.add(2, "Akame ga Kill!")
+    anilist_data.add(3, "Not Fetched Yet", fetched=False)
+    store = Store()
 
-    changed = asyncio.run(anime_collections.sync_names(catalog))
+    names = [collections.name(store.create([aid])) for aid in (1, 2, 3, 4)]
 
-    assert changed == 1
-    assert shoko_calls[-1] == (
-        "PATCH",
-        "/api/v3/Group/7",
-        [
-            {"op": "replace", "path": "/Name", "value": "Kaguya-sama: Love Is War"},
-            {"op": "replace", "path": "/HasCustomName", "value": True},
-        ],
+    assert names == ["Frieren: Beyond Journey's End", "Akame ga Kill!", "Not Fetched Yet", "AniList 4"]
+
+
+def test_a_collection_is_the_show_not_its_first_season(anilist_data) -> None:
+    anilist_data.add(1, "Dorohedoro", english="Dorohedoro Season 1")
+    anilist_data.add(2, "Some Show 1st Season")
+    anilist_data.add(3, "Other Show Season 10")
+    store = Store()
+
+    names = [collections.name(store.create([aid])) for aid in (1, 2, 3)]
+
+    assert names == ["Dorohedoro", "Some Show", "Other Show Season 10"]
+    # The entry itself keeps its name: it is a tab of the collection.
+    assert collections.entry_name(1) == "Dorohedoro Season 1"
+
+
+def test_taking_the_title_entry_out_gives_the_title_to_the_first_season(titan) -> None:
+    store = Store()
+    row = store.create([S1, OVA, S2], title=S1)
+
+    store.take(S1)
+    assert row.title == S2
+
+    store.take(S2)
+    store.take(OVA)
+    assert row.id not in store.collections
+
+
+# -- The store on disk ---------------------------------------------------------------------
+
+
+def test_the_collections_are_saved_and_read_back(titan) -> None:
+    with collections.editing() as store:
+        collections.join([S1], store)
+        collections.set_name(store, 1, "Shingeki")
+        collections.settle_specials(store.collections[1])
+        store.alone.add(OVA)
+
+    loaded = collections.load()
+
+    assert loaded.collections[1].members == store.collections[1].members
+    assert loaded.collections[1].name == "Shingeki"
+    assert loaded.collections[1].title == S1
+    assert loaded.alone == {OVA}
+    assert loaded.next == 2
+
+
+def test_a_change_that_fails_halfway_is_not_saved(titan) -> None:
+    with pytest.raises(RuntimeError), collections.editing() as store:
+        collections.join([S1], store)
+        raise RuntimeError("halfway")
+
+    assert collections.load().collections == {}
+
+
+def test_a_damaged_store_keeps_what_can_be_read() -> None:
+    path = collections._path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "next": 1,
+                "collections": {
+                    "3": {"members": [S2, S1, "x"], "title": OVA, "name": ""},
+                    "4": {"members": []},
+                    "junk": {"members": [S3]},
+                },
+                "alone": [str(MOVIE), "junk"],
+            }
+        ),
+        encoding="utf-8",
     )
-    assert catalog.groups[7].name == "Kaguya-sama: Love Is War"
-    # Named by hand in Shoko: left alone.
-    assert catalog.groups[9].name == "My own name"
-    # Named by bankai, it is kept in step when AniList's name changes.
-    anilist_names[1101]["english"] = "Love Is War"
-    assert asyncio.run(anime_collections.sync_names(catalog)) == 1
-    assert catalog.groups[7].name == "Love Is War"
+
+    store = collections.load()
+
+    assert list(store.collections) == [3]
+    # A title that is not among the members falls back to the first member.
+    assert (store.collections[3].members, store.collections[3].title, store.collections[3].name) == ([S2, S1], S2, None)
+    assert store.alone == {MOVIE}
+    assert store.next == 4
+
+    path.write_text("not json", encoding="utf-8")
+    assert collections.load().collections == {}
 
 
-def test_anilist_is_asked_once_per_week_fifty_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from bankai.metadata import anidb_art, anilist
+# -- The relation graph ----------------------------------------------------------------------
 
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    monkeypatch.setattr(anilist, "_LOADED", None)
-    monkeypatch.setattr(anidb_art, "facts", lambda aid: {"anilist": 1000 + int(aid)} if int(aid) != 7 else {})
-    asked: list[list[int]] = []
 
-    class Response:
-        def __init__(self, ids):
-            self.ids = ids
+def _edges(graph: dict) -> set[tuple]:
+    return {(edge["from"], edge["to"], edge["label"], edge["main_line"]) for edge in graph["edges"]}
 
-        def raise_for_status(self):
-            return None
 
-        def json(self):
-            media = [
-                {"id": i, "title": {"english": f"Show {i}", "romaji": None}, "coverImage": {"extraLarge": f"https://s4.anilist.co/{i}.jpg"}}
-                for i in self.ids if i != 1002
-            ]
-            return {"data": {"Page": {"media": media}}}
+def test_the_graph_is_the_collection_and_the_entries_related_to_it(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
 
-    class Client:
-        def __init__(self, *args, **kwargs):
-            pass
+    graph = collections.graph(store, row.id, episodes_on_disk=lambda aid: 3 if aid == S1 else 0)
 
-        async def __aenter__(self):
-            return self
+    nodes = {node["anilist_id"]: node for node in graph["nodes"]}
+    assert set(nodes) == {S1, S2, S3, S3P2, OVA, MOVIE}
+    assert [nodes[aid]["season"] for aid in (S1, S2, S3, S3P2)] == ["Season 1", "Season 2", "Season 3", "Season 4"]
+    assert nodes[OVA]["in_collection"] is False and nodes[OVA]["season"] is None
+    assert nodes[S1]["title_entry"] is True and nodes[S2]["title_entry"] is False
+    assert (nodes[S1]["on_disk"], nodes[S1]["owned"], nodes[S2]["owned"]) == (3, True, False)
+    assert (nodes[OVA]["type"], nodes[OVA]["episodes"], nodes[OVA]["first_aired"]) == ("OVA", 8, "2013-12-09")
+    assert nodes[S2]["main_title"] == "Shingeki no Kyojin Season 2"
+    assert (graph["collection_id"], graph["name"], graph["title_entry"], graph["root_aid"]) == (
+        row.id, "Attack on Titan", S1, None
+    )
+    # Each link once, in one direction, whichever end it was listed on.
+    assert _edges(graph) == {
+        (S1, S2, "sequel", True),
+        (S2, S3, "sequel", True),
+        (S3, S3P2, "sequel", True),
+        (S1, OVA, "side story", False),
+        (S1, MOVIE, "side story", False),
+    }
+    assert len(graph["edges"]) == 5
 
-        async def __aexit__(self, *exc):
-            return False
 
-        async def post(self, url, json):
-            asked.append(json["variables"]["ids"])
-            return Response(json["variables"]["ids"])
+def test_a_relation_listed_on_one_end_only_is_drawn_once(anilist_data) -> None:
+    """A summary or spin-off read from its other end is the same link, not a second one back."""
+    anilist_data.add(1, "Show", relations=[(2, "SUMMARY", "MOVIE"), (3, "SPIN_OFF"), (4, "ALTERNATIVE")])
+    anilist_data.add(2, "Show Recap", format="MOVIE", episodes=1)
+    anilist_data.add(3, "Show Spin-off")
+    anilist_data.add(4, "Show Remake")
+    store = Store()
+    store.create([1])
 
-    monkeypatch.setattr(anilist.httpx, "AsyncClient", Client)
+    graph = collections.graph(store, 1)
 
-    fetched = asyncio.run(anilist.ensure({1, 2, 7} | set(range(100, 160))))
+    assert _edges(graph) == {
+        (1, 2, "summary", False),
+        (1, 3, "spin-off", False),
+        (1, 4, "alternative", False),
+    }
+    assert {node["anilist_id"] for node in collections.graph(Store(), None, root_aid=2)["nodes"]} == {1, 2}
 
-    # Entry 7 has no AniList match; the rest go in batches of fifty.
-    assert [len(batch) for batch in asked] == [50, 12]
-    assert fetched == 61  # 1002 is not on AniList any more
-    assert anilist.name(1) == "Show 1001" and anilist.cover(1) == "https://s4.anilist.co/1001.jpg"
-    assert anilist.name(2) is None
-    asked.clear()
-    assert asyncio.run(anilist.ensure({1, 2})) == 0
-    assert asked == []  # kept, including the one AniList did not have
+
+def test_a_member_off_the_main_line_is_a_special_in_the_graph(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+    collections.include(store, row.id, OVA)
+
+    nodes = {node["anilist_id"]: node for node in collections.graph(store, row.id)["nodes"]}
+
+    assert nodes[OVA]["season"] == "Specials" and nodes[OVA]["in_collection"] is True
+
+
+def test_a_related_entry_in_another_collection_brings_that_whole_collection(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+    other = collections.split(store, row.id, [S3, S3P2])
+
+    nodes = {node["anilist_id"]: node for node in collections.graph(store, row.id)["nodes"]}
+
+    # S3P2 is related to nothing in this collection, but its collection is.
+    assert nodes[S3P2]["collection_id"] == other
+    assert nodes[S3P2]["collection_name"] == "Attack on Titan Season 3"
+    assert nodes[S3P2]["in_collection"] is False
+
+
+def test_an_entry_kept_out_by_hand_is_marked_so_in_the_graph(titan) -> None:
+    store = Store()
+    row = _titan_collection(store)
+    collections.exclude(store, row.id, [S3P2], with_files=set())
+
+    nodes = {node["anilist_id"]: node for node in collections.graph(store, row.id)["nodes"]}
+
+    assert nodes[S3P2]["alone"] is True and nodes[S3P2]["collection_id"] is None
+
+
+def test_an_entry_in_no_collection_has_a_graph_of_its_own(titan) -> None:
+    store = Store()
+
+    graph = collections.graph(store, None, root_aid=OVA)
+
+    assert {node["anilist_id"] for node in graph["nodes"]} == {OVA, S1}
+    assert (graph["collection_id"], graph["root_aid"], graph["name"], graph["title_entry"]) == (
+        None, OVA, "Attack on Titan OVA", OVA
+    )
+    assert _edges(graph) == {(S1, OVA, "side story", False)}
+
+
+def test_an_entry_in_a_collection_is_opened_through_it(titan) -> None:
+    store = Store()
+    _titan_collection(store)
+
+    with pytest.raises(ValueError):
+        collections.graph(store, None, root_aid=S2)
+    with pytest.raises(ValueError):
+        collections.graph(store, 99)

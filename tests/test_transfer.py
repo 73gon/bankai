@@ -82,16 +82,17 @@ def test_plan_transfer_routes_anime_to_dedicated_library_with_tvdb_id(
     )
 
 
-def test_plan_transfer_reuses_legacy_anime_folder_without_provider_suffix(
+def test_plan_transfer_files_anime_exactly_where_staging_has_it(
     tmp_path: Path,
 ) -> None:
+    """bankai lays the anime library out: no folder of a similar name is reused."""
     show = (
         tmp_path
         / "library"
         / "Shows"
-        / "Attack on Titan (2013) [tvdbid-267440]"
+        / "Attack on Titan (2013)"
         / "Season 04"
-        / "Attack on Titan - S04E01.mkv"
+        / "Attack on Titan (2013) - S04E01.mkv"
     )
     show.parent.mkdir(parents=True)
     show.write_bytes(b"new")
@@ -101,7 +102,10 @@ def test_plan_transfer_reuses_legacy_anime_folder_without_provider_suffix(
 
     (item,) = plan_transfer([show], kind="anime")
 
-    assert item.destination == legacy / "Season 04" / "Attack on Titan - S04E01.mkv"
+    assert item.destination == (
+        tmp_path / "media12" / "shows_anime" / "Attack on Titan (2013)" / "Season 04"
+        / "Attack on Titan (2013) - S04E01.mkv"
+    )
 
 
 def test_plan_transfer_reuses_existing_show_folder(tmp_path: Path) -> None:

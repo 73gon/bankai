@@ -18,6 +18,7 @@ import '@xyflow/react/dist/style.css';
 import { ArrowRightToLine, ExternalLink, Merge, Network, Plus, Scissors, Star } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type CollectionGraph as Graph, type CollectionNode } from '@/lib/api';
+import { anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -35,18 +36,21 @@ const SIDE_GAP = 120;
 const FRAME_PAD = 22;
 const FRAME_HEAD = 32;
 
-/** What kind of entry it is, as anime-offline-database says: its colour throughout. */
+/** What kind of entry it is, by AniList's format: its colour throughout. */
 const TYPES: Record<string, { label: string; stripe: string; chip: string }> = {
   TV: { label: 'TV series', stripe: 'bg-sky-400', chip: 'border-sky-400/40 bg-sky-400/10 text-sky-300' },
   MOVIE: { label: 'Movie', stripe: 'bg-rose-400', chip: 'border-rose-400/40 bg-rose-400/10 text-rose-300' },
   OVA: { label: 'OVA', stripe: 'bg-violet-400', chip: 'border-violet-400/40 bg-violet-400/10 text-violet-300' },
   ONA: { label: 'ONA', stripe: 'bg-emerald-400', chip: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300' },
   SPECIAL: { label: 'Special', stripe: 'bg-orange-400', chip: 'border-orange-400/40 bg-orange-400/10 text-orange-300' },
+  MUSIC: { label: 'Music', stripe: 'bg-lime-400', chip: 'border-lime-400/40 bg-lime-400/10 text-lime-300' },
 };
 const OTHER_TYPE = { label: 'Other', stripe: 'bg-zinc-500', chip: 'border-zinc-500/40 bg-zinc-500/10 text-zinc-300' };
 
 function typeOf(node: CollectionNode) {
-  return TYPES[(node.type ?? '').toUpperCase()] ?? OTHER_TYPE;
+  const format = (node.type ?? '').toUpperCase();
+  // A TV short is a TV series as far as the collection goes.
+  return TYPES[format === 'TV_SHORT' ? 'TV' : format] ?? OTHER_TYPE;
 }
 
 type EntryData = { node: CollectionNode; selected: boolean };
@@ -86,7 +90,7 @@ function sequelOrder(ids: number[], sequels: Map<number, number[]>, byId: Map<nu
       }
     }
   }
-  // A loop in AniDB's links leaves entries waiting: after the rest, by date.
+  // A loop in AniList's links leaves entries waiting: after the rest, by date.
   for (const id of [...ids].sort(byDate)) {
     if (!layer.has(id)) layer.set(id, Math.max(0, ...layer.values()) + 1);
     if (!done.includes(id)) done.push(id);
@@ -109,12 +113,12 @@ type Layout = { positions: Map<number, Point>; spine: Set<number>; frames: { id:
  * the right.
  */
 function layout(graph: Graph): Layout {
-  const byId = new Map(graph.nodes.map((node) => [node.anidb_id, node]));
+  const byId = new Map(graph.nodes.map((node) => [node.anilist_id, node]));
   const sequels = new Map<number, number[]>();
   const linked = new Map<number, number[]>();
   for (const node of graph.nodes) {
-    sequels.set(node.anidb_id, []);
-    linked.set(node.anidb_id, []);
+    sequels.set(node.anilist_id, []);
+    linked.set(node.anilist_id, []);
   }
   for (const edge of graph.edges) {
     linked.get(edge.from)?.push(edge.to);
@@ -123,7 +127,7 @@ function layout(graph: Graph): Layout {
   }
   const byDate = (a: number, b: number) => aired(byId.get(a)!).localeCompare(aired(byId.get(b)!)) || a - b;
   const elsewhere = (node: CollectionNode) => !node.in_collection && node.collection_id !== null && node.collection_id !== graph.collection_id;
-  const own = graph.nodes.filter((node) => node.in_collection).map((node) => node.anidb_id);
+  const own = graph.nodes.filter((node) => node.in_collection).map((node) => node.anilist_id);
   const ownSet = new Set(own);
 
   // The main line: the title entry's sequel chain, within the collection.
@@ -215,14 +219,14 @@ function layout(graph: Graph): Layout {
 
   // Entries related to nothing laid out: a row under everything.
   const lowest = () => Math.max(0, ...[...positions.values()].map((point) => point.y + CARD_H));
-  const loose = graph.nodes.filter((node) => !positions.has(node.anidb_id) && !elsewhere(node)).map((node) => node.anidb_id).sort(byDate);
+  const loose = graph.nodes.filter((node) => !positions.has(node.anilist_id) && !elsewhere(node)).map((node) => node.anilist_id).sort(byDate);
   const looseTop = lowest() + GAP_Y;
   loose.forEach((id, index) => positions.set(id, { x: xOf(index), y: looseTop }));
 
   // Other collections, each laid out down its own sequels.
   const groups = new Map<number, number[]>();
   for (const node of graph.nodes) {
-    if (elsewhere(node)) groups.set(node.collection_id!, [...(groups.get(node.collection_id!) ?? []), node.anidb_id]);
+    if (elsewhere(node)) groups.set(node.collection_id!, [...(groups.get(node.collection_id!) ?? []), node.anilist_id]);
   }
   const frames: Layout['frames'] = [];
   let below = lowest() + GAP_Y + FRAME_HEAD + FRAME_PAD;
@@ -293,7 +297,15 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
       {SIDES.map(([id, position]) => (
         <Handle key={id} id={id} type='source' position={position} isConnectable={false} className={hidden} />
       ))}
-      <AnimePoster url={node.poster_url} title={node.title} className={cn('w-full rounded-lg', !node.in_collection && node.collection_id === null && 'opacity-70')} />
+      <div className='relative'>
+        <AnimePoster url={node.poster_url} title={node.title} className={cn('w-full rounded-lg', !node.in_collection && node.collection_id === null && 'opacity-70')} />
+        {/* Where a member is filed on disk: Season 2, Specials. */}
+        {node.in_collection && node.season && (
+          <span className='absolute left-1.5 top-1.5 rounded border border-white/15 bg-background/85 px-1.5 py-px text-[0.62rem] font-medium text-foreground backdrop-blur-sm'>
+            {node.season}
+          </span>
+        )}
+      </div>
       <div className='flex min-h-0 flex-1 flex-col gap-1.5'>
         <span className={cn('line-clamp-2 text-[0.86rem] font-medium leading-tight', node.title_entry ? 'text-amber-100' : 'text-foreground')}>
           {node.title_entry && <Star className='mr-1 inline size-3.5 -translate-y-px fill-amber-300 text-amber-300' aria-label='Title entry' />}
@@ -345,9 +357,9 @@ function Canvas({
   const { positions, spine, frames } = useMemo(() => layout(graph), [graph]);
   const [nodes, , onNodesChange] = useNodesState<Node<EntryData, 'entry'>>(
     graph.nodes.map((node) => ({
-      id: String(node.anidb_id),
+      id: String(node.anilist_id),
       type: 'entry' as const,
-      position: positions.get(node.anidb_id) ?? { x: 0, y: 0 },
+      position: positions.get(node.anilist_id) ?? { x: 0, y: 0 },
       data: { node, selected: false },
     })),
   );
@@ -438,7 +450,7 @@ function Legend() {
     <div className='flex flex-col gap-3 text-xs text-muted-foreground'>
       <p className='text-sm text-foreground'>Click an entry to change the collection; Shift+click to pick more; click empty space to clear.</p>
       <div className='flex flex-col gap-1.5'>
-        <span className='text-[0.65rem] uppercase tracking-wide'>Type — the stripe on top</span>
+        <span className='text-[0.65rem] uppercase tracking-wide'>AniList format — the stripe on top</span>
         <span className='flex flex-wrap gap-1.5'>
           {[...Object.values(TYPES), OTHER_TYPE].map((kind) => (
             <span key={kind.label} className={cn('rounded border px-1.5 py-px text-[0.62rem] font-medium uppercase', kind.chip)}>{kind.label}</span>
@@ -454,10 +466,10 @@ function Legend() {
       <div className='flex flex-col gap-1.5'>
         <span className='text-[0.65rem] uppercase tracking-wide'>Cards</span>
         <span className='flex items-center gap-2'><span className='h-3 w-5 rounded border border-amber-300 bg-amber-400/30' /> golden: names and pictures the collection</span>
-        <span>Solid: in this collection. Dashed: in no collection.</span>
+        <span>Solid: in this collection, its season chip saying where it is filed. Dashed: in no collection.</span>
         <span className='text-cyan-300'>Inside a cyan frame: another collection; one that continues the main line sits above or below it.</span>
       </div>
-      <p>Drag to move around, scroll or pinch to zoom, drag cards to untangle. Not downloaded entries are kept where you put them and handed to Shoko once they are on disk.</p>
+      <p>Drag to move around, scroll or pinch to zoom, drag cards to untangle. Entries not downloaded yet keep the collection you put them in, and are filed into it once they are on disk.</p>
     </div>
   );
 }
@@ -473,13 +485,13 @@ function Action({ icon: Icon, children, ...props }: React.ComponentProps<typeof 
 }
 
 /** What to show: a collection, or one entry that is in none. */
-export type GraphTarget = { group: number } | { entry: number } | null;
+export type GraphTarget = { collection: number } | { entry: number } | null;
 
 /**
- * A collection's relation graph: its entries, and the entries AniDB relates
- * to them. Splitting, merging and pulling entries in are changes to Shoko's
- * groups, which Jellyfin shows; for an entry not downloaded yet the choice is
- * kept and handed to Shoko once it is.
+ * A collection's relation graph: its entries, and the entries AniList relates
+ * to them. Splitting, merging and pulling entries in change bankai's own
+ * collections, which the library lays out on disk and Jellyfin shows; for an
+ * entry not downloaded yet the choice is kept until it is.
  */
 export function CollectionGraph({
   target,
@@ -497,14 +509,14 @@ export function CollectionGraph({
   const [busy, setBusy] = useState(false);
   // A merge moves a whole collection: the button asks once more before it does.
   const [armed, setArmed] = useState<number | null>(null);
-  const groupId = target && 'group' in target ? target.group : null;
+  const collectionId = target && 'collection' in target ? target.collection : null;
   const rootAid = target && 'entry' in target ? target.entry : null;
 
   async function load() {
     if (!target) return;
     setLoading(true);
     try {
-      setGraph(await ('group' in target ? api.collectionGraph(target.group) : api.entryGraph(target.entry)));
+      setGraph(await ('collection' in target ? api.collectionGraph(target.collection) : api.entryGraph(target.entry)));
       setVersion((value) => value + 1);
     } catch (error: any) {
       toast.error(error.message);
@@ -519,9 +531,9 @@ export function CollectionGraph({
     setArmed(null);
     setGraph(null);
     void load();
-  }, [groupId, rootAid]);
+  }, [collectionId, rootAid]);
 
-  const byId = useMemo(() => new Map((graph?.nodes ?? []).map((node) => [node.anidb_id, node])), [graph]);
+  const byId = useMemo(() => new Map((graph?.nodes ?? []).map((node) => [node.anilist_id, node])), [graph]);
   const picked = selected.map((id) => byId.get(id)).filter((node): node is CollectionNode => Boolean(node));
   const members = picked.filter((node) => node.in_collection);
   const suggestions = picked.filter((node) => !node.in_collection);
@@ -583,20 +595,20 @@ export function CollectionGraph({
       return (
         <div className='flex flex-col gap-2'>
           {members.length === 1 && !members[0].title_entry && (
-            <Action icon={Star} disabled={busy} onClick={() => void act('Collection now named after ' + members[0].title, () => api.collectionTitle(groupId!, members[0].anidb_id))}>
+            <Action icon={Star} disabled={busy} onClick={() => void act('Collection now named after ' + members[0].title, () => api.collectionTitle(collectionId!, members[0].anilist_id))}>
               Name the collection after it
             </Action>
           )}
           {members.length < memberCount && (
             <Action icon={Scissors} disabled={busy} onClick={() => void act(
               members.length === 1 ? members[0].title + ' split off' : members.length + ' entries split off into a new collection',
-              () => (members.length === 1 ? api.collectionExclude(groupId!, members[0].anidb_id) : api.collectionSplit(groupId!, members.map((node) => node.anidb_id))),
+              () => (members.length === 1 ? api.collectionExclude(collectionId!, members[0].anilist_id) : api.collectionSplit(collectionId!, members.map((node) => node.anilist_id))),
             )}>
               {members.length === 1 ? 'Split off into its own collection' : `Split these ${members.length} off into a new collection`}
             </Action>
           )}
           {members.length === 1 && !members[0].owned && !members[0].title_entry && (
-            <p className='text-xs text-muted-foreground'>Not downloaded: named after it, the collection takes its name in Shoko and Jellyfin, and its cover here.</p>
+            <p className='text-xs text-muted-foreground'>Not downloaded: named after it, the collection takes its name (unless renamed by hand) and its cover, on disk and in Jellyfin.</p>
           )}
           {members.every((node) => !node.owned) && (
             <p className='text-xs text-muted-foreground'>Split off on its own, an entry not downloaded leaves every collection, with the entries reached only through it; from its own graph it can then be moved into another.</p>
@@ -608,12 +620,12 @@ export function CollectionGraph({
       const node = suggestions[0];
       return (
         <div className='flex flex-col gap-2'>
-          <Action icon={Plus} disabled={busy} onClick={() => void act(node.title + ' pulled in', () => api.collectionInclude(groupId!, node.anidb_id))}>
+          <Action icon={Plus} disabled={busy} onClick={() => void act(node.title + ' pulled in', () => api.collectionInclude(collectionId!, node.anilist_id))}>
             Pull this entry into the collection
           </Action>
-          {node.collection_id !== null && node.collection_id !== groupId && (
+          {node.collection_id !== null && node.collection_id !== collectionId && (
             armed === node.collection_id ? (
-              <Action icon={Merge} variant='destructive' disabled={busy} onClick={() => void act('Merged ' + node.collection_name, () => api.collectionMerge(groupId!, node.collection_id!))}>
+              <Action icon={Merge} variant='destructive' disabled={busy} onClick={() => void act('Merged ' + node.collection_name, () => api.collectionMerge(collectionId!, node.collection_id!))}>
                 Yes, merge all of {node.collection_name}
               </Action>
             ) : (
@@ -644,13 +656,13 @@ export function CollectionGraph({
             {loading && !graph ? (
               <div className='flex h-full items-center justify-center'><Spinner /></div>
             ) : !graph ? (
-              <EmptyState icon={Network} title='No graph' description='Shoko could not be read for this collection.' />
+              <EmptyState icon={Network} title='No graph' description='The relations of this collection could not be read.' />
             ) : (
               <Canvas key={version} graph={graph} selected={selected} onPick={pick} onClear={clear} />
             )}
             {busy && (
               <div className='absolute right-3 top-3 flex items-center gap-2 rounded-md bg-card/90 px-3 py-1.5 text-xs text-muted-foreground'>
-                <Spinner /> Asking Shoko…
+                <Spinner /> Saving…
               </div>
             )}
           </div>
@@ -661,13 +673,13 @@ export function CollectionGraph({
               <>
                 <ul className='flex flex-col gap-1.5'>
                   {picked.map((node) => (
-                    <li key={node.anidb_id} className='flex items-start justify-between gap-2'>
+                    <li key={node.anilist_id} className='flex items-start justify-between gap-2'>
                       <span className='min-w-0'>
                         <span className='block break-words text-foreground'>{node.title}</span>
-                        <span className='block truncate font-mono text-[0.65rem] text-muted-foreground'>{[typeOf(node).label, meta(node), node.owned ? null : 'not downloaded'].filter(Boolean).join(' · ')}</span>
+                        <span className='block truncate font-mono text-[0.65rem] text-muted-foreground'>{[typeOf(node).label, node.in_collection ? node.season : null, meta(node), node.owned ? null : 'not downloaded'].filter(Boolean).join(' · ')}</span>
                         {!node.in_collection && node.collection_name && <span className='block break-words text-[0.65rem] text-cyan-300'>In {node.collection_name}</span>}
                       </span>
-                      <a href={'https://anidb.net/anime/' + node.anidb_id} target='_blank' rel='noreferrer' className='shrink-0 text-muted-foreground hover:text-foreground' aria-label={'Open ' + node.title + ' on AniDB'}>
+                      <a href={anilistUrl(node.anilist_id)} target='_blank' rel='noreferrer' className='shrink-0 text-muted-foreground hover:text-foreground' title='Open on AniList' aria-label={'Open ' + node.title + ' on AniList'}>
                         <ExternalLink className='size-3.5' />
                       </a>
                     </li>
