@@ -11,6 +11,7 @@ import {
   useNodesState,
   type Edge,
   type Node,
+  type NodeChange,
   type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -25,12 +26,14 @@ import { EmptyState, Spinner } from '@/components/ui/empty';
 import { cn } from '@/lib/utils';
 
 // One entry's card: a poster with its title under it.
-const CARD_W = 176;
-const CARD_H = 344;
-const GAP_X = 88;
-const GAP_Y = 64;
-const FRAME_PAD = 20;
-const FRAME_HEAD = 30;
+const CARD_W = 208;
+const CARD_H = 400;
+const GAP_X = 96;
+const GAP_Y = 72;
+// Extra room between the main line and the side entries, for their arrows.
+const SIDE_GAP = 120;
+const FRAME_PAD = 22;
+const FRAME_HEAD = 32;
 
 /** What kind of entry it is, as anime-offline-database says: its colour throughout. */
 const TYPES: Record<string, { label: string; stripe: string; chip: string }> = {
@@ -46,7 +49,7 @@ function typeOf(node: CollectionNode) {
   return TYPES[(node.type ?? '').toUpperCase()] ?? OTHER_TYPE;
 }
 
-type EntryData = { node: CollectionNode; selected: boolean; spine: boolean };
+type EntryData = { node: CollectionNode; selected: boolean };
 type FrameData = { name: string; width: number; height: number };
 type FlowNode = Node<EntryData, 'entry'> | Node<FrameData, 'frame'>;
 type Point = { x: number; y: number };
@@ -57,13 +60,10 @@ function aired(node: CollectionNode) {
 }
 
 function meta(node: CollectionNode) {
-  const parts = [node.year ? String(node.year) : null];
-  if (node.owned) parts.push(`${node.on_disk}/${node.episodes ?? '?'} on disk`);
-  else parts.push(node.episodes ? `${node.episodes} eps · not downloaded` : 'not downloaded');
-  return parts.filter(Boolean).join(' · ');
+  return [node.year ? String(node.year) : null, node.episodes ? `${node.episodes} eps` : null].filter(Boolean).join(' · ');
 }
 
-/** Entries in sequel order, prequel first; what the links do not order goes by air date. */
+/** Entries in sequel order, prequel first, with the row each goes in; what the links do not order goes by air date. */
 function sequelOrder(ids: number[], sequels: Map<number, number[]>, byId: Map<number, CollectionNode>) {
   const members = new Set(ids);
   const waiting = new Map(ids.map((id) => [id, 0]));
@@ -94,14 +94,19 @@ function sequelOrder(ids: number[], sequels: Map<number, number[]>, byId: Map<nu
   return { order: done, layer };
 }
 
-type Layout = { positions: Map<number, Point>; spine: Set<number>; frames: { id: number; name: string; x: number; y: number; width: number; height: number }[] };
+type Layout = { positions: Map<number, Point>; spine: Set<number>; frames: { id: number; name: string }[] };
 
 /**
- * Where each entry goes. The collection's main line -- the sequel chain its
- * title entry is on -- runs top to bottom down the middle. Its side stories,
- * recaps, movies hang to the sides of the entry they belong to, right then
- * left. Another collection something is related to stands in a frame of its
- * own beside it, its own sequels top to bottom.
+ * Where each entry goes.
+ *
+ * The collection's main line -- the sequel chain its title entry is on --
+ * runs top to bottom. A collection that continues it, a sequel kept as a
+ * collection of its own, continues the line below it in a frame; one that
+ * comes before it, above. Side stories, recaps and movies sit beside the
+ * entry they belong to, one column each side, staggered by half a row so
+ * their arrows do not run into each other; what hangs off them goes a column
+ * further out. A collection related in any other way stands in a frame to
+ * the right.
  */
 function layout(graph: Graph): Layout {
   const byId = new Map(graph.nodes.map((node) => [node.anidb_id, node]));
@@ -116,8 +121,11 @@ function layout(graph: Graph): Layout {
     linked.get(edge.to)?.push(edge.from);
     if (edge.label === 'sequel') sequels.get(edge.from)?.push(edge.to);
   }
+  const byDate = (a: number, b: number) => aired(byId.get(a)!).localeCompare(aired(byId.get(b)!)) || a - b;
+  const elsewhere = (node: CollectionNode) => !node.in_collection && node.collection_id !== null && node.collection_id !== graph.collection_id;
   const own = graph.nodes.filter((node) => node.in_collection).map((node) => node.anidb_id);
   const ownSet = new Set(own);
+
   // The main line: the title entry's sequel chain, within the collection.
   const start = graph.title_entry && ownSet.has(graph.title_entry) ? graph.title_entry : own[0];
   const spine = new Set<number>();
@@ -126,113 +134,134 @@ function layout(graph: Graph): Layout {
     const id = walk.pop()!;
     if (spine.has(id) || !ownSet.has(id)) continue;
     spine.add(id);
-    for (const other of graph.edges) {
-      if (other.label !== 'sequel') continue;
-      if (other.from === id) walk.push(other.to);
-      if (other.to === id) walk.push(other.from);
+    for (const edge of graph.edges) {
+      if (edge.label !== 'sequel') continue;
+      if (edge.from === id) walk.push(edge.to);
+      if (edge.to === id) walk.push(edge.from);
     }
   }
   const step = CARD_H + GAP_Y;
   const lane = CARD_W + GAP_X;
   const positions = new Map<number, Point>();
+  const column = new Map<number, number>();
   const { order: spineOrder, layer } = sequelOrder([...spine], sequels, byId);
-  const across = new Map<number, number>(); // row -> parallel sequels placed in it
+  const across = new Map<number, number>();
   for (const id of spineOrder) {
     const row = layer.get(id)!;
     const k = across.get(row) ?? 0;
     across.set(row, k + 1);
+    column.set(id, k);
     positions.set(id, { x: k * lane, y: row * step });
   }
   const spineWidth = Math.max(1, ...across.values());
+  const xOf = (col: number) => col * lane + (col >= spineWidth ? SIDE_GAP : col < 0 ? -SIDE_GAP : 0);
 
-  // Each remaining entry hangs off the spine entry it is reached from first.
-  const anchor = new Map<number, number>();
-  const depth = new Map<number, number>();
+  // What hangs off what: each entry's nearest laid-out neighbour, outwards from the main line.
+  const parent = new Map<number, number>();
+  const depth = new Map<number, number>(spineOrder.map((id) => [id, 0]));
   const queue = [...spineOrder];
-  for (const id of spineOrder) {
-    anchor.set(id, id);
-    depth.set(id, 0);
-  }
-  const byDate = (a: number, b: number) => aired(byId.get(a)!).localeCompare(aired(byId.get(b)!)) || a - b;
   while (queue.length) {
     const id = queue.shift()!;
     for (const other of [...linked.get(id)!].sort(byDate)) {
-      if (anchor.has(other)) continue;
-      // Another collection is laid out on its own; only this one's and loose ones hang here.
-      const elsewhere = !byId.get(other)!.in_collection && byId.get(other)!.collection_id !== null && byId.get(other)!.collection_id !== graph.collection_id;
-      anchor.set(other, anchor.get(id)!);
+      if (depth.has(other) || elsewhere(byId.get(other)!)) continue;
+      parent.set(other, id);
       depth.set(other, depth.get(id)! + 1);
-      if (!elsewhere) queue.push(other);
+      queue.push(other);
     }
   }
-  const others = new Map<number, number[]>(); // collection -> its entries
-  // Side entries pack into a band beside the main line, at most two columns
-  // each side, and run downwards: in one row, eleven movies of one show made
-  // a strip too wide to read.
-  const SIDE_COLUMNS = 2;
-  const taken = new Set<string>();
-  const cell = (col: number, row: number) => `${col}:${row}`;
-  for (const point of positions.values()) taken.add(cell(Math.round(point.x / lane), Math.round(point.y / step)));
-  let rightmost = spineWidth - 1;
-  const loose: number[] = [];
-  for (const node of [...graph.nodes].sort((a, b) => (depth.get(a.anidb_id) ?? 99) - (depth.get(b.anidb_id) ?? 99) || byDate(a.anidb_id, b.anidb_id))) {
-    const id = node.anidb_id;
-    if (positions.has(id)) continue;
-    if (!node.in_collection && node.collection_id !== null && node.collection_id !== graph.collection_id) {
-      others.set(node.collection_id, [...(others.get(node.collection_id) ?? []), id]);
-      continue;
+
+  // Columns as lists of the heights taken in them, so cards never overlap.
+  const taken = new Map<number, [number, number][]>();
+  const take = (col: number, y: number) => taken.set(col, [...(taken.get(col) ?? []), [y, y + CARD_H]]);
+  const free = (col: number, y: number) => (taken.get(col) ?? []).every(([top, bottom]) => y + CARD_H + GAP_Y / 2 <= top || y >= bottom + GAP_Y / 2);
+  for (const id of spineOrder) take(column.get(id)!, positions.get(id)!.y);
+  const sideOf = new Map<number, number>();
+  const counts = new Map<number, { right: number; left: number }>();
+  const side = [...depth.keys()].filter((id) => !spine.has(id)).sort((a, b) => depth.get(a)! - depth.get(b)! || byDate(a, b));
+  for (const id of side) {
+    const from = parent.get(id)!;
+    const origin = positions.get(from)!;
+    let choices: { col: number; sign: number }[];
+    if (spine.has(from)) {
+      const count = counts.get(from) ?? { right: 0, left: 0 };
+      const right = { col: spineWidth, sign: 1 };
+      const left = { col: -1, sign: -1 };
+      choices = count.right <= count.left ? [right, left] : [left, right];
+    } else {
+      const sign = sideOf.get(from)!;
+      choices = [{ col: column.get(from)! + sign, sign }];
     }
-    const root = anchor.get(id);
-    if (root === undefined) {
-      loose.push(id);
-      continue;
-    }
-    // The nearest free place beside its entry: right, left, one further out,
-    // then a row further down.
-    const row = Math.round(positions.get(root)!.y / step);
-    let spot: Point | null = null;
-    for (let down = 0; spot === null; down += 1) {
-      for (let out = 1; out <= SIDE_COLUMNS && spot === null; out += 1) {
-        for (const column of [spineWidth - 1 + out, -out]) {
-          if (taken.has(cell(column, row + down))) continue;
-          taken.add(cell(column, row + down));
-          rightmost = Math.max(rightmost, column);
-          spot = { x: column * lane, y: (row + down) * step };
+    let spot: { col: number; sign: number; y: number } | null = null;
+    for (let half = 0; spot === null; half += 1) {
+      for (const choice of choices) {
+        const y = origin.y + (half * step) / 2;
+        if (free(choice.col, y)) {
+          spot = { ...choice, y };
           break;
         }
       }
     }
-    positions.set(id, spot);
+    take(spot.col, spot.y);
+    column.set(id, spot.col);
+    sideOf.set(id, spot.sign);
+    positions.set(id, { x: xOf(spot.col), y: spot.y });
+    if (spine.has(from)) {
+      const count = counts.get(from) ?? { right: 0, left: 0 };
+      if (spot.sign > 0) count.right += 1;
+      else count.left += 1;
+      counts.set(from, count);
+    }
   }
-  // Loose ends -- related to nothing laid out -- in a row under everything.
-  const bottom = Math.max(0, ...[...positions.values()].map((point) => point.y / step)) + 1;
-  loose.forEach((id, index) => positions.set(id, { x: index * lane, y: bottom * step }));
 
-  // Other collections: each a frame of its own to the right, its main line downwards.
+  // Entries related to nothing laid out: a row under everything.
+  const lowest = () => Math.max(0, ...[...positions.values()].map((point) => point.y + CARD_H));
+  const loose = graph.nodes.filter((node) => !positions.has(node.anidb_id) && !elsewhere(node)).map((node) => node.anidb_id).sort(byDate);
+  const looseTop = lowest() + GAP_Y;
+  loose.forEach((id, index) => positions.set(id, { x: xOf(index), y: looseTop }));
+
+  // Other collections, each laid out down its own sequels.
+  const groups = new Map<number, number[]>();
+  for (const node of graph.nodes) {
+    if (elsewhere(node)) groups.set(node.collection_id!, [...(groups.get(node.collection_id!) ?? []), node.anidb_id]);
+  }
   const frames: Layout['frames'] = [];
-  let column = rightmost + 1;
-  for (const [collection, ids] of [...others.entries()].sort((a, b) => a[0] - b[0])) {
-    const anchorRows = ids.map((id) => anchor.get(id)).filter((root): root is number => root !== undefined && positions.has(root)).map((root) => positions.get(root)!.y / step);
-    const top = anchorRows.length ? Math.min(...anchorRows) : 0;
+  let below = lowest() + GAP_Y + FRAME_HEAD + FRAME_PAD;
+  let above = -GAP_Y - FRAME_PAD;
+  let right = Math.max(0, ...[...positions.values()].map((point) => point.x + CARD_W)) + GAP_X + SIDE_GAP + FRAME_PAD;
+  for (const [collection, ids] of [...groups.entries()].sort((a, b) => a[0] - b[0])) {
+    const inside = new Set(ids);
     const { order, layer: rows } = sequelOrder(ids, sequels, byId);
     const width = new Map<number, number>();
+    const local = new Map<number, Point>();
     for (const id of order) {
       const row = rows.get(id)!;
       const k = width.get(row) ?? 0;
       width.set(row, k + 1);
-      positions.set(id, { x: (column + k) * lane, y: (top + row) * step });
+      local.set(id, { x: k * lane, y: row * step });
     }
-    const span = Math.max(1, ...width.values());
-    const lastRow = Math.max(...order.map((id) => rows.get(id)!));
-    frames.push({
-      id: collection,
-      name: byId.get(ids[0])!.collection_name ?? 'Another collection',
-      x: column * lane - FRAME_PAD,
-      y: top * step - FRAME_PAD - FRAME_HEAD,
-      width: span * lane - GAP_X + FRAME_PAD * 2,
-      height: (lastRow + 1) * step - GAP_Y + FRAME_PAD * 2 + FRAME_HEAD,
-    });
-    column += span + 1;
+    const height = (Math.max(...order.map((id) => rows.get(id)!)) + 1) * step - GAP_Y;
+    const span = Math.max(1, ...width.values()) * lane - GAP_X;
+    const continues = graph.edges.some((edge) => edge.label === 'sequel' && spine.has(edge.from) && inside.has(edge.to));
+    const precedes = graph.edges.some((edge) => edge.label === 'sequel' && inside.has(edge.from) && spine.has(edge.to));
+    let origin: Point;
+    if (continues) {
+      // A sequel of the main line: the line goes on below, in its frame.
+      origin = { x: 0, y: below };
+      below += height + GAP_Y + FRAME_HEAD + FRAME_PAD * 2;
+    } else if (precedes) {
+      origin = { x: 0, y: above - height - FRAME_HEAD - FRAME_PAD };
+      above = origin.y - FRAME_HEAD - FRAME_PAD - GAP_Y;
+    } else {
+      const neighbours = ids.flatMap((id) => linked.get(id)!).filter((other) => positions.has(other) && !inside.has(other));
+      const top = neighbours.length ? Math.min(...neighbours.map((other) => positions.get(other)!.y)) : 0;
+      origin = { x: right, y: top };
+      right += span + GAP_X + FRAME_PAD * 2;
+    }
+    for (const id of order) {
+      const point = local.get(id)!;
+      positions.set(id, { x: origin.x + point.x, y: origin.y + point.y });
+    }
+    frames.push({ id: collection, name: byId.get(ids[0])!.collection_name ?? 'Another collection' });
   }
   return { positions, spine, frames };
 }
@@ -251,10 +280,11 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
   return (
     <div
       className={cn(
-        'relative flex flex-col gap-2 overflow-hidden rounded-xl border bg-card p-2 pt-3 shadow-lg',
+        'relative flex flex-col gap-2 overflow-hidden rounded-xl border bg-card p-2.5 pt-3.5 shadow-lg',
         node.in_collection ? 'border-border' : node.collection_id === null ? 'border-dashed border-muted-foreground/50 bg-card/70' : 'border-cyan-400/30',
-        node.title_entry && 'border-amber-400 ring-2 ring-amber-400/70',
-        selected && 'ring-2 ring-info',
+        // The collection's title entry: the golden card.
+        node.title_entry && 'border-amber-300 bg-gradient-to-b from-amber-300/30 via-amber-400/15 to-amber-500/10 shadow-amber-500/20',
+        selected && 'ring-2 ring-info ring-offset-2 ring-offset-background',
       )}
       style={{ width: CARD_W, height: CARD_H }}
       title={node.main_title && node.main_title !== node.title ? node.main_title : node.title}
@@ -264,20 +294,21 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
         <Handle key={id} id={id} type='source' position={position} isConnectable={false} className={hidden} />
       ))}
       <AnimePoster url={node.poster_url} title={node.title} className={cn('w-full rounded-lg', !node.in_collection && node.collection_id === null && 'opacity-70')} />
-      <div className='flex min-h-0 flex-1 flex-col gap-1'>
-        <span className='line-clamp-2 text-[0.8rem] font-medium leading-tight text-foreground'>
-          {node.title_entry && <Star className='mr-1 inline size-3.5 -translate-y-px fill-amber-400 text-amber-400' aria-label='Title entry' />}
+      <div className='flex min-h-0 flex-1 flex-col gap-1.5'>
+        <span className={cn('line-clamp-2 text-[0.86rem] font-medium leading-tight', node.title_entry ? 'text-amber-100' : 'text-foreground')}>
+          {node.title_entry && <Star className='mr-1 inline size-3.5 -translate-y-px fill-amber-300 text-amber-300' aria-label='Title entry' />}
           {node.title}
         </span>
         <span className='flex items-center gap-1.5'>
-          <span className={cn('rounded border px-1 py-px text-[0.58rem] font-medium uppercase tracking-wide', kind.chip)}>{kind.label}</span>
-          <span className='truncate font-mono text-[0.6rem] text-muted-foreground'>{meta(node)}</span>
+          <span className={cn('rounded border px-1 py-px text-[0.6rem] font-medium uppercase tracking-wide', kind.chip)}>{kind.label}</span>
+          <span className='truncate font-mono text-[0.64rem] text-muted-foreground'>{meta(node)}</span>
         </span>
-        {!node.in_collection && node.collection_id === null && (
-          <span className='mt-auto'>
+        <span className='mt-auto flex flex-wrap gap-1'>
+          {!node.owned && <Badge variant='muted' className='text-[0.6rem]'>Not downloaded</Badge>}
+          {!node.in_collection && node.collection_id === null && (
             <Badge variant='muted' className='text-[0.6rem]'>{node.alone ? 'In no collection' : 'Not in a collection'}</Badge>
-          </span>
-        )}
+          )}
+        </span>
       </div>
     </div>
   );
@@ -300,31 +331,47 @@ function joins(from: Point, to: Point) {
 }
 
 /** The graph itself: laid out once per loaded graph, then free to pan, zoom and drag. */
-function Canvas({ graph, selected, onToggle }: { graph: Graph; selected: number[]; onToggle: (id: number) => void }) {
+function Canvas({
+  graph,
+  selected,
+  onPick,
+  onClear,
+}: {
+  graph: Graph;
+  selected: number[];
+  onPick: (id: number, add: boolean) => void;
+  onClear: () => void;
+}) {
   const { positions, spine, frames } = useMemo(() => layout(graph), [graph]);
-  const [nodes, , onNodesChange] = useNodesState<FlowNode>([
-    ...frames.map((frame) => ({
-      id: 'frame-' + frame.id,
-      type: 'frame' as const,
-      position: { x: frame.x, y: frame.y },
-      data: { name: frame.name, width: frame.width, height: frame.height },
-      draggable: false,
-      selectable: false,
-      zIndex: -1,
-    })),
-    ...graph.nodes.map((node) => ({
+  const [nodes, , onNodesChange] = useNodesState<Node<EntryData, 'entry'>>(
+    graph.nodes.map((node) => ({
       id: String(node.anidb_id),
       type: 'entry' as const,
       position: positions.get(node.anidb_id) ?? { x: 0, y: 0 },
-      data: { node, selected: false, spine: spine.has(node.anidb_id) },
+      data: { node, selected: false },
     })),
-  ]);
-  const shown = useMemo(
-    () => nodes.map((item) => (item.type === 'entry'
-      ? { ...item, data: { ...item.data, selected: selected.includes(Number(item.id)) } }
-      : item)),
-    [nodes, selected],
   );
+  // Each frame drawn round wherever its cards are now, so it follows them when dragged.
+  const shown = useMemo<FlowNode[]>(() => {
+    const boxes = frames.flatMap((frame) => {
+      const members = nodes.filter((item) => !item.data.node.in_collection && item.data.node.collection_id === frame.id);
+      if (!members.length) return [];
+      const left = Math.min(...members.map((item) => item.position.x)) - FRAME_PAD;
+      const top = Math.min(...members.map((item) => item.position.y)) - FRAME_PAD - FRAME_HEAD;
+      const right = Math.max(...members.map((item) => item.position.x + CARD_W)) + FRAME_PAD;
+      const bottom = Math.max(...members.map((item) => item.position.y + CARD_H)) + FRAME_PAD;
+      return [{
+        id: 'frame-' + frame.id,
+        type: 'frame' as const,
+        position: { x: left, y: top },
+        data: { name: frame.name, width: right - left, height: bottom - top },
+        draggable: false,
+        selectable: false,
+        zIndex: -1,
+      }];
+    });
+    return [...boxes, ...nodes.map((item) => ({ ...item, data: { ...item.data, selected: selected.includes(Number(item.id)) } }))];
+  }, [frames, nodes, selected]);
   const edges = useMemo<Edge[]>(() => graph.edges.map((item) => {
     const from = positions.get(item.from) ?? { x: 0, y: 0 };
     const to = positions.get(item.to) ?? { x: 0, y: 0 };
@@ -338,7 +385,7 @@ function Canvas({ graph, selected, onToggle }: { graph: Graph; selected: number[
       target: String(item.to),
       sourceHandle,
       targetHandle,
-      type: main ? 'straight' : 'smoothstep',
+      type: sourceHandle === 'bottom' || sourceHandle === 'top' ? 'straight' : 'smoothstep',
       label: main ? undefined : item.label,
       markerEnd: sequel || item.label === 'side story' || item.label === 'summary'
         ? { type: MarkerType.ArrowClosed, width: 18, height: 18, color }
@@ -346,7 +393,7 @@ function Canvas({ graph, selected, onToggle }: { graph: Graph; selected: number[
       style: main
         ? { stroke: color, strokeWidth: 3.5 }
         : sequel
-          ? { stroke: color, strokeWidth: 2 }
+          ? { stroke: color, strokeWidth: 2.5 }
           : { stroke: color, strokeWidth: 1.5, strokeDasharray: '6 5' },
       labelStyle: { fill: 'var(--foreground-soft)', fontSize: 11 },
       labelBgStyle: { fill: 'var(--card)' },
@@ -361,11 +408,17 @@ function Canvas({ graph, selected, onToggle }: { graph: Graph; selected: number[
       nodes={shown}
       edges={edges}
       nodeTypes={nodeTypes}
-      onNodesChange={onNodesChange}
-      onNodeClick={(_event, node) => { if (node.type === 'entry') onToggle(Number(node.id)); }}
+      onNodesChange={(changes) => onNodesChange(
+        // Frames are drawn round their cards, not moved on their own.
+        changes.filter((change) => !('id' in change) || !String(change.id).startsWith('frame-')) as NodeChange<Node<EntryData, 'entry'>>[],
+      )}
+      onNodeClick={(event, node) => { if (node.type === 'entry') onPick(Number(node.id), event.shiftKey); }}
+      onPaneClick={onClear}
       connectionMode={ConnectionMode.Loose}
       nodesConnectable={false}
       elementsSelectable={false}
+      selectionKeyCode={null}
+      multiSelectionKeyCode={null}
       colorMode='dark'
       fitView
       fitViewOptions={{ padding: 0.12, maxZoom: 1 }}
@@ -383,7 +436,7 @@ function Canvas({ graph, selected, onToggle }: { graph: Graph; selected: number[
 function Legend() {
   return (
     <div className='flex flex-col gap-3 text-xs text-muted-foreground'>
-      <p className='text-sm text-foreground'>Click entries to change the collection.</p>
+      <p className='text-sm text-foreground'>Click an entry to change the collection; Shift+click to pick more; click empty space to clear.</p>
       <div className='flex flex-col gap-1.5'>
         <span className='text-[0.65rem] uppercase tracking-wide'>Type — the stripe on top</span>
         <span className='flex flex-wrap gap-1.5'>
@@ -395,17 +448,27 @@ function Legend() {
       <div className='flex flex-col gap-1.5'>
         <span className='text-[0.65rem] uppercase tracking-wide'>Links</span>
         <span className='flex items-center gap-2'><span className='h-1 w-8 rounded bg-foreground' /> main line, top to bottom</span>
-        <span className='flex items-center gap-2'><span className='h-0.5 w-8 rounded bg-foreground/60' /> another sequel chain</span>
+        <span className='flex items-center gap-2'><span className='h-0.5 w-8 rounded bg-foreground/60' /> sequels in another collection</span>
         <span className='flex items-center gap-2'><span className='w-8 border-t-2 border-dashed border-muted-foreground' /> side story, recap, other</span>
       </div>
       <div className='flex flex-col gap-1.5'>
         <span className='text-[0.65rem] uppercase tracking-wide'>Cards</span>
-        <span className='flex items-center gap-2'><Star className='size-3.5 fill-amber-400 text-amber-400' /> names and pictures the collection</span>
+        <span className='flex items-center gap-2'><span className='h-3 w-5 rounded border border-amber-300 bg-amber-400/30' /> golden: names and pictures the collection</span>
         <span>Solid: in this collection. Dashed: in no collection.</span>
-        <span className='text-cyan-300'>Inside a cyan frame: in another collection.</span>
+        <span className='text-cyan-300'>Inside a cyan frame: another collection; one that continues the main line sits above or below it.</span>
       </div>
       <p>Drag to move around, scroll or pinch to zoom, drag cards to untangle. Not downloaded entries are kept where you put them and handed to Shoko once they are on disk.</p>
     </div>
+  );
+}
+
+/** A side-panel action: the button wraps a long collection name rather than spill out of itself. */
+function Action({ icon: Icon, children, ...props }: React.ComponentProps<typeof Button> & { icon: typeof Star }) {
+  return (
+    <Button size='sm' variant='secondary' className='h-auto min-h-8 justify-start whitespace-normal py-1.5 text-left leading-snug' {...props}>
+      <Icon data-icon='inline-start' className='shrink-0' />
+      <span className='min-w-0 break-words'>{children}</span>
+    </Button>
   );
 }
 
@@ -464,9 +527,18 @@ export function CollectionGraph({
   const suggestions = picked.filter((node) => !node.in_collection);
   const memberCount = graph?.nodes.filter((node) => node.in_collection).length ?? 0;
 
-  function toggle(id: number) {
+  /** A click picks one entry; with Shift it adds to (or takes from) what is picked. */
+  function pick(id: number, add: boolean) {
     setArmed(null);
-    setSelected((current) => (current.includes(id) ? current.filter((other) => other !== id) : [...current, id]));
+    setSelected((current) => {
+      if (add) return current.includes(id) ? current.filter((other) => other !== id) : [...current, id];
+      return current.length === 1 && current[0] === id ? [] : [id];
+    });
+  }
+
+  function clear() {
+    setArmed(null);
+    setSelected([]);
   }
 
   async function act(label: string, work: () => Promise<unknown>, { close = false } = {}) {
@@ -474,8 +546,7 @@ export function CollectionGraph({
     try {
       await work();
       toast.success(label);
-      setSelected([]);
-      setArmed(null);
+      clear();
       onChanged();
       if (close) onClose();
       else await load();
@@ -497,13 +568,13 @@ export function CollectionGraph({
       const into = suggestions.length === 1 ? suggestions[0] : null;
       if (into?.collection_id) {
         return (
-          <Button size='sm' variant='secondary' disabled={busy} onClick={() => void act(
+          <Action icon={ArrowRightToLine} disabled={busy} onClick={() => void act(
             (root?.title ?? 'The entry') + ' moved into ' + into.collection_name,
             () => api.entryMove(rootAid, into.collection_id!),
             { close: true },
           )}>
-            <ArrowRightToLine data-icon='inline-start' /> Move {root?.title ?? 'it'} into {into.collection_name}
-          </Button>
+            Move it into {into.collection_name}
+          </Action>
         );
       }
       return <p className='text-xs text-muted-foreground'>Pick an entry of a related collection to move this one into it.</p>;
@@ -512,17 +583,17 @@ export function CollectionGraph({
       return (
         <div className='flex flex-col gap-2'>
           {members.length === 1 && !members[0].title_entry && (
-            <Button size='sm' variant='secondary' disabled={busy} onClick={() => void act('Collection now named after ' + members[0].title, () => api.collectionTitle(groupId!, members[0].anidb_id))}>
-              <Star data-icon='inline-start' /> Name the collection after it
-            </Button>
+            <Action icon={Star} disabled={busy} onClick={() => void act('Collection now named after ' + members[0].title, () => api.collectionTitle(groupId!, members[0].anidb_id))}>
+              Name the collection after it
+            </Action>
           )}
           {members.length < memberCount && (
-            <Button size='sm' variant='secondary' disabled={busy} onClick={() => void act(
+            <Action icon={Scissors} disabled={busy} onClick={() => void act(
               members.length === 1 ? members[0].title + ' split off' : members.length + ' entries split off into a new collection',
               () => (members.length === 1 ? api.collectionExclude(groupId!, members[0].anidb_id) : api.collectionSplit(groupId!, members.map((node) => node.anidb_id))),
             )}>
-              <Scissors data-icon='inline-start' /> {members.length === 1 ? 'Split off into its own collection' : `Split ${members.length} off into a new collection`}
-            </Button>
+              {members.length === 1 ? 'Split off into its own collection' : `Split these ${members.length} off into a new collection`}
+            </Action>
           )}
           {members.length === 1 && !members[0].owned && !members[0].title_entry && (
             <p className='text-xs text-muted-foreground'>Not downloaded: named after it, the collection takes its name in Shoko and Jellyfin, and its cover here.</p>
@@ -537,18 +608,18 @@ export function CollectionGraph({
       const node = suggestions[0];
       return (
         <div className='flex flex-col gap-2'>
-          <Button size='sm' variant='secondary' disabled={busy} onClick={() => void act(node.title + ' pulled in', () => api.collectionInclude(groupId!, node.anidb_id))}>
-            <Plus data-icon='inline-start' /> Pull into this collection
-          </Button>
+          <Action icon={Plus} disabled={busy} onClick={() => void act(node.title + ' pulled in', () => api.collectionInclude(groupId!, node.anidb_id))}>
+            Pull this entry into the collection
+          </Action>
           {node.collection_id !== null && node.collection_id !== groupId && (
             armed === node.collection_id ? (
-              <Button size='sm' variant='destructive' disabled={busy} onClick={() => void act('Merged ' + node.collection_name, () => api.collectionMerge(groupId!, node.collection_id!))}>
-                <Merge data-icon='inline-start' /> Yes, merge all of {node.collection_name}
-              </Button>
+              <Action icon={Merge} variant='destructive' disabled={busy} onClick={() => void act('Merged ' + node.collection_name, () => api.collectionMerge(groupId!, node.collection_id!))}>
+                Yes, merge all of {node.collection_name}
+              </Action>
             ) : (
-              <Button size='sm' variant='secondary' disabled={busy} onClick={() => setArmed(node.collection_id)}>
-                <Merge data-icon='inline-start' /> Merge all of {node.collection_name} in
-              </Button>
+              <Action icon={Merge} disabled={busy} onClick={() => setArmed(node.collection_id)}>
+                Merge its whole collection in: {node.collection_name}
+              </Action>
             )
           )}
         </div>
@@ -565,7 +636,7 @@ export function CollectionGraph({
           <DialogDescription>
             {rootAid !== null
               ? 'This entry is in no collection. Its related entries are around it; move it into one of their collections.'
-              : 'The main line runs top to bottom; side stories, recaps and movies hang beside the entry they belong to. Related collections stand in frames of their own.'}
+              : 'The main line runs top to bottom, sequel collections continuing it; side stories, recaps and movies sit beside the entry they belong to.'}
           </DialogDescription>
         </DialogHeader>
         <div className='flex min-h-0 flex-1 gap-3'>
@@ -575,7 +646,7 @@ export function CollectionGraph({
             ) : !graph ? (
               <EmptyState icon={Network} title='No graph' description='Shoko could not be read for this collection.' />
             ) : (
-              <Canvas key={version} graph={graph} selected={selected} onToggle={toggle} />
+              <Canvas key={version} graph={graph} selected={selected} onPick={pick} onClear={clear} />
             )}
             {busy && (
               <div className='absolute right-3 top-3 flex items-center gap-2 rounded-md bg-card/90 px-3 py-1.5 text-xs text-muted-foreground'>
@@ -592,11 +663,11 @@ export function CollectionGraph({
                   {picked.map((node) => (
                     <li key={node.anidb_id} className='flex items-start justify-between gap-2'>
                       <span className='min-w-0'>
-                        <span className='block truncate text-foreground'>{node.title}</span>
-                        <span className='block truncate font-mono text-[0.65rem] text-muted-foreground'>{typeOf(node).label} · {meta(node)}</span>
-                        {!node.in_collection && node.collection_name && <span className='block truncate text-[0.65rem] text-cyan-300'>In {node.collection_name}</span>}
+                        <span className='block break-words text-foreground'>{node.title}</span>
+                        <span className='block truncate font-mono text-[0.65rem] text-muted-foreground'>{[typeOf(node).label, meta(node), node.owned ? null : 'not downloaded'].filter(Boolean).join(' · ')}</span>
+                        {!node.in_collection && node.collection_name && <span className='block break-words text-[0.65rem] text-cyan-300'>In {node.collection_name}</span>}
                       </span>
-                      <a href={'https://anidb.net/anime/' + node.anidb_id} target='_blank' rel='noreferrer' className='text-muted-foreground hover:text-foreground' aria-label={'Open ' + node.title + ' on AniDB'}>
+                      <a href={'https://anidb.net/anime/' + node.anidb_id} target='_blank' rel='noreferrer' className='shrink-0 text-muted-foreground hover:text-foreground' aria-label={'Open ' + node.title + ' on AniDB'}>
                         <ExternalLink className='size-3.5' />
                       </a>
                     </li>
