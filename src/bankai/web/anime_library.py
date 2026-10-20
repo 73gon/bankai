@@ -1169,6 +1169,18 @@ async def group_shows(
             aid: anime_collections.short_label(_entry_name(aid, catalog, known), collection)
             for aid in order
         }
+        # Two tabs of one name -- a show and its OVA both "Attack on Titan" --
+        # are told apart by what they are and when.
+        counts = Counter(labels.values())
+        for aid, label in labels.items():
+            if counts[label] > 1:
+                facts = anidb_art.facts(aid)
+                kind = {"TV": "TV", "MOVIE": "Movie", "OVA": "OVA", "ONA": "ONA", "SPECIAL": "Special"}.get(
+                    str(facts.get("type") or "").upper()
+                )
+                year = first_aired(aid)[:4] if first_aired(aid) != "9999" else None
+                extra = ", ".join(part for part in (kind, year) if part)
+                labels[aid] = f"{label} ({extra or aid})"
         return {"order": order, "rosters": rosters, "labels": labels, "finished": finished}
 
     def build(slot: dict) -> dict:

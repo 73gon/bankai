@@ -166,9 +166,14 @@ function layout(graph: Graph): Layout {
     }
   }
   const others = new Map<number, number[]>(); // collection -> its entries
-  const sides = new Map<number, { right: number; left: number }>(); // spine row -> how far out each side is used
+  // Side entries pack into a band beside the main line, at most two columns
+  // each side, and run downwards: in one row, eleven movies of one show made
+  // a strip too wide to read.
+  const SIDE_COLUMNS = 2;
+  const taken = new Set<string>();
+  const cell = (col: number, row: number) => `${col}:${row}`;
+  for (const point of positions.values()) taken.add(cell(Math.round(point.x / lane), Math.round(point.y / step)));
   let rightmost = spineWidth - 1;
-  let leftmost = 0;
   const loose: number[] = [];
   for (const node of [...graph.nodes].sort((a, b) => (depth.get(a.anidb_id) ?? 99) - (depth.get(b.anidb_id) ?? 99) || byDate(a.anidb_id, b.anidb_id))) {
     const id = node.anidb_id;
@@ -182,15 +187,22 @@ function layout(graph: Graph): Layout {
       loose.push(id);
       continue;
     }
+    // The nearest free place beside its entry: right, left, one further out,
+    // then a row further down.
     const row = Math.round(positions.get(root)!.y / step);
-    const used = sides.get(row) ?? { right: 0, left: 0 };
-    // Right first, then left, keeping both sides about as long.
-    const toRight = used.right <= used.left;
-    const column = toRight ? spineWidth - 1 + ++used.right : -++used.left;
-    sides.set(row, used);
-    rightmost = Math.max(rightmost, column);
-    leftmost = Math.min(leftmost, column);
-    positions.set(id, { x: column * lane, y: row * step });
+    let spot: Point | null = null;
+    for (let down = 0; spot === null; down += 1) {
+      for (let out = 1; out <= SIDE_COLUMNS && spot === null; out += 1) {
+        for (const column of [spineWidth - 1 + out, -out]) {
+          if (taken.has(cell(column, row + down))) continue;
+          taken.add(cell(column, row + down));
+          rightmost = Math.max(rightmost, column);
+          spot = { x: column * lane, y: (row + down) * step };
+          break;
+        }
+      }
+    }
+    positions.set(id, spot);
   }
   // Loose ends -- related to nothing laid out -- in a row under everything.
   const bottom = Math.max(0, ...[...positions.values()].map((point) => point.y / step)) + 1;
@@ -222,7 +234,6 @@ function layout(graph: Graph): Layout {
     });
     column += span + 1;
   }
-  void leftmost;
   return { positions, spine, frames };
 }
 
