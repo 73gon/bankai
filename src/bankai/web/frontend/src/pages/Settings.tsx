@@ -1,14 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Settings as SettingsIcon, Save, Loader2, Eye, EyeOff, RotateCcw } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type SettingRow } from '@/lib/api';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Button } from '@/zon/ui/button';
+import { Input } from '@/zon/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/zon/ui/input-group';
+import { Switch } from '@/zon/ui/switch';
+import { StatusTag } from '@/components/status-tag';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { Empty, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+
+const QUALITY_ITEMS = [
+  { value: '1080p', label: '1080p' },
+  { value: '2160p', label: '2160p (4K)' },
+];
 
 const SETTING_UI: Record<
   string,
@@ -237,8 +244,8 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
     <div className='mx-auto max-w-5xl pb-16'>
       <header className='flex flex-wrap items-end justify-between gap-4 pb-2'>
         <div className='flex flex-col gap-1'>
-          <p className='label-mono'>{scope === 'mas' ? 'Movies & Shows' : 'System'}</p>
-          <h1 className='font-serif text-3xl'>Settings</h1>
+          <p className='eyebrow'>{scope === 'mas' ? 'Movies & Shows' : 'System'}</p>
+          <h1 className='font-heading text-3xl font-light'>Settings</h1>
           <p className='text-sm text-muted-foreground'>Edit safe configuration keys, then save them all at once.</p>
         </div>
         <div className='flex items-center gap-2'>
@@ -257,18 +264,18 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
       {loading ? (
         <div className='space-y-3'>
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className='h-10 w-full' />
+            <Skeleton key={i} shape='field' />
           ))}
         </div>
       ) : rows.length === 0 ? (
-        <div className='flex flex-col items-center py-16 text-muted-foreground'>
-          <SettingsIcon className='mb-3 h-8 w-8' />
-          No editable settings.
-        </div>
+        <Empty>
+          <EmptyMedia><SettingsIcon /></EmptyMedia>
+          <EmptyTitle>No editable settings.</EmptyTitle>
+        </Empty>
       ) : (
         <div>
           {validationError && (
-            <p className='mb-4 border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground'>
+            <p className='mb-4 rounded-control border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive'>
               {validationError}
             </p>
           )}
@@ -277,7 +284,7 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
               key={section}
               className='grid gap-x-10 gap-y-6 border-t border-border/60 py-8 last:border-b md:grid-cols-[168px_1fr]'
             >
-              <h2 className='label-mono md:pt-1.5'>{sectionLabel(section)}</h2>
+              <h2 className='eyebrow md:pt-1.5'>{sectionLabel(section)}</h2>
               <div className='flex flex-col gap-6'>
                 {sectionRows.map((row) => {
                   const isBool = typeof row.value === 'boolean';
@@ -292,11 +299,11 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
                           <span className='text-foreground'>{fieldLabel(row.key)}</span>
                           {dirty && (
                             <Tooltip>
-                              <TooltipTrigger asChild><span className='h-1.5 w-1.5 rounded-full bg-primary' /></TooltipTrigger>
+                              <TooltipTrigger render={<span aria-label='Unsaved change' className='h-1.5 w-1.5 rounded-full bg-primary' />} />
                               <TooltipContent>Unsaved change</TooltipContent>
                             </Tooltip>
                           )}
-                          {row.secret && (row.is_set ? <Badge variant='success'>Set</Badge> : <Badge variant='muted'>Unset</Badge>)}
+                          {row.secret && (row.is_set ? <StatusTag variant='success'>Set</StatusTag> : <StatusTag variant='muted'>Unset</StatusTag>)}
                         </div>
                         {ui?.description && <p className='max-w-md text-xs text-muted-foreground'>{ui.description}</p>}
                       </div>
@@ -306,8 +313,9 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
                           <Switch checked={Boolean(val)} onCheckedChange={(v) => setEdit(row.key, v, original)} />
                         ) : ui?.kind === 'quality' ? (
                           <Select
+                            items={QUALITY_ITEMS}
                             value={Array.isArray(val) && val[0] === '1080p' ? '1080p' : '2160p'}
-                            onValueChange={(v) => setEdit(row.key, [v, v === '2160p' ? '1080p' : '2160p'], original)}
+                            onValueChange={(v) => { if (v) setEdit(row.key, [v, v === '2160p' ? '1080p' : '2160p'], original); }}
                           >
                             <SelectTrigger className='w-72'>
                               <SelectValue />
@@ -326,7 +334,7 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
                             value={Array.isArray(val) ? val.join('\n') : (val ?? '')}
                             spellCheck={false}
                             onChange={(e) => setEdit(row.key, e.target.value.split('\n'), original)}
-                            className='w-96 resize-y px-3 py-2 font-mono text-xs'
+                            className='w-96 resize-y material-field rounded-control px-3 py-2 font-mono text-xs outline-none'
                           />
                         ) : ui?.kind === 'number' ? (
                           <div className='flex items-center gap-2'>
@@ -341,24 +349,26 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
                             {ui.suffix && <span className='w-10 text-xs text-muted-foreground'>{ui.suffix}</span>}
                           </div>
                         ) : (
-                          <div className='relative'>
-                            <Input
+                          <InputGroup className='w-72'>
+                            <InputGroupInput
                               type={row.secret && !reveal[row.key] ? 'password' : 'text'}
                               value={val ?? ''}
                               placeholder={row.secret ? 'not set' : ''}
                               onChange={(e) => setEdit(row.key, e.target.value, original)}
-                              className='w-72 pr-9'
                             />
                             {row.secret && (
-                              <button
-                                type='button'
-                                onClick={() => setReveal((r) => ({ ...r, [row.key]: !r[row.key] }))}
-                                className='absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground'
-                              >
-                                {reveal[row.key] ? <EyeOff className='h-4 w-4' /> : <Eye className='h-4 w-4' />}
-                              </button>
+                              <InputGroupAddon align='inline-end'>
+                                <InputGroupButton
+                                  variant='ghost'
+                                  size='icon'
+                                  aria-label={reveal[row.key] ? 'Hide value' : 'Show value'}
+                                  onClick={() => setReveal((r) => ({ ...r, [row.key]: !r[row.key] }))}
+                                >
+                                  {reveal[row.key] ? <EyeOff className='h-4 w-4' /> : <Eye className='h-4 w-4' />}
+                                </InputGroupButton>
+                              </InputGroupAddon>
                             )}
-                          </div>
+                          </InputGroup>
                         )}
                       </div>
                     </div>

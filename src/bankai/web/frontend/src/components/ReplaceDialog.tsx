@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Download, Replace } from 'lucide-react';
-import { toast } from 'sonner';
-
-import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { toast } from '@/lib/toast';
+import { Button } from '@/zon/ui/button';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
 import { api, type ReplacementPlan } from '@/lib/api';
 
 // A season pack ("Show - S01") names no last episode: every one it has.
@@ -103,8 +102,9 @@ export function ReplaceDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription className='break-words'>{candidate?.name}</DialogDescription>
         </DialogHeader>
+        <DialogBody>
         {planError ? (
-          <p className='rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{planError}</p>
+          <p className='rounded-control border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{planError}</p>
         ) : !plan ? (
           <p className='text-sm text-muted-foreground'>Working out what it would change…</p>
         ) : (
@@ -128,6 +128,7 @@ export function ReplaceDialog({
             <li className='text-muted-foreground'>If publishing fails for good, the held releases go back to review.</li>
           </ul>
         )}
+        </DialogBody>
         <DialogFooter>
           <Button variant='secondary' onClick={onClose}>Cancel</Button>
           <Button onClick={() => void confirm()} disabled={!plan}>

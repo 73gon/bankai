@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, ExternalLink, RefreshCw, Replace, Search, Subtitles } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { StatusTag } from '@/components/status-tag';
 import { ReplaceDialog, replaceLabel, type ReplaceCandidate } from '@/components/ReplaceDialog';
-import { EmptyState } from '@/components/ui/empty';
-import { Input } from '@/components/ui/input';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Button } from '@/zon/ui/button';
+import { Empty, EmptyActions, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 import { api, eraiPath, recall, type EraiCodec, type EraiPage, type EraiRelease, type EraiResolution } from '@/lib/api';
-import { cn, timeAgo } from '@/lib/utils';
+import { timeAgo } from '@/lib/utils';
+import { cn } from '@/zon/lib/cn';
 
 type GermanFilter = 'all' | 'yes' | 'no';
 
@@ -66,7 +68,7 @@ function SubtitleChips({ row, languages }: { row: EraiRelease; languages: Record
           key={code}
           title={languages[code] ?? code}
           className={cn(
-            'rounded px-1.5 py-0.5 font-mono text-[0.65rem] uppercase',
+            'rounded-item px-1.5 py-0.5 font-mono text-[0.65rem] uppercase',
             code === 'de' ? 'bg-success/20 font-semibold text-success' : 'bg-foreground/[0.06] text-muted-foreground',
           )}
         >
@@ -171,7 +173,7 @@ export default function AnimeErai({
     <div className={cn('flex min-h-0 flex-col gap-4', embedded && 'flex-1')}>
       {!embedded && <div className='flex flex-wrap items-end justify-between gap-3'>
         <div>
-          <h1 className='font-serif text-3xl font-semibold'>Erai-raws</h1>
+          <h1 className='font-heading text-3xl font-light'>Erai-raws</h1>
           <p className='text-sm text-muted-foreground'>
             Every release as erai-raws.info lists it, with the subtitle languages the site names.
             {data?.configured && (
@@ -188,98 +190,101 @@ export default function AnimeErai({
       </div>}
 
       {data?.configured && data.error && (
-        <div className='rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning'>
+        <div className='rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning'>
           {data.error}. <Link to='/a/settings' className='underline underline-offset-4'>Anime Settings</Link>
         </div>
       )}
 
       {data && !data.configured ? (
-        <EmptyState
-          icon={Subtitles}
-          title='Connect your Erai-raws account'
-          description='On any show page on erai-raws.info, right-click FHD under RSS Links, copy the link and paste it into Anime Settings as "Erai-raws feed token". bankai keeps only the token from it.'
-          action={<Button asChild><Link to='/a/settings'>Open Anime Settings</Link></Button>}
-        />
+        <Empty>
+          <EmptyMedia><Subtitles /></EmptyMedia>
+          <EmptyTitle>Connect your Erai-raws account</EmptyTitle>
+          <EmptyDescription>On any show page on erai-raws.info, right-click FHD under RSS Links, copy the link and paste it into Anime Settings as "Erai-raws feed token". bankai keeps only the token from it.</EmptyDescription>
+          <EmptyActions>
+            <Button nativeButton={false} render={<Link to='/a/settings' />}>Open Anime Settings</Button>
+          </EmptyActions>
+        </Empty>
       ) : (
         <>
           <div className='flex flex-wrap items-center gap-3'>
-            <div className='relative min-w-64 flex-1 sm:max-w-sm'>
-              <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-              <Input ref={searchRef} className='pl-9' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter by release name…' aria-label='Filter Erai-raws releases' />
-            </div>
-            <ToggleGroup label='Resolution'>
+            <InputGroup className='min-w-64 flex-1 sm:max-w-sm'>
+              <InputGroupAddon>
+                <Search aria-hidden='true' />
+              </InputGroupAddon>
+              <InputGroupInput ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter by release name…' aria-label='Filter Erai-raws releases' />
+            </InputGroup>
+            <ToggleGroup<EraiResolution> aria-label='Resolution' value={[res]} onValueChange={(values) => values[0] && setRes(values[0])}>
               {RESOLUTIONS.map((value) => (
-                <ToggleGroupItem key={value} label={value === 'all' ? 'All' : value} selected={res === value} onClick={() => setRes(value)} />
+                <ToggleGroupItem<EraiResolution> key={value} value={value}>{value === 'all' ? 'All' : value}</ToggleGroupItem>
               ))}
             </ToggleGroup>
-            <ToggleGroup label='Codec'>
+            <ToggleGroup<EraiCodec> aria-label='Codec' value={[codec]} onValueChange={(values) => values[0] && setCodec(values[0])}>
               {CODECS.map(([value, label]) => (
-                <ToggleGroupItem key={value} label={label} selected={codec === value} onClick={() => setCodec(value)} />
+                <ToggleGroupItem<EraiCodec> key={value} value={value}>{label}</ToggleGroupItem>
               ))}
             </ToggleGroup>
-            <ToggleGroup label='German subtitles'>
-              <ToggleGroupItem label='All' selected={german === 'all'} onClick={() => setGerman('all')} />
-              <ToggleGroupItem label='German' selected={german === 'yes'} onClick={() => setGerman('yes')} />
-              <ToggleGroupItem label='No German' selected={german === 'no'} onClick={() => setGerman('no')} />
+            <ToggleGroup<GermanFilter> aria-label='German subtitles' value={[german]} onValueChange={(values) => values[0] && setGerman(values[0])}>
+              <ToggleGroupItem<GermanFilter> value='all'>All</ToggleGroupItem>
+              <ToggleGroupItem<GermanFilter> value='yes'>German</ToggleGroupItem>
+              <ToggleGroupItem<GermanFilter> value='no'>No German</ToggleGroupItem>
             </ToggleGroup>
             <span className='ml-auto text-xs text-muted-foreground'>{data ? data.total.toLocaleString() + ' releases' : ''}</span>
           </div>
 
-          <div className={embedded ? 'min-h-0 flex-1 overflow-auto rounded-md border border-border' : 'table-bleed min-h-0 flex-1 overflow-auto'}>
-            <table className='w-full min-w-[980px] border-collapse text-sm'>
-              <thead className='sticky top-0 z-10 bg-card'>
-                <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
-                  <th className='px-3 py-2.5 font-medium'>Release</th>
-                  <th className='px-3 py-2.5 font-medium'>Subtitles</th>
-                  <th className='px-3 py-2.5 font-medium'>Quality</th>
-                  <th className='px-3 py-2.5 text-right font-medium'>Size</th>
-                  <th className='px-3 py-2.5 font-medium'>Released</th>
-                  <th className='px-3 py-2.5 font-medium'>bankai</th>
-                  {replaceFor && <th className='px-3 py-2.5 font-medium'>Use</th>}
-                  <th className='px-3 py-2.5 text-right font-medium'>Link</th>
-                </tr>
-              </thead>
-              <tbody>
+          <Table dense className='min-w-[980px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+              <TableHeader className='sticky top-0 z-10 bg-card'>
+                <TableRow>
+                  <TableHead>Release</TableHead>
+                  <TableHead>Subtitles</TableHead>
+                  <TableHead>Quality</TableHead>
+                  <TableHead numeric>Size</TableHead>
+                  <TableHead>Released</TableHead>
+                  <TableHead>bankai</TableHead>
+                  {replaceFor && <TableHead>Use</TableHead>}
+                  <TableHead numeric>Link</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {loading && !data && (
-                  <tr><td colSpan={replaceFor ? 8 : 7} className='px-3 py-8 text-center text-muted-foreground'>Loading…</td></tr>
+                  <TableRow><TableCell colSpan={replaceFor ? 8 : 7} className='py-8 text-center text-muted-foreground'>Loading…</TableCell></TableRow>
                 )}
                 {data && data.items.length === 0 && (
-                  <tr>
-                    <td colSpan={replaceFor ? 8 : 7} className='px-3 py-8 text-center text-muted-foreground'>
+                  <TableRow>
+                    <TableCell colSpan={replaceFor ? 8 : 7} className='py-8 text-center text-muted-foreground'>
                       {data.empty_show ? (
                         <>
                           Erai-raws has a page for this show, but lists no release on it: older shows are often emptied there.
                           Nyaa may still have its torrents.{' '}
-                          <a href={data.empty_show} target='_blank' rel='noreferrer' className='underline underline-offset-4'>Open the page</a>
+                          <a href={data.empty_show} target='_blank' rel='noreferrer' className='link'>Open the page</a>
                         </>
                       ) : data.known ? 'No release matches.' : 'Nothing read yet; the feeds are read every ten minutes.'}
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 )}
                 {data?.items.map((row) => {
                   const status = row.status ? STATUS[row.status] ?? { label: row.status, variant: 'muted' as const } : null;
                   return (
-                    <tr key={row.info_hash} className='border-b border-border/60 last:border-b-0'>
-                      <td className='max-w-[30rem] px-3 py-2'>
+                    <TableRow key={row.info_hash}>
+                      <TableCell className='max-w-[30rem] py-2'>
                         <p className='truncate text-foreground' title={row.name}>{row.name}</p>
                         {row.category && <p className='text-[0.68rem] text-muted-foreground'>{row.category}</p>}
-                      </td>
-                      <td className='max-w-[18rem] px-3 py-2'><SubtitleChips row={row} languages={data.languages} /></td>
-                      <td className='whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground'>
+                      </TableCell>
+                      <TableCell className='max-w-[18rem] py-2'><SubtitleChips row={row} languages={data.languages} /></TableCell>
+                      <TableCell className='whitespace-nowrap py-2 font-mono text-xs text-muted-foreground'>
                         {row.resolution}{' '}
-                        <Badge variant={row.codec === 'hevc' ? 'success' : 'warning'}>{row.codec.toUpperCase()}</Badge>
-                      </td>
-                      <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-muted-foreground'>{row.size}</td>
-                      <td className='whitespace-nowrap px-3 py-2 text-xs text-muted-foreground'>{timeAgo(row.published)}</td>
-                      <td className='px-3 py-2'>
-                        {status ? <Badge variant={status.variant} title={row.reason ?? undefined}>{status.label}</Badge> : <span className='text-xs text-muted-foreground'>—</span>}
-                      </td>
+                        <StatusTag variant={row.codec === 'hevc' ? 'success' : 'warning'}>{row.codec.toUpperCase()}</StatusTag>
+                      </TableCell>
+                      <TableCell numeric className='py-2 text-xs text-muted-foreground'>{row.size}</TableCell>
+                      <TableCell className='whitespace-nowrap py-2 text-xs text-muted-foreground'>{timeAgo(row.published)}</TableCell>
+                      <TableCell className='py-2'>
+                        {status ? <StatusTag variant={status.variant} title={row.reason ?? undefined}>{status.label}</StatusTag> : <span className='text-xs text-muted-foreground'>—</span>}
+                      </TableCell>
                       {replaceFor && (
-                        <td className='whitespace-nowrap px-3 py-2'>
+                        <TableCell className='whitespace-nowrap py-2'>
                           {row.episodes ? (
                             <Button
                               size='sm'
-                              variant={row.german ? 'default' : 'secondary'}
+                              variant={row.german ? 'primary' : 'secondary'}
                               disabled={TAKEN.has(row.status ?? '') || queueing.has(row.info_hash)}
                               title={TAKEN.has(row.status ?? '') ? 'bankai already has this release' : 'Take this release in place of what the card holds'}
                               onClick={() => consider(row)}
@@ -287,21 +292,26 @@ export default function AnimeErai({
                               <Replace data-icon='inline-start' /> {queueing.has(row.info_hash) ? 'Queueing…' : replaceLabel(row.episodes)}
                             </Button>
                           ) : <span className='text-xs text-muted-foreground'>—</span>}
-                        </td>
+                        </TableCell>
                       )}
-                      <td className='px-3 py-2 text-right'>
+                      <TableCell className='py-2 text-right'>
                         {row.page && (
-                          <Button asChild size='icon' variant='ghost' title='Open on erai-raws.info'>
-                            <a href={row.page} target='_blank' rel='noreferrer' aria-label={'Open ' + row.name + ' on erai-raws.info'}><ExternalLink /></a>
+                          <Button
+                            size='icon-sm'
+                            variant='ghost'
+                            title='Open on erai-raws.info'
+                            nativeButton={false}
+                            render={<a href={row.page} target='_blank' rel='noreferrer' aria-label={'Open ' + row.name + ' on erai-raws.info'} />}
+                          >
+                            <ExternalLink />
                           </Button>
                         )}
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+          </Table>
 
           {data && pages > 1 && (
             <div className='flex items-center justify-end gap-2 text-sm text-muted-foreground'>

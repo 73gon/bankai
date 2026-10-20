@@ -1,0 +1,214 @@
+/* Graph — React Flow in the zon material. The base styles are in react-flow.css; this file is
+   the look: tokens for the canvas, the nodes' shapes, edges, labels, handles and the map, and
+   the highlight that lights a node's connections and dims the rest. */
+
+@layer components {
+  [data-slot="graph"] .react-flow {
+    --xy-background-color: transparent;
+    --xy-background-pattern-dots-color: var(--field-edge);
+    --xy-background-pattern-lines-color: color-mix(in oklab, var(--border) 55%, transparent);
+    --xy-edge-stroke: var(--muted-foreground);
+    --xy-edge-stroke-selected: var(--foreground);
+    --xy-connectionline-stroke: var(--foreground);
+    --xy-connectionline-stroke-width: 1.5;
+    --xy-selection-background-color: color-mix(in oklab, var(--foreground) 4%, transparent);
+    --xy-selection-border: 1px dashed var(--control-focus);
+    --xy-minimap-background-color: var(--background);
+    --xy-minimap-mask-background-color: color-mix(in oklab, var(--background) 70%, transparent);
+    --xy-minimap-mask-stroke-color: var(--field-edge);
+    --xy-minimap-node-background-color: var(--field-edge);
+    color: var(--foreground);
+    font-family: var(--font-body);
+  }
+
+  /* ── Nodes ───────────────────────────────────────────────────────────────── */
+
+  [data-slot="graph"] .react-flow__node {
+    border-radius: var(--radius-button);
+    /* Focus and selection are drawn on the node's own shape (below), not this box. */
+    outline: none;
+  }
+  [data-slot="graph-node"],
+  [data-slot="graph-group"],
+  [data-slot="graph-edge-label"] {
+    transition: opacity var(--duration) var(--ease);
+  }
+  [data-slot="graph-node"][data-dim],
+  [data-slot="graph-edge-label"][data-dim] {
+    opacity: 0.26;
+  }
+
+  /* Selected, or reached with the keyboard: the 2px focus edge on what the node is. */
+  [data-slot="graph"] .react-flow__node:is(.selected, :focus-visible) > [data-slot="graph-node"]:is([data-kind="task"], [data-kind="entity"]),
+  [data-slot="graph"] .react-flow__node:is(.selected, :focus-visible) [data-slot="graph-shape"],
+  [data-slot="graph"] .react-flow__node:is(.selected, :focus-visible) [data-slot="graph-avatar"],
+  [data-slot="graph"] .react-flow__node:is(.selected, :focus-visible) > [data-slot="graph-group"] {
+    outline: 2px solid var(--control-focus);
+    outline-offset: 0;
+  }
+  [data-slot="graph"] .react-flow__node:is(.selected, :focus-visible) > [data-slot="graph-node"][data-kind="note"] {
+    outline: 2px solid var(--control-focus);
+    outline-offset: 4px;
+  }
+
+  /* Lit: the node the pointer or the selection is on. */
+  [data-slot="graph-node"][data-lit]:is([data-kind="task"], [data-kind="entity"]) {
+    border-color: var(--control-focus);
+  }
+
+  /* Events: circles. Start a thin ring, end a thick one, an intermediate event a double ring. */
+  [data-slot="graph-node"]:is([data-kind="start"], [data-kind="end"], [data-kind="event"]) [data-slot="graph-shape"] {
+    border-radius: 50%;
+    background: var(--background);
+    border: 1.5px solid var(--muted-foreground);
+  }
+  [data-slot="graph-node"][data-kind="end"] [data-slot="graph-shape"] {
+    border: 3.5px solid var(--foreground);
+  }
+  [data-slot="graph-node"][data-kind="event"] [data-slot="graph-shape"] {
+    box-shadow:
+      inset 0 0 0 2.5px var(--background),
+      inset 0 0 0 4px var(--muted-foreground);
+  }
+
+  /* Gateways: a diamond, its kind as a mono glyph (× exclusive, + parallel, ○ inclusive). */
+  [data-slot="graph-node"][data-kind="gateway"] [data-slot="graph-shape"] {
+    position: relative;
+    isolation: isolate;
+    border-radius: var(--radius-item);
+  }
+  [data-slot="graph-node"][data-kind="gateway"] [data-slot="graph-shape"]::before {
+    content: "";
+    position: absolute;
+    inset: 6px;
+    z-index: -1;
+    rotate: 45deg;
+    border-radius: var(--radius-checkbox);
+    background: var(--background);
+    border: 1.5px solid var(--muted-foreground);
+  }
+
+  /* An annotation: the BPMN text bracket, open to the right. */
+  [data-slot="graph-node"][data-kind="note"] {
+    position: relative;
+  }
+  [data-slot="graph-node"][data-kind="note"]::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 10px;
+    border: 1.5px solid var(--muted-foreground);
+    border-right: 0;
+  }
+
+  [data-slot="graph-avatar"] {
+    transition: outline-color var(--duration) var(--ease);
+  }
+
+  /* ── Handles: where a connection starts and lands. Shown only while editing. ── */
+
+  [data-slot="graph"] .react-flow__handle {
+    width: 9px;
+    height: 9px;
+    min-width: 0;
+    min-height: 0;
+    border-radius: 50%;
+    background: var(--background);
+    border: 1.5px solid var(--muted-foreground);
+    opacity: 0;
+    transition:
+      opacity var(--duration) var(--ease),
+      border-color var(--duration) var(--ease);
+  }
+  [data-slot="graph"]:not([data-editable]) .react-flow__handle {
+    pointer-events: none;
+  }
+  [data-slot="graph"][data-editable] .react-flow__node:is(:hover, .selected) .react-flow__handle,
+  [data-slot="graph"][data-editable] .react-flow__handle.connectingfrom,
+  [data-slot="graph"][data-editable] .react-flow__handle.connectingto {
+    opacity: 1;
+  }
+  [data-slot="graph"] .react-flow__handle:hover,
+  [data-slot="graph"] .react-flow__handle.valid {
+    border-color: var(--foreground);
+  }
+
+  /* ── Edges ───────────────────────────────────────────────────────────────── */
+
+  [data-slot="graph"] .zon-graph-edge {
+    stroke: var(--muted-foreground);
+    stroke-width: 1.25;
+    stroke-linecap: round;
+    transition:
+      stroke var(--duration) var(--ease),
+      stroke-width var(--duration) var(--ease),
+      opacity var(--duration) var(--ease);
+  }
+  [data-slot="graph"] .zon-graph-edge[data-kind="relation"] {
+    stroke: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+  }
+  [data-slot="graph"] .zon-graph-edge[data-kind="message"] {
+    stroke-dasharray: 5 4;
+  }
+  [data-slot="graph"] .zon-graph-edge[data-kind="association"] {
+    stroke-dasharray: 1.5 4;
+  }
+  [data-slot="graph"] .zon-graph-edge[data-lit] {
+    stroke: var(--foreground);
+    stroke-width: 1.75;
+  }
+  [data-slot="graph"] .zon-graph-edge[data-dim] {
+    opacity: 0.18;
+  }
+  [data-slot="graph"] .react-flow__edge.animated .zon-graph-edge {
+    stroke-dasharray: 5 4;
+    animation: ep-graph-flow 0.6s linear infinite;
+  }
+  @keyframes ep-graph-flow {
+    to {
+      stroke-dashoffset: -9;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-slot="graph"] .react-flow__edge.animated .zon-graph-edge {
+      animation: none;
+    }
+  }
+  [data-slot="graph"] .react-flow__edge:focus-visible .zon-graph-edge {
+    stroke: var(--foreground);
+    stroke-width: 2;
+  }
+
+  .zon-graph-arrow[data-tone="rest"] {
+    fill: var(--muted-foreground);
+  }
+  .zon-graph-arrow[data-tone="lit"] {
+    fill: var(--foreground);
+  }
+
+  [data-slot="graph-edge-label"] {
+    padding: 3px 6px;
+    border-radius: var(--radius-checkbox);
+    background: var(--background);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--border) 70%, transparent);
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  [data-slot="graph-edge-label"][data-lit] {
+    color: var(--foreground);
+    box-shadow: 0 0 0 1px var(--control-focus);
+  }
+
+  /* ── The map ─────────────────────────────────────────────────────────────── */
+
+  [data-slot="graph"] .react-flow__minimap {
+    overflow: hidden;
+    border-radius: var(--radius-button);
+    box-shadow:
+      0 0 0 1px var(--field-edge),
+      0 4px 16px #0000000f;
+  }
+}

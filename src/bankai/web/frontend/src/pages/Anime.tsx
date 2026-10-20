@@ -12,7 +12,7 @@ import {
   ShieldCheck,
   Tv,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -25,22 +25,24 @@ import {
 } from '@/lib/api';
 import { anilistName, anilistUrl, formatLabel } from '@/lib/anilist';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { StatusTag } from '@/components/status-tag';
+import { Button } from '@/zon/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { EmptyState, Spinner } from '@/components/ui/empty';
-import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+} from '@/zon/ui/dialog';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Input } from '@/zon/ui/input';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Spinner } from '@/zon/ui/spinner';
+import { Tag } from '@/zon/ui/tag';
 
 type Filters = {
   category: string;
@@ -61,6 +63,26 @@ const DEFAULT_FILTERS: Filters = {
 };
 
 const ANIME_FILTERS_KEY = 'bankai:anime-filters';
+
+// Labels for each select, so its trigger shows the label rather than the value.
+const CATEGORY_ITEMS = [
+  { value: '1_0', label: 'All anime' },
+  { value: '1_2', label: 'English-translated' },
+  { value: '1_3', label: 'Non-English-translated' },
+  { value: '1_4', label: 'Raw' },
+  { value: '1_1', label: 'Anime music video' },
+];
+const QUALITY_ITEMS = [
+  { value: 'all', label: 'All qualities' },
+  { value: '2160p', label: '2160p' },
+  { value: '1080p', label: '1080p' },
+  { value: '720p', label: '720p' },
+  { value: '480p', label: '480p' },
+];
+const KIND_ITEMS = [
+  { value: 'show', label: 'Show episodes' },
+  { value: 'movie', label: 'Movie' },
+];
 
 function loadAnimeFilters(): Filters {
   try {
@@ -139,7 +161,7 @@ function isMovie(format: string | null | undefined) {
 function Poster({ url, title, movie }: { url: string | null | undefined; title: string; movie: boolean }) {
   const [failed, setFailed] = useState(false);
   return (
-    <div className='flex aspect-[2/3] w-20 shrink-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black/30 sm:w-24'>
+    <div className='flex aspect-[2/3] w-20 shrink-0 items-center justify-center overflow-hidden rounded-item border border-field-edge bg-field-surface sm:w-24'>
       {url && !failed ? (
         <img
           src={api.posterUrl(url)}
@@ -182,8 +204,8 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
   }
 
   return (
-    <Card>
-      <CardContent className='flex flex-col gap-4 p-4 sm:flex-row sm:items-stretch'>
+    <Card className='[--card-padding:16px]'>
+      <CardContent className='flex flex-col gap-4 sm:flex-row sm:items-stretch'>
         <Poster url={entry.anilist?.cover} title={entry.anilist ? entry.anilist.name || entry.anilist.title : entry.title} movie={isMovie(entry.anilist?.format)} />
         <div className='flex min-w-0 flex-1 flex-col gap-3'>
           <div className='flex flex-col gap-1'>
@@ -193,21 +215,20 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
                 {entry.anilist?.episode != null && ` — Episode ${entry.anilist.episode}`}
               </h2>
               {entry.anilist?.year && <span className='text-sm text-muted-foreground'>{entry.anilist.year}</span>}
-              {entry.anilist?.format && <Badge variant='info'>{formatLabel(entry.anilist.format)}</Badge>}
+              {entry.anilist?.format && <StatusTag variant='info'>{formatLabel(entry.anilist.format)}</StatusTag>}
               {entry.trusted && (
-                <Badge variant='success'>
+                <StatusTag variant='success'>
                   <ShieldCheck data-icon='inline-start' /> Trusted
-                </Badge>
+                </StatusTag>
               )}
               {entry.remake && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge variant='warning' className='cursor-help'>Remake</Badge>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Nyaa marks this as a replacement or reupload of an earlier torrent, often with corrections or updated files.
-                  </TooltipContent>
-                </Tooltip>
+                <StatusTag
+                  variant='warning'
+                  className='cursor-help'
+                  title='Nyaa marks this as a replacement or reupload of an earlier torrent, often with corrections or updated files.'
+                >
+                  Remake
+                </StatusTag>
               )}
             </div>
             {entry.anilist?.name && entry.anilist.name !== entry.anilist.title && (
@@ -218,19 +239,17 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
           <p className='break-words font-mono text-sm text-foreground/90'>{entry.title}</p>
 
           <div className='flex flex-wrap items-center gap-2'>
-            {entry.quality && <Badge>{entry.quality}</Badge>}
-            {entry.publisher && <Badge variant='secondary'>{entry.publisher}</Badge>}
-            <Badge variant='success'>{entry.seeders} seeders</Badge>
-            <Badge variant='muted'>{entry.leechers} leechers</Badge>
-            <Badge variant='muted'>{entry.size}</Badge>
+            {entry.quality && <StatusTag>{entry.quality}</StatusTag>}
+            {entry.publisher && <StatusTag variant='secondary'>{entry.publisher}</StatusTag>}
+            <StatusTag variant='success'>{entry.seeders} seeders</StatusTag>
+            <StatusTag variant='muted'>{entry.leechers} leechers</StatusTag>
+            <StatusTag variant='muted'>{entry.size}</StatusTag>
             <span className='text-xs text-muted-foreground'>{entry.downloads.toLocaleString()} downloads</span>
           </div>
 
           <div className='mt-auto flex flex-wrap items-center gap-2'>
-            <Button variant='secondary' size='sm' asChild>
-              <a href={entry.detail_url} target='_blank' rel='noreferrer'>
-                <ExternalLink data-icon='inline-start' /> Open on Nyaa
-              </a>
+            <Button variant='secondary' size='sm' nativeButton={false} render={<a href={entry.detail_url} target='_blank' rel='noreferrer' />}>
+              <ExternalLink data-icon='inline-start' /> Open on Nyaa
             </Button>
             <Button
               variant='secondary'
@@ -238,31 +257,31 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
               onClick={() => void toggleDescription()}
               aria-expanded={descriptionOpen}
             >
-              {descriptionLoading ? <Spinner /> : descriptionOpen ? <ChevronUp data-icon='inline-start' /> : <ChevronDown data-icon='inline-start' />}
+              {descriptionLoading ? <Spinner label='Loading description' /> : descriptionOpen ? <ChevronUp data-icon='inline-start' /> : <ChevronDown data-icon='inline-start' />}
               Description
             </Button>
-            <Button size='sm' onClick={onDownload}>
+            <Button variant='secondary' size='sm' onClick={onDownload}>
               <Download data-icon='inline-start' /> Select and download
             </Button>
           </div>
 
           {descriptionOpen && (
-            <div className='flex flex-col gap-3 overflow-x-auto rounded-md border border-white/10 bg-black/20 p-3 text-sm leading-relaxed text-foreground'>
+            <div className='flex flex-col gap-3 overflow-x-auto rounded-item border border-field-edge bg-field-surface p-3 text-sm leading-relaxed text-foreground'>
               {descriptionLoading ? (
                 'Loading description…'
               ) : (
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{
-                    h1: (props) => <h1 className='font-serif text-xl font-semibold' {...props} />,
-                    h2: (props) => <h2 className='font-serif text-lg font-semibold' {...props} />,
-                    h3: (props) => <h3 className='font-serif text-base font-semibold' {...props} />,
+                    h1: (props) => <h1 className='font-heading text-xl font-light' {...props} />,
+                    h2: (props) => <h2 className='font-heading text-lg font-light' {...props} />,
+                    h3: (props) => <h3 className='font-heading text-base font-light' {...props} />,
                     p: (props) => <p className='whitespace-pre-wrap' {...props} />,
                     a: (props) => <a className='text-info underline underline-offset-4' target='_blank' rel='noreferrer' {...props} />,
                     ul: (props) => <ul className='list-disc pl-5' {...props} />,
                     ol: (props) => <ol className='list-decimal pl-5' {...props} />,
                     table: (props) => <table className='w-full border-collapse text-left text-xs' {...props} />,
-                    th: (props) => <th className='border border-border bg-secondary px-3 py-2 font-medium' {...props} />,
+                    th: (props) => <th className='border border-border bg-control-surface px-3 py-2 font-medium' {...props} />,
                     td: (props) => <td className='border border-border px-3 py-2 align-top' {...props} />,
                   }}
                 >
@@ -390,13 +409,13 @@ export default function Anime() {
   return (
     <div className='flex h-full min-h-0 flex-col gap-4 overflow-hidden'>
       <div className='flex flex-wrap items-baseline gap-2'>
-        <h1 className='font-serif text-2xl font-semibold tracking-tight'>Anime</h1>
+        <h1 className='font-heading text-2xl font-light tracking-tight'>Anime</h1>
         <span className='text-sm text-muted-foreground'>— Browse Nyaa and download anime filed by its AniList entry.</span>
       </div>
 
-      <Card className='shrink-0'>
+      <Card className='shrink-0 gap-4 [--card-padding:20px]'>
         <CardHeader>
-          <CardTitle>Find a release</CardTitle>
+          <CardTitle className='text-xl sm:text-xl'>Find a release</CardTitle>
           <CardDescription>
             Search with an English or Japanese title. Matching aliases are searched together; comma-separated title and description terms are OR-linked.
           </CardDescription>
@@ -412,14 +431,14 @@ export default function Anime() {
               className='flex-1'
             />
             <Button onClick={applySearch} disabled={loading}>
-              {loading ? <Spinner /> : <Search data-icon='inline-start' />} Search Nyaa
+              {loading ? <Spinner label='Searching Nyaa' /> : <Search data-icon='inline-start' />} Search Nyaa
             </Button>
           </div>
 
           <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-3'>
             <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
               Nyaa category
-              <Select value={draftFilters.category} onValueChange={(value) => setDraftFilters((old) => ({ ...old, category: value }))}>
+              <Select items={CATEGORY_ITEMS} value={draftFilters.category} onValueChange={(value) => value !== null && setDraftFilters((old) => ({ ...old, category: value }))}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -434,7 +453,7 @@ export default function Anime() {
             </label>
             <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
               Quality
-              <Select value={draftFilters.quality} onValueChange={(value) => setDraftFilters((old) => ({ ...old, quality: value }))}>
+              <Select items={QUALITY_ITEMS} value={draftFilters.quality} onValueChange={(value) => value !== null && setDraftFilters((old) => ({ ...old, quality: value }))}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -470,21 +489,21 @@ export default function Anime() {
       {aliases.length > 0 && (
         <div className='flex shrink-0 flex-wrap items-center gap-2 text-xs text-muted-foreground'>
           <span>Also searched:</span>
-          {aliases.map((alias) => <Badge key={alias} variant='secondary'>{alias}</Badge>)}
+          {aliases.map((alias) => <Tag key={alias} variant='muted'>{alias}</Tag>)}
         </div>
       )}
 
-      <div className='flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/60 bg-card/30'>
+      <div className='flex min-h-0 flex-1 flex-col overflow-hidden rounded-card surface-container'>
         {loading && result && (
-          <div className='flex shrink-0 items-center gap-2 border-b border-border/60 bg-card/80 px-4 py-2 text-sm text-foreground'>
-            <Spinner /> Loading the requested Nyaa entries…
+          <div className='flex shrink-0 items-center gap-2 border-b border-border/60 bg-control-surface px-4 py-2 text-sm text-foreground'>
+            <Spinner label='Loading the requested Nyaa entries' /> Loading the requested Nyaa entries…
           </div>
         )}
         <div className='min-h-0 flex-1 overflow-y-auto p-3'>
           {loading && !result ? (
             <div className='flex flex-col gap-3' aria-label='Loading Nyaa releases'>
               {Array.from({ length: 6 }).map((_, index) => (
-                <Skeleton key={index} className='h-44 w-full rounded-xl' />
+                <Skeleton key={index} shape='card' className='h-44 w-full' />
               ))}
             </div>
           ) : result?.items.length ? (
@@ -492,10 +511,14 @@ export default function Anime() {
               {result.items.map((entry) => <ResultCard key={entry.info_hash} entry={entry} onDownload={() => openDownload(entry)} />)}
             </div>
           ) : (
-            <EmptyState icon={Search} title='No matching Nyaa releases' description='Try fewer filters, another title alias, or the All anime category.' />
+            <Empty>
+              <EmptyMedia><Search /></EmptyMedia>
+              <EmptyTitle>No matching Nyaa releases</EmptyTitle>
+              <EmptyDescription>Try fewer filters, another title alias, or the All anime category.</EmptyDescription>
+            </Empty>
           )}
         </div>
-        <div className='flex shrink-0 items-center justify-between border-t border-border/60 bg-card/70 p-3'>
+        <div className='flex shrink-0 items-center justify-between border-t border-border/60 bg-control-surface p-3'>
           <Button variant='secondary' onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={page === 0 || loading}>
             <ArrowLeft data-icon='inline-start' /> Previous
           </Button>
@@ -509,7 +532,7 @@ export default function Anime() {
       </div>
 
       <Dialog open={selectedEntry !== null && pickFor === null} onOpenChange={(open) => !open && setSelectedEntry(null)}>
-        <DialogContent className='max-h-[90vh] max-w-2xl overflow-y-auto'>
+        <DialogContent size='lg' className='max-h-[90vh]'>
           <DialogHeader>
             <DialogTitle>Download as this AniList entry</DialogTitle>
             <DialogDescription>
@@ -517,10 +540,11 @@ export default function Anime() {
             </DialogDescription>
           </DialogHeader>
 
-          {selectedEntry && <p className='break-words rounded-md border border-white/10 bg-black/20 p-3 font-mono text-sm text-foreground'>{selectedEntry.title}</p>}
+          <DialogBody className='flex flex-col gap-4'>
+          {selectedEntry && <p className='break-words rounded-item border border-field-edge bg-field-surface p-3 font-mono text-sm text-foreground'>{selectedEntry.title}</p>}
 
           {chosen ? (
-            <div className='flex gap-3 rounded-lg border border-white/10 bg-black/20 p-3'>
+            <div className='flex gap-3 rounded-button border border-field-edge bg-field-surface p-3'>
               <Poster url={chosen.cover} title={chosen.name} movie={kind === 'movie'} />
               <div className='flex min-w-0 flex-1 flex-col gap-1'>
                 <span className='font-medium text-foreground'>{chosen.name}</span>
@@ -529,8 +553,8 @@ export default function Anime() {
                   {[formatLabel(chosen.format), chosen.year, 'id ' + chosen.anilist_id].filter(Boolean).join(' · ')}
                 </span>
                 <div className='mt-auto flex flex-wrap items-center gap-2 pt-2'>
-                  <Button asChild variant='secondary' size='sm'>
-                    <a href={anilistUrl(chosen.anilist_id)} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> AniList</a>
+                  <Button variant='secondary' size='sm' nativeButton={false} render={<a href={anilistUrl(chosen.anilist_id)} target='_blank' rel='noreferrer' />}>
+                    <ExternalLink data-icon='inline-start' /> AniList
                   </Button>
                   <Button variant='secondary' size='sm' onClick={() => setPickFor(chosen.romaji || chosen.name)}>
                     <Link2 data-icon='inline-start' /> Change AniList entry
@@ -539,14 +563,18 @@ export default function Anime() {
               </div>
             </div>
           ) : (
-            <EmptyState icon={Search} title='No AniList entry chosen' description='Pick the AniList entry this release belongs to.' className='py-10' />
+            <Empty className='py-10 md:py-10'>
+              <EmptyMedia><Search /></EmptyMedia>
+              <EmptyTitle>No AniList entry chosen</EmptyTitle>
+              <EmptyDescription>Pick the AniList entry this release belongs to.</EmptyDescription>
+            </Empty>
           )}
 
           {chosen && (
             <div className='grid gap-3 sm:grid-cols-2'>
               <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
                 Download as
-                <Select value={kind} onValueChange={(value) => setKind(value as 'show' | 'movie')}>
+                <Select items={KIND_ITEMS} value={kind} onValueChange={(value) => value !== null && setKind(value as 'show' | 'movie')}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
@@ -575,6 +603,7 @@ export default function Anime() {
               )}
             </div>
           )}
+          </DialogBody>
 
           <DialogFooter>
             <Button variant='secondary' onClick={() => setSelectedEntry(null)}>Cancel</Button>
@@ -584,7 +613,7 @@ export default function Anime() {
               </Button>
             )}
             <Button onClick={() => void downloadSelected()} disabled={!chosen || downloading}>
-              {downloading ? <Spinner /> : <Download data-icon='inline-start' />}
+              {downloading ? <Spinner label='Downloading' /> : <Download data-icon='inline-start' />}
               Download {kind === 'movie' ? 'movie' : 'show'}
             </Button>
           </DialogFooter>

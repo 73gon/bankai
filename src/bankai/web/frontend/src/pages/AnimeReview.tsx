@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { Ban, Check, Download, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Subtitles, Trash2 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AniListAnime, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AnimePoster } from '@/components/AnimePoster';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { cn } from '@/lib/utils';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { EmptyState, Spinner } from '@/components/ui/empty';
+import { StatusTag } from '@/components/status-tag';
+import { cn } from '@/zon/lib/cn';
+import { Button } from '@/zon/ui/button';
+import { Card } from '@/zon/ui/card';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Spinner } from '@/zon/ui/spinner';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 import AnimeErai from '@/pages/AnimeErai';
 import { ReplaceDialog, episodesLabel, type ReplaceCandidate } from '@/components/ReplaceDialog';
 
@@ -256,8 +258,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     <div className='flex flex-col gap-6'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground'>Anime</p>
-          <h1 className='font-serif text-3xl font-semibold'>{blacklist ? 'Blacklist' : 'Held for review'}</h1>
+          <p className='eyebrow'>Anime</p>
+          <h1 className='font-heading text-3xl font-light'>{blacklist ? 'Blacklist' : 'Held for review'}</h1>
           <p className='text-sm text-muted-foreground'>{blacklist
             ? 'Shows here are ignored permanently until you restore them.'
             : 'One card per AniList entry, which is one season or cour. A decision applies to that entry only.'}</p>
@@ -267,14 +269,22 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </Button>}
         {blacklist && (
           <div className='flex flex-wrap items-center gap-2'>
-            <ToggleGroup label='Show blacklist entries'>
+            <ToggleGroup
+              aria-label='Show blacklist entries'
+              value={[linkFilter]}
+              onValueChange={(values) => { if (values[0]) setLinkFilter(values[0] as typeof linkFilter); }}
+            >
               {([['all', 'All'], ['linked', 'Linked'], ['unlinked', 'Not linked']] as const).map(([value, label]) => (
-                <ToggleGroupItem key={value} label={label} selected={linkFilter === value} onClick={() => setLinkFilter(value)} />
+                <ToggleGroupItem key={value} value={value}>{label}</ToggleGroupItem>
               ))}
             </ToggleGroup>
-            <ToggleGroup label='Blacklist view'>
+            <ToggleGroup
+              aria-label='Blacklist view'
+              value={[view]}
+              onValueChange={(values) => { if (values[0]) setView(values[0] as View); }}
+            >
               {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
-                <ToggleGroupItem key={value} icon={Icon} label={label} selected={view === value} onClick={() => setView(value)} />
+                <ToggleGroupItem key={value} value={value} icon={<Icon />}>{label}</ToggleGroupItem>
               ))}
             </ToggleGroup>
           </div>
@@ -282,41 +292,40 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       </div>
 
       {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : items.length === 0 ? (
-        <EmptyState
-          icon={blacklist ? Ban : ShieldCheck}
-          title={blacklist ? 'No blacklisted Anime' : 'Nothing needs review'}
-          description={blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}
-        />
+        <Empty>
+          <EmptyMedia>{blacklist ? <Ban /> : <ShieldCheck />}</EmptyMedia>
+          <EmptyTitle>{blacklist ? 'No blacklisted Anime' : 'Nothing needs review'}</EmptyTitle>
+          <EmptyDescription>{blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}</EmptyDescription>
+        </Empty>
       ) : blacklist && view === 'table' ? (
-        <div className='table-bleed overflow-auto'>
-          <table className='w-full min-w-[720px] border-collapse text-sm'>
-            <thead className='sticky top-0 z-10 bg-card'>
-              <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
-                <th className='px-3 py-2.5 font-medium'>Show</th>
-                <th className='px-3 py-2.5 font-medium'>Erai name</th>
-                <th className='px-3 py-2.5 font-medium'>AniList</th>
-                <th className='px-3 py-2.5 text-right font-medium'>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+        <Table className='min-w-[720px]' containerProps={{ className: 'overflow-auto' }}>
+            <TableHeader className='sticky top-0 z-10 bg-control-surface'>
+              <TableRow>
+                <TableHead>Show</TableHead>
+                <TableHead>Erai name</TableHead>
+                <TableHead>AniList</TableHead>
+                <TableHead numeric>Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {visible.map((item) => (
-                <tr key={item.key} className='border-b border-border/70 last:border-0'>
-                  <td className='px-3 py-2'>
+                <TableRow key={item.key}>
+                  <TableCell>
                     <div className='flex items-center gap-2.5'>
                       <AnimePoster url={item.poster_url} title={item.title} className='w-8 shrink-0 rounded' />
                       <div className='min-w-0'>
-                        <p className='truncate font-medium' title={item.title}>{item.title}</p>
+                        <p className='truncate font-medium text-foreground' title={item.title}>{item.title}</p>
                         {item.year ? <p className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{item.year}</p> : null}
                       </div>
                     </div>
-                  </td>
-                  <td className='px-3 py-2 font-mono text-xs text-muted-foreground'>{item.source_title}</td>
-                  <td className='px-3 py-2'>
+                  </TableCell>
+                  <TableCell className='font-mono text-xs text-muted-foreground'>{item.source_title}</TableCell>
+                  <TableCell>
                     {item.linked
-                      ? <a className='text-xs underline underline-offset-4' href={anilistUrl(item.anilist_id!)} target='_blank' rel='noreferrer'>{item.anilist_title || 'id ' + item.anilist_id}</a>
-                      : <Badge variant='warning'>Not linked</Badge>}
-                  </td>
-                  <td className='px-3 py-2'>
+                      ? <a className='link text-xs' href={anilistUrl(item.anilist_id!)} target='_blank' rel='noreferrer'>{item.anilist_title || 'id ' + item.anilist_id}</a>
+                      : <StatusTag variant='warning'>Not linked</StatusTag>}
+                  </TableCell>
+                  <TableCell>
                     <div className='flex justify-end gap-1.5'>
                       <Button size='sm' variant='secondary' onClick={() => setLinkTarget(item)} disabled={busyFor(item.key)}>
                         <Link2 data-icon='inline-start' /> {item.linked ? 'Relink' : 'Link'}
@@ -325,12 +334,11 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <RotateCcw data-icon='inline-start' /> Restore
                       </Button>
                     </div>
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </TableBody>
+        </Table>
       ) : (
         <div
           className={cn(
@@ -348,11 +356,11 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             const batch = reasons.some((reason) => reason.startsWith('Whole-season batch'));
             const count = item.release_count || 1;
             return (
-              <Card key={item.key} className='flex flex-col overflow-hidden'>
+              <Card key={item.key} className='gap-0 overflow-hidden [--card-padding:0]'>
                 {/* The cover carries the name, so the card is mostly poster. */}
                 <div className='relative'>
                   <AnimePoster url={item.poster_url} title={item.title} />
-                  <div className='pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-2 pb-2 pt-10'>
+                  <div className='pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-black/95 via-black/70 to-transparent px-2 pb-2 pt-10'>
                     <p
                       className='line-clamp-2 text-[11px] font-medium leading-tight text-white'
                       title={blacklist ? item.source_title : item.title}
@@ -363,8 +371,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                   {blacklist && (
                     <div className='absolute left-1.5 top-1.5 flex gap-1'>
                       <Button
-                        size='icon'
-                        variant={item.linked ? 'secondary' : 'default'}
+                        size='icon-sm'
+                        variant={item.linked ? 'secondary' : 'primary'}
                         title={item.linked ? 'Linked to AniList: ' + (item.anilist_title || item.anilist_id) + '. Relink' : 'Not recognised: link to AniList'}
                         aria-label={(item.linked ? 'Relink ' : 'Link ') + item.title + ' to AniList'}
                         onClick={() => setLinkTarget(item)}
@@ -373,10 +381,13 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         <Link2 />
                       </Button>
                       {item.anilist_id && (
-                        <Button asChild size='icon' variant='secondary' title={'On AniList: ' + (item.anilist_title || 'id ' + item.anilist_id)}>
-                          <a href={anilistUrl(item.anilist_id)} target='_blank' rel='noreferrer' aria-label={item.title + ' on AniList'}>
-                            <ExternalLink />
-                          </a>
+                        <Button
+                          size='icon-sm'
+                          variant='secondary'
+                          nativeButton={false}
+                          render={<a href={anilistUrl(item.anilist_id)} target='_blank' rel='noreferrer' title={'On AniList: ' + (item.anilist_title || 'id ' + item.anilist_id)} aria-label={item.title + ' on AniList'} />}
+                        >
+                          <ExternalLink />
                         </Button>
                       )}
                     </div>
@@ -384,7 +395,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                   {blacklist && (
                     <div className='absolute right-1.5 top-1.5'>
                       <Button
-                        size='icon'
+                        size='icon-sm'
                         variant='secondary'
                         title='Restore and recheck'
                         aria-label={'Restore and recheck ' + item.title}
@@ -413,25 +424,36 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       {/* Nyaa, AniList when the card knows its entry, then Recheck. */}
                       <div className='col-span-2 flex gap-1.5'>
                         {item.detail_url && (
-                          <Button asChild variant='outline' className='min-w-0 flex-1 px-1.5 text-xs'>
-                            <a href={item.detail_url} target='_blank' rel='noreferrer' title='The release on Nyaa'>
-                              Nyaa
-                            </a>
+                          <Button
+                            size='sm'
+                            variant='secondary'
+                            className='min-w-0 flex-1 px-1.5 text-xs'
+                            nativeButton={false}
+                            render={<a href={item.detail_url} target='_blank' rel='noreferrer' title='The release on Nyaa' />}
+                          >
+                            Nyaa
                           </Button>
                         )}
                         {item.anilist_id && (
-                          <Button asChild variant='outline' className='min-w-0 flex-1 px-1.5 text-xs'>
-                            <a
-                              href={anilistUrl(item.anilist_id)}
-                              target='_blank'
-                              rel='noreferrer'
-                              title={'On AniList: ' + (item.anilist_title || 'id ' + item.anilist_id)}
-                            >
-                              AniList
-                            </a>
+                          <Button
+                            size='sm'
+                            variant='secondary'
+                            className='min-w-0 flex-1 px-1.5 text-xs'
+                            nativeButton={false}
+                            render={
+                              <a
+                                href={anilistUrl(item.anilist_id)}
+                                target='_blank'
+                                rel='noreferrer'
+                                title={'On AniList: ' + (item.anilist_title || 'id ' + item.anilist_id)}
+                              />
+                            }
+                          >
+                            AniList
                           </Button>
                         )}
                         <Button
+                          size='sm'
                           variant='secondary'
                           className='min-w-0 flex-1 px-1.5 text-xs'
                           onClick={() => void decide(item, 'recheck')}
@@ -444,6 +466,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
 
                       {german && (
                         <Button
+                          size='sm'
+                          variant='secondary'
                           title='Always allow German subtitles for this show'
                           onClick={() => void decide(item, 'allow_german')}
                           disabled={busyFor(item.key)}
@@ -452,6 +476,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         </Button>
                       )}
                       <Button
+                        size='sm'
                         variant='secondary'
                         className={cn(!german && 'col-span-2')}
                         onClick={() => void markOwned({ key: item.key }, item.title)}
@@ -462,6 +487,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
 
                       {batch && (
                         <Button
+                          size='sm'
+                          variant='secondary'
                           className='col-span-2'
                           onClick={() => void openBatch(item)}
                           disabled={busyFor(item.key)}
@@ -471,7 +498,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         </Button>
                       )}
                       <Button
-                        variant='outline'
+                        size='sm'
+                        variant='secondary'
                         className='col-span-2'
                         onClick={() => setEraiFor({ query: eraiName(item), item })}
                         title='What Erai-raws lists for this anime: every release, with its subtitles'
@@ -481,7 +509,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
 
                       {item.release_title && (
                         <Button
-                          variant='outline'
+                          size='sm'
+                          variant='secondary'
                           className='col-span-2'
                           onClick={() => setEntryFor(item)}
                           disabled={busyFor(item.key)}
@@ -490,10 +519,11 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                         </Button>
                       )}
 
-                      <Button variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={busyFor(item.key)}>
+                      <Button size='sm' variant='destructive' onClick={() => void decide(item, 'blacklist')} disabled={busyFor(item.key)}>
                         <Ban data-icon='inline-start' /> <span className='truncate'>Discard</span>
                       </Button>
                       <Button
+                        size='sm'
                         variant='destructive'
                         onClick={() => setPurgeTarget(item)}
                         disabled={busyFor(item.key) || !item.anilist_id}
@@ -503,7 +533,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       </Button>
 
                       {count > 1 && (
-                        <Button variant='ghost' className='col-span-2' onClick={() => void openReleases(item)} disabled={busyFor(item.key)}>
+                        <Button size='sm' variant='ghost' className='col-span-2' onClick={() => void openReleases(item)} disabled={busyFor(item.key)}>
                           <Layers data-icon='inline-start' /> Show {count} releases
                         </Button>
                       )}
@@ -516,7 +546,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </div>
       )}
       <Dialog open={eraiFor !== null} onOpenChange={(open) => { if (!open) setEraiFor(null); }}>
-        <DialogContent className='flex h-[90dvh] max-h-[90dvh] w-[90vw] max-w-none flex-col'>
+        <DialogContent className='h-[90dvh] max-h-[90dvh] w-[90vw] max-w-none shrink-0'>
           <DialogHeader>
             <DialogTitle>Erai-raws: {eraiFor?.query}</DialogTitle>
             <DialogDescription>Every release erai-raws.info lists under this name. Replace takes one of them, a whole-season batch or a single episode, in place of what this card holds.</DialogDescription>
@@ -561,7 +591,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
       {/* Sixty-three releases would have made one card taller than the page,
           so they open beside it rather than inside it. */}
       <Dialog open={releasesFor !== null} onOpenChange={(open) => { if (!open) setReleasesFor(null); }}>
-        <DialogContent className='max-w-3xl'>
+        <DialogContent size='xl' className='max-w-3xl'>
           <DialogHeader>
             <DialogTitle>{releasesFor?.title}</DialogTitle>
             <DialogDescription>
@@ -569,7 +599,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
               description on Nyaa.
             </DialogDescription>
           </DialogHeader>
-          <div className='max-h-[60vh] overflow-y-auto'>
+          <DialogBody className='max-h-[60vh]'>
             {loadingReleases ? (
               <div className='flex justify-center py-8'><Spinner /></div>
             ) : releases.length === 0 ? (
@@ -577,7 +607,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             ) : (
               <ul className='flex flex-col gap-1'>
                 {releases.map((release) => (
-                  <li key={release.info_hash} className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/40'>
+                  <li key={release.info_hash} className='flex items-center gap-2 rounded-button px-2 py-1.5 transition-colors hover:bg-control-hover'>
                     <span className='w-14 shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>
                       {isBatch(release) && release.episodes
                         ? (release.episodes[1] >= 999 ? 'Season' : release.episodes[0] + '–' + release.episodes[1])
@@ -586,15 +616,21 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                     <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={release.title}>
                       {release.title}
                     </span>
-                    {release.german_in_title && <Badge variant='success'>GER</Badge>}
-                    {release.hevc && <Badge variant='secondary'>HEVC</Badge>}
+                    {release.german_in_title && <StatusTag variant='success'>GER</StatusTag>}
+                    {release.hevc && <StatusTag variant='secondary'>HEVC</StatusTag>}
                     {release.detail_url && (
-                      <Button asChild size='icon' variant='ghost' title='Nyaa description'>
-                        <a href={release.detail_url} target='_blank' rel='noreferrer' aria-label='Nyaa description'><ExternalLink /></a>
+                      <Button
+                        size='icon-sm'
+                        variant='ghost'
+                        nativeButton={false}
+                        render={<a href={release.detail_url} target='_blank' rel='noreferrer' title='Nyaa description' aria-label='Nyaa description' />}
+                      >
+                        <ExternalLink />
                       </Button>
                     )}
                     {isBatch(release) && releasesFor && (
                       <Button
+                        size='sm'
                         variant='secondary'
                         title={'Download ' + (release.episodes ? episodesLabel(release.episodes) : 'it') + ' with this batch'}
                         onClick={() => considerBatch(releasesFor, release)}
@@ -603,6 +639,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                       </Button>
                     )}
                     <Button
+                      size='sm'
                       variant='ghost'
                       disabled={busyFor(release.info_hash)}
                       onClick={() => void markOwned({ info_hashes: [release.info_hash] }, release.title)}
@@ -613,7 +650,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
                 ))}
               </ul>
             )}
-          </div>
+          </DialogBody>
         </DialogContent>
       </Dialog>
 

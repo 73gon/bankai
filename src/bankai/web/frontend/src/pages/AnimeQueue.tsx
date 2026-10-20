@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, CircleStop, Play, RefreshCw, RotateCcw, Search, Trash2, X } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { animeQueuePath, api, recall, type AnimeQueuePage, type Job } from '@/lib/api';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { EmptyState, Spinner } from '@/components/ui/empty';
-import { Input } from '@/components/ui/input';
-import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { Switch } from '@/components/ui/switch';
+import { StatusTag } from '@/components/status-tag';
+import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
+import { Button } from '@/zon/ui/button';
+import { Empty, EmptyActions, EmptyDescription, EmptyTitle } from '@/zon/ui/empty';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/zon/ui/input-group';
+import { Spinner } from '@/zon/ui/spinner';
+import { Switch } from '@/zon/ui/switch';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 import { AnimePoster } from '@/components/AnimePoster';
-import { cn } from '@/lib/utils';
+import { cn } from '@/zon/lib/cn';
 
 function formatTime(value: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : '—';
@@ -225,8 +227,8 @@ export default function AnimeQueue() {
     <div className='flex flex-col gap-6'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground'>Anime</p>
-          <h1 className='font-serif text-3xl font-semibold'>Queue</h1>
+          <p className='eyebrow'>Anime</p>
+          <h1 className='font-heading text-3xl font-light'>Queue</h1>
           <p className='text-sm text-muted-foreground'>Only Erai-raws and manually selected Anime downloads appear here.</p>
         </div>
         <div className='flex items-center gap-3'>
@@ -246,11 +248,12 @@ export default function AnimeQueue() {
       </div>
 
       <div className='flex flex-wrap items-center gap-3'>
-        <div className='relative min-w-64 flex-1 sm:max-w-sm'>
-          <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-          <Input
+        <InputGroup className='min-w-64 flex-1 sm:max-w-sm'>
+          <InputGroupAddon>
+            <Search aria-hidden='true' />
+          </InputGroupAddon>
+          <InputGroupInput
             ref={searchRef}
-            className='pl-9 pr-9'
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -263,51 +266,58 @@ export default function AnimeQueue() {
             aria-label='Filter Anime downloads by title'
           />
           {query && (
-            <button
-              type='button'
-              aria-label='Clear title filter'
-              onClick={() => {
-                setQuery('');
-                searchRef.current?.focus();
-              }}
-              className='filter-chip animate-fade-in absolute right-2 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60'
-            >
-              <X className='size-3.5' />
-            </button>
+            <InputGroupAddon align='inline-end'>
+              <InputGroupButton
+                variant='ghost'
+                size='icon-sm'
+                aria-label='Clear title filter'
+                onClick={() => {
+                  setQuery('');
+                  searchRef.current?.focus();
+                }}
+              >
+                <X className='size-3.5' />
+              </InputGroupButton>
+            </InputGroupAddon>
           )}
-        </div>
-        <ToggleGroup label='Filter by status' className='flex-wrap'>
+        </InputGroup>
+        <ToggleGroup
+          aria-label='Filter by status'
+          className='flex-wrap'
+          value={[status]}
+          onValueChange={(values) => values[0] && setStatus(values[0])}
+        >
           {chips.map((chip) => (
-            <ToggleGroupItem
-              key={chip.value}
-              label={chip.label}
-              selected={status === chip.value}
-              onClick={() => setStatus(chip.value)}
-            >
+            <ToggleGroupItem key={chip.value} value={chip.value} aria-label={chip.label}>
+              <span>{chip.label}</span>
               <span className='font-mono text-[0.65rem] tabular-nums opacity-70'>{chip.count}</span>
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
       </div>
 
-      <div className='table-bleed min-h-0 flex-1 overflow-auto'>
+      <div className='min-h-0 flex-1'>
         <div className='min-w-full'>
           {loading && jobs.length === 0 ? (
-            <div className='flex min-h-40 items-center justify-center'><Spinner /></div>
+            <div className='flex min-h-40 items-center justify-center'><Spinner label='Loading the Anime queue' /></div>
           ) : jobs.length === 0 ? (
-            <EmptyState
-              title={filtered ? 'No matching Anime downloads' : showCompleted ? 'Anime queue is empty' : 'No unfinished Anime downloads'}
-              description={
-                filtered
+            <Empty>
+              <EmptyTitle>{filtered ? 'No matching Anime downloads' : showCompleted ? 'Anime queue is empty' : 'No unfinished Anime downloads'}</EmptyTitle>
+              <EmptyDescription>
+                {filtered
                   ? 'No job matches this title and status combination.'
                   : showCompleted
                     ? 'Automatic and manual Erai downloads will appear here.'
-                    : 'Completed downloads are hidden by default.'
-              }
-              action={filtered ? <Button variant='secondary' onClick={clearFilters}>Clear filters</Button> : undefined}
-            />
+                    : 'Completed downloads are hidden by default.'}
+              </EmptyDescription>
+              {filtered && (
+                <EmptyActions>
+                  <Button variant='secondary' onClick={clearFilters}>Clear filters</Button>
+                </EmptyActions>
+              )}
+            </Empty>
           ) : (
-            <table className='w-full min-w-[900px] table-fixed border-collapse text-sm'>
+            <Table className='min-w-[900px] table-fixed'>
               <colgroup>
                 <col />
                 <col className='w-28' />
@@ -315,20 +325,20 @@ export default function AnimeQueue() {
                 <col className='w-32' />
                 <col className='w-20' />
               </colgroup>
-              <thead className='sticky top-0 z-10 bg-card'>
-                <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
+              <TableHeader>
+                <TableRow>
                   <SortHeader label='Title' column='title' sort={sort} onSort={toggleSort} />
                   <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />
                   <SortHeader label='Progress' column='progress' sort={sort} onSort={toggleSort} />
                   <SortHeader label='Updated' column='updated' sort={sort} onSort={toggleSort} />
                   {/* Actions are buttons, not a value, so there is nothing to order by. */}
-                  <th className='px-3 py-2.5 text-right font-medium'>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
+                  <TableHead numeric>Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {jobs.map((job) => (
-                  <tr key={job.id} className='data-row border-b border-border/70 last:border-0'>
-                    <td className='px-3 py-2'>
+                  <TableRow key={job.id} className='data-row'>
+                    <TableCell>
                       <div className='flex items-center gap-2.5'>
                         <AnimePoster url={job.poster_url} title={job.series_title || job.title} className='w-8 shrink-0 rounded' />
                         <div className='min-w-0'>
@@ -336,30 +346,30 @@ export default function AnimeQueue() {
                           <p className='truncate text-xs text-muted-foreground' title={job.reason || job.step_label || job.kind}>{job.reason || job.step_label || job.kind}</p>
                         </div>
                       </div>
-                    </td>
-                    <td className='px-3 py-2'>
-                      <Badge variant={phaseVariant(job.phase || job.status)}>{titleCase(job.phase || job.status)}</Badge>
-                    </td>
-                    <td className='px-3 py-2'><JobProgress job={job} /></td>
-                    <td className='px-3 py-2 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatTime(job.updated_at)}</td>
-                    <td className='px-3 py-2'>
+                    </TableCell>
+                    <TableCell>
+                      <StatusTag variant={phaseVariant(job.phase || job.status)}>{titleCase(job.phase || job.status)}</StatusTag>
+                    </TableCell>
+                    <TableCell><JobProgress job={job} /></TableCell>
+                    <TableCell className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatTime(job.updated_at)}</TableCell>
+                    <TableCell>
                       <div className='flex justify-end gap-1'>
                         {job.status === 'running' && (
-                          <Button size='icon' variant='ghost' aria-label={'Stop ' + job.title} onClick={() => void act(job, 'stop')} disabled={busy === job.id}><CircleStop /></Button>
+                          <Button size='icon-sm' variant='ghost' aria-label={'Stop ' + job.title} onClick={() => void act(job, 'stop')} disabled={busy === job.id}><CircleStop /></Button>
                         )}
                         {job.status === 'stopped' && (
-                          <Button size='icon' variant='ghost' aria-label={'Continue ' + job.title} onClick={() => void act(job, 'continue')} disabled={busy === job.id}><Play /></Button>
+                          <Button size='icon-sm' variant='ghost' aria-label={'Continue ' + job.title} onClick={() => void act(job, 'continue')} disabled={busy === job.id}><Play /></Button>
                         )}
                         {job.status === 'failed' && (
-                          <Button size='icon' variant='ghost' aria-label={'Retry ' + job.title} onClick={() => void act(job, 'retry')} disabled={busy === job.id}><RotateCcw /></Button>
+                          <Button size='icon-sm' variant='ghost' aria-label={'Retry ' + job.title} onClick={() => void act(job, 'retry')} disabled={busy === job.id}><RotateCcw /></Button>
                         )}
-                        <Button size='icon' variant='ghost' aria-label={'Remove ' + job.title} onClick={() => void act(job, 'delete')} disabled={busy === job.id}><Trash2 /></Button>
+                        <Button size='icon-sm' variant='ghost' aria-label={'Remove ' + job.title} onClick={() => void act(job, 'delete')} disabled={busy === job.id}><Trash2 /></Button>
                       </div>
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           )}
         </div>
       </div>

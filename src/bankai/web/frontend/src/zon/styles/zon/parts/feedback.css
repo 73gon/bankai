@@ -1,0 +1,269 @@
+/* feedback components — owned by the feedback group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
+
+@layer components {
+  /* ── Skeleton ─────────────────────────────────────────────────────────────
+   * A --control-surface block with one soft highlight sweeping across it every 1.6s.
+   * The sweep is a 50%-wide gradient image moved from fully left to fully right; it runs
+   * the other way in RTL. Static under prefers-reduced-motion. */
+
+  [data-slot="skeleton"] {
+    background-color: var(--control-surface);
+    background-image: linear-gradient(90deg, transparent, var(--control-highlight), transparent);
+    background-repeat: no-repeat;
+    background-size: 50% 100%;
+    background-position: -100% 0;
+    box-shadow: inset 0 0 0 1px var(--control-inner-edge);
+    animation: ep-skeleton-sweep 1.6s var(--ease) infinite;
+
+    &:dir(rtl) {
+      animation-direction: reverse;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      animation: none;
+      background-image: none;
+    }
+  }
+
+  @keyframes ep-skeleton-sweep {
+    from {
+      background-position: -100% 0;
+    }
+    to {
+      background-position: 200% 0;
+    }
+  }
+
+  /* ── Spinner ──────────────────────────────────────────────────────────────
+   * Every face is CSS-driven: no JavaScript, identical on the server. Parts animate transform
+   * and opacity only (the arc also animates its dash, on a 24-unit SVG). Each part's resting
+   * style is its reduced-motion pose, so `animation: none` leaves a meaningful still. */
+
+  [data-slot="spinner"] [data-part] {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+
+  /* ascii — the frames are stacked in a 1em-tall window and stepped through with steps(). */
+  [data-slot="spinner-frames"] {
+    animation: ep-spinner-frames 0.52s steps(4) infinite;
+  }
+
+  @keyframes ep-spinner-frames {
+    from {
+      translate: 0 0;
+    }
+    to {
+      translate: 0 -4em;
+    }
+  }
+
+  /* arc — a progress-ring arc that grows and shrinks while it turns. */
+  [data-slot="spinner"][data-variant="arc"] [data-slot="spinner-art"] {
+    animation: ep-spinner-turn 1.6s linear infinite;
+  }
+  [data-slot="spinner"] [data-part="arc"] {
+    stroke-dasharray: 30 100;
+    transform: rotate(-90deg);
+    animation: ep-spinner-arc 1.6s var(--ease) infinite;
+  }
+
+  @keyframes ep-spinner-turn {
+    to {
+      rotate: 360deg;
+    }
+  }
+
+  @keyframes ep-spinner-arc {
+    0% {
+      stroke-dasharray: 6 100;
+      stroke-dashoffset: 0;
+    }
+    50% {
+      stroke-dasharray: 62 100;
+      stroke-dashoffset: -14;
+    }
+    100% {
+      stroke-dasharray: 6 100;
+      stroke-dashoffset: -94;
+    }
+  }
+
+  /* dots — three dots brighten and lift in turn. Still: an ellipsis. */
+  [data-slot="spinner"] [data-part="dot"] {
+    animation: ep-spinner-dot 1s ease-in-out infinite;
+    &:nth-child(2) {
+      animation-delay: 0.15s;
+    }
+    &:nth-child(3) {
+      animation-delay: 0.3s;
+    }
+  }
+
+  @keyframes ep-spinner-dot {
+    0%,
+    70%,
+    100% {
+      opacity: 0.25;
+      transform: translateY(0);
+    }
+    35% {
+      opacity: 1;
+      transform: translateY(-2px);
+    }
+  }
+
+  /* bars — an equaliser. Still: four bars at staggered heights. */
+  [data-slot="spinner"] [data-part="bar"] {
+    transform: scaleY(var(--rest, 1));
+    animation: ep-spinner-bar 1s ease-in-out infinite;
+    &:nth-child(1) {
+      --rest: 0.45;
+      animation-delay: -0.45s;
+    }
+    &:nth-child(2) {
+      --rest: 1;
+      animation-delay: -0.3s;
+    }
+    &:nth-child(3) {
+      --rest: 0.7;
+      animation-delay: -0.15s;
+    }
+    &:nth-child(4) {
+      --rest: 0.35;
+    }
+  }
+
+  @keyframes ep-spinner-bar {
+    0%,
+    100% {
+      transform: scaleY(0.3);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+
+  /* pulse — a ring widens from a dot and fades, twice per cycle. Still: a target. */
+  [data-slot="spinner"] [data-part="ripple"] {
+    opacity: 0.35;
+    animation: ep-spinner-ripple 1.6s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
+    &:nth-child(2) {
+      animation-delay: 0.8s;
+    }
+  }
+
+  @keyframes ep-spinner-ripple {
+    from {
+      opacity: 0.9;
+      transform: scale(0.3);
+    }
+    to {
+      opacity: 0;
+      transform: scale(1);
+    }
+  }
+
+  /* orbit — a dot circling a hairline. Turns about the centre of the 24-unit box. */
+  [data-slot="spinner"] [data-part="satellite"] {
+    transform-box: view-box;
+    transform-origin: 12px 12px;
+    animation: ep-spinner-orbit 1.2s linear infinite;
+  }
+
+  @keyframes ep-spinner-orbit {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* grid — a 3×3 wave from the top-left corner; delays are set inline per cell. */
+  [data-slot="spinner"] [data-part="cell"] {
+    animation: ep-spinner-cell 1.2s ease-in-out infinite;
+  }
+
+  @keyframes ep-spinner-cell {
+    0%,
+    60%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    30% {
+      opacity: 0.2;
+      transform: scale(0.7);
+    }
+  }
+
+  /* cursor — a terminal block blinking on and off. Still: a solid block. */
+  [data-slot="spinner"] [data-part="caret"] {
+    animation: ep-spinner-blink 1s steps(1, end) infinite;
+  }
+
+  @keyframes ep-spinner-blink {
+    50% {
+      opacity: 0;
+    }
+  }
+
+  /* brackets — the logo's halves open and close, like its hover reveal. Still: the symbol. */
+  [data-slot="spinner"] [data-part="bracket-left"] {
+    animation: ep-spinner-bracket-left 1.6s var(--ease) infinite;
+  }
+  [data-slot="spinner"] [data-part="bracket-right"] {
+    animation: ep-spinner-bracket-right 1.6s var(--ease) infinite;
+  }
+
+  @keyframes ep-spinner-bracket-left {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    45%,
+    60% {
+      transform: translateX(-3px);
+    }
+  }
+
+  @keyframes ep-spinner-bracket-right {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    45%,
+    60% {
+      transform: translateX(3px);
+    }
+  }
+
+  /* crescent — the shadow crosses the moon: new → waxing → full, then back in from the
+   * other side: full → waning → new. Still: a waxing crescent. */
+  [data-slot="spinner"] [data-part="shadow"] {
+    transform: translateX(-6px);
+    animation: ep-spinner-moon 2.4s linear infinite;
+  }
+
+  @keyframes ep-spinner-moon {
+    0% {
+      transform: translateX(0);
+      animation-timing-function: cubic-bezier(0.3, 0, 0.6, 1);
+    }
+    50% {
+      transform: translateX(-20px);
+      animation-timing-function: steps(1, end);
+    }
+    50.01% {
+      transform: translateX(20px);
+      animation-timing-function: cubic-bezier(0.4, 0, 0.7, 1);
+    }
+    100% {
+      transform: translateX(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-slot="spinner"] [data-part],
+    [data-slot="spinner"] [data-slot="spinner-art"] {
+      animation: none;
+    }
+  }
+}

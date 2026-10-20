@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type MouseEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { type KeyboardEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   CheckCircle2,
@@ -19,17 +19,26 @@ import {
   Trash2,
   type LucideIcon,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type QBittorrentItem } from '@/lib/api';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { EmptyState } from '@/components/ui/empty';
-import { Input } from '@/components/ui/input';
-import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Separator } from '@/components/ui/separator';
-import { SortHeader, nextSort, type SortState } from '@/components/ui/sort-header';
-import { cn } from '@/lib/utils';
+import { StatusTag } from '@/components/status-tag';
+import { SortHeader, nextSort, type SortState } from '@/components/sort-header';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/zon/ui/alert-dialog';
+import { Button } from '@/zon/ui/button';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
+import { Popover, PopoverContent, PopoverTrigger } from '@/zon/ui/popover';
+import { Separator } from '@/zon/ui/separator';
+import { Spinner } from '@/zon/ui/spinner';
+import { Table, TableBody, TableCell, TableHeader, TableRow } from '@/zon/ui/table';
+import { cn } from '@/zon/lib/cn';
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -164,6 +173,8 @@ export default function QBittorrent() {
   const [contextPoint, setContextPoint] = useState({ x: 0, y: 0 });
   const [actioning, setActioning] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<{ torrent: QBittorrentItem; deleteFiles: boolean } | null>(null);
+  // The point the context menu opens at: a 1px span moved to the pointer.
+  const contextAnchor = useRef<HTMLSpanElement>(null);
 
   const refresh = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true);
@@ -288,7 +299,7 @@ export default function QBittorrent() {
     <div className='flex h-full min-h-0 flex-col gap-4'>
       <header className='flex flex-wrap items-start justify-between gap-3'>
         <div>
-          <h1 className='text-2xl font-semibold'>qBittorrent</h1>
+          <h1 className='font-heading text-2xl font-light'>qBittorrent</h1>
           <p className='mt-1 text-sm text-muted-foreground'>All downloads from the configured qBittorrent server. Updated every 3 seconds.</p>
         </div>
         <Button variant='secondary' disabled={refreshing} onClick={() => void refresh(true)}>
@@ -298,20 +309,20 @@ export default function QBittorrent() {
       </header>
 
       <div className='flex flex-wrap items-center gap-2'>
-        <div className='relative w-full max-w-xs'>
-          <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-          <Input className='pl-9' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter downloads…' aria-label='Filter downloads' />
-        </div>
+        <InputGroup className='w-full max-w-xs'>
+          <InputGroupAddon>
+            <Search aria-hidden='true' />
+          </InputGroupAddon>
+          <InputGroupInput value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter downloads…' aria-label='Filter downloads' />
+        </InputGroup>
 
         <Popover>
-          <PopoverTrigger asChild>
-            <Button variant='secondary' aria-label='Filter by status'>
-              <ListFilter data-icon='inline-start' />
-              {statuses.size === 0 ? 'All statuses' : `${statuses.size} selected`}
-              <ChevronDown className='opacity-60' aria-hidden='true' />
-            </Button>
+          <PopoverTrigger render={<Button variant='secondary' aria-label='Filter by status' />}>
+            <ListFilter data-icon='inline-start' />
+            {statuses.size === 0 ? 'All statuses' : `${statuses.size} selected`}
+            <ChevronDown className='opacity-60' aria-hidden='true' />
           </PopoverTrigger>
-          <PopoverContent align='start' className='w-60 p-1'>
+          <PopoverContent align='start' className='w-60 gap-0 p-1'>
             {STATUSES.map((label) => {
               const on = statuses.has(label);
               const count = statusCounts.get(label) ?? 0;
@@ -323,7 +334,7 @@ export default function QBittorrent() {
                   aria-checked={on}
                   onClick={() => toggleStatus(label)}
                   disabled={count === 0 && !on}
-                  className='flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-accent disabled:opacity-40'
+                  className='flex w-full cursor-pointer items-center gap-2 rounded-item material-row px-2 py-1.5 text-left text-[13px] focus-ring disabled:cursor-default disabled:opacity-40'
                 >
                   <span className='flex size-3.5 shrink-0 items-center justify-center'>
                     {on && <Check className='size-3.5' aria-hidden='true' />}
@@ -339,7 +350,7 @@ export default function QBittorrent() {
                 <button
                   type='button'
                   onClick={() => setStatuses(new Set())}
-                  className='w-full rounded-md px-2 py-1.5 text-left text-[13px] text-muted-foreground hover:bg-accent hover:text-foreground'
+                  className='w-full cursor-pointer rounded-item material-row px-2 py-1.5 text-left text-[13px] text-muted-foreground focus-ring'
                 >
                   Clear
                 </button>
@@ -354,18 +365,25 @@ export default function QBittorrent() {
       </div>
 
       {loading ? (
-        <div className='flex min-h-72 items-center justify-center text-muted-foreground'>
-          <Loader2 className='mr-2 size-5 animate-spin' /> Loading qBittorrent…
+        <div className='flex min-h-72 items-center justify-center gap-2 text-muted-foreground'>
+          <Spinner size='lg' label='Loading qBittorrent' /> Loading qBittorrent…
         </div>
       ) : error && items.length === 0 ? (
-        <EmptyState icon={Download} title='qBittorrent is unavailable' description={error} />
+        <Empty>
+          <EmptyMedia><Download /></EmptyMedia>
+          <EmptyTitle>qBittorrent is unavailable</EmptyTitle>
+          <EmptyDescription>{error}</EmptyDescription>
+        </Empty>
       ) : visible.length === 0 ? (
-        <EmptyState icon={Download} title={query ? 'No matching downloads' : 'No torrents'} description={query ? 'Try another filter.' : 'qBittorrent has no downloads yet.'} />
+        <Empty>
+          <EmptyMedia><Download /></EmptyMedia>
+          <EmptyTitle>{query ? 'No matching downloads' : 'No torrents'}</EmptyTitle>
+          <EmptyDescription>{query ? 'Try another filter.' : 'qBittorrent has no downloads yet.'}</EmptyDescription>
+        </Empty>
       ) : (
-        <div className='table-bleed min-h-0 flex-1 overflow-auto'>
-          <table className='w-full min-w-[1180px] border-collapse text-sm'>
-            <thead className='sticky top-0 z-10 bg-card text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
-              <tr className='border-b border-border'>
+          <Table dense className='min-w-[1180px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+            <TableHeader className='sticky top-0 z-10 bg-card'>
+              <TableRow>
                 <SortHeader label='Name' column='name' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Size' column='size' sort={sort} onSort={toggleSort} align='right' />
@@ -376,52 +394,51 @@ export default function QBittorrent() {
                 <SortHeader label='Up' column='upspeed' sort={sort} onSort={toggleSort} align='right' />
                 <SortHeader label='ETA' column='eta' sort={sort} onSort={toggleSort} align='right' />
                 <SortHeader label='Added on' column='added_on' sort={sort} onSort={toggleSort} />
-              </tr>
-            </thead>
-            <tbody>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {visible.map((item) => {
                 const percent = Math.max(0, Math.min(100, item.progress * 100));
                 const status = torrentStatus(item);
                 const StatusIcon = status.icon;
                 return (
-                  <tr
+                  <TableRow
                     key={item.hash}
                     tabIndex={0}
                     onContextMenu={(event) => showContextMenu(event, item)}
                     onKeyDown={(event) => showKeyboardMenu(event, item)}
                     className={cn(
-                      'data-row cursor-context-menu border-b border-border/70 last:border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60',
+                      'data-row cursor-context-menu focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-control-focus',
                       status.row,
                     )}
                   >
-                    <td className='max-w-[26rem] px-3 py-2 font-medium text-foreground'>
+                    <TableCell className='max-w-[26rem] py-2 font-medium text-foreground'>
                       <div className='flex items-center gap-2'>
                         <StatusIcon className={cn('size-3.5 shrink-0', status.iconColor)} aria-hidden='true' />
                         <div className='truncate' title={item.name}>{item.name}</div>
                       </div>
-                    </td>
-                    <td className='px-3 py-2'><Badge variant={status.badge}>{status.label}</Badge></td>
-                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{formatBytes(item.size_bytes)}</td>
-                    <td className='px-3 py-2'>
+                    </TableCell>
+                    <TableCell className='py-2'><StatusTag variant={status.badge}>{status.label}</StatusTag></TableCell>
+                    <TableCell numeric className='py-2 text-xs'>{formatBytes(item.size_bytes)}</TableCell>
+                    <TableCell className='py-2'>
                       <div className='flex items-center gap-2'>
                         <div className='h-1.5 flex-1 overflow-hidden rounded-full bg-secondary'>
                           <div className={cn('h-full rounded-full transition-[width] duration-300', status.progress)} style={{ width: `${percent}%` }} />
                         </div>
                         <span className='w-10 text-right font-mono text-[0.68rem] tabular-nums'>{percent.toFixed(0)}%</span>
                       </div>
-                    </td>
-                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{item.seeds} ({item.seeds_total})</td>
-                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{item.peers} ({item.peers_total})</td>
-                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{formatSpeed(item.dlspeed)}</td>
-                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums'>{formatSpeed(item.upspeed)}</td>
-                    <td className='whitespace-nowrap px-3 py-2 text-right font-mono text-[0.68rem] tabular-nums'>{formatEta(item.eta, item.progress)}</td>
-                    <td className='whitespace-nowrap px-3 py-2 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatAdded(item.added_on)}</td>
-                  </tr>
+                    </TableCell>
+                    <TableCell numeric className='py-2 text-xs'>{item.seeds} ({item.seeds_total})</TableCell>
+                    <TableCell numeric className='py-2 text-xs'>{item.peers} ({item.peers_total})</TableCell>
+                    <TableCell numeric className='py-2 text-xs'>{formatSpeed(item.dlspeed)}</TableCell>
+                    <TableCell numeric className='py-2 text-xs'>{formatSpeed(item.upspeed)}</TableCell>
+                    <TableCell numeric className='py-2 text-[0.68rem]'>{formatEta(item.eta, item.progress)}</TableCell>
+                    <TableCell className='whitespace-nowrap py-2 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatAdded(item.added_on)}</TableCell>
+                  </TableRow>
                 );
               })}
-            </tbody>
-          </table>
-        </div>
+            </TableBody>
+          </Table>
       )}
 
       {!loading && visible.length > 0 && (
@@ -436,21 +453,15 @@ export default function QBittorrent() {
       )}
 
       <Popover open={contextTorrent !== null} onOpenChange={(open) => !open && setContextTorrent(null)}>
-        <PopoverAnchor asChild>
-          <span
-            aria-hidden='true'
-            className='pointer-events-none fixed size-px'
-            style={{ left: contextPoint.x, top: contextPoint.y }}
-          />
-        </PopoverAnchor>
         {contextTorrent && (
-          <PopoverContent className='w-64 p-1' align='start' sideOffset={4}>
+          <PopoverContent className='w-64 gap-0 p-1' align='start' sideOffset={4} positioner={{ anchor: contextAnchor }}>
             <div className='truncate px-3 py-2 text-xs font-medium text-muted-foreground' title={contextTorrent.name}>
               {contextTorrent.name}
             </div>
             <Separator className='mb-1' />
             <Button
               variant='ghost'
+              size='sm'
               className='w-full justify-start'
               disabled={!contextStopped || actioning === contextTorrent.hash}
               onClick={() => void runTorrentAction(contextTorrent, 'start')}
@@ -460,6 +471,7 @@ export default function QBittorrent() {
             </Button>
             <Button
               variant='ghost'
+              size='sm'
               className='w-full justify-start'
               disabled={contextStopped || actioning === contextTorrent.hash}
               onClick={() => void runTorrentAction(contextTorrent, 'stop')}
@@ -470,6 +482,7 @@ export default function QBittorrent() {
             <Separator className='my-1' />
             <Button
               variant='ghost'
+              size='sm'
               className='w-full justify-start'
               disabled={actioning === contextTorrent.hash}
               onClick={() => {
@@ -482,6 +495,7 @@ export default function QBittorrent() {
             </Button>
             <Button
               variant='ghost'
+              size='sm'
               className='w-full justify-start text-destructive hover:text-destructive'
               disabled={actioning === contextTorrent.hash}
               onClick={() => {
@@ -495,23 +509,30 @@ export default function QBittorrent() {
           </PopoverContent>
         )}
       </Popover>
+      {/* Where the context menu opens: moved to the pointer, or to the row for the keyboard. */}
+      <span
+        ref={contextAnchor}
+        aria-hidden='true'
+        className='pointer-events-none fixed size-px'
+        style={{ left: contextPoint.x, top: contextPoint.y }}
+      />
 
-      <Dialog open={removeTarget !== null} onOpenChange={(open) => !open && setRemoveTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{removeTarget?.deleteFiles ? 'Remove torrent and delete files?' : 'Remove torrent?'}</DialogTitle>
-            <DialogDescription>
+      <AlertDialog open={removeTarget !== null} onOpenChange={(open) => !open && setRemoveTarget(null)}>
+        <AlertDialogContent size='default'>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{removeTarget?.deleteFiles ? 'Remove torrent and delete files?' : 'Remove torrent?'}</AlertDialogTitle>
+            <AlertDialogDescription>
               {removeTarget?.deleteFiles
                 ? 'This removes the torrent from qBittorrent and permanently deletes all of its downloaded files.'
                 : 'This removes the torrent from qBittorrent but keeps its downloaded files on disk.'}
-            </DialogDescription>
-          </DialogHeader>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
           {removeTarget && (
-            <div className='rounded-md border border-border/70 bg-secondary/35 px-3 py-2 text-sm font-medium text-foreground'>
+            <div className='break-all rounded-item border border-field-edge bg-field-surface px-3 py-2 text-sm font-medium text-foreground'>
               {removeTarget.torrent.name}
             </div>
           )}
-          <DialogFooter>
+          <AlertDialogFooter>
             <Button variant='secondary' disabled={actioning !== null} onClick={() => setRemoveTarget(null)}>
               Cancel
             </Button>
@@ -519,9 +540,9 @@ export default function QBittorrent() {
               {actioning ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Trash2 data-icon='inline-start' />}
               {removeTarget?.deleteFiles ? 'Remove and delete files' : 'Remove torrent'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

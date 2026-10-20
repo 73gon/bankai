@@ -1,0 +1,234 @@
+/*
+ * zon tokens — the single source of truth for colour, material, geometry and motion.
+ *
+ * Light is the default (:root). Dark applies under `.dark` / `[data-theme="dark"]`.
+ * `.theme-dark` / `.theme-light` force a scheme locally (e.g. a night footer on a light page).
+ *
+ * The brand is monochrome. `--destructive` (errors) and `--success` (confirmations) are status
+ * colours, used sparingly and never as accents or decoration.
+ */
+
+:root,
+.theme-light {
+  color-scheme: light;
+
+  /* ── Canvas & ink ─────────────────────────────────────────── */
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0.145 0 0);
+  --foreground-soft: oklch(0.37 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --accent: oklch(0.97 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --success: oklch(0.52 0.14 152); /* status only: saved, sent, connected (≥4.5:1 on white) */
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+
+  /* ── Material: controls ───────────────────────────────────── */
+  --control-surface: #f5f5f5; /* resting fill of secondary/raised surfaces */
+  --control-hover: #ebebeb; /* hovered / current fill — never use surface for this */
+  --control-edge: #0000002e; /* fine outer stroke */
+  --control-highlight: #ffffffe6; /* inset top highlight */
+  --control-inner-edge: #00000009; /* inner hairline + top shading */
+  --control-menu: #fafafa; /* menus, popovers, toasts */
+  --control-muted: #737373; /* placeholder, inactive segment text */
+  --control-focus: #737373; /* 2px flush focus outline */
+  --control-thumb: #ffffff; /* switch/slider thumb at rest */
+  --control-thumb-on: #ffffff; /* thumb on a primary-filled (checked) track */
+
+  /* Internal geometry: controls nested inside a field (steppers, clear buttons, chips, addon
+     buttons). Not steps on the 30/38/46 scale — they are the field height minus its inset. */
+  --control-inset: 30px; /* inside a 38px field (3px inset + 1px border) */
+  --control-inset-sm: 24px; /* inside a 30px dense field */
+
+  /* ── Material: fields (recessed) ──────────────────────────── */
+  --field-surface: #ffffff;
+  --field-edge: #d4d4d4;
+  --field-inset: #00000009;
+
+  /* ── Material: primary (layered, not flat) ────────────────── */
+  --primary-fill: #292929;
+  --primary-fill-hover: #383838;
+  --primary-text: #fafafa;
+  --primary-text-shadow: 0 1px 1px #0003;
+  --primary-shadow:
+    0 4px 4px #2a2a2a33, 0 0 0 1px #0e0e0e, inset 0 4px 6px #fff3, inset 0 0 0 1px #ffffff26,
+    inset 0 -8px 14px #00000026;
+  --primary-shadow-pressed: 0 0 0 1px #0e0e0e, inset 0 2px 6px #0000004d, inset 0 0 0 1px #ffffff1a;
+
+  /* ── Drawing: grids, guides, light ────────────────────────── */
+  --grid-line: #0a0a0a0f;
+  --grid-bright: #0a0a0a42;
+  --guide: #0a0a0a29;
+  --ink-ghost: #0a0a0a14;
+  --glow: #fffffff2;
+  --grain-opacity: 0.35;
+  /* The light from above on the page ground (body). None on a light page: white on white. */
+  --page-glow: transparent;
+  /* Overlay and screen vanish on a light ground: the page grain multiplies there instead. */
+  --page-grain-blend: multiply;
+  --page-grain-opacity: 0.1;
+
+  /* ── Isometric illustrations (<Illustration name="iso/…">) ───────────── */
+
+  /* ── Data ─────────────────────────────────────────────────── */
+  --chart-1: oklch(0.205 0 0);
+  --chart-2: oklch(0.38 0 0);
+  --chart-3: oklch(0.52 0 0);
+  --chart-4: oklch(0.66 0 0);
+  --chart-5: oklch(0.8 0 0);
+
+  /* ── Type ─────────────────────────────────────────────────── */
+  --font-heading: "Licht", "Iowan Old Style", Georgia, serif;
+  --font-body: "Licht Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Licht Mono", ui-monospace, "SF Mono", monospace;
+
+  /* ── Geometry ─────────────────────────────────────────────── */
+  --radius-button: 12px; /* text buttons, menus, toasts, nav rows, panels */
+  --radius-control: 10px; /* inputs, textareas, select triggers */
+  --radius-item: 7px; /* select/menu items, segments, tags, swatches */
+  --radius-checkbox: 5px;
+  --radius-card: 20px; /* objects: cards, tables, form panels */
+  --radius-region: 0px; /* regions are square */
+
+  --control-h-sm: 30px; /* dense */
+  --control-h: 38px; /* default */
+  --control-h-lg: 46px; /* prominent */
+  --icon-button: 36px;
+
+  --container: 80rem;
+  --gutter: 24px;
+  --section-pad: clamp(3.5rem, 7vw, 7rem);
+
+  /* ── Motion ───────────────────────────────────────────────── */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration: 150ms;
+  --duration-reveal: 420ms;
+
+  /* ── The zon mark ─────────────────────────────────────────── */
+  /* Its own two colours, the same in every theme: it is an object, a dark disc with a lit rim. */
+  --logo-disc: #1c1c1c;
+  --logo-light: #f6f6f4;
+}
+
+.dark,
+[data-theme="dark"],
+.theme-dark {
+  color-scheme: dark;
+
+  --background: oklch(0.07 0 0);
+  --foreground: oklch(0.985 0 0);
+  --foreground-soft: oklch(0.75 0 0);
+  --muted-foreground: oklch(0.66 0 0);
+  --card: oklch(0.115 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.115 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.16 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.155 0 0);
+  --accent: oklch(0.18 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --success: oklch(0.76 0.16 152);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.556 0 0);
+
+  --control-surface: #1e1e1e;
+  --control-hover: #2a2a2a;
+  --control-edge: #000000a6;
+  --control-highlight: #ffffff1a;
+  --control-inner-edge: #ffffff0f;
+  --control-menu: #1e1e1e;
+  --control-muted: #a3a3a3;
+  --control-focus: #999999;
+  --control-thumb: #8f8f8f; /* light enough to read on the #161616 track */
+  --control-thumb-on: #1c1c1c; /* dark thumb on the near-white checked track */
+
+  --field-surface: #161616;
+  --field-edge: #393939;
+  --field-inset: #00000038;
+
+  /* The dark primary mirrors the light one by perceived contrast (OKLab L), not by inverting
+   * colours: the fill sits as far from the page as #292929 does in light mode, and leaves the
+   * white glow and rim the same headroom to read (+0.16 / +0.14 L). A fill near white (#ededed)
+   * left them nowhere to go and the button went flat. Hover brightens only a little, for the
+   * same reason. */
+  --primary-fill: #cbcbcb;
+  --primary-fill-hover: #d5d5d5;
+  --primary-text: #171717;
+  --primary-text-shadow: 0 1px 0 #ffffffb3;
+  --primary-shadow:
+    0 4px 4px #00000073, 0 0 0 1px #000000, inset 0 4px 7px #ffffff, inset 0 0 0 1px #ffffffe6,
+    inset 0 -8px 14px #0000000b;
+  --primary-shadow-pressed: 0 0 0 1px #000000, inset 0 2px 6px #00000059, inset 0 0 0 1px #ffffff66;
+
+  --grid-line: #ffffff0d;
+  --grid-bright: #ffffff38;
+  --guide: #ffffff29;
+  --ink-ghost: #ffffff12;
+  --glow: #ffffff1f;
+  --grain-opacity: 0.55;
+  --page-glow: rgb(255 255 255 / 0.035);
+  --page-grain-blend: overlay;
+  --page-grain-opacity: calc(var(--grain-opacity) * 1.5);
+
+  /* re-declared so var(--background) resolves inside dark regions, not at :root */
+
+  --chart-1: oklch(0.985 0 0);
+  --chart-2: oklch(0.8 0 0);
+  --chart-3: oklch(0.66 0 0);
+  --chart-4: oklch(0.52 0 0);
+  --chart-5: oklch(0.38 0 0);
+}
+
+/* Night: the deepest ground, used by the horizon footer and dark specimen sheets. */
+.theme-night {
+  color-scheme: dark;
+  --background: #040404;
+  --destructive: oklch(0.704 0.191 22.216);
+  --success: oklch(0.76 0.16 152);
+  --foreground: #fafafa;
+  --foreground-soft: #aeaeae;
+  --muted-foreground: #929292;
+  --border: #ffffff1a;
+  --control-surface: #1e1e1e;
+  --control-hover: #2a2a2a;
+  --control-edge: #000000a6;
+  --control-highlight: #ffffff1a;
+  --control-inner-edge: #ffffff0f;
+  --control-focus: #999999;
+  --control-thumb: #8f8f8f;
+  --control-thumb-on: #1c1c1c;
+  --field-surface: #161616;
+  --field-edge: #393939;
+  --field-inset: #00000038;
+  --grid-line: #ffffff0d;
+  --grid-bright: #ffffff38;
+  --guide: #ffffff29;
+  /* Lower than dark: on a #040404 ground the default reads as grey static. */
+  --grain-opacity: 0.3;
+  --page-glow: rgb(255 255 255 / 0.035);
+  --page-grain-blend: overlay;
+  --page-grain-opacity: calc(var(--grain-opacity) * 1.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration: 0ms;
+    --duration-reveal: 0ms;
+  }
+}

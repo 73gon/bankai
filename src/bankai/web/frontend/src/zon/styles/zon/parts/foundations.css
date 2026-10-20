@@ -1,0 +1,134 @@
+/* foundations components — owned by the foundations group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
+
+/*
+ * Prose — rich text from Markdown or a CMS. Descendant and sibling selectors are the reason
+ * this lives in CSS. Selectors are wrapped in :where() so any utility on a child still wins,
+ * and the block sits in the components layer so utilities on the wrapper win too.
+ */
+@layer components {
+  .ep-prose {
+    max-width: 68ch;
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--foreground-soft);
+
+    /* Flow spacing between blocks: direct children, and blocks inside quotes and list items. */
+    & > :where(* + *),
+    & :where(blockquote, li, figure) > :where(* + *) {
+      margin-top: 20px;
+    }
+
+    & :where(h2, h3, h4) {
+      font-family: var(--font-heading);
+      font-weight: 300;
+      font-kerning: normal;
+      letter-spacing: -0.02em;
+      text-wrap: balance;
+      color: var(--foreground);
+    }
+    & :where(h2) {
+      font-size: 30px;
+      line-height: 1.1;
+      @media (width >= 48rem) {
+        font-size: 36px;
+      }
+    }
+    & :where(h3) {
+      font-size: 24px;
+      line-height: 1.15;
+    }
+    & :where(h4) {
+      font-size: 20px;
+      line-height: 1.25;
+    }
+    & :where(* + h2) {
+      margin-top: 64px;
+    }
+    & :where(* + h3) {
+      margin-top: 48px;
+    }
+    & :where(* + h4) {
+      margin-top: 32px;
+    }
+    & :where(h2 + *, h3 + *) {
+      margin-top: 16px;
+    }
+    & :where(h4 + *) {
+      margin-top: 12px;
+    }
+
+    & :where(p, li) {
+      text-wrap: pretty;
+    }
+    & :where(strong, b) {
+      font-weight: 500;
+      color: var(--foreground);
+    }
+
+    & :where(a) {
+      @apply link;
+    }
+
+    & :where(ul, ol) {
+      padding-left: 24px;
+    }
+    & :where(ul) {
+      list-style-type: disc;
+    }
+    & :where(ol) {
+      list-style-type: decimal;
+    }
+    & :where(li) {
+      padding-left: 4px;
+    }
+    & :where(li + li, li > ul, li > ol) {
+      margin-top: 8px;
+    }
+    & :where(li)::marker {
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 0.85em;
+    }
+
+    & :where(code, kbd, samp) {
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      color: var(--foreground);
+    }
+    & :where(pre) {
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--foreground);
+    }
+    & :where(pre code) {
+      font-size: inherit;
+    }
+
+    & :where(blockquote) {
+      padding-left: 24px;
+      border-left: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+      color: var(--foreground);
+    }
+
+    & :where(hr) {
+      margin-block: 48px;
+      border: 0;
+      border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+    }
+    & :where(hr + *) {
+      margin-top: 0;
+    }
+
+    & :where(img, video, figure) {
+      max-width: 100%;
+    }
+    & :where(figcaption) {
+      margin-top: 12px;
+      font-size: 15px;
+      color: var(--muted-foreground);
+    }
+  }
+}

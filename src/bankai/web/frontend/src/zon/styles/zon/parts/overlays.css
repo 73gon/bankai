@@ -1,0 +1,198 @@
+/* overlays components — owned by the overlays group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
+
+/*
+ * Drawer and toast motion. Both follow the pointer while swiping (Base UI writes the movement
+ * into CSS variables), so their transforms compose several variables per side and state, which
+ * is clearer here than as arbitrary Tailwind values. Larger travel uses 3 × --duration with the
+ * brand ease; --duration is 0 under prefers-reduced-motion, so all of this collapses to instant.
+ */
+
+@layer components {
+  /* ── Drawer ──────────────────────────────────────────────────────────────── */
+
+  [data-slot="drawer-backdrop"] {
+    opacity: calc(1 - var(--drawer-swipe-progress, 0));
+    transition: opacity calc(var(--duration) * 3) var(--ease);
+
+    &[data-starting-style],
+    &[data-ending-style] {
+      opacity: 0;
+    }
+    &[data-ending-style] {
+      transition-duration: calc(var(--drawer-swipe-strength, 1) * var(--duration) * 3);
+    }
+    &[data-swiping] {
+      transition-duration: 0ms;
+    }
+  }
+
+  [data-slot="drawer-content"] {
+    --drawer-bleed: 3rem;
+    transition:
+      transform calc(var(--duration) * 3) var(--ease),
+      padding-bottom calc(var(--duration) * 3) var(--ease);
+
+    /* Fills the gap behind the panel when it is pulled past its resting edge. */
+    &::after {
+      content: "";
+      position: absolute;
+      pointer-events: none;
+      background: var(--field-surface);
+    }
+
+    &[data-swiping] {
+      transition-duration: 0ms;
+      user-select: none;
+    }
+    &[data-ending-style] {
+      transition-duration: calc(var(--drawer-swipe-strength, 1) * var(--duration) * 3);
+    }
+
+    /*
+     * Bottom sheet: snap offset + vertical swipe. While a drag is live Base UI also writes the
+     * offset as an inline transform (and `transition: none`), so the sheet tracks the pointer 1:1.
+     */
+    &[data-side="bottom"] {
+      transform: translateY(calc(var(--drawer-snap-point-offset, 0px) + var(--drawer-swipe-movement-y, 0px)));
+
+      /*
+       * Full-height sheets keep the body's end on screen at a snap point: the padding shrinks the
+       * scroll area by however far the sheet is pushed down. Only a sheet with a fixed height may
+       * do this — on an auto-height sheet the padding would grow the sheet by exactly as much as
+       * the transform moves it, so the sheet would stand still under the pointer.
+       */
+      &[data-full-height] {
+        padding-bottom: max(
+          0px,
+          calc(var(--drawer-snap-point-offset, 0px) + var(--drawer-swipe-movement-y, 0px))
+        );
+      }
+
+      &::after {
+        top: 100%;
+        left: -1px;
+        right: -1px;
+        height: var(--drawer-bleed);
+        border-inline: 1px solid var(--field-edge);
+      }
+      &[data-starting-style],
+      &[data-ending-style] {
+        transform: translateY(calc(100% + 2px));
+        padding-bottom: 0;
+      }
+    }
+
+    /* Side panels: horizontal swipe. */
+    &[data-side="right"] {
+      transform: translateX(var(--drawer-swipe-movement-x, 0px));
+
+      &::after {
+        top: 0;
+        bottom: 0;
+        left: 100%;
+        width: var(--drawer-bleed);
+      }
+      &[data-starting-style],
+      &[data-ending-style] {
+        transform: translateX(calc(100% + 2px));
+      }
+    }
+
+    &[data-side="left"] {
+      transform: translateX(var(--drawer-swipe-movement-x, 0px));
+
+      &::after {
+        top: 0;
+        bottom: 0;
+        right: 100%;
+        width: var(--drawer-bleed);
+      }
+      &[data-starting-style],
+      &[data-ending-style] {
+        transform: translateX(calc(-100% - 2px));
+      }
+    }
+  }
+
+  /* ── Toast stack ─────────────────────────────────────────────────────────── */
+
+  [data-slot="toast"] {
+    --gap: 0.75rem;
+    --peek: 0.625rem;
+    --scale: calc(max(0, 1 - (var(--toast-index) * 0.05)));
+    --shrink: calc(1 - var(--scale));
+    --height: var(--toast-frontmost-height, var(--toast-height));
+    --offset-y: calc(
+      var(--toast-offset-y) * -1 + (var(--toast-index) * var(--gap) * -1) + var(--toast-swipe-movement-y)
+    );
+
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: var(--height);
+    z-index: calc(1000 - var(--toast-index));
+    transform-origin: bottom center;
+    transform: translateX(var(--toast-swipe-movement-x))
+      translateY(
+        calc(
+          var(--toast-swipe-movement-y) - (var(--toast-index) * var(--peek)) - (var(--shrink) * var(--height))
+        )
+      )
+      scale(var(--scale));
+    user-select: none;
+    transition:
+      transform calc(var(--duration) * 3) var(--ease),
+      opacity calc(var(--duration) * 3) var(--ease),
+      height var(--duration) var(--ease);
+
+    /* Bridges the gap between expanded toasts so hover doesn't flicker. */
+    &::after {
+      content: "";
+      position: absolute;
+      top: 100%;
+      left: 0;
+      width: 100%;
+      height: calc(var(--gap) + 1px);
+    }
+
+    &[data-expanded] {
+      height: var(--toast-height);
+      transform: translateX(var(--toast-swipe-movement-x)) translateY(var(--offset-y));
+    }
+    &[data-starting-style] {
+      transform: translateY(150%);
+    }
+    &[data-limited],
+    &[data-ending-style] {
+      opacity: 0;
+    }
+    &[data-ending-style]:not([data-limited]):not([data-swipe-direction]) {
+      transform: translateY(150%);
+    }
+    &[data-ending-style][data-swipe-direction="down"] {
+      transform: translateY(calc(var(--toast-swipe-movement-y) + 150%));
+    }
+    &[data-ending-style][data-swipe-direction="up"] {
+      transform: translateY(calc(var(--toast-swipe-movement-y) - 150%));
+    }
+    &[data-ending-style][data-swipe-direction="right"] {
+      transform: translateX(calc(var(--toast-swipe-movement-x) + 150%)) translateY(var(--offset-y));
+    }
+    &[data-ending-style][data-swipe-direction="left"] {
+      transform: translateX(calc(var(--toast-swipe-movement-x) - 150%)) translateY(var(--offset-y));
+    }
+  }
+
+  /* Content of toasts behind the front one fades out; it returns when the stack expands. */
+  [data-slot="toast-content"] {
+    transition: opacity calc(var(--duration) * 2) var(--ease);
+
+    &[data-behind] {
+      opacity: 0;
+    }
+    &[data-expanded] {
+      opacity: 1;
+    }
+  }
+}

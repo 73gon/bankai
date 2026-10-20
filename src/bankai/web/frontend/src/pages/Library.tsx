@@ -29,21 +29,59 @@ import {
   Link2,
   MoreHorizontal,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { Slider } from '@/components/ui/slider';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { EmptyState } from '@/components/ui/empty';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from '@/components/ui/popover';
+import { Button } from '@/zon/ui/button';
+import { Input } from '@/zon/ui/input';
+import { Badge } from '@/zon/ui/badge';
+import { Slider } from '@/zon/ui/slider';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/zon/ui/alert-dialog';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Tabs, TabsList, TabsTab, TabsPanel } from '@/zon/ui/tabs';
+import { Popover, PopoverContent, PopoverDescription, PopoverTitle, PopoverTrigger } from '@/zon/ui/popover';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { StatusTag } from '@/components/status-tag';
+import { SortHeader } from '@/components/sort-header';
 import { formatBytes } from '@/lib/utils';
-import { cn } from '@/lib/utils';
+import { cn } from '@/zon/lib/cn';
+
+const PAGE_SIZE_ITEMS = [
+  { value: '10', label: '10' },
+  { value: '25', label: '25' },
+  { value: '50', label: '50' },
+  { value: '100', label: '100' },
+];
+
+const QUALITY_ITEMS = [
+  { value: '360', label: '360p' },
+  { value: '480', label: '480p' },
+  { value: '720', label: '720p' },
+  { value: '1080', label: '1080p' },
+];
+
+// zon's Empty, composed the way the old EmptyState took its props.
+function EmptyNote({ icon: Icon, title, description }: { icon: React.ComponentType<{ className?: string }>; title: string; description: string }) {
+  return (
+    <Empty>
+      <EmptyMedia>
+        <Icon />
+      </EmptyMedia>
+      <EmptyTitle>{title}</EmptyTitle>
+      <EmptyDescription>{description}</EmptyDescription>
+    </Empty>
+  );
+}
 
 // After a reload, the last answer this browser saw -- stale, so refreshed at once.
 let queueRowsCache: TitleRow[] | null = recall<{ rows: TitleRow[] }>(pagePaths.titles)?.rows ?? null;
@@ -81,7 +119,7 @@ function ansi256(n: number): string {
 }
 
 function AnsiLog({ text }: { text: string }) {
-  const nodes: JSX.Element[] = [];
+  const nodes: React.JSX.Element[] = [];
   let color: string | undefined;
   let bold = false;
   let key = 0;
@@ -174,10 +212,8 @@ function TruncCell({
   if (!text) return <span className='text-foreground'>-</span>;
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <div className={cn('truncate cursor-default', mono && 'font-mono')} style={{ maxWidth: width }}>
-          {text}
-        </div>
+      <TooltipTrigger render={<div className={cn('truncate cursor-default', mono && 'font-mono')} style={{ maxWidth: width }} />}>
+        {text}
       </TooltipTrigger>
       <TooltipContent className={cn(mono && 'font-mono')}>{tooltip || text}</TooltipContent>
     </Tooltip>
@@ -205,20 +241,21 @@ function SourceCell({ r }: { r: TitleRow }) {
     <div className='flex items-center gap-1'>
       {sources.map((source) => (
         <Tooltip key={source.label}>
-          <TooltipTrigger asChild>
-            <Button
-              size='sm'
-              variant='secondary'
-              className='h-7 w-10 px-2 font-mono text-xs'
-              aria-label={`Open ${source.name} source in a new tab`}
-              asChild
-            >
-              <a href={source.url!} target='_blank' rel='noreferrer' onClick={(event) => event.stopPropagation()}>
-                {source.label}
-              </a>
-            </Button>
+          <TooltipTrigger
+            render={
+              <Button
+                size='sm'
+                variant='secondary'
+                className='w-10 px-2 font-mono text-xs'
+                aria-label={`Open ${source.name} source in a new tab`}
+                nativeButton={false}
+                render={<a href={source.url!} target='_blank' rel='noreferrer' onClick={(event) => event.stopPropagation()} />}
+              />
+            }
+          >
+            {source.label}
           </TooltipTrigger>
-          <TooltipContent className='max-w-md'>
+          <TooltipContent variant='text' className='max-w-md'>
             <div className='flex flex-col gap-1'>
               <span className='font-medium'>
                 Open {source.name} source
@@ -243,52 +280,55 @@ function TorrentCandidateTable({
   onSelect: (candidate: TorrentCandidate) => void | Promise<void>;
 }) {
   return (
-    <div className='min-h-0 overflow-auto rounded-lg border border-border'>
-      <table className='w-full min-w-[58rem] table-fixed text-left text-sm text-foreground'>
-        <thead className='sticky top-0 z-10 bg-card text-xs uppercase tracking-wide text-foreground'>
-          <tr>
-            <th className='w-[46%] px-3 py-2'>Title</th>
-            <th className='w-32 px-3 py-2'>Policy</th>
-            <th className='w-24 px-3 py-2 text-right'>Seeders</th>
-            <th className='w-24 px-3 py-2 text-right'>Size</th>
-            <th className='w-24 px-3 py-2 text-right'>Length</th>
-            <th className='w-36 px-3 py-2'>Source</th>
-            <th className='w-32 px-3 py-2 text-right'>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {candidates.map((candidate) => (
-            <tr key={candidate.id} className='border-t border-border/70 hover:bg-white/[0.03]'>
-              <td className='px-3 py-2.5 font-medium'><TruncCell text={candidate.title} width='100%' /></td>
-              <td className='px-3 py-2.5'>
-                <Badge variant={candidate.eligible ? 'success' : 'warning'}>{candidate.eligible ? 'Meets policy' : 'Manual override'}</Badge>
-              </td>
-              <td className='px-3 py-2.5 text-right font-mono'>{candidate.seeders}</td>
-              <td className='px-3 py-2.5 text-right font-mono'>{formatBytes(candidate.size_bytes)}</td>
-              <td className='px-3 py-2.5 text-right font-mono'>{candidate.runtime_seconds ? `${Math.round(candidate.runtime_seconds / 60)} min` : '—'}</td>
-              <td className='px-3 py-2.5'><TruncCell text={candidate.indexer} width='8rem' /></td>
-              <td className='px-3 py-2.5 text-right'>
-                <div className='flex items-center justify-end gap-1'>
-                  {candidate.info_url && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button size='icon' variant='ghost' asChild>
-                          <a href={candidate.info_url} target='_blank' rel='noreferrer' aria-label={`Open ${candidate.title} details`}>
-                            <ExternalLink data-icon='inline-start' />
-                          </a>
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Open the indexer description</TooltipContent>
-                    </Tooltip>
-                  )}
-                  <Button size='sm' disabled={busy} onClick={() => onSelect(candidate)}>Select</Button>
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Table dense containerProps={{ className: 'min-h-0 overflow-auto' }} className='min-w-[58rem] table-fixed text-foreground'>
+      <TableHeader className='sticky top-0 z-10 bg-card'>
+        <TableRow>
+          <TableHead className='w-[46%]'>Title</TableHead>
+          <TableHead className='w-32'>Policy</TableHead>
+          <TableHead numeric className='w-24'>Seeders</TableHead>
+          <TableHead numeric className='w-24'>Size</TableHead>
+          <TableHead numeric className='w-24'>Length</TableHead>
+          <TableHead className='w-36'>Source</TableHead>
+          <TableHead numeric className='w-32'>Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {candidates.map((candidate) => (
+          <TableRow key={candidate.id}>
+            <TableCell className='font-medium text-foreground'><TruncCell text={candidate.title} width='100%' /></TableCell>
+            <TableCell>
+              <StatusTag variant={candidate.eligible ? 'success' : 'warning'}>{candidate.eligible ? 'Meets policy' : 'Manual override'}</StatusTag>
+            </TableCell>
+            <TableCell numeric>{candidate.seeders}</TableCell>
+            <TableCell numeric>{formatBytes(candidate.size_bytes)}</TableCell>
+            <TableCell numeric>{candidate.runtime_seconds ? `${Math.round(candidate.runtime_seconds / 60)} min` : '—'}</TableCell>
+            <TableCell><TruncCell text={candidate.indexer} width='8rem' /></TableCell>
+            <TableCell className='text-right'>
+              <div className='flex items-center justify-end gap-1'>
+                {candidate.info_url && (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          size='icon-sm'
+                          variant='ghost'
+                          nativeButton={false}
+                          render={<a href={candidate.info_url} target='_blank' rel='noreferrer' aria-label={`Open ${candidate.title} details`} />}
+                        />
+                      }
+                    >
+                      <ExternalLink data-icon='inline-start' />
+                    </TooltipTrigger>
+                    <TooltipContent>Open the indexer description</TooltipContent>
+                  </Tooltip>
+                )}
+                <Button size='sm' variant='secondary' disabled={busy} onClick={() => onSelect(candidate)}>Select</Button>
+              </div>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 
@@ -337,18 +377,18 @@ function TorrentPickerTools({
         value={filters[key]}
         onChange={(event) => onChange({ ...filters, [key]: event.target.value })}
         placeholder={placeholder}
-        className='h-8'
+        size='sm'
       />
     </label>
   );
   return (
-    <div className='flex flex-col gap-3 rounded-lg border border-border bg-secondary/20 p-3'>
+    <div className='flex shrink-0 flex-col gap-3 rounded-button surface-container p-3'>
       <div className='grid gap-2 sm:grid-cols-2 lg:grid-cols-[repeat(4,minmax(7rem,1fr))_auto] lg:items-end'>
         {field('minSeeders', 'Min seeders', 'Default')}
         {field('maxSeeders', 'Max seeders', 'Unlimited')}
         {field('minSizeGib', 'Min size (GB)', 'Default')}
         {field('maxSizeGib', 'Max size (GB)', 'Default')}
-        <Button variant='secondary' onClick={onSearch} disabled={busy}>
+        <Button size='sm' variant='secondary' onClick={onSearch} disabled={busy}>
           {busy ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <RefreshCw data-icon='inline-start' />}
           Apply
         </Button>
@@ -361,6 +401,7 @@ function TorrentPickerTools({
           className='min-w-0 flex-1 font-mono text-xs'
         />
         <Button
+          variant='secondary'
           onClick={() => onMagnet(filters.magnet)}
           disabled={busy || !filters.magnet.trim()}
         >
@@ -442,7 +483,7 @@ const STATUS_VARIANT: Record<Status, 'queue' | 'starting' | 'extract' | 'torrent
 };
 
 const STATUS_ROW_TINT: Record<Status, string> = {
-  queued: 'bg-queue/80 hover:bg-queue',
+  queued: 'bg-control-surface/80 hover:bg-control-hover',
   starting: 'bg-starting/[0.15] hover:bg-starting/[0.22]',
   extracting: 'bg-extract/[0.13] hover:bg-extract/[0.2]',
   downloading: 'bg-torrent/[0.13] hover:bg-torrent/[0.2]',
@@ -518,21 +559,21 @@ function StatusCell({ r }: { r: TitleRow }) {
   const s = rowStatus(r);
   if (s === 'queued') {
     return (
-      <Badge variant={STATUS_VARIANT[s]}>
+      <StatusTag variant={STATUS_VARIANT[s]}>
         Queued{r.queue_position != null ? ` #${r.queue_position}` : ''}
-      </Badge>
+      </StatusTag>
     );
   }
   if (['starting', 'extracting', 'downloading', 'syncing', 'remuxing'].includes(s)) {
     const pct = Math.round(r.overall_percent ?? 0);
     return (
       <div className='min-w-[10rem]'>
-        <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
+        <StatusTag variant={STATUS_VARIANT[s]} className='gap-1.5'>
           <Loader2 className='h-3 w-3 animate-spin' />
           {r.step_label || STATUS_LABEL[s]} {pct > 0 ? `${pct}%` : ''}
-        </Badge>
+        </StatusTag>
         {pct > 0 && (
-          <div className='mt-1 h-1 overflow-hidden rounded-full bg-secondary'>
+          <div className='mt-1 h-1 overflow-hidden rounded-full bg-control-surface'>
             <div
               className={cn(
                 'h-full rounded-full',
@@ -548,28 +589,28 @@ function StatusCell({ r }: { r: TitleRow }) {
   if (s === 'transferring') {
     const pct = Math.round(r.transfer_percent || 0);
     return (
-      <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
+      <StatusTag variant={STATUS_VARIANT[s]} className='gap-1.5'>
         <Loader2 className='h-3 w-3 animate-spin' /> Transferring {pct > 0 ? `${pct}%` : ''}
-      </Badge>
+      </StatusTag>
     );
   }
   if (s === 'repacking') {
     const pct = Math.round(r.repack_percent || 0);
     return (
-      <Badge variant={STATUS_VARIANT[s]} className='gap-1.5'>
+      <StatusTag variant={STATUS_VARIANT[s]} className='gap-1.5'>
         <Loader2 className='h-3 w-3 animate-spin' /> {r.repack_label || (r.repack_kind === 'torrent' ? 'Replacing torrent' : 'Repacking')}{' '}
         {pct > 0 ? `${pct}%` : ''}
-      </Badge>
+      </StatusTag>
     );
   }
   if (s === 'failed' && r.reason) {
     return (
-      <Badge variant='destructive' title={r.reason_detail || r.reason} className='max-w-[18rem] truncate'>
-        {r.reason}
-      </Badge>
+      <StatusTag variant='destructive' title={r.reason_detail || r.reason} className='max-w-[18rem]'>
+        <span className='truncate'>{r.reason}</span>
+      </StatusTag>
     );
   }
-  return <Badge variant={STATUS_VARIANT[s]}>{STATUS_LABEL[s]}</Badge>;
+  return <StatusTag variant={STATUS_VARIANT[s]}>{STATUS_LABEL[s]}</StatusTag>;
 }
 
 function statusRank(r: TitleRow): number {
@@ -709,18 +750,18 @@ function StatusMultiSelect({
     <div ref={ref} className='relative'>
       <button
         onClick={() => setOpen((o) => !o)}
-        className='flex h-9 min-w-[12rem] max-w-[20rem] items-center justify-between gap-2 rounded-md border border-white/10 bg-gradient-to-b from-white/[0.02] to-transparent px-3 text-sm transition-colors hover:border-white/20'
+        className='flex min-h-(--control-h) min-w-[12rem] max-w-[20rem] cursor-pointer items-center justify-between gap-2 rounded-control material-field px-3.5 text-sm'
       >
         <span className='truncate text-left text-muted-foreground'>{label}</span>
-        <ChevronsUpDown className='h-4 w-4 shrink-0 opacity-50' />
+        <ChevronsUpDown className='h-4 w-4 shrink-0 text-muted-foreground' />
       </button>
       {open && (
-        <div className='absolute z-50 mt-1 w-64 rounded-md border border-border bg-card p-1 shadow-lg'>
+        <div className='absolute z-50 mt-1.5 w-64 rounded-button material-menu p-1'>
           {all.map((s) => (
             <button
               key={s}
               onClick={() => onToggle(s)}
-              className='flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-secondary'
+              className='flex w-full cursor-pointer items-center justify-between gap-2 rounded-item px-2 py-1.5 text-sm text-foreground-soft hover:bg-control-hover hover:text-foreground'
             >
               <span className='flex items-center gap-2'>
                 <span
@@ -733,11 +774,11 @@ function StatusMultiSelect({
                 </span>
                 {STATUS_LABEL[s]}
               </span>
-              <span className='text-xs text-muted-foreground'>{counts[s] ?? 0}</span>
+              <span className='font-mono text-xs text-muted-foreground tabular-nums'>{counts[s] ?? 0}</span>
             </button>
           ))}
           {selected.size > 0 && (
-            <button onClick={onClear} className='mt-1 w-full rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-secondary'>
+            <button onClick={onClear} className='mt-1 w-full cursor-pointer rounded-item px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-control-hover hover:text-foreground'>
               Clear all
             </button>
           )}
@@ -1242,34 +1283,34 @@ export default function Library() {
     if (r.sync_user_approved || ['approved', 'transferred'].includes(r.stage || '')) {
       const appliedDelay = `${r.delay_ms > 0 ? '+' : ''}${r.delay_ms} ms`;
       return (
-        <Badge variant='success' title={`Approved by you with an applied delay of ${appliedDelay}.`}>
+        <StatusTag variant='success' title={`Approved by you with an applied delay of ${appliedDelay}.`}>
           Spot on · {appliedDelay}
-        </Badge>
+        </StatusTag>
       );
     }
     if (r.duration_compatible === false) {
       const minutes = r.duration_delta_seconds == null ? null : Math.abs(r.duration_delta_seconds) / 60;
       return (
-        <Badge
+        <StatusTag
           variant='destructive'
           title={minutes == null ? 'German and HQ runtimes are incompatible.' : `German and HQ runtimes differ by ${minutes.toFixed(1)} minutes.`}
         >
           Out of sync
-        </Badge>
+        </StatusTag>
       );
     }
     const c = r.sync_confidence;
     if (c == null) {
       if (r.needs_sync_review)
         return (
-          <Badge variant='review' title='Automatic alignment was inconclusive — open Review.'>
+          <StatusTag variant='review' title='Automatic alignment was inconclusive — open Review.'>
             Manual review
-          </Badge>
+          </StatusTag>
         );
       return (
-        <Badge variant='muted' title='No automatic audio sync was applied.'>
+        <StatusTag variant='muted' title='No automatic audio sync was applied.'>
           Not analyzed
-        </Badge>
+        </StatusTag>
       );
     }
     const pct = Math.round(c * 100);
@@ -1282,9 +1323,9 @@ export default function Library() {
             ? { label: 'Needs tuning', variant: 'warning' as const }
             : { label: 'Out of sync', variant: 'destructive' as const };
     return (
-      <Badge variant={acc.variant} title={`Automatic sync confidence ${pct}%`}>
+      <StatusTag variant={acc.variant} title={`Automatic sync confidence ${pct}%`}>
         {acc.label}
-      </Badge>
+      </StatusTag>
     );
   }
 
@@ -1317,210 +1358,199 @@ export default function Library() {
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
-        <tr className={cn('border-t border-border text-foreground', STATUS_ROW_TINT[status])}>
-          <td className='px-2 py-2 align-middle'>
+        <TableRow className={cn('text-foreground', STATUS_ROW_TINT[status])}>
+          <TableCell className='px-2 py-2'>
             <Poster r={r} />
-          </td>
-          <td className='max-w-[24rem] px-2 py-2 align-middle'>
+          </TableCell>
+          <TableCell className='max-w-[24rem] px-2 py-2 text-foreground'>
             <div className='flex items-center gap-1.5'>
               <span className='truncate font-medium'>{titleWithYear(r)}</span>
             </div>
-            {isLib && r.size ? <div className='text-xs text-foreground'>{formatBytes(r.size)}</div> : null}
-          </td>
-          <td className='px-2 py-2 align-middle text-xs text-foreground'>{typeLabel(r)}</td>
-          <td className='px-2 py-2 align-middle'>
+            {isLib && r.size ? <div className='font-mono text-xs text-foreground-soft tabular-nums'>{formatBytes(r.size)}</div> : null}
+          </TableCell>
+          <TableCell className='px-2 py-2 text-xs text-foreground'>{typeLabel(r)}</TableCell>
+          <TableCell className='px-2 py-2'>
             <StatusCell r={r} />
-          </td>
-          <td className='px-2 py-2 align-middle'>
+          </TableCell>
+          <TableCell className='px-2 py-2'>
             <SyncCell r={r} />
-          </td>
-          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-foreground'>{dateTimeLabel(r.created_at)}</td>
-          <td className='whitespace-nowrap px-2 py-2 align-middle text-xs text-foreground'>{dateTimeLabel(r.updated_at)}</td>
-          <td className='px-2 py-2 align-middle'>
+          </TableCell>
+          <TableCell className='whitespace-nowrap px-2 py-2 font-mono text-xs text-foreground tabular-nums'>{dateTimeLabel(r.created_at)}</TableCell>
+          <TableCell className='whitespace-nowrap px-2 py-2 font-mono text-xs text-foreground tabular-nums'>{dateTimeLabel(r.updated_at)}</TableCell>
+          <TableCell className='px-2 py-2'>
             <SourceCell r={r} />
-          </td>
-          <td className='px-2 py-2 align-middle' onClick={stop}>
+          </TableCell>
+          <TableCell className='px-2 py-2' onClick={stop}>
             <div className='flex items-center justify-end gap-1'>
               {r.action_required && (
-                <Button size='sm' variant='default' onClick={() => openTorrentAction(r)}>
+                <Button size='sm' variant='secondary' onClick={() => openTorrentAction(r)}>
                   <Download data-icon='inline-start' /> Select torrent
                 </Button>
               )}
               {canForce && (
                 <>
                   <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size='icon'
-                        variant='ghost'
-                        disabled={queueBusy.has(r.id) || (r.queue_position ?? 1) <= 1}
-                        onClick={() => moveQueuedJob(r, -1)}
-                        aria-label='Move queued job earlier'
-                      >
-                        <ChevronUp data-icon='inline-start' />
-                      </Button>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          size='icon-sm'
+                          variant='ghost'
+                          disabled={queueBusy.has(r.id) || (r.queue_position ?? 1) <= 1}
+                          onClick={() => moveQueuedJob(r, -1)}
+                          aria-label='Move queued job earlier'
+                        />
+                      }
+                    >
+                      <ChevronUp data-icon='inline-start' />
                     </TooltipTrigger>
                     <TooltipContent>Move earlier in the queue</TooltipContent>
                   </Tooltip>
                   <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size='icon'
-                        variant='ghost'
-                        disabled={queueBusy.has(r.id) || (r.queue_position ?? 0) >= (r.queue_total ?? 0)}
-                        onClick={() => moveQueuedJob(r, 1)}
-                        aria-label='Move queued job later'
-                      >
-                        <ChevronDown data-icon='inline-start' />
-                      </Button>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          size='icon-sm'
+                          variant='ghost'
+                          disabled={queueBusy.has(r.id) || (r.queue_position ?? 0) >= (r.queue_total ?? 0)}
+                          onClick={() => moveQueuedJob(r, 1)}
+                          aria-label='Move queued job later'
+                        />
+                      }
+                    >
+                      <ChevronDown data-icon='inline-start' />
                     </TooltipTrigger>
                     <TooltipContent>Move later in the queue</TooltipContent>
                   </Tooltip>
                   <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size='icon'
-                        variant='ghost'
-                        disabled={queueBusy.has(r.id)}
-                        onClick={() => forceJob(r.job_id!)}
-                        aria-label='Force queued job to start'
-                      >
-                        {queueBusy.has(r.id) ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <CirclePlay data-icon='inline-start' />}
-                      </Button>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          size='icon-sm'
+                          variant='ghost'
+                          disabled={queueBusy.has(r.id)}
+                          onClick={() => forceJob(r.job_id!)}
+                          aria-label='Force queued job to start'
+                        />
+                      }
+                    >
+                      {queueBusy.has(r.id) ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <CirclePlay data-icon='inline-start' />}
                     </TooltipTrigger>
                     <TooltipContent>Start now, bypassing the concurrent-job limit</TooltipContent>
                   </Tooltip>
                 </>
               )}
               {isLib && !rerunActive && !reviewComplete && (
-                <Button size='sm' variant='default' onClick={() => setReview(r)} disabled={operationLocked}>
+                <Button size='sm' variant='secondary' onClick={() => setReview(r)} disabled={operationLocked}>
                   <Play data-icon='inline-start' /> Review
                 </Button>
               )}
               {isLib && !rerunActive && reviewComplete && (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button size='icon' variant='ghost' onClick={() => setReview(r)} disabled={operationLocked} aria-label='Open review'>
-                      <Play data-icon='inline-start' />
-                    </Button>
+                  <TooltipTrigger
+                    render={<Button size='icon-sm' variant='ghost' onClick={() => setReview(r)} disabled={operationLocked} aria-label='Open review' />}
+                  >
+                    <Play data-icon='inline-start' />
                   </TooltipTrigger>
                   <TooltipContent>Open the approved review</TooltipContent>
                 </Tooltip>
               )}
               {isLib && (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size='icon'
-                      variant='ghost'
-                      onClick={() => openTorrentReplacement(r)}
-                      disabled={operationLocked}
-                      aria-label='Select a new torrent'
-                    >
-                      <Download data-icon='inline-start' />
-                    </Button>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size='icon-sm'
+                        variant='ghost'
+                        onClick={() => openTorrentReplacement(r)}
+                        disabled={operationLocked}
+                        aria-label='Select a new torrent'
+                      />
+                    }
+                  >
+                    <Download data-icon='inline-start' />
                   </TooltipTrigger>
                   <TooltipContent>Select a new torrent</TooltipContent>
                 </Tooltip>
               )}
               {canReplaceSource && (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size='icon'
-                      variant='ghost'
-                      onClick={() => {
-                        setSourceRetry(r);
-                        setSourceUrl(r.german_source_url ?? '');
-                      }}
-                      aria-label='Retry with another German source link'
-                    >
-                      <Link2 className='h-4 w-4' />
-                    </Button>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size='icon-sm'
+                        variant='ghost'
+                        onClick={() => {
+                          setSourceRetry(r);
+                          setSourceUrl(r.german_source_url ?? '');
+                        }}
+                        aria-label='Retry with another German source link'
+                      />
+                    }
+                  >
+                    <Link2 className='h-4 w-4' />
                   </TooltipTrigger>
                   <TooltipContent>Paste a VOE, Vinovo, or other German mirror and retry</TooltipContent>
                 </Tooltip>
               )}
               <Button
-                size='icon'
+                size='icon-sm'
                 variant='ghost'
                 onClick={() => redo(r)}
                 disabled={redoing.has(r.id) || operationLocked || rerunActive}
                 title='Redo — re-run the pipeline for this title'
+                aria-label='Redo — re-run the pipeline for this title'
               >
                 {redoing.has(r.id) ? <Loader2 className='h-4 w-4 animate-spin' /> : <RefreshCw className='h-4 w-4' />}
               </Button>
               {r.job_id && (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button size='icon' variant='ghost' onClick={() => openLogs(r)} aria-label='Open logs'>
-                      <ScrollText data-icon='inline-start' />
-                    </Button>
+                  <TooltipTrigger render={<Button size='icon-sm' variant='ghost' onClick={() => openLogs(r)} aria-label='Open logs' />}>
+                    <ScrollText data-icon='inline-start' />
                   </TooltipTrigger>
                   <TooltipContent>Open logs</TooltipContent>
                 </Tooltip>
               )}
               {canCancel && (
-                <Button size='icon' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel'>
+                <Button size='icon-sm' variant='ghost' onClick={() => cancelJob(r.job_id!)} title='Cancel' aria-label='Cancel'>
                   <X className='h-4 w-4' />
                 </Button>
               )}
               {canStop && (
-                <Button size='icon' variant='ghost' onClick={() => stopJob(r.job_id!)} title='Stop and keep resumable'>
+                <Button size='icon-sm' variant='ghost' onClick={() => stopJob(r.job_id!)} title='Stop and keep resumable' aria-label='Stop and keep resumable'>
                   <CirclePause className='h-4 w-4' />
                 </Button>
               )}
               {canContinue && (
-                <Button size='sm' variant='default' onClick={() => continueJob(r.job_id!)}>
+                <Button size='sm' variant='secondary' onClick={() => continueJob(r.job_id!)}>
                   <CirclePlay data-icon='inline-start' /> Continue
                 </Button>
               )}
               {canDelete && (
-                <Button size='icon' variant='ghost' onClick={() => deleteJob(r.job_id!)} title='Remove — delete this failed job'>
-                  <Trash2 className='h-4 w-4 text-red-400' />
+                <Button
+                  size='icon-sm'
+                  variant='ghost'
+                  onClick={() => deleteJob(r.job_id!)}
+                  title='Remove — delete this failed job'
+                  aria-label='Remove — delete this failed job'
+                >
+                  <Trash2 className='h-4 w-4 text-destructive' />
                 </Button>
               )}
               {isLib && (r.stage === 'approved' || r.transfer_status === 'failed') && (
-                <Button size='sm' variant='default' onClick={() => transferOne(r.path!)} disabled={operationLocked} title='Send to media server'>
+                <Button size='sm' variant='secondary' onClick={() => transferOne(r.path!)} disabled={operationLocked} title='Send to media server'>
                   <UploadCloud data-icon='inline-start' />
                   {r.transfer_status === 'failed' ? 'Retry transfer' : 'Transfer'}
                 </Button>
               )}
               {isLib && (
-                <Button size='icon' variant='ghost' onClick={() => setDel(r)} title='Delete' disabled={operationLocked}>
-                  <Trash2 className='h-4 w-4 text-red-400' />
+                <Button size='icon-sm' variant='ghost' onClick={() => setDel(r)} title='Delete' aria-label='Delete' disabled={operationLocked}>
+                  <Trash2 className='h-4 w-4 text-destructive' />
                 </Button>
               )}
             </div>
-          </td>
-        </tr>
+          </TableCell>
+        </TableRow>
       </>
-    );
-  }
-
-  function SortHeader({ col, label, className }: { col: SortCol; label: string; className?: string }) {
-    const active = sortCol === col;
-    return (
-      <th className={cn('px-2 py-2 font-medium', className)} aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-        <button
-          onClick={() => sortBy(col)}
-          className={cn(
-            'inline-flex items-center gap-1 rounded-md px-2 py-1 transition-colors hover:bg-secondary hover:text-foreground',
-            active && 'bg-secondary text-foreground shadow-sm',
-          )}
-        >
-          {label}
-          {active ? (
-            sortDir === 'asc' ? (
-              <ChevronUp className='size-3 text-foreground' />
-            ) : (
-              <ChevronDown className='size-3 text-foreground' />
-            )
-          ) : (
-            <ChevronsUpDown className='size-3 opacity-40' />
-          )}
-        </button>
-      </th>
     );
   }
 
@@ -1540,23 +1570,23 @@ export default function Library() {
     <div className='flex h-full min-h-0 flex-col gap-4'>
       <header className='flex flex-wrap items-center justify-between gap-3'>
         <div className='flex items-baseline gap-2'>
-          <h1 className='text-2xl font-semibold'>Queue</h1>
+          <h1 className='font-heading text-3xl font-light tracking-[-0.02em]'>Queue</h1>
           <span className='text-sm text-muted-foreground'>— Every title in one table: downloads, review, sync and transfer.</span>
         </div>
       </header>
 
       {/* Collapsible filter bar */}
-      <div className='rounded-lg border border-border bg-card/40'>
-        <button onClick={() => setFiltersOpen((o) => !o)} className='flex w-full items-center justify-between px-3 py-2 text-sm font-medium'>
+      <div className='rounded-button surface-container'>
+        <button onClick={() => setFiltersOpen((o) => !o)} className='flex w-full cursor-pointer items-center justify-between rounded-button px-3 py-2 text-sm font-medium focus-ring'>
           <span className='flex items-center gap-2'>
             <Filter className='h-4 w-4 text-muted-foreground' />
             Filters
-            {(statusFilters.size > 0 || filter) && <Badge variant='accent'>{statusFilters.size + (filter ? 1 : 0)}</Badge>}
+            {(statusFilters.size > 0 || filter) && <Badge variant='secondary' count={statusFilters.size + (filter ? 1 : 0)} />}
           </span>
           {filtersOpen ? <ChevronUp className='h-4 w-4' /> : <ChevronDown className='h-4 w-4' />}
         </button>
         {filtersOpen && (
-          <div className='flex flex-wrap items-center gap-3 border-t border-border px-3 py-3'>
+          <div className='flex flex-wrap items-center gap-3 border-t border-border/60 px-3 py-3'>
             <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Search title…' className='w-56' />
             <StatusMultiSelect selected={statusFilters} onToggle={toggleFilter} onClear={() => setStatusFilters(new Set())} counts={counts} />
             {(statusFilters.size > 0 || filter) && (
@@ -1578,34 +1608,32 @@ export default function Library() {
       {loading ? (
         <div className='space-y-2'>
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className='h-12' />
+            <Skeleton key={i} shape='item' className='h-12 w-full' />
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <EmptyState icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
+        <EmptyNote icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
       ) : (
-        <div ref={tableScrollRef} className='table-bleed min-h-0 flex-1 overflow-auto'>
-          <table className='w-full text-sm'>
-            <thead className='sticky top-0 z-10 bg-card text-left text-xs uppercase tracking-wide text-foreground'>
-              <tr>
-                <th className='w-14 px-2 py-2' />
-                <SortHeader col='title' label='Title' className='text-left' />
-                <SortHeader col='type' label='Type' className='text-left' />
-                <SortHeader col='status' label='Status' className='text-left' />
-                <th className='px-2 py-2 text-left font-medium'>Sync</th>
-                <SortHeader col='created_at' label='Created at' className='text-left' />
-                <SortHeader col='updated_at' label='Updated at' className='text-left' />
-                <th className='px-2 py-2 text-left font-medium'>Sources</th>
-                <th className='px-2 py-2 text-right font-medium'>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pageRows.map((r) => (
-                <RowView key={r.id} r={r} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table containerProps={{ ref: tableScrollRef, className: 'min-h-0 flex-1 overflow-auto' }}>
+          <TableHeader className='sticky top-0 z-10 bg-card'>
+            <TableRow>
+              <TableHead className='w-14 px-2' />
+              <SortHeader column='title' label='Title' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
+              <SortHeader column='type' label='Type' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
+              <SortHeader column='status' label='Status' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
+              <TableHead className='px-2'>Sync</TableHead>
+              <SortHeader column='created_at' label='Created at' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
+              <SortHeader column='updated_at' label='Updated at' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
+              <TableHead className='px-2'>Sources</TableHead>
+              <TableHead numeric className='px-2'>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {pageRows.map((r) => (
+              <RowView key={r.id} r={r} />
+            ))}
+          </TableBody>
+        </Table>
       )}
 
       {!loading && (
@@ -1618,21 +1646,24 @@ export default function Library() {
             <span>·</span>
             <span>Per page</span>
             <Select
+              items={PAGE_SIZE_ITEMS}
               value={String(pageSize)}
               onValueChange={(value) => {
+                if (value == null) return;
                 const next = Number(value) as PageSize;
                 if (PAGE_SIZES.includes(next)) setPageSize(next);
               }}
             >
-              <SelectTrigger className='h-7 w-[86px]'>
+              <SelectTrigger size='sm' className='w-[86px] min-w-0' aria-label='Rows per page'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
-                  <SelectItem value='10'>10</SelectItem>
-                  <SelectItem value='25'>25</SelectItem>
-                  <SelectItem value='50'>50</SelectItem>
-                  <SelectItem value='100'>100</SelectItem>
+                  {PAGE_SIZE_ITEMS.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
                 </SelectGroup>
               </SelectContent>
             </Select>
@@ -1652,7 +1683,7 @@ export default function Library() {
       )}
 
       <Dialog open={!!logEntry} onOpenChange={(open) => !open && setLogEntry(null)}>
-        <DialogContent className='flex max-h-[86vh] w-[94vw] max-w-5xl flex-col overflow-hidden'>
+        <DialogContent size='xl' className='max-h-[86vh] max-w-5xl'>
           <DialogHeader>
             <DialogTitle>{logEntry ? `${titleWithYear(logEntry)} logs` : 'Job logs'}</DialogTitle>
             <DialogDescription>
@@ -1667,24 +1698,24 @@ export default function Library() {
       </Dialog>
 
       {/* Delete confirm */}
-      <Dialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
-        <DialogContent className='max-w-md'>
-          <DialogHeader>
-            <DialogTitle>Delete file?</DialogTitle>
-            <DialogDescription>
-              This permanently removes <span className='font-medium'>{del?.name}</span> from the local library. This cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant='outline' onClick={() => setDel(null)}>
+      <AlertDialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete file?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes <span className='font-medium text-foreground'>{del?.name}</span> from the local library. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button variant='secondary' onClick={() => setDel(null)}>
               Cancel
             </Button>
             <Button variant='destructive' onClick={doDelete}>
               <Trash2 className='h-4 w-4' /> Delete
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog
         open={!!sourceRetry}
@@ -1724,7 +1755,7 @@ export default function Library() {
       </Dialog>
 
       <Dialog open={!!torrentAction} onOpenChange={(open) => !open && setTorrentAction(null)}>
-        <DialogContent className='flex max-h-[88vh] w-[96vw] max-w-7xl flex-col overflow-hidden'>
+        <DialogContent size='xl' className='max-h-[88vh] max-w-7xl'>
           <DialogHeader>
             <DialogTitle>Select a torrent</DialogTitle>
             <DialogDescription>
@@ -1743,7 +1774,7 @@ export default function Library() {
               <Loader2 className='h-6 w-6 animate-spin' />
             </div>
           ) : torrentCandidates.length === 0 ? (
-            <EmptyState icon={Download} title='No torrent results' description='Try the job again later when indexers have more releases.' />
+            <EmptyNote icon={Download} title='No torrent results' description='Try the job again later when indexers have more releases.' />
           ) : (
             <TorrentCandidateTable candidates={torrentCandidates} busy={torrentLoading} onSelect={chooseTorrent} />
           )}
@@ -1756,7 +1787,7 @@ export default function Library() {
           if (!open && !replacementBusy) setTorrentReplacement(null);
         }}
       >
-        <DialogContent className='flex max-h-[88vh] w-[96vw] max-w-7xl flex-col overflow-hidden'>
+        <DialogContent size='xl' className='max-h-[88vh] max-w-7xl'>
           <DialogHeader>
             <DialogTitle>Repack with a new torrent</DialogTitle>
             <DialogDescription>
@@ -1769,10 +1800,10 @@ export default function Library() {
             onValueChange={(value) => setReplacementMode(value as 'auto' | 'manual')}
           >
             <TabsList>
-              <TabsTrigger value='auto'>Automatic</TabsTrigger>
-              <TabsTrigger value='manual'>Manual</TabsTrigger>
+              <TabsTab value='auto'>Automatic</TabsTab>
+              <TabsTab value='manual'>Manual</TabsTab>
             </TabsList>
-            <TabsContent value='auto'>
+            <TabsPanel value='auto'>
               <div className='flex flex-col gap-4 py-3'>
                 <p className='text-sm text-foreground'>
                   Bankai will prefer an eligible release close to the German runtime, then fall back to the release with the most seeders.
@@ -1782,8 +1813,8 @@ export default function Library() {
                   Pick automatically
                 </Button>
               </div>
-            </TabsContent>
-            <TabsContent value='manual' className='min-h-0 flex-1 overflow-hidden'>
+            </TabsPanel>
+            <TabsPanel value='manual' className='flex min-h-0 flex-1 flex-col overflow-hidden'>
               <div className='flex min-h-0 flex-1 flex-col gap-3 py-3'>
                 <TorrentPickerTools
                   filters={replacementFilters}
@@ -1797,12 +1828,12 @@ export default function Library() {
                     <Loader2 className='h-6 w-6 animate-spin' />
                   </div>
                 ) : replacementCandidates.length === 0 ? (
-                  <EmptyState icon={Download} title='No matching torrents' description='Change the filters or paste a magnet link.' />
+                  <EmptyNote icon={Download} title='No matching torrents' description='Change the filters or paste a magnet link.' />
                 ) : (
                   <TorrentCandidateTable candidates={replacementCandidates} busy={replacementBusy} onSelect={startTorrentReplacement} />
                 )}
               </div>
-            </TabsContent>
+            </TabsPanel>
           </Tabs>
         </DialogContent>
       </Dialog>
@@ -3439,17 +3470,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
     <div className='fixed inset-0 z-50 flex flex-col bg-background'>
       <div className='flex items-center justify-between gap-3 border-b border-border/50 px-4 py-3 md:px-6'>
         <div className='flex min-w-0 items-center gap-2'>
-          <Button size='icon' variant='ghost' onClick={onClose} title='Close'>
+          <Button size='icon' variant='ghost' onClick={onClose} title='Close' aria-label='Close'>
             <ArrowLeft className='h-5 w-5' />
           </Button>
-          <h2 className='truncate text-lg font-semibold'>
+          <h2 className='truncate font-heading text-2xl font-light tracking-[-0.02em]'>
             {entry.title}
             {entry.year ? <span className='ml-1 text-muted-foreground'>({entry.year})</span> : null}
           </h2>
-          <div className='shrink-0 rounded-md border border-white/10 bg-white/[0.03] px-3 py-1.5 font-mono text-sm text-foreground'>
+          <div className='shrink-0 rounded-control material-field px-3 py-1.5 font-mono text-sm text-foreground tabular-nums'>
             {formatBytes(entry.size ?? info?.size ?? 0)}
           </div>
-          <div className='shrink-0 rounded-md border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm text-foreground'>
+          <div className='shrink-0 rounded-control material-field px-3 py-1.5 text-sm text-foreground'>
             Delay <span className='font-mono font-semibold'>{delayMs > 0 ? '+' : ''}{delayMs} ms</span>
             {drift !== 0 && <span className='ml-1 text-xs text-amber-400'>(unsaved {drift > 0 ? '+' : ''}{drift})</span>}
           </div>
@@ -3466,7 +3497,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       </div>
 
       <Dialog open={replaceOpen} onOpenChange={setReplaceOpen}>
-        <DialogContent className='flex max-h-[88vh] w-[96vw] max-w-7xl flex-col overflow-hidden'>
+        <DialogContent size='xl' className='max-h-[88vh] max-w-7xl'>
           <DialogHeader>
             <DialogTitle>Repack with a new torrent</DialogTitle>
             <DialogDescription>
@@ -3475,10 +3506,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           </DialogHeader>
           <Tabs className='flex min-h-0 flex-1 flex-col' value={replaceMode} onValueChange={(value) => setReplaceMode(value as 'auto' | 'manual')}>
             <TabsList>
-              <TabsTrigger value='auto'>Automatic</TabsTrigger>
-              <TabsTrigger value='manual'>Manual</TabsTrigger>
+              <TabsTab value='auto'>Automatic</TabsTab>
+              <TabsTab value='manual'>Manual</TabsTab>
             </TabsList>
-            <TabsContent value='auto'>
+            <TabsPanel value='auto'>
               <div className='flex flex-col gap-4 py-3'>
                 <p className='text-sm text-foreground'>Bankai will prefer an eligible release close to the German runtime, then fall back to the release with the most seeders.</p>
                 <Button onClick={() => startReplacement()} disabled={busy === 'replace'}>
@@ -3486,8 +3517,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                   Pick automatically
                 </Button>
               </div>
-            </TabsContent>
-            <TabsContent value='manual' className='min-h-0 flex-1 overflow-hidden'>
+            </TabsPanel>
+            <TabsPanel value='manual' className='flex min-h-0 flex-1 flex-col overflow-hidden'>
               <div className='flex min-h-0 flex-1 flex-col gap-3 py-3'>
                 <TorrentPickerTools
                   filters={replaceFilters}
@@ -3501,12 +3532,12 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     <Loader2 className='h-6 w-6 animate-spin' />
                   </div>
                 ) : replaceCandidates.length === 0 ? (
-                  <EmptyState icon={Download} title='No matching torrents' description='Change the filters or paste a magnet link.' />
+                  <EmptyNote icon={Download} title='No matching torrents' description='Change the filters or paste a magnet link.' />
                 ) : (
                   <TorrentCandidateTable candidates={replaceCandidates} busy={busy === 'replace'} onSelect={startReplacement} />
                 )}
               </div>
-            </TabsContent>
+            </TabsPanel>
           </Tabs>
         </DialogContent>
       </Dialog>
@@ -3514,8 +3545,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       <div className='flex flex-1 flex-col overflow-hidden'>
         {loading ? (
           <div className='space-y-3 p-3'>
-            <Skeleton className='h-40 w-full' />
-            <Skeleton className='h-24 w-full' />
+            <Skeleton shape='card' className='h-40 w-full' />
+            <Skeleton shape='card' className='h-24 w-full' />
           </div>
         ) : (
           <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2'>
@@ -3592,24 +3623,20 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
               <div className='flex items-center justify-end px-1 text-xs'>
                 <span className='flex flex-wrap items-center justify-end gap-3 text-white'>
                   <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className='flex cursor-help items-center gap-1'>
-                        <span className='size-2 rounded-sm bg-muted-foreground/40' />
-                        Ready on Bankai
-                      </span>
+                    <TooltipTrigger render={<span className='flex cursor-help items-center gap-1' />}>
+                      <span className='size-2 rounded-sm bg-muted-foreground/40' />
+                      Ready on Bankai
                     </TooltipTrigger>
-                    <TooltipContent>
+                    <TooltipContent variant='text'>
                       Every clip required for {readinessLabel} is cached on the server.
                     </TooltipContent>
                   </Tooltip>
                   <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className='flex cursor-help items-center gap-1'>
-                        <span className='size-2 rounded-sm bg-foreground/45' />
-                        Ready now
-                      </span>
+                    <TooltipTrigger render={<span className='flex cursor-help items-center gap-1' />}>
+                      <span className='size-2 rounded-sm bg-foreground/45' />
+                      Ready now
                     </TooltipTrigger>
-                    <TooltipContent>
+                    <TooltipContent variant='text'>
                       Every stream required for {readinessLabel} is already buffered in this browser.
                     </TooltipContent>
                   </Tooltip>
@@ -3675,12 +3702,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 </span>
                 {lenDrift != null && (
                   <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className={cn('font-mono', Math.abs(lenDrift) > 1 ? 'text-amber-400' : 'text-white')}>
-                        Δlen {lenDrift > 0 ? '+' : ''}{lenDrift.toFixed(2)}s
-                      </span>
+                    <TooltipTrigger render={<span className={cn('font-mono', Math.abs(lenDrift) > 1 ? 'text-amber-400' : 'text-white')} />}>
+                      Δlen {lenDrift > 0 ? '+' : ''}{lenDrift.toFixed(2)}s
                     </TooltipTrigger>
-                    <TooltipContent>Length difference between HQ and German audio. A large value suggests frame-rate or speed drift.</TooltipContent>
+                    <TooltipContent variant='text'>Length difference between HQ and German audio. A large value suggests frame-rate or speed drift.</TooltipContent>
                   </Tooltip>
                 )}
               </div>
@@ -3736,47 +3761,59 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
             <div className='flex flex-wrap items-center gap-3'>
               {/* Zoom */}
               <div className='flex items-center gap-1'>
-                <Button size='icon' variant='secondary' onClick={() => zoom(2)} title='Zoom out'>
+                <Button size='icon-sm' variant='secondary' onClick={() => zoom(2)} title='Zoom out' aria-label='Zoom out'>
                   <ZoomOut className='h-4 w-4' />
                 </Button>
-                <span className='w-20 text-center text-xs text-white'>
+                <span className='w-20 text-center font-mono text-xs text-white tabular-nums'>
                   {windowSec >= 60 ? `${(windowSec / 60).toFixed(1)} min` : `${windowSec}s`} view
                 </span>
-                <Button size='icon' variant='secondary' onClick={() => zoom(0.5)} title='Zoom in'>
+                <Button size='icon-sm' variant='secondary' onClick={() => zoom(0.5)} title='Zoom in' aria-label='Zoom in'>
                   <ZoomIn className='h-4 w-4' />
                 </Button>
               </div>
 
               <Popover>
-                <PopoverTrigger asChild>
-                  <Button size='icon' variant='ghost' aria-label='Review display settings'>
-                    <MoreHorizontal data-icon='inline-start' />
-                  </Button>
+                <PopoverTrigger render={<Button size='icon-sm' variant='ghost' aria-label='Review display settings' />}>
+                  <MoreHorizontal data-icon='inline-start' />
                 </PopoverTrigger>
                 <PopoverContent align='start' side='top' className='flex flex-col gap-4'>
-                  <PopoverHeader>
+                  <div className='flex flex-col gap-1'>
                     <PopoverTitle>Display settings</PopoverTitle>
                     <PopoverDescription>Adjust the waveform height and preview quality.</PopoverDescription>
-                  </PopoverHeader>
+                  </div>
                   <div className='flex flex-col gap-2'>
                     <div className='flex items-center justify-between gap-3 text-xs text-foreground'>
                       <span>Audio bar height</span>
-                      <span className='font-mono'>{canvasH}px</span>
+                      <span className='font-mono tabular-nums'>{canvasH}px</span>
                     </div>
-                    <Slider value={[canvasH]} min={100} max={640} step={20} onValueChange={(value) => setCanvasH(value[0])} />
+                    <Slider
+                      value={canvasH}
+                      min={100}
+                      max={640}
+                      step={20}
+                      onValueChange={(value) => setCanvasH(value)}
+                      thumbLabels={['Audio bar height']}
+                    />
                   </div>
                   <div className='flex items-center justify-between gap-3'>
                     <span className='text-xs text-foreground'>Video quality</span>
-                    <Select value={String(quality)} onValueChange={(value) => setQuality(Number(value))}>
-                      <SelectTrigger className='h-8 w-28' aria-label='Video preview quality'>
+                    <Select
+                      items={QUALITY_ITEMS}
+                      value={String(quality)}
+                      onValueChange={(value) => {
+                        if (value != null) setQuality(Number(value));
+                      }}
+                    >
+                      <SelectTrigger size='sm' className='w-28 min-w-0' aria-label='Video preview quality'>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
-                          <SelectItem value='360'>360p</SelectItem>
-                          <SelectItem value='480'>480p</SelectItem>
-                          <SelectItem value='720'>720p</SelectItem>
-                          <SelectItem value='1080'>1080p</SelectItem>
+                          {QUALITY_ITEMS.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
                         </SelectGroup>
                       </SelectContent>
                     </Select>
@@ -3796,7 +3833,8 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                       if (event.key === 'Enter') applyStretchInput();
                     }}
                     inputMode='decimal'
-                    className='h-8 w-28 font-mono'
+                    size='sm'
+                    className='w-28 font-mono tabular-nums'
                     aria-label='German audio drift factor'
                   />
                 </label>
@@ -3856,12 +3894,10 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                 )}
                 {!measuredDriftReliable && measuredDrift != null && (
                   <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className='cursor-help text-xs text-muted-foreground'>
-                        Visual ×{measuredDrift.toFixed(4)} ignored
-                      </span>
+                    <TooltipTrigger render={<span className='cursor-help text-xs text-muted-foreground' />}>
+                      Visual ×{measuredDrift.toFixed(4)} ignored
                     </TooltipTrigger>
-                    <TooltipContent>
+                    <TooltipContent variant='text'>
                       Visual matching confidence was too low to recommend this drift factor.
                     </TooltipContent>
                   </Tooltip>
@@ -3911,7 +3947,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
                     <Button size='sm' variant='secondary' onClick={() => playSection('ger')}>
                       <Play className='h-4 w-4' /> German
                     </Button>
-                    <Button size='sm' onClick={() => playSection('both')} title='Play (Space)'>
+                    <Button size='sm' variant='secondary' onClick={() => playSection('both')} title='Play (Space)'>
                       <Play className='h-4 w-4' /> Play both
                     </Button>
                   </>

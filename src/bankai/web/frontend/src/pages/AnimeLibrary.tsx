@@ -1,30 +1,83 @@
 import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { EmptyState, Spinner } from '@/components/ui/empty';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph';
-import { Meter, rampParts } from '@/components/ui/meter';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
-import { cn } from '@/lib/utils';
+import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
+import { StatusTag } from '@/components/status-tag';
+import { cn } from '@/zon/lib/cn';
+import { Button } from '@/zon/ui/button';
+import { Card } from '@/zon/ui/card';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/zon/ui/drawer';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Input } from '@/zon/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Spinner } from '@/zon/ui/spinner';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
+import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 
 function formatSize(bytes: number) {
   const tib = bytes / 1024 ** 4;
   if (tib >= 1) return tib.toFixed(2) + ' TiB';
   const gib = bytes / 1024 ** 3;
   return gib >= 1 ? gib.toFixed(2) + ' GiB' : (bytes / 1024 ** 2).toFixed(0) + ' MiB';
+}
+
+/** A segmented meter: discrete steps, each able to carry its own colour, so one
+ *  meter can show a composition (the encode mix) as well as a ratio. */
+const SEGMENTS = 12;
+
+type MeterPart = { value: number; className: string };
+
+function SegmentMeter({ parts, total, className, title }: { parts: MeterPart[]; total: number; className?: string; title?: string }) {
+  const filled: string[] = [];
+  if (total > 0) {
+    // Largest-remainder allocation, so a part that exists at all keeps a
+    // segment instead of rounding away to nothing.
+    const exact = parts.map((part) => ({ ...part, exact: (part.value / total) * SEGMENTS }));
+    const base = exact.map((part) => ({ ...part, whole: Math.floor(part.exact) }));
+    let used = base.reduce((sum, part) => sum + part.whole, 0);
+    const order = [...base]
+      .map((part, index) => ({ index, rest: part.exact - part.whole, any: part.value > 0 }))
+      .filter((row) => row.any)
+      .sort((a, b) => b.rest - a.rest);
+    for (const row of order) {
+      if (used >= SEGMENTS) break;
+      if (base[row.index].whole === 0 || row.rest > 0) {
+        base[row.index].whole += 1;
+        used += 1;
+      }
+    }
+    for (const part of base) {
+      for (let i = 0; i < part.whole; i += 1) filled.push(part.className);
+    }
+  }
+  return (
+    <div
+      className={cn('flex h-[13px] items-center gap-[2px] overflow-hidden rounded-[3px] border border-field-edge bg-field-surface px-[2px] shadow-field', className)}
+      title={title}
+      role='img'
+      aria-label={title}
+    >
+      {Array.from({ length: SEGMENTS }, (_, index) => (
+        <span key={index} className={cn('h-[7px] min-w-px flex-1 rounded-[1px]', filled[index] ?? 'bg-control-surface')} />
+      ))}
+    </div>
+  );
+}
+
+/** Threshold colours for a single ratio, ramping as the meter fills. */
+function rampParts(value: number, total: number): MeterPart[] {
+  if (total <= 0 || value <= 0) return [];
+  const ratio = value / total;
+  const className = ratio >= 0.85 ? 'bg-success' : ratio >= 0.5 ? 'bg-warning' : 'bg-destructive';
+  return [{ value, className }];
 }
 
 type LibrarySortKey = 'title' | 'seasons' | 'episodes' | 'encode' | 'size' | 'state';
@@ -94,15 +147,15 @@ function CodecMix({ show }: { show: AnimeLibraryShow }) {
   ].filter(Boolean).join(' · ');
   return (
     <div className='flex items-center gap-2'>
-      <Meter
+      <SegmentMeter
         className='w-[74px]'
         total={total}
         title={title}
         parts={[
-          { value: hevc, className: 'bg-trend' },
+          { value: hevc, className: 'bg-success' },
           { value: avc, className: 'bg-warning' },
           { value: dubbed, className: 'bg-transfer' },
-          { value: unknown, className: 'bg-trend-muted' },
+          { value: unknown, className: 'bg-muted-foreground/40' },
         ]}
       />
       <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{hevc + dubbed}/{total}</span>
@@ -114,7 +167,7 @@ function Progress({ show }: { show: AnimeLibraryShow }) {
   const total = show.total_count || show.downloaded_count || 1;
   return (
     <div className='flex items-center gap-2'>
-      <Meter
+      <SegmentMeter
         className='w-[74px]'
         total={total}
         title={`${show.downloaded_count} of ${show.total_count} episodes`}
@@ -636,18 +689,18 @@ export default function AnimeLibrary() {
     <div className='flex min-h-0 flex-1 flex-col gap-5'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground'>Anime</p>
-          <h1 className='font-serif text-3xl font-semibold'>Library</h1>
+          <p className='eyebrow'>Anime</p>
+          <h1 className='font-heading text-3xl font-light'>Library</h1>
           <p className='break-all font-mono text-xs text-muted-foreground'>{root || 'Dedicated anime destination'}</p>
         </div>
         <div className='flex flex-wrap items-center gap-2'>
-          <div className='relative'>
-            <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-            <Input aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} className='w-60 pl-9' />
-          </div>
+          <InputGroup className='w-60'>
+            <InputGroupAddon align='inline-start'><Search /></InputGroupAddon>
+            <InputGroupInput aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} />
+          </InputGroup>
           {(unmatchedCount > 0 || onlyUnmatched) && (
             <Button
-              variant={onlyUnmatched ? 'default' : 'secondary'}
+              variant={onlyUnmatched ? 'primary' : 'secondary'}
               aria-pressed={onlyUnmatched}
               onClick={() => setOnlyUnmatched((current) => !current)}
               title='Files no AniList entry is known for; match them on AniList from their details'
@@ -665,15 +718,13 @@ export default function AnimeLibrary() {
               <Ban data-icon='inline-start' /> {showBlacklisted ? 'Hide' : 'Show'} blacklisted ({blacklistedCount})
             </Button>
           )}
-          <ToggleGroup label='Library view'>
+          <ToggleGroup
+            aria-label='Library view'
+            value={[view]}
+            onValueChange={(values) => { if (values[0]) setView(values[0] as View); }}
+          >
             {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table']] as const).map(([value, Icon, label]) => (
-              <ToggleGroupItem
-                key={value}
-                icon={Icon}
-                label={label}
-                selected={view === value}
-                onClick={() => setView(value)}
-              />
+              <ToggleGroupItem key={value} value={value} icon={<Icon />}>{label}</ToggleGroupItem>
             ))}
           </ToggleGroup>
           <Button variant='secondary' onClick={() => void load(true)} disabled={loading}><RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan</Button>
@@ -681,31 +732,39 @@ export default function AnimeLibrary() {
       </div>
 
       {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : visible.length === 0 ? (
-        <EmptyState icon={HardDrive} title={shows.length ? 'No matching Anime' : 'No Anime in your library yet'} description='Completed and staged episodes are grouped into collections of AniList entries.' />
+        <Empty>
+          <EmptyMedia><HardDrive /></EmptyMedia>
+          <EmptyTitle>{shows.length ? 'No matching Anime' : 'No Anime in your library yet'}</EmptyTitle>
+          <EmptyDescription>Completed and staged episodes are grouped into collections of AniList entries.</EmptyDescription>
+        </Empty>
       ) : view === 'grid' ? (
         <div className='min-h-0 flex-1 overflow-y-auto'>
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
           {visible.map((show) => {
             const tone = COMPLETION[show.completion_state] ?? COMPLETION.unknown;
             return (
-              <button key={show.key} type='button' onClick={() => void openShow(show.key)} aria-label={'View ' + show.title} className='block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background'>
-                <Card className='poster-card h-full overflow-hidden border-border'>
+              <button key={show.key} type='button' onClick={() => void openShow(show.key)} aria-label={'View ' + show.title} className='block w-full cursor-pointer rounded-card text-left focus-ring'>
+                <Card className='poster-card h-full gap-0 overflow-hidden [--card-padding:0]'>
                   <div className='relative block w-full'>
                     <AnimePoster url={show.poster_url} title={show.title} />
-                    {show.blacklisted && <Badge variant='destructive' className='absolute left-2 top-2 bg-background/85 backdrop-blur-sm'>Blacklisted</Badge>}
-                    {isUnmatched(show) && <Badge variant='warning' className='absolute right-2 top-2 bg-background/85 backdrop-blur-sm' title='No AniList entry is known for these files: match it from its details'>Unmatched</Badge>}
+                    {show.blacklisted && <StatusTag variant='destructive' className='absolute left-2 top-2 bg-background/85 backdrop-blur-sm'>Blacklisted</StatusTag>}
+                    {isUnmatched(show) && (
+                      <span className='absolute right-2 top-2'>
+                        <StatusTag variant='warning' className='bg-background/85 backdrop-blur-sm' title='No AniList entry is known for these files: match it from its details'>Unmatched</StatusTag>
+                      </span>
+                    )}
                     <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/75 to-transparent px-3 pb-2.5 pt-10 text-left text-sm font-medium leading-tight text-white'>{show.title}</span>
                   </div>
                   {/* The completion colour, as the rule between the cover and
                       what is written under it. */}
                   <span className={cn('block h-0.5 w-full', tone.className)} title={tone.label} aria-hidden='true' />
-                  <CardContent className='flex flex-col gap-2 p-3'>
+                  <div className='flex flex-col gap-2 p-3'>
                     <Progress show={show} />
                     <div className='flex items-center justify-between gap-2'>
                       <CodecMix show={show} />
                       <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatSize(show.size)}</span>
                     </div>
-                  </CardContent>
+                  </div>
                 </Card>
               </button>
             );
@@ -713,30 +772,29 @@ export default function AnimeLibrary() {
         </div>
         </div>
       ) : (
-        <div className='table-bleed min-h-0 flex-1 overflow-auto'>
-          <table className='w-full min-w-[820px] border-collapse text-sm'>
-            <thead className='sticky top-0 z-10 bg-card'>
-              <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
+        <Table className='min-w-[820px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+            <TableHeader className='sticky top-0 z-10 bg-control-surface'>
+              <TableRow>
                 <SortHeader label='Series' column='title' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Seasons' column='seasons' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Episodes' column='episodes' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Encode' column='encode' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Size' column='size' sort={sort} onSort={toggleSort} align='right' />
                 <SortHeader label='State' column='state' sort={sort} onSort={toggleSort} />
-              </tr>
-            </thead>
-            <tbody>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {visible.map((show) => {
                 const tone = COMPLETION[show.completion_state] ?? COMPLETION.unknown;
                 return (
-                  <tr
+                  <TableRow
                     key={show.key}
                     tabIndex={0}
                     onClick={() => void openShow(show.key)}
                     onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openShow(show.key); } }}
-                    className='data-row cursor-pointer border-b border-border/70 last:border-0 hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60'
+                    className='data-row cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-control-focus'
                   >
-                    <td className='px-3 py-2'>
+                    <TableCell>
                       <div className='flex items-center gap-2.5'>
                         <AnimePoster url={show.poster_url} title={show.title} className='w-8 shrink-0 rounded' />
                         <div className='min-w-0'>
@@ -744,26 +802,25 @@ export default function AnimeLibrary() {
                           {show.year ? <p className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{show.year}</p> : null}
                         </div>
                       </div>
-                    </td>
-                    <td className='px-3 py-2 font-mono text-xs tabular-nums text-muted-foreground'>{show.season_count}</td>
-                    <td className='px-3 py-2'><Progress show={show} /></td>
-                    <td className='px-3 py-2'><CodecMix show={show} /></td>
-                    <td className='px-3 py-2 text-right font-mono text-xs tabular-nums'>{formatSize(show.size)}</td>
-                    <td className='px-3 py-2'>
+                    </TableCell>
+                    <TableCell className='font-mono text-xs tabular-nums text-muted-foreground'>{show.season_count}</TableCell>
+                    <TableCell><Progress show={show} /></TableCell>
+                    <TableCell><CodecMix show={show} /></TableCell>
+                    <TableCell numeric className='text-xs text-foreground'>{formatSize(show.size)}</TableCell>
+                    <TableCell>
                       <div className='flex items-center gap-1.5'>
                         <span className={cn('size-1.5 rounded-full', tone.className)} />
                         <span className='text-xs text-muted-foreground'>{tone.label}</span>
-                        {show.staged_count > 0 && <Badge variant='warning'>{show.staged_count} staged</Badge>}
-                        {show.blacklisted && <Badge variant='destructive'>Blacklisted</Badge>}
-                        {isUnmatched(show) && <Badge variant='warning' title='No AniList entry is known for these files: match it from its details'>Unmatched</Badge>}
+                        {show.staged_count > 0 && <StatusTag variant='warning'>{show.staged_count} staged</StatusTag>}
+                        {show.blacklisted && <StatusTag variant='destructive'>Blacklisted</StatusTag>}
+                        {isUnmatched(show) && <StatusTag variant='warning' title='No AniList entry is known for these files: match it from its details'>Unmatched</StatusTag>}
                       </div>
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 );
               })}
-            </tbody>
-          </table>
-        </div>
+            </TableBody>
+        </Table>
       )}
 
       {!loading && visible.length > 0 && (
@@ -777,16 +834,16 @@ export default function AnimeLibrary() {
         </footer>
       )}
 
-      <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); setTab(null); clearChecked(); } }}>
-        <DrawerContent aria-describedby={undefined} className='md:w-3/4'>
-          {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner /></div>}
+      <Drawer side='right' open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); setTab(null); clearChecked(); } }}>
+        <DrawerContent className='w-full md:w-3/4'>
+          {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner label='Loading the show' /></div>}
           {active && (
             <>
               <DrawerHeader>
-                <div className='flex items-start gap-4 pr-8'>
+                <div className='flex items-start gap-4'>
                   <AnimePoster url={active.poster_url} title={active.title} className='w-16 shrink-0' />
                   <div className='flex min-w-0 flex-col gap-2'>
-                    <DrawerTitle className='text-base font-semibold leading-tight'>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DrawerTitle>
+                    <DrawerTitle className='text-[22px]'>{active.title}{active.year ? ' (' + active.year + ')' : ''}</DrawerTitle>
                     {active.source_title && active.source_title !== active.title && (
                       <p className='font-mono text-[0.7rem] leading-tight text-muted-foreground' title='The name Erai-raws publishes this show under'>
                         {active.source_title}
@@ -796,7 +853,16 @@ export default function AnimeLibrary() {
                     <div className='flex flex-wrap items-center gap-2'>
                       {/* First, always: every matched card is an AniList entry, so the
                           tabs' own links do not stand in for it. */}
-                      {active.anilist_id && <Button asChild variant='secondary' size='sm'><a href={anilistUrl(active.anilist_id)} target='_blank' rel='noreferrer' title={(active.anilist_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anilist_ids!.length + ' AniList entries; each tab links its own' : 'This show on AniList'}><ExternalLink data-icon='inline-start' /> AniList</a></Button>}
+                      {active.anilist_id && (
+                        <Button
+                          variant='secondary'
+                          size='sm'
+                          nativeButton={false}
+                          render={<a href={anilistUrl(active.anilist_id)} target='_blank' rel='noreferrer' title={(active.anilist_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anilist_ids!.length + ' AniList entries; each tab links its own' : 'This show on AniList'} />}
+                        >
+                          <ExternalLink data-icon='inline-start' /> AniList
+                        </Button>
+                      )}
                       {(active.collection_id != null || active.anilist_id != null) && (
                         <Button
                           size='sm'
@@ -808,13 +874,17 @@ export default function AnimeLibrary() {
                         </Button>
                       )}
                       {(active.collection_entries?.length ?? 0) > 1 && active.collection_id != null && (
-                        <Select
+                        <Select<string>
                           value={String(active.anilist_id ?? '')}
-                          onValueChange={(value) => void setTitle(active, Number(value))}
+                          onValueChange={(value) => { if (value !== null) void setTitle(active, Number(value)); }}
                           disabled={titling}
+                          items={active.collection_entries!.map((entry) => ({
+                            value: String(entry.anilist_id),
+                            label: 'Shown as: ' + entry.title + (entry.season ? ' · ' + entry.season : '') + (entry.owned ? '' : ' (not downloaded)'),
+                          }))}
                         >
                           <SelectTrigger
-                            data-size='sm'
+                            size='sm'
                             className='w-72'
                             aria-label='Which entry the collection is shown as'
                             title={active.collection_name_custom
@@ -858,6 +928,7 @@ export default function AnimeLibrary() {
                       {Boolean(active.avc_count) && (
                         <Button
                           size='sm'
+                          variant='secondary'
                           disabled={!active.anilist_ids?.length || upgrading === active.key}
                           onClick={() => void upgradeToHevc(active)}
                           title='Download HEVC versions of this show&apos;s AVC episodes and replace them'
@@ -903,12 +974,12 @@ export default function AnimeLibrary() {
                   </div>
                 </div>
               </DrawerHeader>
-              <Tabs value={openTab} onValueChange={(value) => setTab({ key: active.key, value })} className='flex min-h-0 flex-1 flex-col'>
-                <TabsList className='flex h-auto flex-wrap justify-start px-5 pt-3'>
-                  {seasons.map((season) => <TabsTrigger key={String(season)} value={String(season)}>{seasonLabel(season)}</TabsTrigger>)}
+              <Tabs value={openTab} onValueChange={(value) => setTab({ key: active.key, value: String(value) })} className='min-h-0 flex-1 gap-3'>
+                <TabsList className='h-auto max-w-full flex-wrap'>
+                  {seasons.map((season) => <TabsTab key={String(season)} value={String(season)}>{seasonLabel(season)}</TabsTab>)}
                 </TabsList>
                 {activeChecked.length > 0 && (
-                  <div className='mx-5 mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card/60 px-3 py-2'>
+                  <div className='flex flex-wrap items-center gap-2 rounded-control surface-container px-3 py-2'>
                     <span className='text-xs text-muted-foreground'>
                       <span className='font-mono tabular-nums text-foreground'>{activeChecked.length}</span> file{activeChecked.length === 1 ? '' : 's'} selected
                     </span>
@@ -937,9 +1008,9 @@ export default function AnimeLibrary() {
                   </div>
                 )}
                 {seasons.map((season) => (
-                  <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>
+                  <TabsPanel key={String(season)} value={String(season)} className='flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto'>
                     {season !== null && (active.season_anilist?.[String(season)]?.length ?? 0) > 0 && (
-                      <p className='flex flex-wrap items-center gap-x-3 gap-y-1 pt-3 text-xs text-muted-foreground'>
+                      <p className='flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground'>
                         <span>AniList:</span>
                         {active.season_anilist![String(season)].map((entry) => (
                           <span key={entry.anilist_id} className='inline-flex items-center gap-0.5'>
@@ -953,7 +1024,7 @@ export default function AnimeLibrary() {
                             </a>
                             {!isUnmatched(active) && (
                               <Button
-                                size='icon'
+                                size='icon-sm'
                                 variant='ghost'
                                 className='size-6 text-muted-foreground'
                                 aria-label={'Change the AniList entry of ' + entry.title}
@@ -967,9 +1038,8 @@ export default function AnimeLibrary() {
                         ))}
                       </p>
                     )}
-                    <div className='overflow-x-auto'>
-                      <table className='w-full border-collapse text-sm'>
-                        <thead><tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'><th className='w-7 py-2.5 pr-2 font-medium'>{(() => {
+                    <Table dense containerProps={{ className: 'shrink-0' }}>
+                        <TableHeader><TableRow><TableHead className='w-7 pr-2'>{(() => {
                           // "Select all in this tab": every row of it that is a file.
                           const files = active.episodes.filter((entry) => entry.season_number === season && hasFile(entry)).map((entry) => entry.path);
                           const ticked = files.filter((path) => checkedPaths.has(path)).length;
@@ -985,8 +1055,8 @@ export default function AnimeLibrary() {
                               onChange={(event) => toggleChecked(active, files, event.target.checked)}
                             />
                           );
-                        })()}</th><th className='py-2.5 pr-3 font-medium'>Ep</th><th className='px-3 py-2.5 font-medium'>Episode / File</th><th className='px-3 py-2.5 font-medium'>Encode</th><th className='px-3 py-2.5 text-right font-medium'>Size</th><th className='py-2.5 pl-3 text-right font-medium'>State</th></tr></thead>
-                        <tbody>{(() => {
+                        })()}</TableHead><TableHead className='pr-3'>Ep</TableHead><TableHead>Episode / File</TableHead><TableHead>Encode</TableHead><TableHead numeric>Size</TableHead><TableHead numeric>State</TableHead></TableRow></TableHeader>
+                        <TableBody>{(() => {
                           // A season made of several AniList entries: each entry's episodes under a row naming it.
                           const tabRows = active.episodes.filter((entry) => entry.season_number === season);
                           const parts = active.season_anilist?.[String(season)] ?? [];
@@ -999,8 +1069,8 @@ export default function AnimeLibrary() {
                             return (
                           <Fragment key={entry.path || String(entry.season_number) + ':' + entry.episode}>
                           {starts && (
-                            <tr className='border-b border-border bg-muted/40'>
-                              <td colSpan={6} className='px-2 py-1.5'>
+                            <TableRow className='bg-control-surface/60 hover:bg-control-surface/60'>
+                              <TableCell colSpan={6} className='py-1.5'>
                                 <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-xs'>
                                   <span className='font-medium text-foreground'>{part?.title ?? 'AniList ' + entry.anilist_id}</span>
                                   {numbers.length > 0 && (
@@ -1021,11 +1091,11 @@ export default function AnimeLibrary() {
                                     <ExternalLink className='size-3' /> AniList
                                   </a>
                                 </div>
-                              </td>
-                            </tr>
+                              </TableCell>
+                            </TableRow>
                           )}
-                          <tr className={cn('border-b border-border/70 last:border-0', hasFile(entry) && checkedPaths.has(entry.path) && 'bg-accent/30')}>
-                            <td className='w-7 py-2.5 pr-2'>
+                          <TableRow data-selected={hasFile(entry) && checkedPaths.has(entry.path) ? '' : undefined}>
+                            <TableCell className='w-7 pr-2'>
                               {hasFile(entry) && (
                                 <input
                                   type='checkbox'
@@ -1035,23 +1105,23 @@ export default function AnimeLibrary() {
                                   onChange={(event) => toggleChecked(active, [entry.path], event.target.checked)}
                                 />
                               )}
-                            </td>
-                            <td className='py-2.5 pr-3 font-mono text-xs tabular-nums'>{entry.episode ?? '—'}</td>
-                            <td className='px-3 py-2.5 text-xs text-muted-foreground'>{entry.episode_title && <p className='text-sm text-foreground'>{entry.episode_title}</p>}{!entry.missing && <p className='font-mono text-[0.68rem]'>{entry.name}</p>}{entry.missing && <p>{entry.tba ? 'TBA' : 'Missing'}{entry.aired ? ' · ' + entry.aired : ''}</p>}</td>
-                            <td className='px-3 py-2.5'>
+                            </TableCell>
+                            <TableCell className='pr-3 font-mono text-xs tabular-nums text-foreground'>{entry.episode ?? '—'}</TableCell>
+                            <TableCell className='text-xs text-muted-foreground'>{entry.episode_title && <p className='text-sm text-foreground'>{entry.episode_title}</p>}{!entry.missing && <p className='font-mono text-[0.68rem]'>{entry.name}</p>}{entry.missing && <p>{entry.tba ? 'TBA' : 'Missing'}{entry.aired ? ' · ' + entry.aired : ''}</p>}</TableCell>
+                            <TableCell>
                               <div className='flex flex-wrap items-center gap-1.5'>
-                                {entry.codec ? <Badge variant={entry.codec === 'hevc' ? 'success' : 'warning'}>{entry.codec.toUpperCase()}</Badge> : <span className='text-xs text-muted-foreground'>—</span>}
-                                {entry.german_dub && <Badge variant='transfer' title='Carries a German dub — never replaced by an HEVC upgrade'>GER dub</Badge>}
+                                {entry.codec ? <StatusTag variant={entry.codec === 'hevc' ? 'success' : 'warning'}>{entry.codec.toUpperCase()}</StatusTag> : <span className='text-xs text-muted-foreground'>—</span>}
+                                {entry.german_dub && <StatusTag variant='transfer' title='Carries a German dub — never replaced by an HEVC upgrade'>GER dub</StatusTag>}
                               </div>
-                            </td>
-                            <td className='px-3 py-2.5 text-right font-mono text-xs tabular-nums'>{entry.missing ? '—' : formatSize(entry.size)}</td>
-                            <td className='py-2.5 pl-3 text-right'>{entry.missing ? <Button size='icon' variant='secondary' disabled={entryOf(active, entry) == null || entry.tba} aria-label='Search for a release' title={entry.tba ? 'Not aired yet' : 'Search for a release of this AniList episode'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : (
+                            </TableCell>
+                            <TableCell numeric className='text-xs text-foreground'>{entry.missing ? '—' : formatSize(entry.size)}</TableCell>
+                            <TableCell className='text-right'>{entry.missing ? <Button size='icon-sm' variant='secondary' disabled={entryOf(active, entry) == null || entry.tba} aria-label='Search for a release' title={entry.tba ? 'Not aired yet' : 'Search for a release of this AniList episode'} onClick={() => void searchMissing(active, entry)}><Search /></Button> : (
                               <div className='flex items-center justify-end gap-1.5'>
                                 {entry.staged ? (
                                   <Button size='sm' variant='secondary' onClick={() => void transfer(entry)} disabled={transferring === entry.path || entry.transfer_status === 'transferring'}><ArrowRight data-icon='inline-start' /> {entry.transfer_status === 'transferring' ? 'Transferring' : 'Transfer'}</Button>
-                                ) : <Badge variant='success'>In library</Badge>}
+                                ) : <StatusTag variant='success'>In library</StatusTag>}
                                 <Button
-                                  size='icon'
+                                  size='icon-sm'
                                   variant='ghost'
                                   className='size-7 text-muted-foreground hover:text-destructive'
                                   disabled={entry.transfer_status === 'transferring'}
@@ -1062,15 +1132,14 @@ export default function AnimeLibrary() {
                                   <Trash2 />
                                 </Button>
                               </div>
-                            )}</td>
-                          </tr>
+                            )}</TableCell>
+                          </TableRow>
                           </Fragment>
                             );
                           });
-                        })()}</tbody>
-                      </table>
-                    </div>
-                  </TabsContent>
+                        })()}</TableBody>
+                    </Table>
+                  </TabsPanel>
                 ))}
               </Tabs>
             </>
@@ -1079,7 +1148,7 @@ export default function AnimeLibrary() {
       </Drawer>
       {/* Deleting a whole show is not undoable, so it is never one click. */}
       <Dialog open={Boolean(removeTarget)} onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}>
-        <DialogContent className='max-w-md'>
+        <DialogContent size='sm'>
           <DialogHeader>
             <DialogTitle>Remove {removeTarget?.show.title}?</DialogTitle>
             <DialogDescription>
@@ -1100,7 +1169,7 @@ export default function AnimeLibrary() {
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(episodeTarget)} onOpenChange={(open) => { if (!open && !deletingEpisode) setEpisodeTarget(null); }}>
-        <DialogContent className='max-w-md'>
+        <DialogContent size='sm'>
           <DialogHeader>
             <DialogTitle>Delete episode {episodeTarget?.episode.episode ?? ''}?</DialogTitle>
             <DialogDescription>
@@ -1118,7 +1187,7 @@ export default function AnimeLibrary() {
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(searchTarget)} onOpenChange={(open) => { if (!open) setSearchTarget(null); }}>
-        <DialogContent className='flex h-[90dvh] w-[92vw] max-w-none flex-col overflow-hidden'>
+        <DialogContent className='h-[90dvh] max-h-none w-[92vw] max-w-none shrink-0'>
           <DialogHeader>
             <DialogTitle>Search {searchTarget ? seasonLabel(searchTarget.episode.season_number) : ''} — episode {searchTarget?.episode.episode ?? ''}</DialogTitle>
             <DialogDescription>Choose a release of this AniList episode. Every result is checked to be this entry's episode.</DialogDescription>
@@ -1127,19 +1196,25 @@ export default function AnimeLibrary() {
             <Input aria-label='Episode release search' value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className='flex-1' />
             <Button type='submit' disabled={searching}><Search data-icon='inline-start' /> Search</Button>
           </form>
-          <div className='min-h-0 flex-1 overflow-y-auto'>
-            {searching ? <div className='flex h-40 items-center justify-center'><Spinner /></div> : results.length ? <div className='flex flex-col gap-2'>
-              {results.map((entry) => <Card key={entry.info_hash}><CardContent className='flex flex-wrap items-center justify-between gap-3 p-3'>
+          <DialogBody>
+            {searching ? <div className='flex h-40 items-center justify-center'><Spinner label='Searching' /></div> : results.length ? <div className='flex flex-col gap-2'>
+              {results.map((entry) => <Card key={entry.info_hash} className='flex-row flex-wrap items-center justify-between gap-3 rounded-button [--card-padding:12px]'>
                 <div className='flex min-w-0 flex-1 flex-col gap-1'><p className='break-words font-mono text-xs'>{entry.title}</p><p className='text-xs text-muted-foreground'>{entry.quality} · {entry.size} · {entry.seeders} seeds · {entry.publisher}</p></div>
-                <Button asChild size='sm' variant='secondary'><a href={entry.detail_url} target='_blank' rel='noreferrer'><ExternalLink data-icon='inline-start' /> Description</a></Button>
-                <Button size='sm' disabled={Boolean(downloading)} onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> {downloading === entry.info_hash ? 'Queuing…' : 'Download'}</Button>
-              </CardContent></Card>)}
-            </div> : <EmptyState icon={Search} title='No matching releases found' description='Try another title above, the way Erai-raws names the show.' />}
-          </div>
+                <Button size='sm' variant='secondary' nativeButton={false} render={<a href={entry.detail_url} target='_blank' rel='noreferrer' />}><ExternalLink data-icon='inline-start' /> Description</Button>
+                <Button size='sm' variant='secondary' disabled={Boolean(downloading)} onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> {downloading === entry.info_hash ? 'Queuing…' : 'Download'}</Button>
+              </Card>)}
+            </div> : (
+              <Empty>
+                <EmptyMedia><Search /></EmptyMedia>
+                <EmptyTitle>No matching releases found</EmptyTitle>
+                <EmptyDescription>Try another title above, the way Erai-raws names the show.</EmptyDescription>
+              </Empty>
+            )}
+          </DialogBody>
         </DialogContent>
       </Dialog>
       <Dialog open={assignFor !== null} onOpenChange={(open) => { if (!open && !assigning) setAssignFor(null); }}>
-        <DialogContent className='flex max-h-[90dvh] w-[min(44rem,calc(100vw-2rem))] max-w-2xl flex-col'>
+        <DialogContent size='lg' className='max-h-[90dvh]'>
           <DialogHeader>
             <DialogTitle>Match {assignFor?.rows.length ?? 0} file{assignFor?.rows.length === 1 ? '' : 's'} to an AniList entry</DialogTitle>
             <DialogDescription>
@@ -1151,9 +1226,9 @@ export default function AnimeLibrary() {
             const known = knownEntries(assignFor.show);
             const options = assignEntry && !known.some((entry) => entry.anilist_id === assignEntry.anilist_id) ? [assignEntry, ...known] : known;
             return (
-              <div className='flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1'>
+              <DialogBody className='flex flex-col gap-4'>
                 <section className='flex flex-col gap-2'>
-                  <span className='text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground'>Entry</span>
+                  <span className='eyebrow'>Entry</span>
                   {options.length > 0 && (
                     <ul className='flex flex-col gap-1' role='radiogroup' aria-label='AniList entry'>
                       {options.map((entry) => {
@@ -1166,8 +1241,8 @@ export default function AnimeLibrary() {
                               aria-checked={on}
                               onClick={() => setAssignEntry(entry)}
                               className={cn(
-                                'flex w-full items-center gap-2.5 rounded-md border px-3 py-2 text-left text-sm transition-colors',
-                                on ? 'border-foreground/60 bg-accent/50 text-foreground' : 'border-border text-foreground-soft hover:bg-accent/30',
+                                'flex w-full cursor-pointer items-center gap-2.5 rounded-control border px-3 py-2 text-left text-sm transition-colors focus-ring',
+                                on ? 'border-foreground/60 bg-control-hover text-foreground' : 'border-field-edge text-foreground-soft hover:bg-control-hover/60',
                               )}
                             >
                               <span className={cn('size-3 shrink-0 rounded-full border', on ? 'border-foreground bg-foreground' : 'border-muted-foreground')} aria-hidden='true' />
@@ -1190,7 +1265,7 @@ export default function AnimeLibrary() {
                 </section>
                 <section className='flex flex-col gap-2'>
                   <div className='flex flex-wrap items-center justify-between gap-2'>
-                    <span className='text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground'>Episodes</span>
+                    <span className='eyebrow'>Episodes</span>
                     <label className='flex items-center gap-2 text-xs text-muted-foreground'>
                       First episode
                       <Input
@@ -1200,12 +1275,13 @@ export default function AnimeLibrary() {
                         aria-label='First episode'
                         value={assignFirst}
                         onChange={(event) => changeAssignFirst(event.target.value)}
+                        size='sm'
                         className='w-20 font-mono tabular-nums'
                       />
                     </label>
                   </div>
                   <p className='text-xs text-muted-foreground'>The files in their order on the card; changing the first episode numbers them all on from it.</p>
-                  <ul className='flex flex-col divide-y divide-border/70 rounded-md border border-border'>
+                  <ul className='flex flex-col divide-y divide-border/60 rounded-control border border-field-edge'>
                     {assignFor.rows.map((row, index) => (
                       <li key={row.path} className='flex items-center gap-3 px-3 py-2'>
                         <div className='min-w-0 flex-1'>
@@ -1227,13 +1303,14 @@ export default function AnimeLibrary() {
                             const value = event.target.value;
                             setAssignEpisodes((current) => current.map((old, at) => (at === index ? value : old)));
                           }}
+                          size='sm'
                           className='w-20 shrink-0 font-mono tabular-nums'
                         />
                       </li>
                     ))}
                   </ul>
                 </section>
-              </div>
+              </DialogBody>
             );
           })()}
           <DialogFooter>
@@ -1257,7 +1334,7 @@ export default function AnimeLibrary() {
         action={pickFor?.mode === 'rematch' ? 'Change' : pickFor?.mode === 'assign' ? 'Choose' : 'Match'}
       />
       <Dialog open={renameFor !== null} onOpenChange={(open) => { if (!open && !renaming) setRenameFor(null); }}>
-        <DialogContent className='max-w-md'>
+        <DialogContent size='sm'>
           <DialogHeader>
             <DialogTitle>Rename collection</DialogTitle>
             <DialogDescription>
@@ -1275,7 +1352,7 @@ export default function AnimeLibrary() {
           >
             <Input aria-label='Collection name' value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus />
           </form>
-          <DialogFooter className='gap-2 sm:justify-between sm:space-x-0'>
+          <DialogFooter className='sm:justify-between'>
             <Button
               variant='secondary'
               disabled={renaming || !renameFor?.collection_name_custom}

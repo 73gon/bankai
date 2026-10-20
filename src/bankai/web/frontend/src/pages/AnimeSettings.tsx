@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Database, Play, Save, ShieldCheck } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type AnimeAutomationStatus, type SettingRow } from '@/lib/api';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Switch } from '@/components/ui/switch';
+import { StatusTag } from '@/components/status-tag';
+import { Button } from '@/zon/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
+import { Input } from '@/zon/ui/input';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Switch } from '@/zon/ui/switch';
 
 const LABELS: Record<string, { label: string; description: string; suffix?: string }> = {
   'transfer.anime_shows_dir': { label: 'Anime library folder', description: 'Dedicated Jellyfin Anime destination; bankai lays each show out by its AniList entries and writes NFO files for Jellyfin.' },
@@ -92,8 +92,8 @@ export default function AnimeSettings() {
     <div className='flex flex-col gap-6'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground'>Anime</p>
-          <h1 className='font-serif text-3xl font-semibold'>Settings</h1>
+          <p className='eyebrow'>Anime</p>
+          <h1 className='font-heading text-3xl font-light'>Settings</h1>
           <p className='text-sm text-muted-foreground'>Autonomous Erai-raws policy, storage guard, and backfill progress.</p>
         </div>
         <div className='flex flex-wrap gap-2'>
@@ -106,18 +106,18 @@ export default function AnimeSettings() {
         </div>
       </div>
 
-      {loading ? <Skeleton className='h-44 w-full' /> : status && (
+      {loading ? <Skeleton shape='card' className='h-44 w-full' /> : status && (
         <Card className={status.paused ? 'border-warning/40' : 'border-success/40'}>
           <CardHeader>
             <div className='flex flex-wrap items-center justify-between gap-3'>
               <div className='flex flex-col gap-1'>
-                <CardTitle className='flex items-center gap-2'>
+                <CardTitle className='flex items-center gap-2 text-xl sm:text-xl'>
                   {status.paused ? <AlertTriangle className='text-warning' /> : <ShieldCheck className='text-success' />}
                   {status.paused ? 'Automation paused' : 'Automation ready'}
                 </CardTitle>
                 <CardDescription>{status.pause_reason || 'All safety checks are available.'}</CardDescription>
               </div>
-              <Badge variant={status.paused ? 'warning' : 'success'}>{status.running ? 'Checking now' : status.enabled ? 'Enabled' : 'Disabled'}</Badge>
+              <StatusTag variant={status.paused ? 'warning' : 'success'}>{status.running ? 'Checking now' : status.enabled ? 'Enabled' : 'Disabled'}</StatusTag>
             </div>
           </CardHeader>
           <CardContent className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
@@ -126,13 +126,13 @@ export default function AnimeSettings() {
             <div><p className='text-xs text-muted-foreground'>Reserve</p><p className='font-mono text-lg'>{status.min_free_space_gib} GiB</p></div>
             <div><p className='text-xs text-muted-foreground'>Last successful check</p><p className='text-sm'>{formatDate(status.last_success)}</p></div>
             <div><p className='text-xs text-muted-foreground'>Last cycle</p><p className='font-mono text-lg'>{status.last_enqueued} queued</p></div>
-            <div className='sm:col-span-2 lg:col-span-4'><p className='text-xs text-muted-foreground'>Active feed: {status.feed_source}</p><a href={status.rss_url} target='_blank' rel='noreferrer' className='break-all font-mono text-xs underline underline-offset-4'>{status.rss_url}</a></div>
+            <div className='sm:col-span-2 lg:col-span-4'><p className='text-xs text-muted-foreground'>Active feed: {status.feed_source}</p><a href={status.rss_url} target='_blank' rel='noreferrer' className='link break-all font-mono text-xs'>{status.rss_url}</a></div>
           </CardContent>
         </Card>
       )}
 
       <Card>
-        <CardHeader><CardTitle>Download policy</CardTitle><CardDescription>Every automatic item requires a trusted Erai uploader, explicit German subtitle evidence, an unambiguous AniList match, and post-download subtitle verification.</CardDescription></CardHeader>
+        <CardHeader><CardTitle className='text-xl sm:text-xl'>Download policy</CardTitle><CardDescription>Every automatic item requires a trusted Erai uploader, explicit German subtitle evidence, an unambiguous AniList match, and post-download subtitle verification.</CardDescription></CardHeader>
         <CardContent className='grid gap-5 md:grid-cols-2'>
           {rows.map((row) => {
             const meta = LABELS[row.key] || { label: row.key, description: '' };
@@ -140,7 +140,7 @@ export default function AnimeSettings() {
             const isBoolean = typeof row.value === 'boolean';
             const isNumber = typeof row.value === 'number';
             return (
-              <label key={row.key} className='flex items-start justify-between gap-4 rounded-md border border-border/70 p-4'>
+              <label key={row.key} className='flex items-start justify-between gap-4 rounded-control border border-border/60 p-4'>
                 <span className='flex flex-col gap-1'>
                   <span className='font-medium'>{meta.label}</span>
                   <span className='text-xs leading-relaxed text-muted-foreground'>{meta.description}</span>
@@ -162,12 +162,12 @@ export default function AnimeSettings() {
       {status && (
         <Card>
           <CardHeader>
-            <CardTitle className='flex items-center gap-2'><Database /> Historical quality index</CardTitle>
+            <CardTitle className='flex items-center gap-2 text-xl sm:text-xl'><Database /> Historical quality index</CardTitle>
             <CardDescription>720p is not considered until the full 2160p and 1080p catalogue passes finish. Capped Nyaa queries are split into complementary search branches.</CardDescription>
           </CardHeader>
-          {status.backfill.error && <p className='px-5 pb-3 text-sm text-warning'>{status.backfill.error} New RSS episodes continue independently.</p>}
+          {status.backfill.error && <p className='text-sm text-warning'>{status.backfill.error} New RSS episodes continue independently.</p>}
           <CardContent className='grid gap-4 sm:grid-cols-4'>
-            <div><p className='text-xs text-muted-foreground'>Phase</p><Badge variant={status.backfill.complete ? 'success' : 'info'}>{status.backfill.phase}</Badge></div>
+            <div><p className='text-xs text-muted-foreground'>Phase</p><StatusTag variant={status.backfill.complete ? 'success' : 'info'}>{status.backfill.phase}</StatusTag></div>
             <div><p className='text-xs text-muted-foreground'>Search branches completed</p><p className='font-mono text-xl'>{status.backfill.queries_completed}</p></div>
             <div><p className='text-xs text-muted-foreground'>1080p+ episodes</p><p className='font-mono text-xl'>{status.backfill.found_1080}</p></div>
             <div><p className='text-xs text-muted-foreground'>720p fallbacks</p><p className='font-mono text-xl'>{status.backfill.fallback_720}</p></div>

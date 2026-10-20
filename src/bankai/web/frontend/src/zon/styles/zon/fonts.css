@@ -1,0 +1,145 @@
+/*
+ * zon faces.
+ *
+ * Licht, Licht Sans and Licht Mono are zon's own faces and are still in development. They are NOT
+ * vendored: they are requested from the app's own origin at /licht/fonts/*.woff2 and proxied
+ * server-side to zon.sh/licht/fonts, so every visit gets the current release and the
+ * visitor's browser never talks to a third-party host. Use `zonFonts()` from
+ * `@zonsh/ui/vite` (or an equivalent rewrite on your host) to set up the proxy.
+ *
+ * Licht (the serif, LichtSerif-Light) is used in its Light cut only. It is declared at
+ * 300–700 against that one file so heading weights keep the Light appearance. Never
+ * synthesise a heavier cut.
+ *
+ * Licht Sans and Licht Mono ship real cuts from Light (300) to Bold (700), one file each, named
+ * by weight (LichtSans-Regular, LichtMono-Regular …); Licht Sans has an italic for each. The
+ * browser only fetches the weights and styles a page uses.
+ */
+
+@font-face {
+  font-family: "Licht";
+  src: url("/fonts/licht/LichtSerif-Light.woff2") format("woff2");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-Light.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-LightItalic.woff2") format("woff2");
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-Italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-MediumItalic.woff2") format("woff2");
+  font-weight: 500;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-SemiBoldItalic.woff2") format("woff2");
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Sans";
+  src: url("/fonts/licht/LichtSans-BoldItalic.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Mono";
+  src: url("/fonts/licht/LichtMono-Light.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Mono";
+  src: url("/fonts/licht/LichtMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Mono";
+  src: url("/fonts/licht/LichtMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Mono";
+  src: url("/fonts/licht/LichtMono-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Licht Mono";
+  src: url("/fonts/licht/LichtMono-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}

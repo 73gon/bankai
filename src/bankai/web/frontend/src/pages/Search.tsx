@@ -1,19 +1,20 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2, Check, UserRound } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type DiscoverItem, type DiscoverSearchBy, type PagedDiscover, type PersonSuggestion, type SearchResult, type EpisodeItem } from '@/lib/api';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
-import { EmptyState } from '@/components/ui/empty';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Switch } from '@/components/ui/switch';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Separator } from '@/components/ui/separator';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tabs, TabsList, TabsTab } from '@/zon/ui/tabs';
+import { Button } from '@/zon/ui/button';
+import { Input } from '@/zon/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
+import { Popover, PopoverContent } from '@/zon/ui/popover';
+import { StatusTag } from '@/components/status-tag';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Switch } from '@/zon/ui/switch';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Separator } from '@/zon/ui/separator';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
 import { GermanRelease } from '@/components/GermanRelease';
 import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
 
@@ -34,6 +35,8 @@ const FAMOUS_STUDIOS = [
   'A24',
   'Studio Ghibli',
 ] as const;
+const STUDIO_ITEMS = FAMOUS_STUDIOS.map((studio) => ({ value: studio, label: studio }));
+const PAGE_SIZE_ITEMS = CATALOG_PAGE_SIZES.map((size) => ({ value: String(size), label: `${size} per page` }));
 
 function searchCacheKey(query: string, kind: string, by: string, page: number, pageSize: number) {
   return `${kind}:${by}:${query.toLocaleLowerCase()}:${page}:${pageSize}`;
@@ -97,7 +100,7 @@ function Poster({ item, onClick, priority = false, eager = false }: { item: Disc
   return (
     <button
       onClick={onClick}
-      className='group relative aspect-[2/3] overflow-hidden rounded-lg bg-secondary/40 text-left ring-1 ring-border/40 transition-transform hover:-translate-y-1 hover:ring-primary/50'
+      className='poster-card group relative aspect-[2/3] overflow-hidden rounded-control bg-control-surface text-left ring-1 ring-border/40 focus-ring hover:ring-primary/50'
     >
       {item.poster_url && !err ? (
         <img
@@ -114,18 +117,17 @@ function Poster({ item, onClick, priority = false, eager = false }: { item: Disc
         </div>
       )}
       {item.added && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Badge variant='success' className='absolute right-2 top-2 gap-1 border-success/50 bg-card/95 shadow-lg backdrop-blur-sm'>
-              <Check className='h-3 w-3' strokeWidth={3} /> Added
-            </Badge>
-          </TooltipTrigger>
-          <TooltipContent>Already added to the queue or library.</TooltipContent>
-        </Tooltip>
+        <StatusTag
+          variant='success'
+          title='Already added to the queue or library.'
+          className='absolute right-2 top-2 gap-1 border-success/50 bg-card/95 shadow-lg backdrop-blur-sm'
+        >
+          <Check className='h-3 w-3' strokeWidth={3} /> Added
+        </StatusTag>
       )}
-      <div className='absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-2.5 pt-8'>
-        <div className='line-clamp-2 text-xs font-medium'>{item.name}</div>
-        {item.year && <div className='text-[10px] text-muted-foreground'>{item.year}</div>}
+      <div className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black/90 to-transparent p-2.5 pt-8'>
+        <div className='line-clamp-2 text-xs font-medium text-foreground'>{item.name}</div>
+        {item.year && <div className='font-mono text-[10px] tabular-nums text-muted-foreground'>{item.year}</div>}
       </div>
     </button>
   );
@@ -151,6 +153,8 @@ export default function Search() {
   const [configured, setConfigured] = useState(true);
   const debounce = useRef<number | undefined>(undefined);
   const personDebounce = useRef<number | undefined>(undefined);
+  // The person suggestions open under the search field rather than a trigger.
+  const searchAnchor = useRef<HTMLDivElement>(null);
   const [personSuggestions, setPersonSuggestions] = useState<PersonSuggestion[]>([]);
   const [personSuggesting, setPersonSuggesting] = useState(false);
   const [personSuggestionsOpen, setPersonSuggestionsOpen] = useState(false);
@@ -557,7 +561,7 @@ export default function Search() {
   return (
     <div className='space-y-6'>
       <header className='flex items-baseline gap-2'>
-        <h1 className='shrink-0 text-2xl font-semibold'>Search</h1>
+        <h1 className='shrink-0 font-heading text-3xl font-light'>Search</h1>
         <span className='text-sm text-muted-foreground'>—{' '}
           {kind === 'show'
             ? 'Find a show on TheTVDB, then match it to a German stream source.'
@@ -571,6 +575,7 @@ export default function Search() {
 
       <div className='flex flex-wrap items-center gap-3'>
         <Tabs
+          className='w-auto'
           value={kind}
           onValueChange={(v) => {
             setKind(v as 'movie' | 'show');
@@ -580,15 +585,16 @@ export default function Search() {
             setPage(0);
           }}
         >
-          <TabsList className='border-0 bg-transparent shadow-none'>
-            <TabsTrigger value='movie'>Movie</TabsTrigger>
-            <TabsTrigger value='show'>Show</TabsTrigger>
+          <TabsList>
+            <TabsTab value='movie'>Movie</TabsTab>
+            <TabsTab value='show'>Show</TabsTab>
           </TabsList>
         </Tabs>
         {kind === 'movie' && (
           <>
             <Separator orientation='vertical' className='h-7' />
             <Tabs
+              className='w-auto'
               value={searchBy}
               onValueChange={(value) => {
                 setSearchBy(value as DiscoverSearchBy);
@@ -601,10 +607,10 @@ export default function Search() {
               }}
               aria-label='Search movies by'
             >
-              <TabsList className='border-0 bg-transparent shadow-none'>
-                <TabsTrigger value='title'>Title</TabsTrigger>
-                <TabsTrigger value='person'>Person</TabsTrigger>
-                <TabsTrigger value='studio'>Studio</TabsTrigger>
+              <TabsList>
+                <TabsTab value='title'>Title</TabsTab>
+                <TabsTab value='person'>Person</TabsTab>
+                <TabsTab value='studio'>Studio</TabsTab>
               </TabsList>
             </Tabs>
           </>
@@ -616,10 +622,10 @@ export default function Search() {
             if (!open) setActivePersonIndex(-1);
           }}
         >
-          <PopoverAnchor asChild>
-            <div className='relative flex-1'>
-              <SearchIcon className='absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' />
-              <Input
+          <div ref={searchAnchor} className='min-w-60 flex-1'>
+            <InputGroup>
+              <InputGroupAddon><SearchIcon className='h-4 w-4' /></InputGroupAddon>
+              <InputGroupInput
                 value={q}
                 onChange={(e) => {
                   setQ(e.target.value);
@@ -644,16 +650,17 @@ export default function Search() {
                         ? 'Type a studio or production company…'
                         : 'Start typing a movie…'
                 }
-                className='pl-9'
                 autoFocus
               />
-            </div>
-          </PopoverAnchor>
+            </InputGroup>
+          </div>
           <PopoverContent
-            className='w-[var(--radix-popover-trigger-width)] p-1'
+            className='w-(--anchor-width) max-w-none gap-0 p-1'
             align='start'
             sideOffset={4}
-            onOpenAutoFocus={(event) => event.preventDefault()}
+            positioner={{ anchor: searchAnchor }}
+            initialFocus={false}
+            finalFocus={false}
           >
             {personSuggesting && personSuggestions.length === 0 ? (
               <div className='flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground'>
@@ -668,6 +675,7 @@ export default function Search() {
                     role='option'
                     aria-selected={index === activePersonIndex}
                     variant={index === activePersonIndex ? 'secondary' : 'ghost'}
+                    size='sm'
                     className='w-full justify-start'
                     onMouseEnter={() => setActivePersonIndex(index)}
                     onClick={() => selectPerson(suggestion)}
@@ -682,8 +690,10 @@ export default function Search() {
         </Popover>
         {kind === 'movie' && searchBy === 'studio' && (
           <Select
-            value={FAMOUS_STUDIOS.includes(q as (typeof FAMOUS_STUDIOS)[number]) ? q : ''}
+            items={STUDIO_ITEMS}
+            value={FAMOUS_STUDIOS.includes(q as (typeof FAMOUS_STUDIOS)[number]) ? q : null}
             onValueChange={(value) => {
+              if (value == null) return;
               setQ(value);
               setPage(0);
             }}
@@ -701,27 +711,35 @@ export default function Search() {
           </Select>
         )}
         <label className='flex items-center gap-2 whitespace-nowrap text-sm text-foreground'>
-          <Switch checked={hideLibrary} onCheckedChange={setHideLibrary} aria-label='Hide movies already in library' />
+          <Switch checked={hideLibrary} onCheckedChange={(checked) => setHideLibrary(checked)} aria-label='Hide movies already in library' />
           Hide library titles
         </label>
       </div>
 
       {!configured ? (
-        <EmptyState icon={SearchIcon} title='TheTVDB key not configured' description='Add your TVDB API key in Settings to search.' />
+        <Empty>
+          <EmptyMedia><SearchIcon /></EmptyMedia>
+          <EmptyTitle>TheTVDB key not configured</EmptyTitle>
+          <EmptyDescription>Add your TVDB API key in Settings to search.</EmptyDescription>
+        </Empty>
       ) : loading ? (
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {Array.from({ length: 12 }).map((_, i) => (
-            <Skeleton key={i} className='aspect-[2/3] rounded-lg' />
+            <Skeleton key={i} shape='item' className='aspect-[2/3] rounded-control' />
           ))}
         </div>
       ) : q.trim().length < 2 ? (
-        <EmptyState icon={SearchIcon} title='Type to search' description='Results appear as you type.' />
+        <Empty>
+          <EmptyMedia><SearchIcon /></EmptyMedia>
+          <EmptyTitle>Type to search</EmptyTitle>
+          <EmptyDescription>Results appear as you type.</EmptyDescription>
+        </Empty>
       ) : visibleItems.length === 0 ? (
-        <EmptyState
-          icon={SearchIcon}
-          title='No results'
-          description={searchBy === 'person' ? 'Choose a suggested person or keep typing.' : searchBy === 'studio' ? 'Try the company’s full name.' : 'Try a different title.'}
-        />
+        <Empty>
+          <EmptyMedia><SearchIcon /></EmptyMedia>
+          <EmptyTitle>No results</EmptyTitle>
+          <EmptyDescription>{searchBy === 'person' ? 'Choose a suggested person or keep typing.' : searchBy === 'studio' ? 'Try the company’s full name.' : 'Try a different title.'}</EmptyDescription>
+        </Empty>
       ) : (
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {visibleItems.map((it, index) => (
@@ -741,19 +759,21 @@ export default function Search() {
           <Button variant='secondary' disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
             Previous
           </Button>
-          <span className='text-sm text-foreground'>
+          <span className='font-mono text-sm tabular-nums text-foreground'>
             Page {page + 1}{totalPages ? ` of ${totalPages}` : ''}
           </span>
           <Select
+            items={PAGE_SIZE_ITEMS}
             value={String(pageSize)}
             onValueChange={(value) => {
+              if (!value) return;
               const next = Number(value) as CatalogPageSize;
               setPageSize(next);
               saveCatalogPageSize(next);
               setPage(0);
             }}
           >
-            <SelectTrigger className='w-32' aria-label='Entries per page'>
+            <SelectTrigger className='w-36 min-w-0' aria-label='Entries per page'>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -769,12 +789,12 @@ export default function Search() {
       )}
 
       <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
-        <DialogContent className='max-h-[90vh] max-w-3xl overflow-y-auto'>
+        <DialogContent size='lg' className='max-h-[90vh] max-w-3xl overflow-y-auto'>
           <DialogHeader>
-            <DialogTitle className='flex items-center gap-2'>
+            <DialogTitle className='flex flex-wrap items-center gap-2'>
               {selected?.name}
-              {selected?.year && <span className='text-sm font-normal text-muted-foreground'>({selected.year})</span>}
-              {german && german !== selected?.name && <Badge variant='accent'>DE: {german}</Badge>}
+              {selected?.year && <span className='font-mono text-sm font-normal tabular-nums text-muted-foreground'>({selected.year})</span>}
+              {german && german !== selected?.name && <StatusTag variant='accent'>DE: {german}</StatusTag>}
             </DialogTitle>
             <DialogDescription>
               {loadingFilm ? 'Searching German stream sources…' : 'Pick a matching result or use your own German source link below.'}
@@ -801,27 +821,31 @@ export default function Search() {
           {loadingFilm ? (
             <div className='space-y-2'>
               {Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className='h-14' />
+                <Skeleton key={i} shape='item' className='h-14' />
               ))}
             </div>
           ) : filmResults.length === 0 && selected?.kind === 'movie' ? (
-            <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or use the direct German source field below.' />
+            <Empty className='py-8 md:py-10'>
+              <EmptyMedia><SearchIcon /></EmptyMedia>
+              <EmptyTitle>No German source match</EmptyTitle>
+              <EmptyDescription>Try another title or use the direct German source field below.</EmptyDescription>
+            </Empty>
           ) : selected?.kind === 'movie' ? (
             <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
               {filmResults.map((r) => (
-                <div key={`${r.site}-${r.url}`} className='rounded-lg ring-1 ring-border/50'>
+                <div key={`${r.site}-${r.url}`} className='rounded-control border border-field-edge'>
                   <div className='flex items-center justify-between gap-3 p-3'>
                     <div className='min-w-0'>
                       <div className='flex items-center gap-2'>
-                        <span className='truncate font-medium'>{r.title}</span>
-                        {r.year && <span className='text-xs text-muted-foreground'>{r.year}</span>}
+                        <span className='truncate font-medium text-foreground'>{r.title}</span>
+                        {r.year && <span className='font-mono text-xs tabular-nums text-muted-foreground'>{r.year}</span>}
                       </div>
-                      <Badge variant='muted' className='mt-1'>
+                      <StatusTag variant='muted' className='mt-1'>
                         {siteLabel(r.site)}
-                      </Badge>
+                      </StatusTag>
                       <GermanRelease value={r.release_name} />
                     </div>
-                    <Button size='sm' onClick={() => queueMovie(r)} disabled={busy === r.url}>
+                    <Button size='sm' variant='secondary' onClick={() => queueMovie(r)} disabled={busy === r.url}>
                       {busy === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
                       Queue
                     </Button>
@@ -831,28 +855,31 @@ export default function Search() {
             </div>
           ) : (
             // Show flow: choose a scraper source or provide one mirror URL per episode.
-            <div className='space-y-3 rounded-lg p-1'>
+            <div className='space-y-3 rounded-control p-1'>
               <div className='space-y-1.5'>
-                <span className='text-xs text-muted-foreground'>Source matches</span>
+                <span className='eyebrow text-[11px]'>Source matches</span>
                 <div className='grid gap-2 py-0.5 sm:grid-cols-3'>
                   {uniqueShowSources(filmResults).map((r) => {
                     const active = !customMode && picked?.site === r.site && picked?.url === r.url;
                     return (
                       <Tooltip key={`${r.site}-${r.url}`}>
-                        <TooltipTrigger asChild>
-                          <button
-                            type='button'
-                            onClick={() => {
-                              setCustomMode(false);
-                              const cleaned = cleanSeriesTitle(r.title) || searchTerm || r.title;
-                              setSeriesTitle(cleaned);
-                              loadEpisodes(r, season, cleaned, true);
-                            }}
-                            className={'min-w-0 cursor-pointer rounded-md px-3 py-2 text-left text-xs ring-1 transition-colors ' + (active ? 'bg-primary/20 text-foreground ring-primary/50' : 'bg-secondary/40 text-muted-foreground ring-border/50 hover:text-foreground')}
-                          >
-                            <span className='block font-medium'>{siteLabel(r.site)}</span>
-                            <span className='block truncate opacity-75'>{r.title}</span>
-                          </button>
+                        <TooltipTrigger
+                          render={
+                            <button
+                              type='button'
+                              aria-pressed={active}
+                              onClick={() => {
+                                setCustomMode(false);
+                                const cleaned = cleanSeriesTitle(r.title) || searchTerm || r.title;
+                                setSeriesTitle(cleaned);
+                                loadEpisodes(r, season, cleaned, true);
+                              }}
+                              className={'min-w-0 cursor-pointer rounded-item px-3 py-2 text-left text-xs ring-1 transition-colors focus-ring ' + (active ? 'bg-primary/20 text-foreground ring-primary/50' : 'bg-control-surface text-muted-foreground ring-border/50 hover:text-foreground')}
+                            />
+                          }
+                        >
+                          <span className='block font-medium'>{siteLabel(r.site)}</span>
+                          <span className='block truncate opacity-75'>{r.title}</span>
                         </TooltipTrigger>
                         <TooltipContent>{r.title}</TooltipContent>
                       </Tooltip>
@@ -860,12 +887,13 @@ export default function Search() {
                   })}
                   <button
                     type='button'
+                    aria-pressed={customMode}
                     onClick={selectCustomSource}
                     className={
-                      'rounded-md px-3 py-2 text-left text-xs ring-1 transition-colors ' +
+                      'cursor-pointer rounded-item px-3 py-2 text-left text-xs ring-1 transition-colors focus-ring ' +
                       (customMode
                         ? 'bg-transfer/20 text-foreground ring-transfer/50'
-                        : 'bg-secondary/40 text-muted-foreground ring-border/50 hover:text-foreground')
+                        : 'bg-control-surface text-muted-foreground ring-border/50 hover:text-foreground')
                     }
                   >
                     <span className='flex items-center gap-1.5 font-medium'>
@@ -877,8 +905,8 @@ export default function Search() {
               </div>
 
               <div className='flex flex-wrap items-center gap-2'>
-                <span className='text-sm font-medium'>{seriesTitle || selected?.name}</span>
-                <Badge variant={customMode ? 'transfer' : 'muted'}>{customMode ? 'Custom mirrors' : siteLabel(picked?.site || 'source')}</Badge>
+                <span className='text-sm font-medium text-foreground'>{seriesTitle || selected?.name}</span>
+                <StatusTag variant={customMode ? 'transfer' : 'muted'}>{customMode ? 'Custom mirrors' : siteLabel(picked?.site || 'source')}</StatusTag>
               </div>
 
               <div className='flex flex-wrap items-center gap-2'>
@@ -887,12 +915,13 @@ export default function Search() {
                   showSeasons.map((s) => (
                     <button
                       key={s}
+                      aria-pressed={String(s) === season}
                       onClick={() => pickSeason(s)}
                       className={
-                        'rounded-md px-2.5 py-1 text-xs font-medium ring-1 transition-colors ' +
+                        'cursor-pointer rounded-item px-2.5 py-1 font-mono text-xs font-medium ring-1 transition-colors focus-ring ' +
                         (String(s) === season
-                          ? 'bg-primary/20 text-primary-foreground ring-primary/40'
-                          : 'bg-secondary/40 text-muted-foreground ring-border/40 hover:text-foreground')
+                          ? 'bg-primary/20 text-foreground ring-primary/40'
+                          : 'bg-control-surface text-muted-foreground ring-border/40 hover:text-foreground')
                       }
                     >
                       S{String(s).padStart(2, '0')}
@@ -905,7 +934,8 @@ export default function Search() {
                     value={season}
                     onChange={(e) => setSeason(e.target.value)}
                     onBlur={() => picked && loadEpisodes(picked, season, seriesTitle, !customMode)}
-                    className='h-8 w-20'
+                    size='sm'
+                    className='w-20'
                   />
                 )}
               </div>
@@ -913,7 +943,7 @@ export default function Search() {
               {loadingEps ? (
                 <div className='text-sm text-muted-foreground'>Detecting episodes…</div>
               ) : episodes.length === 0 ? (
-                <div className='rounded-md border border-border/50 bg-secondary/25 p-3 text-sm text-muted-foreground'>
+                <div className='rounded-control border border-field-edge bg-control-surface/50 p-3 text-sm text-muted-foreground'>
                   {filmResults.length === 0
                     ? 'No supported source supplied the episode list. Search a matching show source first, then switch to Custom to paste mirror links.'
                     : 'No episodes found for this season.'}
@@ -922,13 +952,13 @@ export default function Search() {
                 <>
                   <div className='flex items-center gap-2'>
                     {!customMode && (
-                      <Button size='sm' variant='outline' onClick={() => setSelectedEps(new Set(episodes.map((e) => e.episode)))}>
+                      <Button size='sm' variant='secondary' onClick={() => setSelectedEps(new Set(episodes.map((e) => e.episode)))}>
                         Select all
                       </Button>
                     )}
                     <Button
                       size='sm'
-                      variant='outline'
+                      variant='secondary'
                       onClick={() => {
                         setSelectedEps(new Set());
                         if (customMode) setCustomUrls({});
@@ -936,7 +966,7 @@ export default function Search() {
                     >
                       {customMode ? 'Clear links' : 'Clear'}
                     </Button>
-                    <span className='text-xs text-muted-foreground'>
+                    <span className='text-xs tabular-nums text-muted-foreground'>
                       {customMode ? 'Pasting a link selects its episode' : `${selectedEps.size} of ${episodes.length} selected`}
                     </span>
                   </div>
@@ -947,12 +977,12 @@ export default function Search() {
                         <div
                           key={ep.episode}
                           className={
-                            'grid gap-2 rounded-md p-2.5 ring-1 transition-colors sm:grid-cols-[minmax(12rem,0.8fr)_minmax(16rem,1.2fr)] sm:items-center ' +
+                            'grid gap-2 rounded-item p-2.5 ring-1 transition-colors sm:grid-cols-[minmax(12rem,0.8fr)_minmax(16rem,1.2fr)] sm:items-center ' +
                             (on
                               ? customMode
                                 ? 'bg-transfer/10 ring-transfer/40'
                                 : 'bg-primary/15 ring-primary/40'
-                              : 'bg-secondary/30 ring-border/40')
+                              : 'bg-control-surface/60 ring-border/40')
                           }
                         >
                           <button
@@ -962,16 +992,17 @@ export default function Search() {
                               on ? next.delete(ep.episode) : next.add(ep.episode);
                               setSelectedEps(next);
                             }}
-                            className='flex min-w-0 items-center gap-3 rounded-sm text-left'
+                            aria-pressed={on}
+                            className='flex min-w-0 cursor-pointer items-center gap-3 rounded-item text-left focus-ring'
                           >
                             <span
                               className={
-                                'shrink-0 rounded-md px-2.5 py-1 text-xs font-semibold ring-1 ' +
+                                'shrink-0 rounded-item px-2.5 py-1 font-mono text-xs font-medium ring-1 ' +
                                 (on
                                   ? customMode
                                     ? 'bg-transfer/20 text-transfer ring-transfer/40'
                                     : 'bg-primary/20 text-foreground ring-primary/40'
-                                  : 'bg-secondary/50 text-muted-foreground ring-border/50')
+                                  : 'bg-control-surface text-muted-foreground ring-border/50')
                               }
                             >
                               E{String(ep.episode).padStart(2, '0')}
@@ -985,7 +1016,8 @@ export default function Search() {
                               onChange={(event) => setCustomEpisodeUrl(ep.episode, event.target.value)}
                               placeholder='https://voe.sx/...'
                               aria-label={`Mirror URL for episode ${ep.episode}`}
-                              className='h-9 font-mono text-xs'
+                              size='sm'
+                              className='font-mono text-xs'
                             />
                           )}
                         </div>
@@ -1006,14 +1038,10 @@ export default function Search() {
 
           {selected?.kind === 'movie' && (
             <div className='flex flex-col gap-3'>
-              <div className='flex items-center gap-3'>
-                <Separator className='flex-1' />
-                <span className='text-xs font-medium text-muted-foreground'>or use your own source</span>
-                <Separator className='flex-1' />
-              </div>
-              <div className='flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-3'>
+              <Separator label='or use your own source' />
+              <div className='flex flex-col gap-2 rounded-control surface-container p-3'>
                 <div className='flex items-center gap-2 text-sm font-medium text-foreground'>
-                  <Link2 /> Use your own German source
+                  <Link2 className='size-4' /> Use your own German source
                 </div>
                 <p className='text-xs text-muted-foreground'>
                   Paste a direct VOE, Vidmoly, Vinovo, Filmpalast, or other German video link. It will be used instead of the unavailable automatic result.
@@ -1029,6 +1057,7 @@ export default function Search() {
                     className='flex-1'
                   />
                   <Button
+                    variant='secondary'
                     onClick={queueDirectMovie}
                     disabled={!directMovieUrl.trim() || busy === directMovieUrl.trim()}
                   >

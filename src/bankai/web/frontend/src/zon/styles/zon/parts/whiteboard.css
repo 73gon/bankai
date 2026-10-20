@@ -1,0 +1,854 @@
+/* Whiteboard — Excalidraw's interface in the zon material. Every colour Excalidraw defines is mapped
+   to a token (no violet, no blue), and its parts take the library's shapes: islands and popups in
+   the menu material at 12px, tools that rise when picked like ToolbarButton, raised keys in joined
+   groups like ButtonGroup, recessed fields, segmented tabs, Kbd keys, eyebrow headings and Licht
+   titles. Unlayered, and scoped one class deeper than Excalidraw's own rules (its stylesheet is
+   unlayered too and loads later). Dialogs are portalled to <body>, so the scope takes them too. */
+
+:is([data-slot="whiteboard"] .excalidraw, .excalidraw-modal-container).excalidraw {
+  /* ── Colours ── */
+  --color-primary: var(--foreground);
+  --color-primary-darker: var(--foreground);
+  --color-primary-darkest: var(--foreground);
+  --color-primary-hover: var(--foreground-soft);
+  --color-primary-light: var(--control-hover);
+  --color-primary-light-darker: var(--control-hover);
+  --color-brand-hover: var(--foreground-soft);
+  --color-brand-active: var(--foreground);
+  --color-promo: var(--foreground);
+  --color-logo-icon: var(--foreground);
+  --color-selection: var(--muted-foreground);
+  --color-surface-lowest: var(--background);
+  --color-surface-low: var(--control-surface);
+  --color-surface-mid: var(--control-surface);
+  --color-surface-high: var(--control-hover);
+  --color-surface-primary-container: var(--control-hover);
+  --color-on-primary-container: var(--foreground);
+  --color-on-surface: var(--foreground);
+  --color-icon-white: var(--background);
+  --color-border-outline: var(--muted-foreground);
+  --color-border-outline-variant: var(--field-edge);
+  --color-muted: var(--muted-foreground);
+  --color-gray-40: var(--muted-foreground);
+  --color-disabled: var(--control-muted);
+  --color-danger: var(--destructive);
+  --color-danger-dark: var(--destructive);
+  --color-danger-text: var(--background);
+  --color-slider-track: var(--field-edge);
+  --color-slider-thumb: var(--foreground);
+  --island-bg-color: var(--control-menu);
+  --sidebar-bg-color: var(--control-menu);
+  --sidebar-border-color: var(--field-edge);
+  --default-bg-color: var(--background);
+  --popup-bg-color: var(--control-menu);
+  --popup-secondary-bg-color: var(--control-surface);
+  --popup-text-color: var(--foreground);
+  --popup-text-inverted-color: var(--background);
+  --overlay-bg-color: color-mix(in srgb, var(--background) 70%, transparent);
+  --input-bg-color: var(--field-surface);
+  --input-border-color: var(--field-edge);
+  --input-hover-bg-color: var(--field-surface);
+  --input-label-color: var(--foreground);
+  --link-color: var(--foreground);
+  --text-primary-color: var(--foreground);
+  --icon-fill-color: var(--foreground);
+  --keybinding-color: var(--control-muted);
+  --focus-highlight-color: var(--control-focus);
+  --select-highlight-color: var(--control-focus);
+  --default-border-color: var(--field-edge);
+  --dialog-border-color: var(--field-edge);
+  --list-border-color: var(--field-edge);
+  --avatar-border-color: var(--field-edge);
+  --scrollbar-thumb: var(--field-edge);
+  --scrollbar-thumb-hover: var(--muted-foreground);
+  --ImageExportModal-preview-border: var(--field-edge);
+  --button-bg: transparent;
+  --button-hover-bg: var(--control-hover);
+  --button-active-bg: var(--control-hover);
+  --button-selected-bg: var(--control-hover);
+  --button-selected-hover-bg: var(--control-hover);
+  --button-active-border: var(--control-focus);
+  --button-selected-border: var(--control-edge);
+  --button-destructive-bg-color: color-mix(in srgb, var(--destructive) 14%, transparent);
+  --button-destructive-color: var(--destructive);
+  --ExcTextField--color: var(--foreground);
+  --ExcTextField--label-color: var(--foreground);
+  --ExcTextField--background: var(--field-surface);
+  --ExcTextField--border: var(--field-edge);
+  --ExcTextField--border-hover: var(--field-edge);
+  --ExcTextField--border-active: var(--control-focus);
+  --ExcTextField--placeholder: var(--control-muted);
+  --ExcTextField--readonly--background: var(--control-surface);
+  --ExcTextField--readonly--border: var(--field-edge);
+  --RadioGroup-background: var(--field-surface);
+  --RadioGroup-border: var(--field-edge);
+  --RadioGroup-choice-color-off: var(--foreground-soft);
+  --RadioGroup-choice-color-off-hover: var(--foreground);
+  --RadioGroup-choice-background-off: transparent;
+  --RadioGroup-choice-background-off-active: var(--control-hover);
+  --RadioGroup-choice-color-on: var(--foreground);
+  --RadioGroup-choice-background-on: var(--control-surface);
+  --RadioGroup-choice-background-on-hover: var(--control-hover);
+  --RadioGroup-choice-background-on-active: var(--control-hover);
+  --Switch-track-background: var(--field-surface);
+  --Switch-thumb-background: var(--muted-foreground);
+  --Switch-hover-background: var(--field-edge);
+  --Switch-active-background: var(--control-focus);
+
+  /* ── Shape and type ── */
+  --ui-font: var(--font-body);
+  --border-radius-md: var(--radius-item);
+  --border-radius-lg: var(--radius-button);
+  --space-factor: 0.25rem;
+  --shadow-island:
+    0 0 0 1px var(--control-edge),
+    inset 0 1px 0 var(--control-highlight),
+    0 6px 20px #00000014,
+    0 1px 3px #0000000f;
+  --modal-shadow:
+    0 0 0 1px var(--control-edge),
+    0 24px 64px #0000003d,
+    0 2px 6px #0000001a;
+  --sidebar-shadow: -12px 0 32px #0000001f;
+  --library-dropdown-shadow: var(--shadow-island);
+  font-family: var(--font-body);
+
+  /* ── Islands and popups: the menu material at 12px ── */
+  & :is(.Island, .dropdown-menu-container, .picker, .popover > .Island) {
+    border: 1px solid var(--field-edge);
+    border-radius: var(--radius-button);
+    background-color: var(--control-menu);
+    box-shadow: var(--shadow-island);
+  }
+
+  /* ── Tools: flat and muted at rest, brighter on hover, risen when picked ── */
+  & .ToolIcon__icon {
+    border-radius: var(--radius-item);
+    color: var(--foreground-soft);
+    transition:
+      background-color var(--duration) var(--ease),
+      color var(--duration) var(--ease),
+      box-shadow var(--duration) var(--ease);
+  }
+  & .ToolIcon:hover .ToolIcon__icon {
+    color: var(--foreground);
+  }
+  & :is(.ToolIcon_type_radio, .ToolIcon_type_checkbox):checked + .ToolIcon__icon,
+  & .ToolIcon.active .ToolIcon__icon {
+    color: var(--foreground);
+    background-color: var(--control-hover);
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      inset 0 0 0 1px var(--control-inner-edge);
+  }
+  & .ToolIcon__icon svg {
+    stroke-width: 1.5;
+  }
+  & .ToolIcon__keybinding {
+    font-family: var(--font-mono);
+    font-size: 9px;
+  }
+  & .HintViewer {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted-foreground);
+  }
+
+  /* ── Raised keys: the menu, library and help buttons ── */
+  & :is(.dropdown-menu-button, .sidebar-trigger, .help-icon) {
+    border: 1px solid transparent;
+    border-radius: var(--radius-button);
+    background-color: var(--control-surface);
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      inset 0 0 0 1px var(--control-inner-edge);
+    color: var(--foreground);
+    transition: background-color var(--duration) var(--ease);
+
+    &:hover {
+      background-color: var(--control-hover);
+    }
+    &:active {
+      box-shadow:
+        0 0 0 1px var(--control-edge),
+        inset 0 2px 4px #0000002e,
+        inset 0 0 0 1px var(--control-inner-edge);
+    }
+  }
+  & .sidebar-trigger {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.02em;
+  }
+
+  /* ── Zoom and undo: joined raised keys, like a ButtonGroup of secondaries ── */
+  & :is(.zoom-actions, .undo-redo-buttons) {
+    gap: 0;
+    border-radius: var(--radius-button);
+    background: none;
+    box-shadow: none;
+  }
+  & :is(.zoom-button, .undo-redo-buttons button, .reset-zoom-button) {
+    width: var(--control-h) !important;
+    height: var(--control-h) !important;
+    border: 1px solid transparent !important;
+    border-radius: 0 !important;
+    background-color: var(--control-surface) !important;
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      inset 0 0 0 1px var(--control-inner-edge);
+    color: var(--foreground);
+    transition: background-color var(--duration) var(--ease);
+
+    &:hover:not(:disabled) {
+      background-color: var(--control-hover) !important;
+    }
+    &:active:not(:disabled) {
+      box-shadow:
+        0 0 0 1px var(--control-edge),
+        inset 0 2px 4px #0000002e,
+        inset 0 0 0 1px var(--control-inner-edge);
+    }
+    &:disabled {
+      color: var(--control-muted);
+    }
+    & .ToolIcon__icon {
+      background: none !important;
+      box-shadow: none !important;
+    }
+    & svg {
+      width: 16px !important;
+      height: 16px !important;
+      stroke-width: 1.5;
+    }
+  }
+  & .reset-zoom-button {
+    width: auto !important;
+    min-width: 58px;
+    padding: 0 10px !important;
+    font-family: var(--font-mono) !important;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+    font-variant-numeric: tabular-nums;
+  }
+  & :is(.zoom-out-button, .undo-redo-buttons .undo-button-container button) {
+    border-top-left-radius: var(--radius-button) !important;
+    border-bottom-left-radius: var(--radius-button) !important;
+  }
+  & :is(.zoom-in-button, .undo-redo-buttons .redo-button-container button) {
+    border-top-right-radius: var(--radius-button) !important;
+    border-bottom-right-radius: var(--radius-button) !important;
+  }
+
+  /* ── The right-click menu: the ContextMenu — menu material at 12px, a 4px inset, dense 30px
+     items at 7px that lift on hover, mono shortcuts, hairline separators. Never taller than the
+     board: a long menu scrolls. ── */
+  & .context-menu {
+    min-width: 13rem;
+    max-height: calc(var(--whiteboard-height, 100vh) - 16px);
+    margin: 0;
+    padding: 4px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--field-edge);
+    border-radius: var(--radius-button);
+    background-color: var(--control-menu);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      0 12px 32px #0003,
+      0 2px 6px #0000001a;
+    font-family: var(--font-body);
+    animation: whiteboard-panel-in var(--duration) var(--ease);
+  }
+  & .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-height: var(--control-h-sm);
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-item);
+    color: var(--foreground-soft);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.2;
+
+    &:is(:hover, :focus-visible) {
+      color: var(--foreground);
+      background-color: var(--control-hover);
+      border-color: var(--control-inner-edge);
+      box-shadow: var(--shadow-highlight);
+    }
+    &:focus-visible {
+      outline: 2px solid var(--control-focus);
+      outline-offset: 0;
+    }
+    &.checkmark::before {
+      left: 10px;
+      margin: 0;
+      font-size: 12px;
+      color: var(--foreground);
+    }
+    &.dangerous .context-menu-item__label,
+    &.dangerous:hover .context-menu-item__label {
+      color: var(--destructive);
+    }
+    &.dangerous:hover {
+      background-color: color-mix(in srgb, var(--destructive) 12%, transparent);
+    }
+  }
+  /* Room for a tick only when the menu has one ("Snap to objects" when it is on). */
+  & .context-menu:has(.checkmark) .context-menu-item {
+    padding-left: 28px;
+  }
+  & .context-menu button {
+    color: var(--foreground-soft);
+  }
+  & .context-menu-item__label {
+    margin-inline-end: 0;
+  }
+  & .context-menu-item__shortcut {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted-foreground);
+    opacity: 1;
+  }
+  & .context-menu-item-separator {
+    margin: 4px -4px;
+    border: 0;
+    border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+
+  /* ── Menus: 7px items in Licht Sans 13px, mono shortcuts ── */
+  & .dropdown-menu .dropdown-menu-container {
+    padding: 4px;
+  }
+  & .dropdown-menu .dropdown-menu-item {
+    height: var(--control-h-sm);
+    border-radius: var(--radius-item);
+    font-size: 13px;
+
+    &:hover,
+    &.dropdown-menu-item--hovered {
+      background-color: var(--control-hover) !important;
+    }
+  }
+  & .dropdown-menu .dropdown-menu-item--selected {
+    background-color: var(--control-hover) !important;
+  }
+  & .dropdown-menu .dropdown-menu-item__shortcut {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted-foreground);
+    opacity: 1;
+  }
+  & .dropdown-menu-group-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  /* ── The style panel: eyebrow titles, segmented choices, square swatches ── */
+  & .App-menu__left :is(h3, legend, .control-label),
+  & .color-picker__heading,
+  & .color-picker-content--canvas-title,
+  & .picker-collapsible {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  & .panelColumn .buttonList {
+    gap: 2px;
+    width: fit-content;
+    padding: 3px;
+    border: 1px solid var(--field-edge);
+    border-radius: var(--radius-control);
+    background-color: var(--field-surface);
+    box-shadow: inset 0 1px 2px var(--field-inset);
+  }
+  & .panelColumn .buttonList :is(label, .ToolIcon, button) {
+    border: 0;
+    border-radius: var(--radius-item);
+  }
+  & .panelColumn .buttonList .ToolIcon__icon,
+  & .panelColumn .buttonList label {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    border-radius: var(--radius-item);
+    background: transparent;
+    box-shadow: none;
+  }
+  & .panelColumn .buttonList :is(label.active, label:has(input:checked)),
+  & .panelColumn .buttonList .ToolIcon:has(input:checked) .ToolIcon__icon {
+    background-color: var(--control-surface);
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      inset 0 0 0 1px var(--control-inner-edge);
+  }
+  & .color-picker__button {
+    --radius: var(--radius-checkbox);
+    border-color: var(--field-edge);
+  }
+  & .color-picker__button.active .color-picker__button-outline,
+  & .color-picker__button:hover::after {
+    box-shadow: 0 0 0 1.5px var(--control-focus);
+  }
+  & .color-picker__button__hotkey-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+  & .color-picker__input-label {
+    height: var(--control-h);
+    margin: 4px 8px;
+    border: 1px solid var(--field-edge);
+    border-radius: var(--radius-control);
+    background-color: var(--field-surface);
+    box-shadow: inset 0 1px 2px var(--field-inset);
+    font-family: var(--font-mono);
+    font-size: 13px;
+
+    &:focus-within {
+      border-color: var(--control-focus);
+      border-radius: var(--radius-control);
+      box-shadow: none;
+    }
+  }
+  & :is(.color-picker__input, .color-picker__input-label input) {
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  & input[type="range"] {
+    accent-color: var(--foreground);
+  }
+
+  /* Layers and actions are commands, not choices: a dense toolbar row — flat, muted buttons that
+     brighten on hover. */
+  & .panelColumn .buttonList:has(> .zIndexButton, > .ToolIcon_type_button) {
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+  & .panelColumn .buttonList :is(.zIndexButton, .ToolIcon_type_button) {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-item);
+    background: transparent;
+    color: var(--foreground-soft);
+    transition:
+      background-color var(--duration) var(--ease),
+      color var(--duration) var(--ease);
+
+    &:hover {
+      color: var(--foreground);
+      background-color: var(--control-hover);
+    }
+    &:active {
+      box-shadow: inset 0 2px 4px #0000002e;
+    }
+    & .ToolIcon__icon {
+      width: 100%;
+      height: 100%;
+      background: none;
+      box-shadow: none;
+    }
+    & svg {
+      width: 16px;
+      height: 16px;
+      stroke-width: 1.5;
+    }
+  }
+
+  /* Opacity: the Slider — a recessed 6px track, a soft fill and a raised 18px thumb. */
+  & .range-wrapper {
+    padding: 8px 2px 24px;
+  }
+  & .range-input {
+    --color-slider-track: var(--foreground-soft);
+    --button-bg: var(--field-surface);
+    height: 6px;
+    border-radius: 999px;
+    box-shadow:
+      inset 0 0 0 1px var(--field-edge),
+      inset 0 1px 2px var(--field-inset);
+    cursor: pointer;
+
+    &::-webkit-slider-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--control-surface) linear-gradient(180deg, var(--control-inner-edge), transparent);
+      box-shadow: var(--shadow-thumb);
+      cursor: grab;
+    }
+    &::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border: 0;
+      border-radius: 50%;
+      background: var(--control-surface) linear-gradient(180deg, var(--control-inner-edge), transparent);
+      box-shadow: var(--shadow-thumb);
+      cursor: grab;
+    }
+    &:focus-visible {
+      outline: 2px solid var(--control-focus);
+      outline-offset: 2px;
+    }
+  }
+  & :is(.value-bubble, .zero-label) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted-foreground);
+  }
+
+  /* Fonts: text on the canvas is set in Licht (excalidrawAssets() swaps the files). Each quick
+     button shows its face as "Aa" — set in Excalidraw's family name, so it is the very face the
+     canvas uses — and the list names the Licht faces without Excalidraw's icons or its search. */
+  & .FontPicker__container [data-testid^="font-family-"]:not([data-testid="font-family-show-fonts"]) {
+    & svg {
+      display: none;
+    }
+    &::before {
+      font-size: 14px;
+      line-height: 1;
+      content: "Aa";
+    }
+  }
+  & [data-testid="font-family-hand-drawn"]::before {
+    font-family: Excalifont, var(--font-heading);
+  }
+  & [data-testid="font-family-normal"]::before {
+    font-family: Nunito, var(--font-body);
+  }
+  & [data-testid="font-family-code"]::before {
+    font-family: "Comic Shanns", var(--font-mono);
+  }
+  & .dropdown-menu.fonts .dropdown-menu-item__icon,
+  & :has(> .dropdown-menu.fonts) > .QuickSearch__wrapper,
+  & .QuickSearch__wrapper:has(+ .dropdown-menu.fonts) {
+    display: none;
+  }
+  & .dropdown-menu.fonts .dropdown-menu-item__text {
+    font-size: 15px;
+  }
+
+  /* Our own Library and Find panels replace Excalidraw's sidebar, and help lives in the menu
+     and on "?": its sidebar, its trigger and the help button never show. */
+  & :is(.sidebar, .default-sidebar-trigger, .help-icon) {
+    display: none !important;
+  }
+
+  /* ── Fields: recessed, 10px corners ── */
+  & .ExcTextField__input {
+    height: var(--control-h);
+    border-radius: var(--radius-control);
+    box-shadow: inset 0 1px 2px var(--field-inset);
+
+    & input {
+      font-family: var(--font-body);
+      font-size: 14px;
+    }
+  }
+  & .ExcTextField__label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  /* ── The sidebar: a square region, segmented tabs, Licht section titles ── */
+  & .sidebar {
+    border-left: 1px solid var(--field-edge);
+  }
+  & .default-sidebar .sidebar-triggers {
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--field-edge);
+    border-radius: var(--radius-button);
+    background: var(--field-surface);
+    box-shadow: inset 0 1px 2px var(--field-inset);
+  }
+  & .default-sidebar .sidebar-triggers .sidebar-tab-trigger {
+    --button-bg: transparent;
+    --button-hover-bg: transparent;
+    --button-hover-color: var(--foreground);
+    --button-hover-border: transparent;
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-item);
+    color: var(--foreground-soft);
+
+    & svg {
+      width: 16px;
+      height: 16px;
+    }
+    &[data-state="active"] {
+      --button-bg: var(--control-surface);
+      --button-hover-bg: var(--control-hover);
+      --button-hover-color: var(--foreground);
+      --button-border: transparent;
+      color: var(--foreground);
+      background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+      box-shadow:
+        0 0 0 1px var(--control-edge),
+        inset 0 1px 0 var(--control-highlight),
+        inset 0 0 0 1px var(--control-inner-edge);
+    }
+  }
+  & .sidebar__header__buttons button {
+    border: 0;
+    border-radius: var(--radius-item);
+    color: var(--foreground-soft);
+
+    &:hover {
+      color: var(--foreground);
+    }
+    & svg {
+      width: 16px;
+      height: 16px;
+    }
+  }
+  & :is(.library-menu-items-container__header, .library-menu-items__no-items__label) {
+    font-family: var(--font-heading);
+    font-size: 20px;
+    font-weight: 300;
+    color: var(--foreground);
+  }
+  & .library-menu-items__no-items {
+    font-size: 13px;
+    color: var(--muted-foreground);
+  }
+  & .library-unit {
+    border: 1px solid var(--field-edge);
+    border-radius: var(--radius-control);
+    background-color: var(--field-surface);
+  }
+  & :is(.library-unit--hover, .library-unit--selected) {
+    border-color: var(--control-focus);
+  }
+  & .library-unit__adder {
+    border-radius: var(--radius-item);
+    background-color: var(--control-surface);
+    box-shadow: 0 0 0 1px var(--control-edge);
+    animation: none;
+
+    & svg {
+      color: var(--foreground);
+    }
+  }
+  /* Excalidraw's public library lives on its own site: left out, like its other links. */
+  & :is(.library-menu-browse-button, .library-menu-items-container__header--excal) {
+    display: none;
+  }
+  & .library-menu-control-buttons--at-bottom::before {
+    display: none;
+  }
+
+  /* ── Checkboxes and switches ── */
+  & .Checkbox .Checkbox-box {
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius-checkbox);
+    background-color: var(--field-surface);
+    box-shadow: inset 0 0 0 1px var(--field-edge) !important;
+    color: var(--primary-text);
+  }
+  & .Checkbox.is-checked .Checkbox-box {
+    background-color: var(--primary-fill) !important;
+  }
+  & .Checkbox:hover:not(.is-checked) .Checkbox-box:not(:focus) {
+    box-shadow: inset 0 0 0 1px var(--muted-foreground) !important;
+  }
+  & .Switch.toggled {
+    background: var(--primary-fill);
+    border-color: var(--primary-fill);
+
+    &::before {
+      background: var(--primary-text);
+    }
+  }
+
+  /* ── Buttons in dialogs: primary is the layered fill, the rest raised ── */
+  & .ExcButton {
+    min-height: var(--control-h);
+    border-radius: var(--radius-button);
+    font-family: var(--font-body);
+    font-weight: 500;
+  }
+  & :is(.ExcButton--color-primary.ExcButton--variant-filled, .Dialog__action-button--primary) {
+    --text-color: var(--primary-text);
+    --back-color: var(--primary-fill);
+    color: var(--primary-text);
+    background-color: var(--primary-fill);
+    border-color: transparent;
+    box-shadow: var(--primary-shadow);
+  }
+  & :is(.ExcButton--variant-outlined, .Dialog__action-button:not(.Dialog__action-button--primary, .Dialog__action-button--danger)) {
+    --text-color: var(--foreground);
+    --border-color: transparent;
+    --back-color: var(--control-surface);
+    border-radius: var(--radius-button);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight);
+  }
+
+  /* ── Dialogs: the 20px card over a quiet backdrop, a Licht title ── */
+  & .Modal__background {
+    background-color: color-mix(in srgb, var(--background) 55%, transparent);
+    backdrop-filter: blur(2px);
+  }
+  & .Modal__content {
+    border: 1px solid var(--field-edge);
+    border-radius: var(--radius-card);
+    background: linear-gradient(160deg, var(--control-surface), var(--field-surface) 55%);
+    box-shadow: var(--modal-shadow);
+  }
+  & .Modal .Island {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  & .Dialog__title {
+    font-family: var(--font-heading);
+    font-size: 28px;
+    font-weight: 300;
+    letter-spacing: -0.01em;
+    border-bottom-color: var(--field-edge);
+  }
+  & :is(.Modal__close, .Dialog__close) {
+    border-radius: var(--radius-item);
+    color: var(--muted-foreground);
+
+    &:hover {
+      color: var(--foreground);
+      background-color: var(--control-hover);
+    }
+  }
+
+  /* Help: shortcuts as hairline-ruled lists with Kbd keys, and none of Excalidraw's links. */
+  & .HelpDialog__header {
+    display: none;
+  }
+  & .HelpDialog h3,
+  & .HelpDialog__island h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  & .HelpDialog__island-content {
+    border-color: var(--field-edge);
+    border-radius: var(--radius-control);
+    background-color: var(--field-surface);
+  }
+  & .HelpDialog__shortcut {
+    min-height: var(--control-h);
+    border-bottom-color: color-mix(in srgb, var(--border) 60%, transparent);
+    font-size: 13px;
+    color: var(--foreground-soft);
+  }
+  & .color-picker-content :is(.color-picker__heading + div, .color-picker__shades-empty) {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--muted-foreground);
+  }
+  & .HelpDialog__key {
+    min-width: 20px;
+    min-height: 20px;
+    justify-content: center;
+    padding: 0 6px;
+    border-radius: var(--radius-checkbox);
+    background-color: var(--control-surface);
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow: var(--shadow-key);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--foreground-soft);
+  }
+
+  /* Export: setting labels in Licht Sans, previews on the field. */
+  & .ImageExportModal__settings__setting__label {
+    font-family: var(--font-body);
+    font-size: 14px;
+    font-weight: 500;
+  }
+  & .ImageExportModal h3 {
+    font-family: var(--font-heading);
+    font-size: 24px;
+    font-weight: 300;
+  }
+  /* One primary per view: the first export is the primary, the others raised. */
+  & .ImageExportModal__settings__buttons .ExcButton:not(:first-child) {
+    --text-color: var(--foreground);
+    --back-color: var(--control-surface);
+    color: var(--foreground);
+    background-color: var(--control-surface);
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      inset 0 0 0 1px var(--control-inner-edge);
+    text-shadow: none;
+  }
+  & .ImageExportModal__preview__canvas {
+    border-radius: var(--radius-control);
+  }
+
+  & kbd {
+    font-family: var(--font-mono);
+  }
+}
+
+/* The welcome: a Licht headline and a mono line, not hand-written arrows. */
+[data-slot="whiteboard"] .excalidraw.excalidraw .welcome-screen-center {
+  gap: 10px;
+}
+[data-slot="whiteboard"] .excalidraw.excalidraw .welcome-screen-center__heading {
+  font-family: var(--font-heading);
+  font-size: 28px;
+  font-weight: 300;
+  color: var(--foreground);
+}
+
+/* The Library and Find panels arrive like a popup: a short fade and rise. */
+[data-slot="whiteboard-panel"] {
+  animation: whiteboard-panel-in var(--duration) var(--ease);
+}
+@keyframes whiteboard-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="whiteboard-panel"] {
+    animation: none;
+  }
+}

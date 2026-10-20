@@ -80,7 +80,8 @@ src/bankai/
           Search.tsx         TVDB search + queue
           Server.tsx         Media-server browser
           Settings.tsx
-        components/ui/       shadcn/ui + Radix components
+        zon/                 zon/ui components + styles (Base UI), from the zon.sh/ui registry
+        components/          bankai's own parts (StatusTag, SortHeader, CollectionGraph, …)
         lib/api.ts           Typed fetch wrappers for every API endpoint
       index.html             <html class="dark"> — dark mode always on
       tailwind.config.js     DELETED — v4 uses CSS-only config
@@ -260,20 +261,24 @@ yielding empty `MediaInfo` with 0 audio tracks. This is already applied in
 
 | Thing             | Detail                                                                               |
 | ----------------- | ------------------------------------------------------------------------------------ |
-| Framework         | React 18 + TypeScript                                                                |
+| Framework         | React 19 + TypeScript                                                                |
 | Build             | Vite 6                                                                               |
 | CSS               | **Tailwind v4** (`@import 'tailwindcss'`) — no `tailwind.config.js`                  |
 | PostCSS           | `@tailwindcss/postcss` (replaces v3's `tailwindcss: {}`)                             |
-| Component library | shadcn/ui (Radix Primitives)                                                         |
-| Theme             | Eigenpair mono design system — oklch tokens, `@theme inline`, `@custom-variant dark` |
+| Component library | zon/ui (zon.sh/ui, on Base UI) in `src/zon/`; `render` prop, no `asChild`            |
+| Theme             | zon tokens + material utilities (`src/zon/styles/zon`); status colours kept in `index.css` |
 | Dark mode         | Always on (`<html class="dark">`)                                                    |
 | Fonts             | Licht (zon.sh/licht), self-hosted in `public/fonts/licht`: Licht Serif (headings), Licht Sans (body/UI), Licht Mono (mono) |
 | State             | React hooks only (no Redux/Zustand)                                                  |
 | API               | `src/lib/api.ts` — typed `fetch` wrappers, all endpoints relative to window origin   |
 
-**Embossed button/input styling** uses `data-slot` / `data-variant` HTML attributes
-emitted by `button.tsx`, `input.tsx`, and `select.tsx`. Without those attributes
-the CSS gradient rules in `index.css` will not apply.
+**zon/ui.** Components are copied from the registry (`https://zon.sh/ui/r/<name>.json`),
+imports rewritten from `@/registry/zon/` to `@/zon/`. `_overlay.tsx` is not published and
+was rebuilt from zon.sh. zon is written for React 19 (`ref` as a prop): on React 18 the
+`render={<Button/>}` triggers lose their refs and tooltips/popovers do not open. Status
+labels use `StatusTag` (`components/status-tag.tsx`), counts use zon `Badge`, toasts come
+from `@/lib/toast`. Run the dev server against live data with
+`BANKAI_API=http://seireitei:7003 npm run dev`.
 
 **Tailwind v4 deprecated aliases still work** (e.g. `bg-gradient-to-b`) but the
 linter will suggest `bg-linear-to-b`. The build succeeds either way.

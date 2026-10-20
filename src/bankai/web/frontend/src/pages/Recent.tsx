@@ -1,17 +1,18 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react';
 import { CalendarClock, Check, ChevronRight, CirclePlay, Film, Files, Loader2, Plus, Search, Tv, X } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type DiscoverItem, type FilmpalastDetails, type FilmpalastFeed, type RecentRelease, type RecentReleasePage } from '@/lib/api';
 import { GermanRelease } from '@/components/GermanRelease';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { EmptyState } from '@/components/ui/empty';
-import { Input } from '@/components/ui/input';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Switch } from '@/components/ui/switch';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { StatusTag } from '@/components/status-tag';
+import { Button } from '@/zon/ui/button';
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/zon/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Input } from '@/zon/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/zon/ui/input-group';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Switch } from '@/zon/ui/switch';
+import { Tabs, TabsList, TabsTab } from '@/zon/ui/tabs';
 
 const FILMPALAST_HIDE_DOWNLOADED_KEY = 'bankai:filmpalast-hide-downloaded';
 const pageCache = new Map<string, RecentReleasePage>();
@@ -38,7 +39,7 @@ function episodeIdentity(item: RecentRelease) {
 function Poster({ item }: { item: RecentRelease }) {
   const [failed, setFailed] = useState(false);
   return (
-    <div className='aspect-[2/3] overflow-hidden rounded-md bg-secondary/40'>
+    <div className='aspect-[2/3] overflow-hidden bg-control-surface'>
       {item.poster_url && !failed ? (
         <img
           src={api.posterUrl(item.poster_url)}
@@ -275,26 +276,27 @@ export default function Recent() {
   return (
     <div className='flex flex-col gap-6'>
       <header className='flex flex-wrap items-baseline gap-2'>
-        <h1 className='text-2xl font-semibold'>Filmpalast</h1>
+        <h1 className='font-heading text-3xl font-light'>Filmpalast</h1>
         <span className='text-sm text-muted-foreground'>— Browse German new releases, movies, shows, and top titles.</span>
       </header>
 
       <div className='flex flex-wrap items-center gap-3'>
         <form className='flex min-w-80 max-w-2xl flex-1 gap-2' onSubmit={searchFilmpalast}>
-          <div className='relative flex-1'>
-            <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-            <Input
-              className='pl-9 pr-9'
+          <InputGroup className='flex-1'>
+            <InputGroupAddon><Search /></InputGroupAddon>
+            <InputGroupInput
               value={browseQuery}
               onChange={(event) => setBrowseQuery(event.target.value)}
               placeholder='Search Filmpalast movies and shows…'
             />
             {searchResults && (
-              <button type='button' className='absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground' onClick={clearSearch} aria-label='Clear Filmpalast search'>
-                <X className='size-4' />
-              </button>
+              <InputGroupAddon align='inline-end'>
+                <InputGroupButton type='button' variant='ghost' size='icon' onClick={clearSearch} aria-label='Clear Filmpalast search'>
+                  <X className='size-4' />
+                </InputGroupButton>
+              </InputGroupAddon>
             )}
-          </div>
+          </InputGroup>
           <Button type='submit' disabled={!browseQuery.trim() || searching}>
             {searching ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Search data-icon='inline-start' />}
             Search
@@ -302,6 +304,7 @@ export default function Recent() {
         </form>
 
         <Tabs
+          className='w-auto'
           value={feed}
           onValueChange={(value) => {
             const next = value as FilmpalastFeed;
@@ -314,33 +317,33 @@ export default function Recent() {
             else setKind('all');
           }}
         >
-          <TabsList className='h-auto justify-start overflow-x-auto'>
-            <TabsTrigger value='new'>New</TabsTrigger>
-            <TabsTrigger value='movies'>Movies</TabsTrigger>
-            <TabsTrigger value='shows'>Shows</TabsTrigger>
-            <TabsTrigger value='top'>Top titles</TabsTrigger>
+          <TabsList className='max-w-full justify-start overflow-x-auto'>
+            <TabsTab value='new'>New</TabsTab>
+            <TabsTab value='movies'>Movies</TabsTab>
+            <TabsTab value='shows'>Shows</TabsTab>
+            <TabsTab value='top'>Top titles</TabsTab>
           </TabsList>
         </Tabs>
 
-        <Tabs value={kind} onValueChange={(value) => setKind(value as typeof kind)}>
+        <Tabs className='w-auto' value={kind} onValueChange={(value) => setKind(value as typeof kind)}>
           <TabsList>
-            <TabsTrigger value='all'>All</TabsTrigger>
-            <TabsTrigger value='movie'>Movies</TabsTrigger>
-            <TabsTrigger value='episode'>Episodes</TabsTrigger>
+            <TabsTab value='all'>All</TabsTab>
+            <TabsTab value='movie'>Movies</TabsTab>
+            <TabsTab value='episode'>Episodes</TabsTab>
           </TabsList>
         </Tabs>
         <label className='flex items-center gap-2 whitespace-nowrap text-sm text-foreground'>
           <Switch
             checked={hideDownloaded}
-            onCheckedChange={setHideDownloaded}
+            onCheckedChange={(checked) => setHideDownloaded(checked)}
             aria-label='Hide downloaded Filmpalast titles'
           />
           Hide downloaded
         </label>
         {searchResults ? (
-          <span className='ml-auto text-xs text-muted-foreground'>{searchResults.length} search results</span>
+          <span className='ml-auto font-mono text-xs tabular-nums text-muted-foreground'>{searchResults.length} search results</span>
         ) : data && (
-          <span className='ml-auto text-xs text-muted-foreground'>
+          <span className='ml-auto font-mono text-xs tabular-nums text-muted-foreground'>
             Pages {data.source_page_start}–{data.source_page_end} · {data.items.length} releases
           </span>
         )}
@@ -348,41 +351,41 @@ export default function Recent() {
 
       {(loading && !data) || searching ? (
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
-          {Array.from({ length: 10 }).map((_, index) => <Skeleton key={index} className='aspect-[2/3] rounded-lg' />)}
+          {Array.from({ length: 10 }).map((_, index) => <Skeleton key={index} shape='card' className='aspect-[2/3]' />)}
         </div>
       ) : visibleItems.length === 0 ? (
-        <EmptyState
-          icon={searchResults ? Search : CalendarClock}
-          title={hideDownloaded && kindItems.length > 0 ? 'All matching titles are downloaded' : searchResults ? 'No Filmpalast matches' : 'No recent releases found'}
-          description={hideDownloaded && kindItems.length > 0 ? 'Turn off “Hide downloaded” to show them.' : searchResults ? 'Try a shorter title or different spelling.' : 'Try another page or filter.'}
-        />
+        <Empty>
+          <EmptyMedia>{searchResults ? <Search /> : <CalendarClock />}</EmptyMedia>
+          <EmptyTitle>{hideDownloaded && kindItems.length > 0 ? 'All matching titles are downloaded' : searchResults ? 'No Filmpalast matches' : 'No recent releases found'}</EmptyTitle>
+          <EmptyDescription>{hideDownloaded && kindItems.length > 0 ? 'Turn off “Hide downloaded” to show them.' : searchResults ? 'Try a shorter title or different spelling.' : 'Try another page or filter.'}</EmptyDescription>
+        </Empty>
       ) : (
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {visibleItems.map((item) => (
-            <Card key={item.url} className='flex min-w-0 flex-col overflow-hidden transition-colors hover:border-foreground/25'>
+            <Card key={item.url} className='poster-card flex min-w-0 flex-col gap-0 overflow-hidden [--card-padding:0] hover:border-foreground/25'>
               <CardContent className='cursor-pointer p-0' onClick={() => void openDetails(item)}>
                 <Poster item={item} />
               </CardContent>
               <CardHeader className='flex-1 gap-2 p-4 pb-3'>
                 <div className='flex flex-wrap items-center gap-2'>
-                  <Badge variant={item.kind === 'movie' ? 'review' : 'info'}>
+                  <StatusTag variant={item.kind === 'movie' ? 'review' : 'info'}>
                     {item.kind === 'movie' ? 'Movie' : 'Episode'}
-                  </Badge>
+                  </StatusTag>
                   {item.in_library && (
-                    <Badge variant='success' className='gap-1' title='Already present in the Bankai library or on the media server.'>
+                    <StatusTag variant='success' className='gap-1' title='Already present in the Bankai library or on the media server.'>
                       <Check className='size-3' aria-hidden='true' /> Downloaded
-                    </Badge>
+                    </StatusTag>
                   )}
-                  {item.year && <span className='text-xs text-muted-foreground'>{item.year}</span>}
-                  {item.runtime_minutes && <span className='text-xs text-muted-foreground'>{item.runtime_minutes} min</span>}
+                  {item.year && <span className='font-mono text-xs tabular-nums text-muted-foreground'>{item.year}</span>}
+                  {item.runtime_minutes && <span className='font-mono text-xs tabular-nums text-muted-foreground'>{item.runtime_minutes} min</span>}
                 </div>
-                <CardTitle className='line-clamp-2 text-base leading-6'>{item.title}</CardTitle>
+                <CardTitle className='line-clamp-2 font-body text-base font-medium leading-6 tracking-normal sm:text-base'>{item.title}</CardTitle>
               </CardHeader>
               <CardFooter className='gap-2 p-4 pt-0'>
                 <Button className='flex-1' size='sm' variant='secondary' onClick={() => void openDetails(item)}>
                   <CirclePlay data-icon='inline-start' /> Details
                 </Button>
-                <Button className='flex-1' size='sm' onClick={() => void findTvdb(item)}>
+                <Button className='flex-1' size='sm' variant='secondary' onClick={() => void findTvdb(item)}>
                   <Plus data-icon='inline-start' /> Add
                 </Button>
               </CardFooter>
@@ -396,7 +399,7 @@ export default function Recent() {
           <Button variant='secondary' disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}>
             Previous
           </Button>
-          <span className='text-sm text-foreground'>Page {page + 1}</span>
+          <span className='font-mono text-sm tabular-nums text-foreground'>Page {page + 1}</span>
           <Button variant='secondary' disabled={!data?.has_next || loading} onClick={() => setPage((value) => value + 1)}>
             Next
           </Button>
@@ -410,7 +413,7 @@ export default function Recent() {
           setActiveMirror(null);
         }
       }}>
-        <DialogContent className='max-h-[92vh] max-w-5xl overflow-y-auto'>
+        <DialogContent size='xl' className='max-h-[92vh] max-w-5xl overflow-y-auto'>
           {detailLoading ? (
             <div className='flex min-h-72 items-center justify-center text-muted-foreground'>
               <Loader2 className='mr-2 size-5 animate-spin' /> Loading title and mirrors…
@@ -419,16 +422,16 @@ export default function Recent() {
             <>
               <DialogHeader>
                 <div className='flex flex-wrap items-center gap-2'>
-                  <Badge variant={details.kind === 'movie' ? 'review' : 'info'}>{details.kind === 'movie' ? 'Movie' : 'Show / episode'}</Badge>
-                  {details.year && <span className='text-xs text-muted-foreground'>{details.year}</span>}
-                  {details.runtime_minutes && <span className='text-xs text-muted-foreground'>{details.runtime_minutes} min</span>}
+                  <StatusTag variant={details.kind === 'movie' ? 'review' : 'info'}>{details.kind === 'movie' ? 'Movie' : 'Show / episode'}</StatusTag>
+                  {details.year && <span className='font-mono text-xs tabular-nums text-muted-foreground'>{details.year}</span>}
+                  {details.runtime_minutes && <span className='font-mono text-xs tabular-nums text-muted-foreground'>{details.runtime_minutes} min</span>}
                 </div>
                 <DialogTitle>{details.title}</DialogTitle>
                 <DialogDescription>Choose a mirror below to watch it here, or open the player separately.</DialogDescription>
               </DialogHeader>
 
-              <div className='rounded-lg border border-border/60 bg-secondary/20 p-3'>
-                <div className='mb-1 flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground'><Files className='size-3.5' /> File title</div>
+              <div className='rounded-control surface-container p-3'>
+                <div className='eyebrow mb-1 flex items-center gap-2 text-[11px]'><Files className='size-3.5' /> File title</div>
                 {details.release_name ? (
                   <div className='break-all font-mono text-sm text-foreground'>{details.release_name}</div>
                 ) : (
@@ -466,7 +469,8 @@ export default function Recent() {
                         <Button
                           key={mirror.url}
                           size='sm'
-                          variant={activeMirror === mirror.url ? 'default' : 'secondary'}
+                          variant={activeMirror === mirror.url ? 'primary' : 'secondary'}
+                          aria-pressed={activeMirror === mirror.url}
                           onClick={() => setActiveMirror(mirror.url)}
                         >
                           Mirror {index + 1} · {mirror.host}
@@ -481,7 +485,7 @@ export default function Recent() {
                     )}
                   </div>
                   {activeMirror && (
-                    <div className='aspect-video overflow-hidden rounded-lg border border-border bg-black'>
+                    <div className='aspect-video overflow-hidden rounded-control border border-field-edge bg-black'>
                       <iframe
                         key={activeMirror}
                         src={activeMirror}
@@ -496,7 +500,11 @@ export default function Recent() {
                   )}
                 </div>
               ) : details.episodes.length === 0 ? (
-                <EmptyState icon={CirclePlay} title='No mirrors found' description='This Filmpalast page currently has no playable mirror links.' />
+                <Empty>
+                  <EmptyMedia><CirclePlay /></EmptyMedia>
+                  <EmptyTitle>No mirrors found</EmptyTitle>
+                  <EmptyDescription>This Filmpalast page currently has no playable mirror links.</EmptyDescription>
+                </Empty>
               ) : null}
             </>
           )}
@@ -504,7 +512,7 @@ export default function Recent() {
       </Dialog>
 
       <Dialog open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
-        <DialogContent className='max-h-[90vh] max-w-3xl overflow-y-auto'>
+        <DialogContent size='lg' className='max-h-[90vh] max-w-3xl overflow-y-auto'>
           <DialogHeader>
             <DialogTitle>Choose the {selected?.kind === 'episode' ? 'show' : 'movie'} identity</DialogTitle>
             <DialogDescription>
@@ -512,7 +520,7 @@ export default function Recent() {
             </DialogDescription>
           </DialogHeader>
           {selected && (
-            <div className='rounded-lg border border-border/60 bg-secondary/20 p-3'>
+            <div className='rounded-control surface-container p-3'>
               <div className='font-medium text-foreground'>{selected.title}</div>
               <GermanRelease value={selected.release_name} />
             </div>
@@ -530,18 +538,22 @@ export default function Recent() {
             </Button>
           </div>
           {matching ? (
-            <div className='flex flex-col gap-2'>{Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className='h-16' />)}</div>
+            <div className='flex flex-col gap-2'>{Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} shape='item' className='h-16' />)}</div>
           ) : matches.length === 0 ? (
-            <EmptyState icon={Search} title='No TVDB match yet' description='Adjust the title above and search again.' />
+            <Empty>
+              <EmptyMedia><Search /></EmptyMedia>
+              <EmptyTitle>No TVDB match yet</EmptyTitle>
+              <EmptyDescription>Adjust the title above and search again.</EmptyDescription>
+            </Empty>
           ) : (
             <div className='flex flex-col gap-2'>
               {matches.map((match) => (
-                <div key={match.tvdb_id ?? match.name} className='flex items-center justify-between gap-3 rounded-lg border border-border/60 p-3'>
+                <div key={match.tvdb_id ?? match.name} className='flex items-center justify-between gap-3 rounded-control border border-field-edge p-3'>
                   <div className='min-w-0'>
                     <div className='truncate font-medium text-foreground'>{match.name}</div>
-                    <div className='text-xs text-muted-foreground'>{match.year ?? 'Year unknown'}</div>
+                    <div className='font-mono text-xs tabular-nums text-muted-foreground'>{match.year ?? 'Year unknown'}</div>
                   </div>
-                  <Button size='sm' disabled={!match.tvdb_id || queueing !== null} onClick={() => void queueSelection(match)}>
+                  <Button size='sm' variant='secondary' disabled={!match.tvdb_id || queueing !== null} onClick={() => void queueSelection(match)}>
                     {queueing === match.tvdb_id ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Plus data-icon='inline-start' />}
                     Queue
                   </Button>

@@ -1,0 +1,149 @@
+/* data components — owned by the data group (Chart, DataTable). Prefer Tailwind in TSX; use this only for what classes cannot express (SVG internals of Recharts). */
+
+/*
+ * Recharts theming. Recharts writes presentation attributes (fill="#666", stroke="#ccc");
+ * CSS outranks them, so every chart inside a ChartContainer takes the zon look
+ * without props: mono muted ticks, --grid-line hairlines, no tick marks, a hairline cursor,
+ * 1.5px lines with no dots except the active one.
+ */
+@layer components {
+  [data-slot="chart"] {
+    /* Axes and ticks */
+    & .recharts-cartesian-axis-tick-value,
+    & .recharts-polar-angle-axis-tick-value,
+    & .recharts-polar-radius-axis-tick-value {
+      fill: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    & .recharts-cartesian-axis-tick-line,
+    & .recharts-polar-radius-axis-line {
+      display: none;
+    }
+    & .recharts-cartesian-axis-line {
+      stroke: var(--border);
+    }
+    /* The baseline stays; the value axis is carried by the grid. */
+    & .recharts-yAxis .recharts-cartesian-axis-line {
+      display: none;
+    }
+    &[data-grid="vertical"] .recharts-yAxis .recharts-cartesian-axis-line {
+      display: inline;
+    }
+    &[data-grid="vertical"] .recharts-xAxis .recharts-cartesian-axis-line {
+      display: none;
+    }
+
+    /* Grid: hairlines in --grid-line, horizontal only unless data-grid says otherwise */
+    & .recharts-cartesian-grid line,
+    & .recharts-polar-grid line,
+    & .recharts-polar-grid path,
+    & .recharts-polar-grid circle,
+    & .recharts-polar-grid polygon {
+      stroke: var(--grid-line);
+      stroke-dasharray: none;
+    }
+    &[data-grid="horizontal"] .recharts-cartesian-grid-vertical,
+    &[data-grid="vertical"] .recharts-cartesian-grid-horizontal {
+      display: none;
+    }
+
+    /* Marks */
+    & .recharts-line-curve,
+    & .recharts-area-curve,
+    & .recharts-radar-polygon path {
+      stroke-width: 1.5px;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+    & .recharts-line-dots {
+      display: none;
+    }
+    & .recharts-active-dot circle,
+    & .recharts-dot.recharts-active-dot {
+      stroke: var(--field-surface);
+      stroke-width: 2px;
+    }
+    /* Sectors carry no border. A full pie separates its segments with a 2px rule in the colour
+       behind the chart: set --chart-sector-gap (e.g. var(--background)) on the container. */
+    & .recharts-sector,
+    & .recharts-pie-sector path {
+      stroke: var(--chart-sector-gap, none);
+      stroke-width: 2px;
+      stroke-linejoin: round;
+    }
+    & .recharts-label-list text,
+    & .recharts-label {
+      fill: var(--foreground-soft);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    & .recharts-reference-line line {
+      stroke: var(--control-focus);
+    }
+
+    /* Cursor: a hairline on lines and areas, a quiet band on bars */
+    & .recharts-curve.recharts-tooltip-cursor {
+      stroke: var(--control-focus);
+      stroke-width: 1px;
+    }
+    & .recharts-rectangle.recharts-tooltip-cursor,
+    & .recharts-sector.recharts-tooltip-cursor {
+      fill: var(--control-hover);
+      fill-opacity: 0.6;
+    }
+
+    /* Tooltip follows the pointer on the system's 150ms curve (0 under reduced motion). */
+    & .recharts-tooltip-wrapper {
+      transition-duration: var(--duration) !important;
+      transition-timing-function: var(--ease) !important;
+      z-index: 10;
+    }
+
+    /* Focus. Recharts makes the surface and each series group focusable, and a click leaves
+       focus on one of them: that never draws a ring. The keyboard gets one flush ring on the chart. */
+    & .recharts-wrapper,
+    & .recharts-surface,
+    & .recharts-layer,
+    & .recharts-sector,
+    & .recharts-bar-rectangle {
+      outline: none;
+    }
+    & .recharts-wrapper:has(:focus-visible),
+    & .recharts-wrapper:focus-visible {
+      outline: 2px solid var(--control-focus);
+      outline-offset: 0;
+    }
+
+    /* The slice ChartActiveSector has marked lifts: 4px out from the centre and 3% larger, on
+       --duration, and settles back the same way. */
+    & .recharts-pie-sector {
+      transform-box: view-box;
+      transition:
+        translate var(--duration) var(--ease),
+        scale var(--duration) var(--ease);
+    }
+    & .recharts-pie-sector[data-lifted] {
+      translate: var(--lift-x, 0) var(--lift-y, 0);
+      scale: 1.03;
+    }
+  }
+}
+
+/*
+ * Table groups. A closed TableGroup keeps only its header row; rows are removed from layout
+ * and from the accessibility tree. The last group closes the card without a doubled rule:
+ * its last row loses the hairline, and so does its header when the group is closed.
+ * Unlayered on purpose: these must win over the row utilities (`border-b`) in TableRow.
+ */
+[data-slot="table-group"][data-closed] > tr:not([data-slot="table-group-header"]) {
+  display: none;
+}
+[data-slot="table-group"]:last-child > tr:last-child {
+  border-bottom-width: 0;
+}
+[data-slot="table-group"]:last-child[data-closed] > [data-slot="table-group-header"] > th::after {
+  display: none;
+}

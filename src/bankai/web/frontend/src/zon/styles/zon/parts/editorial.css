@@ -1,0 +1,120 @@
+/*
+ * editorial components — owned by the editorial group. Prefer Tailwind in TSX; use this only
+ * for what classes cannot express (keyframes, complex selectors, SVG, container-query grids).
+ */
+
+/* ── SpecSheet: local ink for each tone ────────────────────────────────────────
+ * Unlayered on purpose: these must beat `.theme-night` / `.theme-light` in tokens.css.
+ * A sheet is artwork. Its fill IS the content, so it keeps its own ground whatever the page.
+ */
+
+[data-slot="spec-sheet"][data-tone="night"] {
+  --sheet-ground: #040404;
+  --sheet-caption: rgb(255 255 255 / 0.5);
+  --sheet-rule: rgb(255 255 255 / 0.16);
+  --sheet-mark: rgb(255 255 255 / 0.42);
+  --sheet-light: rgb(255 255 255 / 0.7);
+  --background: #040404;
+  --glow: #ffffff3d;
+  --ink-ghost: #ffffff12;
+  /* Lower than the page grain: the bleed must stay near-black, not read as static. */
+  --grain-opacity: 0.2;
+}
+
+[data-slot="spec-sheet"][data-tone="paper"] {
+  color-scheme: light;
+  --sheet-ground: linear-gradient(160deg, #fdfdfc, #efefed 70%, #e7e7e4);
+  --sheet-caption: rgb(18 18 18 / 0.55);
+  --sheet-rule: rgb(18 18 18 / 0.18);
+  --sheet-mark: rgb(18 18 18 / 0.4);
+  --sheet-light: rgb(255 255 255 / 0.85);
+  --background: #efefed;
+  --foreground: #121212;
+  --foreground-soft: #3a3a38;
+  --muted-foreground: #6b6b68;
+  --border: #1212121f;
+  --field-edge: #d4d4d0;
+  --grid-line: #1212120f;
+  --grid-bright: #12121242;
+  --guide: #12121229;
+  --ink-ghost: #12121214;
+  --glow: #ffffffcc;
+  --grain-opacity: 0.22;
+}
+
+/* Editorial line art inverts in dark mode (`dark:invert`). The nearest scheme wins: a light
+ * region or a paper sheet inside a dark page keeps black ink; a dark region inside it inverts. */
+.theme-light [data-slot="illustration"][data-kind="editorial"] {
+  filter: none;
+}
+.theme-light :is(.theme-dark, .theme-night) [data-slot="illustration"][data-kind="editorial"] {
+  filter: invert(1);
+}
+
+@layer components {
+  [data-slot="spec-sheet"] {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    container-type: inline-size;
+    aspect-ratio: var(--sheet-aspect, 4 / 3);
+    border: 1px solid var(--field-edge);
+    border-radius: 0;
+    color: var(--foreground);
+    background: var(--sheet-ground);
+  }
+
+  /* Light table: a soft-light highlight that rests top-left and follows a fine pointer. */
+  [data-slot="spec-sheet-light"] {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    mix-blend-mode: soft-light;
+    opacity: 0.55;
+    background: radial-gradient(
+      circle 75cqw at var(--lx, 30%) var(--ly, 22%),
+      var(--sheet-light),
+      transparent 70%
+    );
+    transition: opacity var(--duration-reveal) var(--ease);
+  }
+  [data-slot="spec-sheet"][data-lit="true"] [data-slot="spec-sheet-light"] {
+    opacity: 1;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-slot="spec-sheet-light"] {
+      background: radial-gradient(circle 75cqw at 30% 22%, var(--sheet-light), transparent 70%);
+    }
+  }
+
+  /* ── SpecSheetGrid: the light-table wall ─────────────────────────────────────
+   * 12 columns, square cells: a row is exactly one column wide.
+   *   (100cqw - 11 gaps × 16px) / 12 = 8.333cqw - 14.67px
+   * Below 40rem of container width the tiles stack and keep their proportion instead.
+   */
+  [data-slot="spec-sheet-grid"] {
+    container-type: inline-size;
+  }
+  [data-slot="spec-sheet-grid-inner"] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  [data-slot="spec-sheet-grid-inner"] > [data-slot="spec-sheet"] {
+    aspect-ratio: 4 / 3;
+    aspect-ratio: clamp(0.8, calc(var(--c, 6) / var(--r, 4)), 1.6);
+  }
+  @container (min-width: 40rem) {
+    [data-slot="spec-sheet-grid-inner"] {
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      grid-auto-rows: calc(8.333cqw - 14.67px);
+      grid-auto-flow: row dense;
+    }
+    [data-slot="spec-sheet-grid-inner"] > [data-slot="spec-sheet"] {
+      grid-column: span var(--c, 6);
+      grid-row: span var(--r, 4);
+      aspect-ratio: auto;
+    }
+  }
+}

@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, ExternalLink, Search } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type AniListAnime } from '@/lib/api';
 import { anilistName, anilistUrl, formatLabel } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { TruncatedText } from '@/components/TruncatedText';
-import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { EmptyState, Spinner } from '@/components/ui/empty';
-import { Input } from '@/components/ui/input';
+import { Button } from '@/zon/ui/button';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Input } from '@/zon/ui/input';
+import { Spinner } from '@/zon/ui/spinner';
 
 /** How long typing pauses before the search runs. */
 const DEBOUNCE_MS = 400;
@@ -92,7 +93,7 @@ export function AniListPickDialog({
   return (
     <Dialog open={query !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
       {/* Wide: titles run long, and the whole of one is often what tells two entries apart. */}
-      <DialogContent className='flex max-h-[85dvh] w-[min(56rem,calc(100vw-2rem))] max-w-4xl flex-col'>
+      <DialogContent size='xl' className='max-h-[85dvh]'>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
@@ -111,25 +112,25 @@ export function AniListPickDialog({
             className='flex-1'
           />
           <Button type='submit' variant='secondary' size='icon' aria-label='Search AniList' disabled={searching}>
-            {searching ? <Spinner /> : <Search />}
+            {searching ? <Spinner label='Searching AniList' /> : <Search />}
           </Button>
         </form>
-        <div className='min-h-0 flex-1 overflow-y-auto'>
+        <DialogBody>
           {searching && results.length === 0 ? (
-            <div className='flex justify-center py-10'><Spinner /></div>
+            <div className='flex justify-center py-10'><Spinner label='Searching AniList' /></div>
           ) : results.length === 0 ? (
-            <EmptyState
-              icon={Search}
-              title={searched ? 'Nothing found on AniList' : 'Search AniList'}
-              description='Try the romaji title Erai-raws uses, the English one, or paste the anilist.co link.'
-            />
+            <Empty>
+              <EmptyMedia><Search /></EmptyMedia>
+              <EmptyTitle>{searched ? 'Nothing found on AniList' : 'Search AniList'}</EmptyTitle>
+              <EmptyDescription>Try the romaji title Erai-raws uses, the English one, or paste the anilist.co link.</EmptyDescription>
+            </Empty>
           ) : (
             <ul className='flex flex-col gap-1'>
               {results.map((anime) => {
                 const shown = anilistName(anime);
                 const romaji = anime.romaji && anime.romaji.toLocaleLowerCase() !== shown.toLocaleLowerCase() ? anime.romaji : null;
                 return (
-                  <li key={anime.anilist_id} className='flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-accent/40'>
+                  <li key={anime.anilist_id} className='flex items-center gap-3 rounded-button px-2 py-2 transition-colors hover:bg-control-hover'>
                     <AnimePoster url={anime.cover} title={shown} className='w-10 shrink-0 rounded' />
                     <div className='min-w-0 flex-1'>
                       {/* Two lines before they are cut; hovering shows the rest. */}
@@ -140,12 +141,16 @@ export function AniListPickDialog({
                           .filter(Boolean).join(' · ')}
                       </p>
                     </div>
-                    <Button asChild size='icon' variant='ghost' className='shrink-0 text-muted-foreground'>
-                      <a href={anilistUrl(anime.anilist_id)} target='_blank' rel='noreferrer' title='Open on AniList' aria-label={'Open ' + shown + ' on AniList'}>
-                        <ExternalLink />
-                      </a>
+                    <Button
+                      size='icon-sm'
+                      variant='ghost'
+                      className='shrink-0 text-muted-foreground'
+                      nativeButton={false}
+                      render={<a href={anilistUrl(anime.anilist_id)} target='_blank' rel='noreferrer' title='Open on AniList' aria-label={'Open ' + shown + ' on AniList'} />}
+                    >
+                      <ExternalLink />
                     </Button>
-                    <Button size='sm' onClick={() => void pick(anime)} disabled={picking !== null}>
+                    <Button size='sm' variant='secondary' onClick={() => void pick(anime)} disabled={picking !== null}>
                       <Check data-icon='inline-start' /> {picking === anime.anilist_id ? 'Working…' : action}
                     </Button>
                   </li>
@@ -153,7 +158,7 @@ export function AniListPickDialog({
               })}
             </ul>
           )}
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

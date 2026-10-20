@@ -1,0 +1,108 @@
+/* brand components — owned by the brand group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
+
+/* ── Starfield: slow twinkle on a few stars ─────────────────────────────────── */
+
+@keyframes ep-twinkle {
+  0%,
+  100% {
+    opacity: var(--star-o, 0.6);
+  }
+  50% {
+    opacity: calc(var(--star-o, 0.6) * 0.18);
+  }
+}
+
+.ep-star-twinkle {
+  animation: ep-twinkle var(--star-d, 6s) ease-in-out var(--star-delay, 0s) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ep-star-twinkle {
+    animation: none;
+  }
+}
+
+/* ── Glow orb: halo, body and limb are gradients, never an animated filter ──── */
+
+.ep-orb-halo {
+  background: radial-gradient(
+    closest-side,
+    color-mix(in oklab, currentColor 13%, transparent),
+    color-mix(in oklab, currentColor 6%, transparent) 38%,
+    color-mix(in oklab, currentColor 2%, transparent) 68%,
+    transparent
+  );
+}
+
+.ep-orb-body {
+  background: radial-gradient(
+    circle at 36% 30%,
+    color-mix(in oklab, currentColor 17%, transparent),
+    color-mix(in oklab, currentColor 8%, transparent) 46%,
+    color-mix(in oklab, currentColor 3.5%, transparent) 78%,
+    color-mix(in oklab, currentColor 2%, transparent)
+  );
+  /* A soft edge without a blur filter. */
+  mask-image: radial-gradient(closest-side, #000 93%, transparent);
+}
+
+.ep-orb-limb {
+  background: radial-gradient(
+    closest-side,
+    transparent 86%,
+    color-mix(in oklab, currentColor 9%, transparent) 96.5%,
+    transparent
+  );
+}
+
+@keyframes ep-orb-breathe {
+  0%,
+  100% {
+    opacity: 0.82;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.035);
+  }
+}
+
+/* Desktop only: mobile backdrops stay static. Opacity + transform, compositor-only. */
+@media (hover: hover) and (pointer: fine) and (min-width: 48rem) and (prefers-reduced-motion: no-preference) {
+  [data-slot="glow-orb"][data-animate="true"] .ep-orb-halo {
+    animation: ep-orb-breathe 16s var(--ease) infinite;
+  }
+}
+
+/* ── Footer: a revealed backdrop rises and fades in by --p (0 → 1 as the footer enters) ── */
+
+[data-slot="footer-backdrop"][data-reveal] {
+  transform: translateY(calc((1 - var(--p, 1)) * var(--footer-reveal-distance, 240px)));
+  opacity: clamp(0, calc(var(--p, 1) * 1.4 - 0.2), 1);
+  will-change: transform, opacity;
+}
+
+/* FooterHorizon: the word arrives late, after the rim. */
+[data-slot="footer-horizon"] [data-part="word"] {
+  opacity: clamp(0, calc(var(--p, 1) * 1.8 - 0.7), 1);
+}
+
+[data-slot="footer-horizon"] [data-part="tagline"] {
+  font-size: 10.5px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+}
+
+/* The drawing shrinks with the viewport; keep the tagline legible on phones. */
+@media (width < 40rem) {
+  [data-slot="footer-horizon"] [data-part="tagline"] {
+    font-size: 19px;
+    letter-spacing: 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="footer"] {
+    --p: 1 !important;
+  }
+}

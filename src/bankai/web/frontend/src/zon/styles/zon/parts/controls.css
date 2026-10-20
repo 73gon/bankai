@@ -1,0 +1,352 @@
+/* controls components — owned by the controls group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
+
+@layer components {
+  /* ── Toggle: the pressed ("on") shadow ───────────────────────────────────────
+   * The raised-current edge (--control-focus) plus a pressed-in inset. The inset uses
+   * --control-edge, which is 18% black in light and 65% black in dark, so the sink reads
+   * in both themes. Applied in toggle.tsx with `data-pressed:shadow-(--toggle-shadow-pressed)`. */
+  [data-slot="toggle"] {
+    --toggle-shadow-pressed:
+      0 0 0 1px var(--control-focus), inset 0 2px 4px var(--control-edge),
+      inset 0 0 0 1px var(--control-inner-edge);
+  }
+
+  /* ── Toggle and toggle-group items ──────────────────────────────────────────
+   * Hover only brightens the ink — no fill, so hover never reads as "on". A press shows in the
+   * material (the pressed inset), not in movement. The inset is inlined: theme shadows exist as
+   * variables only when a utility uses them. */
+  [data-slot="toggle"],
+  [data-slot="toggle-group-item"] {
+    transition:
+      background-color var(--duration) var(--ease),
+      color var(--duration) var(--ease),
+      box-shadow var(--duration) var(--ease);
+  }
+  [data-slot="toggle"]:active:not(:disabled, [data-disabled]) {
+    --toggle-shadow-pressed:
+      0 0 0 1px var(--control-edge), inset 0 2px 4px #0000002e, inset 0 0 0 1px var(--control-inner-edge);
+    box-shadow: var(--toggle-shadow-pressed);
+  }
+
+  /* ── Checkbox: the check draws in, and undraws the same way out ──────────────
+   * Ticking draws the check from its short leg up to the long one; unticking runs it backwards,
+   * faster, and the fill clears as it finishes. Base UI keeps the indicator mounted while
+   * its own transitions run, so it carries a stepped opacity of the same length. Starting and
+   * ending styles exist only on change, so nothing animates on first render. */
+  [data-slot="checkbox"] {
+    --check-undraw: calc(var(--duration) * 0.72);
+  }
+  [data-slot="checkbox-indicator"] {
+    transition: opacity var(--check-undraw) steps(1, end);
+  }
+  [data-slot="checkbox-indicator"][data-ending-style] {
+    opacity: 0;
+  }
+  [data-slot="checkbox-indicator"] svg {
+    stroke-dasharray: 24;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset calc(var(--duration) * 1.6) var(--ease);
+  }
+  [data-slot="checkbox-indicator"]:is([data-starting-style], [data-ending-style]) svg {
+    stroke-dashoffset: -24;
+  }
+  [data-slot="checkbox-indicator"][data-ending-style] svg {
+    transition-duration: var(--check-undraw);
+    transition-timing-function: cubic-bezier(0.65, 0, 0.35, 1);
+  }
+
+  /* ── Switch: the thumb stretches, then slides ────────────────────────────────
+   * Hover stretches the thumb from 18 to 22px, a press to 25px, toward the side it will travel.
+   * Checked, it sits against the far edge: the track's inner width (34px) minus its own width,
+   * so it stays flush while it stretches. Width and position move together in 2 × --duration. */
+  [data-slot="switch-thumb"] {
+    --thumb-w: 18px;
+    width: var(--thumb-w);
+    height: 18px;
+    transition:
+      width calc(var(--duration) * 2) var(--ease),
+      translate calc(var(--duration) * 2) var(--ease),
+      background-color var(--duration) var(--ease),
+      box-shadow var(--duration) var(--ease);
+  }
+  [data-slot="switch-thumb"][data-checked] {
+    translate: calc(34px - var(--thumb-w)) 0;
+  }
+  @media (hover: hover) {
+    [data-slot="switch"]:not([data-disabled], [data-readonly]):hover > [data-slot="switch-thumb"] {
+      --thumb-w: 22px;
+    }
+  }
+  [data-slot="switch"]:not([data-disabled], [data-readonly]):active > [data-slot="switch-thumb"] {
+    --thumb-w: 25px;
+  }
+
+  /* ── Button group: how neighbours meet ───────────────────────────────────────
+   * Fields (real borders) overlap by a pixel so their borders merge into one line. Buttons draw
+   * their edge as an outer ring plus inner highlights, which doubled up at the join — a heavy bar
+   * on a split primary, and the right half seeming to sit on the left. So a joined button trims
+   * 1px of its inner side (ring and highlight with it), the two meet exactly, and the later one
+   * draws a single 1px seam: the edge colour on raised buttons, a soft line on the primary. A
+   * focused or open control drops the trim so its outline and ring show whole. */
+  [data-slot="button-group"][data-orientation="horizontal"]
+    > :not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ) {
+    margin-left: -1px;
+  }
+  [data-slot="button-group"][data-orientation="vertical"]
+    > :not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ) {
+    margin-top: -1px;
+  }
+  [data-slot="button-group"][data-orientation="horizontal"]
+    > [data-variant]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ) {
+    margin-left: -2px;
+  }
+  [data-slot="button-group"][data-orientation="vertical"]
+    > [data-variant]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ) {
+    margin-top: -2px;
+  }
+  [data-slot="button-group"][data-orientation="horizontal"]
+    > [data-variant]:nth-child(
+      1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+    ):not(
+      :nth-last-child(
+        1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+      )
+    ) {
+    clip-path: inset(-16px 1px -16px -16px);
+  }
+  [data-slot="button-group"][data-orientation="horizontal"]
+    > [data-variant]:nth-last-child(
+      1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+    ):not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ) {
+    clip-path: inset(-16px -16px -16px 1px);
+  }
+  [data-slot="button-group"][data-orientation="horizontal"]
+    > [data-variant]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ):not(
+      :nth-last-child(
+        1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+      )
+    ) {
+    clip-path: inset(-16px 1px);
+  }
+  [data-slot="button-group"][data-orientation="vertical"]
+    > [data-variant]:nth-child(
+      1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+    ):not(
+      :nth-last-child(
+        1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+      )
+    ) {
+    clip-path: inset(-16px -16px 1px -16px);
+  }
+  [data-slot="button-group"][data-orientation="vertical"]
+    > [data-variant]:nth-last-child(
+      1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+    ):not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ) {
+    clip-path: inset(1px -16px -16px -16px);
+  }
+  [data-slot="button-group"][data-orientation="vertical"]
+    > [data-variant]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    ):not(
+      :nth-last-child(
+        1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"])
+      )
+    ) {
+    clip-path: inset(1px -16px);
+  }
+  [data-slot="button-group"] > [data-variant]:is(:focus-visible, :has(:focus-visible), [data-popup-open]) {
+    clip-path: none;
+  }
+  [data-slot="button-group"]
+    > [data-variant]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    )::after {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+    background: var(--control-edge);
+  }
+  [data-slot="button-group"]
+    > [data-variant="primary"]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    )::after {
+    background: color-mix(in oklab, var(--primary-text) 22%, transparent);
+  }
+  [data-slot="button-group"][data-orientation="horizontal"]
+    > [data-variant]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    )::after {
+    top: -1px;
+    bottom: -1px;
+    left: 0;
+    width: 1px;
+  }
+  [data-slot="button-group"][data-orientation="vertical"]
+    > [data-variant]:not(
+      :nth-child(1 of :not([data-base-ui-focus-guard], span[aria-owns], [data-slot="button-group-separator"]))
+    )::after {
+    left: -1px;
+    right: -1px;
+    top: 0;
+    height: 1px;
+  }
+
+  /* ── Toggle group, reveal: one part of a segment stays hidden until it is pressed ──────────
+   * A segment's icon and label each sit in a one-column grid; the hidden one is a 0fr column
+   * with its content clipped, and widens to 1fr when the segment is pressed. The width moves on
+   * 2 × --duration like the raised surface that follows it; the fade on --duration. */
+  [data-slot="toggle-group-item"] > [data-slot="toggle-group-icon"],
+  [data-slot="toggle-group-item"] > [data-slot="toggle-group-label"] {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: center;
+    transition:
+      grid-template-columns calc(var(--duration) * 2) var(--ease),
+      opacity var(--duration) var(--ease);
+  }
+  [data-slot="toggle-group-icon"] > span,
+  [data-slot="toggle-group-label"] > span {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+  }
+  /* The icon–label gap travels inside the part that slides (a pseudo-element, which a 0fr
+     track does not count the way it counts padding), so nothing is left of it while hidden. */
+  [data-slot="toggle-group"][data-reveal="label"] [data-slot="toggle-group-label"] > span::before,
+  [data-slot="toggle-group"][data-reveal="icon"] [data-slot="toggle-group-icon"] > span::after {
+    content: "";
+    flex: none;
+    width: --spacing(1.5);
+  }
+  [data-slot="toggle-group"][data-reveal="label"]
+    > [data-slot="toggle-group-item"]:not([data-pressed])
+    > [data-slot="toggle-group-label"],
+  [data-slot="toggle-group"][data-reveal="icon"]
+    > [data-slot="toggle-group-item"]:not([data-pressed])
+    > [data-slot="toggle-group-icon"] {
+    grid-template-columns: 0fr;
+    opacity: 0;
+  }
+
+  /* ── Input group: nested radius ──────────────────────────────────────────────
+   * A button inside the field is concentric with it: outer radius − inset = inner radius,
+   * where the inset is the space between the field's border and the button.
+   *   default: 10 − ((38 − 30) / 2 − 1) = 7px
+   *   dense:   10 − ((30 − 24) / 2 − 1) = 8px
+   * Applied in input-group.tsx with `rounded-(--input-group-button-radius)`. */
+  [data-slot="input-group-button"] {
+    --input-group-button-radius: calc(
+      var(--radius-control) - ((var(--control-h) - var(--control-inset)) / 2 - 1px)
+    );
+  }
+  [data-slot="input-group"][data-size="sm"] [data-slot="input-group-button"] {
+    --input-group-button-radius: calc(
+      var(--radius-control) - ((var(--control-h-sm) - var(--control-inset-sm)) / 2 - 1px)
+    );
+  }
+
+  /* ── Badge: pinned to the corner of what it marks ────────────────────────────
+   * The badge is centred on the anchor point. For a circle that is its 45° point,
+   * (1 − 1/√2) / 2 ≈ 14.6% in from the bounding box; for a rect, just inside the corner.
+   * The outline is a cut-out in the page colour that separates the badge from the object. */
+  [data-slot="badge-anchor"] {
+    --badge-inset: 14.6%;
+  }
+  [data-slot="badge-anchor"][data-shape="rect"] {
+    --badge-inset: 2px;
+  }
+  [data-slot="badge-anchor"] > [data-slot="badge"] {
+    position: absolute;
+    z-index: 1;
+    top: var(--badge-inset);
+    inset-inline-end: var(--badge-inset);
+    translate: 50% -50%;
+    outline: 2px solid var(--badge-cutout, var(--background));
+    outline-offset: 0;
+    pointer-events: none;
+  }
+  [data-slot="badge-anchor"][data-placement="bottom-end"] > [data-slot="badge"] {
+    top: auto;
+    bottom: var(--badge-inset);
+    translate: 50% 50%;
+  }
+  [data-slot="badge-anchor"]:dir(rtl) > [data-slot="badge"] {
+    translate: -50% -50%;
+  }
+  [data-slot="badge-anchor"][data-placement="bottom-end"]:dir(rtl) > [data-slot="badge"] {
+    translate: -50% 50%;
+  }
+}
+
+/* ── Checkbox: the fill clears right behind the undraw ───────────────────────
+ * Ticking fills at once and draws the check; unticking is the same in reverse and quicker: the
+ * check undraws in ~110ms and the fill clears as it finishes. Unlayered: the field material sets
+ * its own `transition`, which a layered rule cannot change. */
+[data-slot="checkbox"] {
+  transition:
+    border-color var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease),
+    background-color var(--duration) var(--ease);
+}
+[data-slot="checkbox"]:not([data-checked], [data-indeterminate]) {
+  transition-duration: calc(var(--duration) * 0.72);
+  transition-delay: calc(var(--check-undraw) * 0.6);
+}
+
+/* ── Button group with a field: one outline for the pair ─────────────────────────────────────
+ * A raised button draws its edge 1px outside its box; a field draws it inside its border, plus
+ * a 1px highlight under it. Next to a field a secondary button takes the field's geometry and
+ * colours: its edge moves inside and becomes --field-edge, it gets the same highlight below,
+ * and the seam between them is --field-edge too. In light mode the two edge colours were close;
+ * in dark mode the button's near-black edge vanished into the page and the field's light one
+ * did not, so the button looked 2px smaller while measuring the same. (A primary button keeps
+ * its own shadow.) Unlayered: it must beat the raised material, which is a utility. */
+[data-slot="button-group"]:has(
+    [data-slot="input"],
+    [data-slot="input-group"],
+    [data-slot="select-trigger"],
+    [data-slot="native-select"]
+  )
+  > [data-variant="secondary"] {
+  border-color: var(--field-edge);
+  box-shadow:
+    inset 0 1px 0 var(--control-highlight),
+    inset 0 0 0 1px var(--control-inner-edge),
+    0 1px 0 var(--control-highlight);
+}
+[data-slot="button-group"]:has(
+    [data-slot="input"],
+    [data-slot="input-group"],
+    [data-slot="select-trigger"],
+    [data-slot="native-select"]
+  )
+  > [data-variant="secondary"]:active:not(:disabled, [data-disabled]) {
+  box-shadow:
+    inset 0 2px 4px #0000002e,
+    inset 0 0 0 1px var(--control-inner-edge),
+    0 1px 0 var(--control-highlight);
+}
+[data-slot="button-group"]:has(
+    [data-slot="input"],
+    [data-slot="input-group"],
+    [data-slot="select-trigger"],
+    [data-slot="native-select"]
+  )
+  > [data-variant="secondary"]::after {
+  background: var(--field-edge);
+}

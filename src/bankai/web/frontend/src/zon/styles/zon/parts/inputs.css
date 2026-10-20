@@ -1,0 +1,225 @@
+/* inputs & dates components — owned by the inputs group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
+
+@layer components {
+  /* ── Calendar: day cells ─────────────────────────────────────────────────────
+   * The cell (td) carries the range band; the button inside carries the state.
+   * States are data attributes set from react-day-picker's modifiers in calendar.tsx. */
+
+  [data-slot="calendar-day"] {
+    position: relative;
+    width: var(--control-h);
+    height: var(--control-h);
+    padding: 0;
+    text-align: center;
+    /* Read-only calendars (no `mode`) render the number straight into the cell. */
+    color: var(--foreground);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  [data-slot="calendar-day"][data-outside] {
+    color: var(--muted-foreground);
+  }
+  [data-slot="calendar-day"][data-disabled]:not(:has(button)) {
+    color: var(--muted-foreground);
+    text-decoration-line: line-through;
+    opacity: 0.55;
+  }
+  [data-slot="calendar-day"][data-today]:not(:has(button))::after {
+    content: "";
+    position: absolute;
+    bottom: 5px;
+    left: 50%;
+    width: 4px;
+    height: 4px;
+    border-radius: 9999px;
+    background-color: currentColor;
+    translate: -50% 0;
+  }
+
+  /* The band behind a range's middle days: the hover fill, square, rounded only where a week
+     row starts or ends. */
+  [data-slot="calendar-day"][data-range-middle] {
+    background-color: var(--control-hover);
+  }
+  td[data-slot="calendar-day"][data-range-middle]:first-of-type {
+    border-start-start-radius: var(--radius-item);
+    border-end-start-radius: var(--radius-item);
+  }
+  td[data-slot="calendar-day"][data-range-middle]:last-of-type {
+    border-start-end-radius: var(--radius-item);
+    border-end-end-radius: var(--radius-item);
+  }
+
+  [data-slot="calendar-day-button"] {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    border: 1px solid transparent;
+    border-radius: var(--radius-item);
+    background-color: transparent;
+    color: var(--foreground);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition:
+      background-color var(--duration) var(--ease),
+      color var(--duration) var(--ease),
+      box-shadow var(--duration) var(--ease);
+  }
+
+  /* Hover lifts the day like a row: the raised treatment on the hover fill. */
+  @media (hover: hover) {
+    [data-slot="calendar-day-button"]:not(
+        :disabled,
+        [aria-disabled="true"],
+        [data-selected-single],
+        [data-range-start],
+        [data-range-end]
+      ):hover {
+      color: var(--foreground);
+      background-color: var(--control-hover);
+      background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+      box-shadow:
+        0 0 0 1px var(--control-edge),
+        inset 0 1px 0 var(--control-highlight),
+        inset 0 0 0 1px var(--control-inner-edge);
+    }
+  }
+
+  [data-slot="calendar-day-button"]:focus-visible {
+    z-index: 2;
+    outline: 2px solid var(--control-focus);
+    outline-offset: 0;
+  }
+
+  /* Today: a small dot under the number, in the day's own ink. */
+  [data-slot="calendar-day-button"][data-today]::after {
+    content: "";
+    position: absolute;
+    bottom: 5px;
+    left: 50%;
+    width: 4px;
+    height: 4px;
+    border-radius: 9999px;
+    background-color: currentColor;
+    translate: -50% 0;
+  }
+
+  /* Outside days are muted; disabled days are muted and struck through. */
+  [data-slot="calendar-day-button"][data-outside] {
+    color: var(--muted-foreground);
+  }
+  [data-slot="calendar-day-button"][data-disabled] {
+    color: var(--muted-foreground);
+    text-decoration-line: line-through;
+    text-decoration-color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  /* Range middle: on the band, inner corners collapsed. */
+  [data-slot="calendar-day-button"][data-range-middle] {
+    border-radius: 0;
+    color: var(--foreground);
+  }
+  [data-slot="calendar-day-button"][data-range-middle][data-outside] {
+    color: var(--muted-foreground);
+  }
+  td:first-of-type > [data-slot="calendar-day-button"][data-range-middle] {
+    border-start-start-radius: var(--radius-item);
+    border-end-start-radius: var(--radius-item);
+  }
+  td:last-of-type > [data-slot="calendar-day-button"][data-range-middle] {
+    border-start-end-radius: var(--radius-item);
+    border-end-end-radius: var(--radius-item);
+  }
+
+  /* Selected (single, multiple, and a range's two ends): the layered primary fill. */
+  [data-slot="calendar-day-button"][data-selected-single],
+  [data-slot="calendar-day-button"][data-range-start],
+  [data-slot="calendar-day-button"][data-range-end] {
+    z-index: 1;
+    color: var(--primary-text);
+    text-shadow: var(--primary-text-shadow);
+    background-color: var(--primary-fill);
+    background-image: linear-gradient(#ffffff0f, transparent 55%);
+    box-shadow: var(--primary-shadow);
+    text-decoration-line: none;
+    opacity: 1;
+  }
+  @media (hover: hover) {
+    [data-slot="calendar-day-button"]:is([data-selected-single], [data-range-start], [data-range-end]):hover {
+      background-color: var(--primary-fill-hover);
+    }
+  }
+
+  /* A range's ends collapse the corners that face the band, except at the edge of a week. */
+  td:not(:last-of-type) > [data-slot="calendar-day-button"][data-range-start]:not([data-range-end]) {
+    border-start-end-radius: 0;
+    border-end-end-radius: 0;
+  }
+  td:not(:first-of-type) > [data-slot="calendar-day-button"][data-range-end]:not([data-range-start]) {
+    border-start-start-radius: 0;
+    border-end-start-radius: 0;
+  }
+
+  /* ── NumberField: the digit roll ───────────────────────────────────────────
+   * On a step (steppers, arrow keys, wheel) the digits that changed roll: up, the new digit
+   * rises from below and the old one leaves upward; down, the reverse (--roll-dir 1 / -1).
+   * A digit that appears or disappears (9 → 10) grows or shrinks its 1ch slot, so the centred
+   * value never jumps. Mono, tabular digits keep every slot the same width as the input's. */
+
+  [data-slot="number-field-roll"] [data-roll] {
+    display: inline-grid;
+    width: 1ch;
+    height: 1lh;
+    overflow: hidden;
+
+    & > * {
+      grid-area: 1 / 1;
+      text-align: center;
+    }
+    & > [data-old] {
+      animation: ep-roll-out var(--duration) var(--ease) both;
+    }
+    & > [data-new] {
+      animation: ep-roll-in var(--duration) var(--ease) both;
+    }
+    &[data-grow] {
+      animation: ep-roll-grow var(--duration) var(--ease) both;
+    }
+    &[data-shrink] {
+      animation: ep-roll-shrink var(--duration) var(--ease) both;
+    }
+  }
+
+  @keyframes ep-roll-out {
+    to {
+      translate: 0 calc(var(--roll-dir) * -100%);
+      opacity: 0;
+    }
+  }
+  @keyframes ep-roll-in {
+    from {
+      translate: 0 calc(var(--roll-dir) * 100%);
+      opacity: 0;
+    }
+  }
+  @keyframes ep-roll-grow {
+    from {
+      width: 0;
+    }
+  }
+  @keyframes ep-roll-shrink {
+    to {
+      width: 0;
+    }
+  }
+}

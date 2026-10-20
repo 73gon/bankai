@@ -1,19 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon, Check, Link2 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type DiscoverItem, type PagedDiscover, type SearchResult } from '@/lib/api';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
-import { EmptyState } from '@/components/ui/empty';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tabs, TabsList, TabsTab, TabsPanel } from '@/zon/ui/tabs';
+import { Button } from '@/zon/ui/button';
+import { StatusTag } from '@/components/status-tag';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Input } from '@/zon/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
 import { GermanRelease } from '@/components/GermanRelease';
-import { Separator } from '@/components/ui/separator';
+import { Separator } from '@/zon/ui/separator';
 import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
+
+const PAGE_SIZE_ITEMS = CATALOG_PAGE_SIZES.map((size) => ({ value: String(size), label: `${size} per page` }));
 
 const discoverCache = new Map<string, PagedDiscover>();
 let discoverView = { kind: 'movie', page: 0 };
@@ -60,7 +62,7 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
   return (
     <button
       onClick={onClick}
-      className='group relative aspect-[2/3] overflow-hidden rounded-lg bg-secondary/40 text-left ring-1 ring-border/40 transition-transform hover:-translate-y-1 hover:ring-primary/50'
+      className='poster-card group relative aspect-[2/3] overflow-hidden rounded-control bg-control-surface text-left ring-1 ring-border/40 focus-ring hover:ring-primary/50'
     >
       {item.poster_url && !err ? (
         <img src={api.posterUrl(item.poster_url)} onError={() => setErr(true)} className='h-full w-full object-cover' loading='lazy' />
@@ -69,21 +71,21 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
           {item.kind === 'movie' ? <Film className='h-8 w-8' /> : <Tv className='h-8 w-8' />}
         </div>
       )}
-      <div className='absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-2.5 pt-8'>
-        <div className='line-clamp-2 text-xs font-medium'>{item.name}</div>
-        {item.year && <div className='text-[10px] text-muted-foreground'>{item.year}</div>}
+      <div className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black/90 to-transparent p-2.5 pt-8'>
+        <div className='line-clamp-2 text-xs font-medium text-foreground'>{item.name}</div>
+        {item.year && <div className='font-mono text-[10px] tabular-nums text-muted-foreground'>{item.year}</div>}
       </div>
       {item.is_new && (
-        <span className='absolute left-2 top-2 rounded bg-primary px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary-foreground shadow'>
+        <span className='absolute left-2 top-2 rounded-item bg-primary px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wide text-primary-foreground shadow'>
           New
         </span>
       )}
       {item.available && (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <span className='absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-white shadow ring-2 ring-black/20'>
-              <Check className='h-3.5 w-3.5' strokeWidth={3} />
-            </span>
+          <TooltipTrigger
+            render={<span className='absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-success text-background shadow ring-2 ring-black/20' />}
+          >
+            <Check className='h-3.5 w-3.5' strokeWidth={3} />
           </TooltipTrigger>
           <TooltipContent>Verified: the matching Filmpalast release currently has a reachable, supported German stream mirror.</TooltipContent>
         </Tooltip>
@@ -393,7 +395,7 @@ export default function Discover() {
   return (
     <div className='space-y-6'>
       <header className='flex items-baseline gap-2'>
-        <h1 className='text-2xl font-semibold'>Discover</h1>
+        <h1 className='font-heading text-3xl font-light'>Discover</h1>
         <span className='text-sm text-muted-foreground'>— Trending titles from TheTVDB.</span>
       </header>
 
@@ -404,26 +406,29 @@ export default function Discover() {
           setPage(0);
         }}
       >
-        <TabsList className='border-0 bg-transparent shadow-none'>
-          <TabsTrigger value='movie'>Movies</TabsTrigger>
-          <TabsTrigger value='show'>Shows</TabsTrigger>
+        <TabsList>
+          <TabsTab value='movie'>Movies</TabsTab>
+          <TabsTab value='show'>Shows</TabsTab>
         </TabsList>
 
-        <TabsContent value={kind}>
+        <TabsPanel value={kind}>
           {!configured ? (
-            <EmptyState
-              icon={Compass}
-              title='TheTVDB key not configured'
-              description='Add your TVDB API key in Settings to browse trending titles.'
-            />
+            <Empty>
+              <EmptyMedia><Compass /></EmptyMedia>
+              <EmptyTitle>TheTVDB key not configured</EmptyTitle>
+              <EmptyDescription>Add your TVDB API key in Settings to browse trending titles.</EmptyDescription>
+            </Empty>
           ) : loading ? (
             <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
               {Array.from({ length: Math.min(pageSize, 24) }).map((_, i) => (
-                <Skeleton key={i} className='aspect-[2/3] rounded-lg' />
+                <Skeleton key={i} shape='item' className='aspect-[2/3] rounded-control' />
               ))}
             </div>
           ) : visibleItems.length === 0 ? (
-            <EmptyState icon={Compass} title='Nothing to show' />
+            <Empty>
+              <EmptyMedia><Compass /></EmptyMedia>
+              <EmptyTitle>Nothing to show</EmptyTitle>
+            </Empty>
           ) : (
             <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
               {visibleItems.map((it) => (
@@ -431,7 +436,7 @@ export default function Discover() {
               ))}
             </div>
           )}
-        </TabsContent>
+        </TabsPanel>
       </Tabs>
 
       {!loading && configured && (
@@ -439,19 +444,21 @@ export default function Discover() {
           <Button variant='secondary' disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
             Previous
           </Button>
-          <span className='text-sm text-foreground'>
+          <span className='font-mono text-sm tabular-nums text-foreground'>
             Page {page + 1}{totalPages ? ` of ${totalPages}` : ''}
           </span>
           <Select
+            items={PAGE_SIZE_ITEMS}
             value={String(pageSize)}
             onValueChange={(value) => {
+              if (!value) return;
               const next = Number(value) as CatalogPageSize;
               setPageSize(next);
               saveCatalogPageSize(next);
               setPage(0);
             }}
           >
-            <SelectTrigger className='w-32' aria-label='Entries per page'>
+            <SelectTrigger className='w-36 min-w-0' aria-label='Entries per page'>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -467,12 +474,12 @@ export default function Discover() {
       )}
 
       <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
-        <DialogContent className={selected?.kind === 'movie' ? 'max-w-2xl' : undefined}>
+        <DialogContent size={selected?.kind === 'movie' ? 'lg' : 'default'}>
           <DialogHeader>
-            <DialogTitle className='flex items-center gap-2'>
+            <DialogTitle className='flex flex-wrap items-center gap-2'>
               {selected?.name}
-              {selected?.year && <span className='text-sm font-normal text-muted-foreground'>({selected.year})</span>}
-              {german && german !== selected?.name && <Badge variant='accent'>DE: {german}</Badge>}
+              {selected?.year && <span className='font-mono text-sm font-normal tabular-nums text-muted-foreground'>({selected.year})</span>}
+              {german && german !== selected?.name && <StatusTag variant='accent'>DE: {german}</StatusTag>}
             </DialogTitle>
             <DialogDescription>
               {selected?.kind === 'movie'
@@ -524,31 +531,35 @@ export default function Discover() {
               {loadingFilm ? (
                 <div className='space-y-2'>
                   {Array.from({ length: 3 }).map((_, i) => (
-                    <Skeleton key={i} className='h-14' />
+                    <Skeleton key={i} shape='item' className='h-14' />
                   ))}
                 </div>
               ) : filmResults.length === 0 ? (
-                <EmptyState icon={SearchIcon} title='No German source match' description='Try another title or use the direct German source field below.' />
+                <Empty className='py-8 md:py-10'>
+                  <EmptyMedia><SearchIcon /></EmptyMedia>
+                  <EmptyTitle>No German source match</EmptyTitle>
+                  <EmptyDescription>Try another title or use the direct German source field below.</EmptyDescription>
+                </Empty>
               ) : (
                 <div className='max-h-[55vh] space-y-2 overflow-auto pr-1'>
                   {filmResults.map((r) => (
-                    <div key={`${r.site}-${r.url}`} className='flex items-center justify-between gap-3 rounded-lg p-3 ring-1 ring-border/50'>
+                    <div key={`${r.site}-${r.url}`} className='flex items-center justify-between gap-3 rounded-control border border-field-edge p-3'>
                       <div className='min-w-0'>
                         <div className='flex items-center gap-2'>
-                          <span className='truncate font-medium'>{r.title}</span>
-                          {r.year && <span className='text-xs text-muted-foreground'>{r.year}</span>}
+                          <span className='truncate font-medium text-foreground'>{r.title}</span>
+                          {r.year && <span className='font-mono text-xs tabular-nums text-muted-foreground'>{r.year}</span>}
                         </div>
-                        <Badge variant='muted' className='mt-1'>
+                        <StatusTag variant='muted' className='mt-1'>
                           {r.site}
-                        </Badge>
+                        </StatusTag>
                         {selected?.filmpalast_url === r.url && (
-                          <Badge variant='success' className='ml-2 mt-1'>
+                          <StatusTag variant='success' className='ml-2 mt-1'>
                             Verified German source
-                          </Badge>
+                          </StatusTag>
                         )}
                         <GermanRelease value={r.release_name} />
                       </div>
-                      <Button size='sm' onClick={() => queueMovie(r)} disabled={busyUrl === r.url}>
+                      <Button size='sm' variant='secondary' onClick={() => queueMovie(r)} disabled={busyUrl === r.url}>
                         {busyUrl === r.url ? <Loader2 className='h-4 w-4 animate-spin' /> : <Plus className='h-4 w-4' />}
                         Queue
                       </Button>
@@ -558,14 +569,10 @@ export default function Discover() {
               )}
 
               <div className='flex flex-col gap-3'>
-                <div className='flex items-center gap-3'>
-                  <Separator className='flex-1' />
-                  <span className='text-xs font-medium text-muted-foreground'>or use your own source</span>
-                  <Separator className='flex-1' />
-                </div>
-                <div className='flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-3'>
+                <Separator label='or use your own source' />
+                <div className='flex flex-col gap-2 rounded-control surface-container p-3'>
                   <div className='flex items-center gap-2 text-sm font-medium text-foreground'>
-                    <Link2 /> Use your own German source
+                    <Link2 className='size-4' /> Use your own German source
                   </div>
                   <p className='text-xs text-muted-foreground'>
                     Paste a direct VOE, Vidmoly, Vinovo, Filmpalast, or other German video link. It will be used instead of the unavailable automatic result.
@@ -581,6 +588,7 @@ export default function Discover() {
                       className='flex-1'
                     />
                     <Button
+                      variant='secondary'
                       onClick={queueDirectMovie}
                       disabled={!directMovieUrl.trim() || busyUrl === directMovieUrl.trim()}
                     >

@@ -1,0 +1,179 @@
+/*
+ * @zonsh/ui — stylesheet entry.
+ *
+ * Usage (Tailwind v4 app):
+ *   @import "tailwindcss";
+ *   @import "@zonsh/ui/styles.css";
+ *
+ * Order matters: import Tailwind first so the component utilities layer after preflight.
+ */
+
+/* The components' Tailwind classes live in the JS beside this folder; a consumer's Tailwind
+   does not scan node_modules on its own, so point it there. The path holds in src and in dist. */
+/* Tailwind auto-detects copied components. */
+
+@import "./tokens.css";
+@import "./fonts.css";
+@import "./material.css";
+@import "./expressive.css";
+@import "./parts/controls.css";
+@import "./parts/overlays.css";
+@import "./parts/navigation.css";
+@import "./parts/foundations.css";
+@import "./parts/brand.css";
+@import "./parts/editorial.css";
+@import "./parts/isometric.css";
+@import "./parts/feedback.css";
+@import "./parts/data.css";
+@import "./parts/inputs.css";
+@import "./parts/pdf.css";
+@import "./parts/ai.css";
+@import "./parts/react-flow.css";
+@import "./parts/graph.css";
+@import "./parts/whiteboard.css";
+
+/* Let Tailwind see the classes used inside this package. */
+/* Tailwind auto-detects copied components. */
+/* Tailwind auto-detects copied components. */
+
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *, .theme-dark, .theme-dark *, .theme-night, .theme-night *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-foreground-soft: var(--foreground-soft);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-control-surface: var(--control-surface);
+  --color-control-hover: var(--control-hover);
+  --color-control-edge: var(--control-edge);
+  --color-control-highlight: var(--control-highlight);
+  --color-control-inner-edge: var(--control-inner-edge);
+  --color-control-menu: var(--control-menu);
+  --color-control-muted: var(--control-muted);
+  --color-control-focus: var(--control-focus);
+  --color-field-surface: var(--field-surface);
+  --color-field-edge: var(--field-edge);
+  --color-grid-line: var(--grid-line);
+  --color-grid-bright: var(--grid-bright);
+  --color-guide: var(--guide);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --font-heading: var(--font-heading);
+  --font-body: var(--font-body);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-mono);
+
+  --radius-button: var(--radius-button);
+  --radius-control: var(--radius-control);
+  --radius-item: var(--radius-item);
+  --radius-checkbox: var(--radius-checkbox);
+  --radius-card: var(--radius-card);
+
+  /*
+   * The material's shadows as utilities (`shadow-raised`, `shadow-checked` …). Inlined, so the
+   * var() colours resolve where they are used and stay right inside .theme-dark regions.
+   * Never retype these as shadow-[…]: use the utility.
+   */
+  --shadow-raised:
+    0 0 0 1px var(--control-edge), inset 0 1px 0 var(--control-highlight), inset 0 0 0 1px var(--control-inner-edge);
+  --shadow-raised-pressed:
+    0 0 0 1px var(--control-edge), inset 0 2px 4px #0000002e, inset 0 0 0 1px var(--control-inner-edge);
+  --shadow-raised-current:
+    0 0 0 1px var(--control-focus), inset 0 1px 0 var(--control-highlight), inset 0 0 0 1px var(--control-inner-edge);
+  --shadow-key:
+    0 0 0 1px var(--control-edge), inset 0 1px 0 var(--control-highlight), inset 0 -1px 0 var(--control-inner-edge);
+  --shadow-checked: 0 0 0 1px var(--control-edge), inset 0 2px 3px #fff3, inset 0 -2px 3px #0000001f;
+  --shadow-thumb: 0 0 0 1px var(--control-edge), 0 1px 3px #00000040, inset 0 1px 0 var(--control-highlight);
+  --shadow-field: inset 0 1px 2px var(--field-inset), 0 1px 0 var(--control-highlight);
+  --shadow-highlight: inset 0 1px 0 var(--control-highlight);
+  --shadow-invalid: 0 0 0 3px color-mix(in srgb, var(--destructive) 18%, transparent);
+  --shadow-overlay: inset 0 1px 0 var(--control-highlight), 0 12px 32px #0003, 0 2px 6px #0000001a;
+  --shadow-card: inset 0 1px 0 var(--control-highlight), 0 4px 16px #0000000a;
+
+  --ease-brand: var(--ease);
+  --container-page: var(--container);
+
+  --text-body: 17px;
+  --text-body--line-height: 1.6;
+  --text-eyebrow: 12px;
+  --text-eyebrow--line-height: 1.4;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-heading);
+    font-weight: 300;
+    font-kerning: normal;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  ::selection {
+    background-color: var(--foreground);
+    color: var(--background);
+  }
+  /* Native scrollbars (the page, overflow-auto panels) echo ScrollArea: a thin --field-edge thumb
+     on a transparent track. ScrollArea hides these and draws its own. */
+  html {
+    scrollbar-width: thin;
+  }
+  * {
+    scrollbar-color: var(--field-edge) transparent;
+  }
+  @supports not (scrollbar-color: auto) {
+    ::-webkit-scrollbar {
+      width: 12px;
+      height: 12px;
+    }
+    ::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      border: 3px solid transparent;
+      border-radius: 9999px;
+      background: var(--field-edge) padding-box;
+    }
+  }
+  :focus-visible {
+    outline: 2px solid var(--control-focus);
+    outline-offset: 0;
+  }
+}

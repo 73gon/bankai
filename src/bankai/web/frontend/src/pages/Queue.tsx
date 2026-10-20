@@ -1,29 +1,29 @@
 import { useMemo, useState } from 'react';
 import { ListVideo, Loader2, X, RotateCcw, CheckCircle2, AlertCircle, Clock, Wifi, WifiOff } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type Job } from '@/lib/api';
 import { useJobStream } from '@/hooks/useJobStream';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Card, CardContent } from '@/components/ui/card';
-import { EmptyState } from '@/components/ui/empty';
-import { cn, timeAgo } from '@/lib/utils';
+import { Button } from '@/zon/ui/button';
+import { StatusTag } from '@/components/status-tag';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { timeAgo } from '@/lib/utils';
+import { cn } from '@/zon/lib/cn';
 
 function statusBadge(job: Job) {
-  if (job.pending) return <Badge variant='muted'>Pending</Badge>;
+  if (job.pending) return <StatusTag variant='muted'>Pending</StatusTag>;
   switch (job.status) {
     case 'running':
-      return job.kind === 'transfer' ? <Badge variant='transfer'>Transferring</Badge> : <Badge variant='info'>Running</Badge>;
+      return job.kind === 'transfer' ? <StatusTag variant='transfer'>Transferring</StatusTag> : <StatusTag variant='info'>Running</StatusTag>;
     case 'done':
     case 'success':
-      return <Badge variant='success'>Done</Badge>;
+      return <StatusTag variant='success'>Done</StatusTag>;
     case 'error':
     case 'failed':
-      return <Badge variant='destructive'>Failed</Badge>;
+      return <StatusTag variant='destructive'>Failed</StatusTag>;
     case 'cancelled':
-      return <Badge variant='warning'>Cancelled</Badge>;
+      return <StatusTag variant='warning'>Cancelled</StatusTag>;
     default:
-      return <Badge variant='muted'>{job.status}</Badge>;
+      return <StatusTag variant='muted'>{job.status}</StatusTag>;
   }
 }
 
@@ -74,27 +74,38 @@ export default function Queue() {
     <div className='space-y-6'>
       <header className='flex items-center justify-between'>
         <div className='flex items-baseline gap-2'>
-          <h1 className='text-2xl font-semibold'>Queue</h1>
+          <h1 className='font-heading text-3xl font-light'>Queue</h1>
           <span className='text-sm text-muted-foreground'>— Live download and dubbing jobs.</span>
         </div>
-        <Badge variant={connected ? 'success' : 'muted'} className='gap-1.5'>
+        <StatusTag variant={connected ? 'success' : 'muted'} className='gap-1.5'>
           {connected ? <Wifi className='h-3 w-3' /> : <WifiOff className='h-3 w-3' />}
           {live ? 'Live' : connected ? 'Polling' : 'Offline'}
-        </Badge>
+        </StatusTag>
       </header>
 
       {sorted.length === 0 ? (
-        <EmptyState icon={ListVideo} title='Queue is empty' description='Queue a title from Discover or Search.' />
+        <Empty>
+          <EmptyMedia><ListVideo /></EmptyMedia>
+          <EmptyTitle>Queue is empty</EmptyTitle>
+          <EmptyDescription>Queue a title from Discover or Search.</EmptyDescription>
+        </Empty>
       ) : (
         <div className='grid gap-3'>
           {sorted.map((job) => {
             const pct = job.overall_percent ?? 0;
             const active = follow === job.id;
             return (
-              <Card key={job.id} className={cn(jobTint(job), active && 'ring-1 ring-primary/40')}>
-                <CardContent className='p-4'>
+              <div
+                key={job.id}
+                className={cn(
+                  'rounded-card border border-field-edge p-4 transition-colors duration-(--duration) ease-(--ease)',
+                  jobTint(job),
+                  active && 'ring-1 ring-primary/40',
+                )}
+              >
+                <div>
                   <div className='flex items-center justify-between gap-3'>
-                    <button className='flex min-w-0 flex-1 items-center gap-3 text-left' onClick={() => setFollow(active ? null : job.id)}>
+                    <button className='flex min-w-0 flex-1 items-center gap-3 rounded-item text-left focus-ring' onClick={() => setFollow(active ? null : job.id)}>
                       <StatusIcon job={job} />
                       <div className='min-w-0'>
                         <div className='truncate font-medium'>{job.title}</div>
@@ -108,12 +119,12 @@ export default function Queue() {
                     <div className='flex items-center gap-2'>
                       {statusBadge(job)}
                       {job.status === 'running' && !job.pending && (
-                        <Button size='icon' variant='ghost' onClick={() => cancel(job.id)} title='Cancel'>
+                        <Button size='icon-sm' variant='ghost' onClick={() => cancel(job.id)} title='Cancel' aria-label='Cancel'>
                           <X className='h-4 w-4' />
                         </Button>
                       )}
                       {['error', 'failed', 'cancelled'].includes(job.status) && (
-                        <Button size='icon' variant='ghost' onClick={() => retry(job.id)} title='Retry'>
+                        <Button size='icon-sm' variant='ghost' onClick={() => retry(job.id)} title='Retry' aria-label='Retry'>
                           <RotateCcw className='h-4 w-4' />
                         </Button>
                       )}
@@ -122,17 +133,17 @@ export default function Queue() {
 
                   {(job.status === 'running' || (job.overall_percent ?? 0) > 0) && !job.pending && (
                     <div className='mt-3'>
-                      <div className='h-1.5 overflow-hidden rounded-full bg-secondary'>
+                      <div className='h-1.5 overflow-hidden rounded-full border border-field-edge bg-field-surface'>
                         <div
                           className={cn(
-                            'h-full rounded-full bg-gradient-to-r transition-all',
+                            'h-full rounded-full bg-linear-to-r transition-all',
                             job.kind === 'transfer' ? 'from-transfer to-primary' : 'from-info to-primary',
                           )}
                           style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
                         />
                       </div>
                       {job.total_steps != null && (
-                        <div className='mt-1 text-[11px] text-muted-foreground'>
+                        <div className='mt-1 font-mono text-[11px] tabular-nums text-muted-foreground'>
                           Step {job.step ?? 0}/{job.total_steps} · {Math.round(pct)}%
                         </div>
                       )}
@@ -140,12 +151,12 @@ export default function Queue() {
                   )}
 
                   {active && (
-                    <pre className='ansi-log mt-3 max-h-72 overflow-auto rounded-md bg-black/50 p-3 text-[11px] leading-relaxed'>
+                    <pre className='ansi-log mt-3 max-h-72 overflow-auto rounded-control border border-field-edge bg-black/50 p-3 font-mono text-[11px] leading-relaxed'>
                       {logTail || 'Waiting for log output…'}
                     </pre>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </div>
             );
           })}
         </div>

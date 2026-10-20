@@ -1,0 +1,266 @@
+/*
+ * The zon material, as Tailwind utilities.
+ *
+ * Every interactive or enclosing surface uses one of these. Do not invent flat fills:
+ *   material-primary  — the layered dark (light mode) / light (dark mode) primary button
+ *   material-raised   — secondary buttons, nav rows, tabs, active segments, hoverable rows
+ *   material-field    — recessed inputs, textareas, select triggers, tracks
+ *   material-menu     — popups: menus, select lists, popovers, toasts, tooltips
+ *   surface-container — regions: square, bordered, 160° gradient, inset highlight
+ *   surface-card      — objects: the container material + 20px radius + padding + soft lift
+ *
+ * State hooks are shared: Base UI's data attributes (data-pressed, data-highlighted,
+ * data-popup-open, data-active, data-selected) and ARIA (aria-current, aria-pressed).
+ */
+
+/* ── Focus ─────────────────────────────────────────────────────────────────── */
+
+@utility focus-ring {
+  &:focus-visible {
+    outline: 2px solid var(--control-focus);
+    outline-offset: 0;
+  }
+}
+
+/* ── Primary ───────────────────────────────────────────────────────────────── */
+
+@utility material-primary {
+  color: var(--primary-text);
+  text-shadow: var(--primary-text-shadow);
+  background-color: var(--primary-fill);
+  background-image: linear-gradient(#ffffff0f, transparent 55%);
+  border: 1px solid transparent;
+  box-shadow: var(--primary-shadow);
+  transition:
+    background-color var(--duration) var(--ease),
+    color var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+
+  @media (hover: hover) {
+    &:not(:disabled, [data-disabled]):hover {
+      background-color: var(--primary-fill-hover);
+    }
+  }
+  &:not(:disabled, [data-disabled]):active,
+  &[data-pressed] {
+    box-shadow: var(--primary-shadow-pressed);
+  }
+}
+
+/* ── Raised (secondary) ────────────────────────────────────────────────────── */
+
+@utility material-raised {
+  color: var(--foreground);
+  background-color: var(--control-surface);
+  background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+  border: 1px solid transparent;
+  box-shadow:
+    0 0 0 1px var(--control-edge),
+    inset 0 1px 0 var(--control-highlight),
+    inset 0 0 0 1px var(--control-inner-edge);
+  transition:
+    background-color var(--duration) var(--ease),
+    color var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+
+  @media (hover: hover) {
+    &:not(:disabled, [data-disabled]):hover {
+      background-color: var(--control-hover);
+    }
+  }
+  &:not(:disabled, [data-disabled]):active {
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 2px 4px #0000002e,
+      inset 0 0 0 1px var(--control-inner-edge);
+  }
+  &[data-popup-open] {
+    background-color: var(--control-hover);
+  }
+}
+
+/*
+ * Lift-on-interaction: a row that is flat at rest and takes the raised treatment when
+ * hovered, highlighted or current (nav rows, sidebar items, menu items, glyph cells).
+ */
+@utility material-row {
+  color: var(--foreground-soft);
+  border: 1px solid transparent;
+  background-color: transparent;
+  transition:
+    background-color var(--duration) var(--ease),
+    color var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+
+  @media (hover: hover) {
+    &:not(:disabled, [data-disabled]):hover {
+      color: var(--foreground);
+      background-color: var(--control-hover);
+      background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+      box-shadow:
+        0 0 0 1px var(--control-edge),
+        inset 0 1px 0 var(--control-highlight),
+        inset 0 0 0 1px var(--control-inner-edge);
+    }
+  }
+  &[data-highlighted],
+  &[data-current],
+  &[data-active],
+  &[aria-current="page"],
+  &[aria-current="true"] {
+    color: var(--foreground);
+    background-color: var(--control-hover);
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      inset 0 0 0 1px var(--control-inner-edge);
+  }
+}
+
+/* ── Field (recessed) ──────────────────────────────────────────────────────── */
+
+@utility material-field {
+  color: var(--foreground);
+  background-color: var(--field-surface);
+  background-image: linear-gradient(180deg, var(--field-inset), transparent 12px);
+  border: 1px solid var(--field-edge);
+  box-shadow:
+    inset 0 1px 2px var(--field-inset),
+    0 1px 0 var(--control-highlight);
+  transition:
+    border-color var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease),
+    background-color var(--duration) var(--ease);
+
+  &:focus-visible,
+  &:has(> input:focus-visible),
+  &[data-popup-open] {
+    border-color: var(--control-focus);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--control-focus);
+    outline-offset: 0;
+  }
+  &[data-invalid],
+  &[aria-invalid="true"] {
+    border-color: var(--destructive);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--destructive) 18%, transparent);
+  }
+  &[data-disabled],
+  &:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  &::placeholder {
+    color: var(--control-muted);
+  }
+}
+
+/* ── Menu / popup ──────────────────────────────────────────────────────────── */
+
+@utility material-menu {
+  color: var(--foreground);
+  background-color: var(--control-menu);
+  border: 1px solid var(--field-edge);
+  box-shadow:
+    0 0 0 1px var(--control-edge),
+    inset 0 1px 0 var(--control-highlight),
+    0 12px 32px #0003,
+    0 2px 6px #0000001a;
+}
+
+/* ── Surfaces ──────────────────────────────────────────────────────────────── */
+
+@utility surface-container {
+  border: 1px solid var(--field-edge);
+  background: linear-gradient(160deg, var(--control-surface), var(--field-surface) 55%);
+  box-shadow: inset 0 1px 0 var(--control-highlight);
+}
+
+@utility surface-card {
+  border: 1px solid var(--field-edge);
+  background: linear-gradient(160deg, var(--control-surface), var(--field-surface) 55%);
+  box-shadow:
+    inset 0 1px 0 var(--control-highlight),
+    0 4px 16px #0000000a;
+  border-radius: var(--radius-card);
+  /* Padding belongs to the card: 24 / 32 / 40. Set --card-padding (e.g. [--card-padding:0]) to override. */
+  padding: var(--card-padding, 24px);
+
+  @media (width >= 40rem) {
+    padding: var(--card-padding, 32px);
+  }
+  @media (width >= 48rem) {
+    padding: var(--card-padding, 40px);
+  }
+}
+
+/* ── Popup motion (Base UI starting/ending styles) ─────────────────────────── */
+
+@utility popup-motion {
+  transform-origin: var(--transform-origin);
+  transition:
+    opacity var(--duration) var(--ease),
+    scale var(--duration) var(--ease),
+    translate var(--duration) var(--ease);
+
+  &[data-starting-style],
+  &[data-ending-style] {
+    opacity: 0;
+    scale: 0.97;
+  }
+  &[data-instant] {
+    transition: none;
+  }
+}
+
+/* ── Typography helpers ────────────────────────────────────────────────────── */
+
+@utility display {
+  font-family: var(--font-heading);
+  font-weight: 300;
+  font-kerning: normal;
+  letter-spacing: -0.02em;
+  line-height: 1.03;
+  text-wrap: balance;
+}
+
+@utility eyebrow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+@utility link {
+  color: var(--foreground);
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in oklab, var(--foreground) 35%, transparent);
+  text-underline-offset: 4px;
+  transition: text-decoration-color var(--duration) var(--ease);
+
+  &:hover {
+    text-decoration-color: var(--foreground);
+  }
+}
+
+@utility container-page {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: 24px;
+
+  @media (width >= 40rem) {
+    padding-inline: 40px;
+  }
+  @media (width >= 64rem) {
+    padding-inline: 64px;
+  }
+}
+
+@utility hairline {
+  border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+}

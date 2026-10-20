@@ -4,9 +4,15 @@
     {
       "name": "frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "cwd": "src/bankai/web/frontend",
-      "port": 5173
+      "port": 5173,
+      "env": {
+        "BANKAI_API": "http://seireitei:7003"
+      }
     }
   ]
 }

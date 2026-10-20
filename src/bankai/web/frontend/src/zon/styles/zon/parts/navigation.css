@@ -1,0 +1,207 @@
+/* navigation components — owned by the navigation group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
+
+/* ── ScrollArea: edge fades driven by Base UI's overflow distances ─────────────
+ * The fade grows from 0 to --scroll-fade as the user scrolls away from an edge.
+ * The end-side fallbacks keep the bottom/right fade visible before hydration.  */
+
+[data-slot="scroll-area-viewport"] {
+  --scroll-fade: 24px;
+}
+
+[data-slot="scroll-area-viewport"][data-fade="y"] {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 min(var(--scroll-fade), var(--scroll-area-overflow-y-start, 0px)),
+    #000 calc(100% - min(var(--scroll-fade), var(--scroll-area-overflow-y-end, var(--scroll-fade)))),
+    transparent 100%
+  );
+  mask-repeat: no-repeat;
+}
+
+[data-slot="scroll-area-viewport"][data-fade="x"] {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 min(var(--scroll-fade), var(--scroll-area-overflow-x-start, 0px)),
+    #000 calc(100% - min(var(--scroll-fade), var(--scroll-area-overflow-x-end, var(--scroll-fade)))),
+    transparent 100%
+  );
+  mask-repeat: no-repeat;
+}
+
+[data-slot="scroll-area-viewport"][data-fade="both"] {
+  mask-image:
+    linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 min(var(--scroll-fade), var(--scroll-area-overflow-y-start, 0px)),
+      #000 calc(100% - min(var(--scroll-fade), var(--scroll-area-overflow-y-end, var(--scroll-fade)))),
+      transparent 100%
+    ),
+    linear-gradient(
+      to right,
+      transparent 0,
+      #000 min(var(--scroll-fade), var(--scroll-area-overflow-x-start, 0px)),
+      #000 calc(100% - min(var(--scroll-fade), var(--scroll-area-overflow-x-end, var(--scroll-fade)))),
+      transparent 100%
+    );
+  mask-composite: intersect;
+  mask-repeat: no-repeat;
+}
+
+/* ── Progress: indeterminate sweep (static under reduced motion) ─────────────── */
+
+@keyframes ep-progress-indeterminate {
+  from {
+    translate: -100% 0;
+  }
+  to {
+    translate: 250% 0;
+  }
+}
+
+[data-slot="progress-indicator"][data-indeterminate] {
+  width: 40%;
+  animation: ep-progress-indeterminate 1.4s var(--ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="progress-indicator"][data-indeterminate] {
+    animation: none;
+    width: 100%;
+    opacity: 0.35;
+  }
+}
+
+/* ── Sidebar: scrolls, never shows a scrollbar ─────────────────────────────────
+ * Covers a Sidebar that scrolls itself and the element that directly wraps it.  */
+
+:where([data-slot="sidebar"], :has(> [data-slot="sidebar"])) {
+  scrollbar-width: none;
+}
+
+:where([data-slot="sidebar"], :has(> [data-slot="sidebar"]))::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Toolbar buttons ───────────────────────────────────────────────────────────
+ * Four states that never look alike:
+ *   off      flat, muted text
+ *   hover    text and icon brighten to foreground — no fill, so it never mimics "on"
+ *   on       aria-pressed: the raised material
+ *   press    the pressed inset, in ~90ms — the material shows the click, nothing moves
+ * Theme shadows are inlined: they are only emitted as variables when a utility uses them. */
+
+@layer components {
+  [data-slot="toolbar-button"] {
+    color: var(--muted-foreground);
+    border: 1px solid transparent;
+    background-color: transparent;
+    transition:
+      background-color var(--duration) var(--ease),
+      color var(--duration) var(--ease),
+      box-shadow var(--duration) var(--ease);
+  }
+
+  @media (hover: hover) {
+    [data-slot="toolbar-button"]:not(:disabled, [data-disabled]):hover {
+      color: var(--foreground);
+    }
+  }
+
+  [data-slot="toolbar-button"][aria-pressed="true"] {
+    color: var(--foreground);
+    background-color: var(--control-hover);
+    background-image: linear-gradient(180deg, var(--control-inner-edge), transparent);
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 1px 0 var(--control-highlight),
+      inset 0 0 0 1px var(--control-inner-edge);
+  }
+
+  [data-slot="toolbar-button"]:active:not(:disabled, [data-disabled]) {
+    color: var(--foreground);
+    background-color: var(--control-hover);
+    background-image: none;
+    box-shadow:
+      0 0 0 1px var(--control-edge),
+      inset 0 2px 4px #0000002e,
+      inset 0 0 0 1px var(--control-inner-edge);
+    transition-duration: var(--duration), var(--duration), 90ms;
+  }
+}
+
+/* ── Sidebar, inset variant ────────────────────────────────────────────────────
+ * The page sits beside the sidebar as a raised panel: 8px from the shell's edges, 20px corners,
+ * the region material. The edge against the sidebar has no margin while the sidebar is open (the
+ * sidebar's own padding is the gap) and takes 8px when it slides away. Desktop only; on mobile
+ * the sidebar is a sheet and the page fills the shell. Unlayered on purpose, so it wins over any
+ * utility class on SidebarInset. */
+
+@media (width >= 48rem) {
+  [data-slot="sidebar-wrapper"]:has(> [data-variant="inset"]) > [data-slot="sidebar-inset"] {
+    @apply surface-container;
+    margin: 8px;
+    border-radius: var(--radius-card);
+    transition: margin var(--duration) var(--ease);
+  }
+  [data-slot="sidebar-wrapper"]:has(> [data-variant="inset"][data-side="left"]:not([data-collapsible="offcanvas"]))
+    > [data-slot="sidebar-inset"] {
+    margin-inline-start: 0;
+  }
+  [data-slot="sidebar-wrapper"]:has(> [data-variant="inset"][data-side="right"]:not([data-collapsible="offcanvas"]))
+    > [data-slot="sidebar-inset"] {
+    margin-inline-end: 0;
+  }
+}
+
+/* ── Sidebar, floating variant ─────────────────────────────────────────────────
+ * The reverse of inset: the sidebar is the raised panel — the region material at 20px corners,
+ * 8px from the shell's top, bottom and outer edge — and the page beside it stays flat. Its width
+ * stays fixed while it collapses, so offcanvas slides it away and the icon rail keeps the margin.
+ * Unlayered: it overrides the panel's own width and inset utilities. Desktop only. */
+
+@media (width >= 48rem) {
+  [data-slot="sidebar-shell"][data-variant="floating"] > [data-slot="sidebar"],
+  nav[data-slot="sidebar"][data-variant="floating"] {
+    @apply surface-container;
+    border-radius: var(--radius-card);
+    overflow: clip;
+  }
+  [data-slot="sidebar-shell"][data-variant="floating"] > [data-slot="sidebar"] {
+    top: 8px;
+    bottom: 8px;
+    height: auto;
+    width: calc(var(--sidebar-width) - 8px);
+  }
+  [data-slot="sidebar-shell"][data-variant="floating"][data-side="left"] > [data-slot="sidebar"] {
+    left: 8px;
+  }
+  [data-slot="sidebar-shell"][data-variant="floating"][data-side="right"] > [data-slot="sidebar"] {
+    right: 8px;
+  }
+  [data-slot="sidebar-shell"][data-variant="floating"][data-collapsible="icon"] {
+    width: calc(var(--sidebar-width-icon) + 8px);
+  }
+  [data-slot="sidebar-shell"][data-variant="floating"][data-collapsible="icon"] > [data-slot="sidebar"] {
+    width: var(--sidebar-width-icon);
+  }
+  nav[data-slot="sidebar"][data-variant="floating"] {
+    top: 8px;
+    margin: 8px;
+    height: calc(100svh - 16px);
+    max-height: calc(100% - 16px);
+    width: calc(var(--sidebar-width) - 8px);
+  }
+}
+
+/* ── Menubar: popups on the bar's shared surface ─────────────────────────────
+ * A menubar popup hands its material to the bar's gliding surface (menubar.tsx) and keeps only
+ * its items. Unlayered so it wins over the popup's material-menu. */
+
+[data-slot="menubar-content"][data-surface] {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}

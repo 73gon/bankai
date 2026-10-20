@@ -55,17 +55,18 @@ import {
   SplitSquareHorizontal,
   Star,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type CollectionGraph as Graph, type CollectionNode } from '@/lib/api';
 import { anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { EmptyState, Spinner } from '@/components/ui/empty';
-import { cn } from '@/lib/utils';
+import { StatusTag } from '@/components/status-tag';
+import { cn } from '@/zon/lib/cn';
+import { Button } from '@/zon/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Popover, PopoverContent, PopoverTrigger } from '@/zon/ui/popover';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Spinner } from '@/zon/ui/spinner';
 
 // One entry's card: a poster with its title under it.
 const CARD_W = 208;
@@ -381,7 +382,7 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
         'relative flex flex-col gap-2 overflow-hidden rounded-xl border bg-card p-2.5 pt-3.5 shadow-lg',
         node.in_collection ? 'border-border' : node.collection_id === null ? 'border-dashed border-muted-foreground/50 bg-card/70' : 'border-cyan-400/30',
         // The collection's title entry: the golden card.
-        node.title_entry && 'border-amber-300 bg-gradient-to-b from-amber-300/30 via-amber-400/15 to-amber-500/10 shadow-amber-500/20',
+        node.title_entry && 'border-amber-300 bg-linear-to-b from-amber-300/30 via-amber-400/15 to-amber-500/10 shadow-amber-500/20',
         selected && 'ring-2 ring-info ring-offset-2 ring-offset-background',
       )}
       style={{ width: CARD_W, height: CARD_H }}
@@ -416,9 +417,9 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
           <span className='truncate font-mono text-[0.64rem] text-muted-foreground'>{meta(node)}</span>
         </span>
         <span className='mt-auto flex flex-wrap gap-1'>
-          {!node.owned && <Badge variant='muted' className='text-[0.6rem]'>Not downloaded</Badge>}
+          {!node.owned && <StatusTag variant='muted' className='text-[0.6rem]'>Not downloaded</StatusTag>}
           {!node.in_collection && node.collection_id === null && (
-            <Badge variant='muted' className='text-[0.6rem]'>{node.alone ? 'In no collection' : 'Not in a collection'}</Badge>
+            <StatusTag variant='muted' className='text-[0.6rem]'>{node.alone ? 'In no collection' : 'Not in a collection'}</StatusTag>
           )}
         </span>
       </div>
@@ -556,7 +557,7 @@ function Legend() {
     <div className='flex flex-col gap-3 text-xs text-muted-foreground'>
       <p className='text-sm text-foreground'>Click an entry to change the collection; Shift+click to pick more; click empty space to clear.</p>
       <div className='flex flex-col gap-1.5'>
-        <span className='text-[0.65rem] uppercase tracking-wide'>AniList format — the stripe on top</span>
+        <span className='eyebrow text-[0.65rem]'>AniList format — the stripe on top</span>
         <span className='flex flex-wrap gap-1.5'>
           {[...Object.values(TYPES), OTHER_TYPE].map((kind) => (
             <span key={kind.label} className={cn('rounded border px-1.5 py-px text-[0.62rem] font-medium uppercase', kind.chip)}>{kind.label}</span>
@@ -564,13 +565,13 @@ function Legend() {
         </span>
       </div>
       <div className='flex flex-col gap-1.5'>
-        <span className='text-[0.65rem] uppercase tracking-wide'>Links</span>
+        <span className='eyebrow text-[0.65rem]'>Links</span>
         <span className='flex items-center gap-2'><span className='h-1 w-8 rounded bg-foreground' /> main line, top to bottom</span>
         <span className='flex items-center gap-2'><span className='h-0.5 w-8 rounded bg-foreground/60' /> sequels in another collection</span>
         <span className='flex items-center gap-2'><span className='w-8 border-t-2 border-dashed border-muted-foreground' /> side story, recap, other</span>
       </div>
       <div className='flex flex-col gap-1.5'>
-        <span className='text-[0.65rem] uppercase tracking-wide'>Cards</span>
+        <span className='eyebrow text-[0.65rem]'>Cards</span>
         <span className='flex items-center gap-2'><span className='h-3 w-5 rounded border border-amber-300 bg-amber-400/30' /> golden: names and pictures the collection</span>
         <span>Solid: in this collection, its season chip saying where it is filed. Dashed: in no collection.</span>
         <span className='text-cyan-300'>Inside a cyan frame: another collection; one that continues the main line sits above or below it.</span>
@@ -583,7 +584,7 @@ function Legend() {
 /** A side-panel action: the button wraps a long collection name rather than spill out of itself. */
 function Action({ icon: Icon, children, ...props }: React.ComponentProps<typeof Button> & { icon: typeof Star }) {
   return (
-    <Button size='sm' variant='secondary' className='h-auto min-h-8 justify-start whitespace-normal py-1.5 text-left leading-snug' {...props}>
+    <Button size='sm' variant='secondary' className='justify-start whitespace-normal py-1.5 text-left leading-snug' {...props}>
       <Icon data-icon='inline-start' className='shrink-0' />
       <span className='min-w-0 break-words'>{children}</span>
     </Button>
@@ -606,16 +607,17 @@ function SeasonPicker({
 }) {
   const special = arrangement.specials.includes(id);
   return (
-    <Select
-      value=''
+    <Select<string>
+      value={null}
       disabled={disabled}
       onValueChange={(value) => {
+        if (value === null) return;
         if (value === 'specials') onChange(toSpecials(arrangement, id));
         else if (value === 'new') onChange(appendTo(arrangement, id, arrangement.seasons.length));
         else onChange(appendTo(arrangement, id, Number(value)));
       }}
     >
-      <SelectTrigger data-size='sm' className='w-full' aria-label={label}>
+      <SelectTrigger size='sm' className='w-full min-w-0' aria-label={label}>
         <SelectValue placeholder={label} />
       </SelectTrigger>
       <SelectContent>
@@ -687,7 +689,7 @@ function ChipFace({ id, node, floating, menu }: { id: number; node: CollectionNo
         'inline-flex max-w-full select-none items-center gap-1 rounded-md border py-1 pl-2 pr-1 text-xs',
         kind.chip,
         node && !node.owned && !floating && 'opacity-70',
-        floating ? 'cursor-grabbing bg-card shadow-xl ring-1 ring-info/60' : 'cursor-grab',
+        floating ? 'cursor-grabbing bg-control-menu shadow-overlay ring-1 ring-info/60' : 'cursor-grab',
       )}
     >
       <span className='min-w-0 truncate text-foreground'>{title}</span>
@@ -727,18 +729,20 @@ function SortableChip({ id, node, disabled, children }: { id: number; node: Coll
         node={node}
         menu={
           <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                size='icon'
-                variant='ghost'
-                className='size-6 shrink-0'
-                aria-label={'More for ' + title}
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <MoreHorizontal />
-              </Button>
+            <PopoverTrigger
+              render={
+                <Button
+                  size='icon-sm'
+                  variant='ghost'
+                  className='size-6 shrink-0'
+                  aria-label={'More for ' + title}
+                  onPointerDown={(event) => event.stopPropagation()}
+                />
+              }
+            >
+              <MoreHorizontal />
             </PopoverTrigger>
-            <PopoverContent align='start' className='flex w-64 flex-col gap-2 p-3'>
+            <PopoverContent align='start' className='w-64 gap-2 p-3'>
               <p className='break-words text-xs font-medium text-foreground'>{title}</p>
               {children}
             </PopoverContent>
@@ -818,7 +822,7 @@ function SeasonBox({
 /** A dragged season floating under the cursor. */
 function SeasonFace({ number, ids, byId }: { number: number; ids: number[]; byId: Map<number, CollectionNode> }) {
   return (
-    <div className='flex cursor-grabbing flex-wrap items-center gap-1.5 rounded-md border border-info/60 bg-card p-2 shadow-2xl'>
+    <div className='flex cursor-grabbing flex-wrap items-center gap-1.5 rounded-button border border-info/60 bg-control-menu p-2 shadow-overlay'>
       <span className='text-xs font-medium text-foreground sm:w-20'>Season {number}</span>
       {ids.map((id) => (
         <ChipFace key={id} id={id} node={byId.get(id)} />
@@ -1006,13 +1010,13 @@ function SeasonsPanel({
     );
 
   return (
-    <section className='flex max-h-[45%] shrink-0 flex-col rounded-lg border border-border bg-card/40'>
+    <section className='flex max-h-[45%] shrink-0 flex-col rounded-control surface-container'>
       <header className='flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2'>
         <button
           type='button'
           onClick={onToggle}
           aria-expanded={open}
-          className='flex items-center gap-1.5 text-sm font-medium text-foreground'
+          className='flex cursor-pointer items-center gap-1.5 rounded-item text-sm font-medium text-foreground focus-ring'
         >
           <ChevronDown className={cn('size-4 transition-transform', !open && '-rotate-90')} />
           <ListOrdered className='size-4' /> Seasons
@@ -1302,13 +1306,18 @@ export function CollectionGraph({
   }
 
   return (
-    <Dialog open={target !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent
-        className='flex h-[98dvh] w-[98vw] max-w-none flex-col gap-3'
-        onEscapeKeyDown={(event) => {
-          if (seasonDrag) event.preventDefault();
-        }}
-      >
+    <Dialog
+      open={target !== null}
+      onOpenChange={(open, details) => {
+        if (open) return;
+        if (seasonDrag && details.reason === 'escape-key') {
+          details.cancel();
+          return;
+        }
+        onClose();
+      }}
+    >
+      <DialogContent className='h-[98dvh] max-h-none w-[98vw] max-w-none shrink-0 gap-3 p-4 sm:p-5'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'><Network className='size-4' /> {graph?.name ?? 'Collection'}</DialogTitle>
           <DialogDescription>
@@ -1319,17 +1328,21 @@ export function CollectionGraph({
         </DialogHeader>
         <div className='flex min-h-0 flex-1 flex-col gap-3 md:flex-row'>
           <div className='flex min-h-0 min-w-0 flex-1 flex-col gap-3'>
-            <div className='relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-black/30'>
+            <div className='relative min-h-0 flex-1 overflow-hidden rounded-control border border-field-edge bg-black/30'>
               {loading && !graph ? (
-                <div className='flex h-full items-center justify-center'><Spinner /></div>
+                <div className='flex h-full items-center justify-center'><Spinner label='Loading the graph' /></div>
               ) : !graph ? (
-                <EmptyState icon={Network} title='No graph' description='The relations of this collection could not be read.' />
+                <Empty>
+                  <EmptyMedia><Network /></EmptyMedia>
+                  <EmptyTitle>No graph</EmptyTitle>
+                  <EmptyDescription>The relations of this collection could not be read.</EmptyDescription>
+                </Empty>
               ) : (
                 <Canvas key={version} graph={graph} selected={selected} drafts={drafts} onPick={pick} onClear={clear} />
               )}
               {busy && (
-                <div className='absolute right-3 top-3 flex items-center gap-2 rounded-md bg-card/90 px-3 py-1.5 text-xs text-muted-foreground'>
-                  <Spinner /> Saving…
+                <div className='absolute right-3 top-3 flex items-center gap-2 rounded-button material-menu px-3 py-1.5 text-xs text-muted-foreground'>
+                  <Spinner label='Saving' /> Saving…
                 </div>
               )}
             </div>
@@ -1350,7 +1363,7 @@ export function CollectionGraph({
               />
             )}
           </div>
-          <aside className='flex max-h-[35%] w-full shrink-0 flex-col md:max-h-none md:w-80 gap-3 overflow-y-auto rounded-lg border border-border bg-card/40 p-3 text-sm'>
+          <aside className='flex max-h-[35%] w-full shrink-0 flex-col gap-3 overflow-y-auto rounded-control surface-container p-3 text-sm md:max-h-none md:w-80'>
             {picked.length === 0 ? (
               <Legend />
             ) : (

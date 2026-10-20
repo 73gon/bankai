@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Server as ServerIcon, RefreshCw, Film, Tv, Sparkles, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, type ServerTitle, type ServerSeason, type ServerDirKind } from '@/lib/api';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
-import { EmptyState } from '@/components/ui/empty';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Button } from '@/zon/ui/button';
+import { Badge } from '@/zon/ui/badge';
+import { Input } from '@/zon/ui/input';
+import { Card, CardContent, CardHeader, CardTitle } from '@/zon/ui/card';
+import { Skeleton } from '@/zon/ui/skeleton';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
 
 // Anime is listed here too: this page is where anything already on the server
 // is added and renamed, whichever library it belongs to.
@@ -28,7 +28,7 @@ type RenameTarget = {
 function PathText({ text, tooltip, className }: { text: string; tooltip: string; className?: string }) {
   return (
     <Tooltip>
-      <TooltipTrigger asChild><span className={className}>{text}</span></TooltipTrigger>
+      <TooltipTrigger render={<span className={className} />}>{text}</TooltipTrigger>
       <TooltipContent className='font-mono'>{tooltip}</TooltipContent>
     </Tooltip>
   );
@@ -67,11 +67,11 @@ function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameT
   }
 
   return (
-    <div className='rounded-md'>
+    <div className='rounded-item'>
       <button
         onClick={toggle}
         disabled={!canExpand}
-        className='flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left hover:bg-secondary/40 disabled:cursor-default'
+        className='flex w-full items-center justify-between gap-3 rounded-item material-row px-2 py-1.5 text-left focus-ring disabled:cursor-default'
       >
         <span className='flex min-w-0 items-center gap-1.5'>
           {canExpand ? (
@@ -99,36 +99,38 @@ function ShowRow({ it, onRename }: { it: ServerTitle; onRename: (target: RenameT
                 <div key={se.name}>
                   <button
                     onClick={() => setOpenSeasons((s) => ({ ...s, [se.name]: !sOpen }))}
-                    className='flex w-full items-center gap-1.5 rounded px-1 py-1 text-left text-xs font-medium text-muted-foreground hover:bg-secondary/30'
+                    className='flex w-full items-center gap-1.5 rounded-item material-row px-1 py-1 text-left text-xs font-medium text-muted-foreground focus-ring'
                   >
                     {sOpen ? <ChevronDown className='h-3.5 w-3.5 shrink-0' /> : <ChevronRight className='h-3.5 w-3.5 shrink-0' />}
                     {se.name}
-                    <Badge variant='muted'>{se.episodes.length}</Badge>
+                    <Badge variant='secondary' size='sm'>{se.episodes.length}</Badge>
                   </button>
                   {sOpen &&
                     (se.episodes.length === 0 ? (
                       <p className='pl-6 text-xs text-muted-foreground/70'>No files.</p>
                     ) : (
                       se.episodes.map((ep) => (
-                        <div key={ep.path} className='flex items-center justify-between gap-3 rounded px-2 py-1 pl-6 hover:bg-secondary/30'>
+                        <div key={ep.path} className='flex items-center justify-between gap-3 rounded-item px-2 py-1 pl-6 hover:bg-control-hover/50'>
                           <div className='min-w-0'>
                             <Tooltip>
-                              <TooltipTrigger asChild><span className='truncate text-xs'>{ep.name}</span></TooltipTrigger>
+                              <TooltipTrigger render={<span className='truncate text-xs' />}>{ep.name}</TooltipTrigger>
                               <TooltipContent className='font-mono'>{ep.path}</TooltipContent>
                             </Tooltip>
                           </div>
                           <div className='ml-auto flex shrink-0 items-center gap-1'>
-                            <span className='text-[11px] text-muted-foreground'>{fmtSize(ep.size)}</span>
+                            <span className='font-mono text-[11px] tabular-nums text-muted-foreground'>{fmtSize(ep.size)}</span>
                             <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  size='icon'
-                                  variant='ghost'
-                                  onClick={() => onRename({ kind: 'episode', name: ep.name, path: ep.path })}
-                                  aria-label='Rename this episode file'
-                                >
-                                  <Pencil />
-                                </Button>
+                              <TooltipTrigger
+                                render={
+                                  <Button
+                                    size='icon-sm'
+                                    variant='ghost'
+                                    onClick={() => onRename({ kind: 'episode', name: ep.name, path: ep.path })}
+                                    aria-label='Rename this episode file'
+                                  />
+                                }
+                              >
+                                <Pencil />
                               </TooltipTrigger>
                               <TooltipContent>Rename this episode file</TooltipContent>
                             </Tooltip>
@@ -175,12 +177,12 @@ function Column({
   );
   if (ungrouped.length > 0) groups.push({ directory: 'Other / unavailable', items: ungrouped });
   return (
-    <Card className='flex h-full min-h-0 flex-col'>
+    <Card className='flex h-full min-h-0 flex-col gap-4 [--card-padding:20px]'>
       <CardHeader className='flex flex-row items-center justify-between'>
-        <CardTitle className='flex items-center gap-2'>
+        <CardTitle className='flex items-center gap-2 text-xl sm:text-xl'>
           <Icon className='h-4 w-4' /> {title}
         </CardTitle>
-        <span className='text-xs text-muted-foreground'>{items.length} titles</span>
+        <span className='font-mono text-xs tabular-nums text-muted-foreground'>{items.length} titles</span>
       </CardHeader>
       <CardContent className='min-h-0 flex-1 overflow-auto'>
         {groups.length === 0 ? (
@@ -188,10 +190,10 @@ function Column({
         ) : (
           <div className='flex flex-col gap-4'>
             {groups.map((group) => (
-              <section key={group.directory} className='overflow-hidden rounded-lg border border-border/70'>
-                <div className='flex items-center justify-between gap-3 bg-secondary/35 px-3 py-2'>
+              <section key={group.directory} className='overflow-hidden rounded-control border border-field-edge'>
+                <div className='flex items-center justify-between gap-3 border-b border-border/60 bg-control-surface px-3 py-2'>
                   <PathText text={group.directory} tooltip={group.directory} className='truncate font-mono text-xs text-foreground' />
-                  <span className='shrink-0 text-xs text-muted-foreground'>{group.items.length}</span>
+                  <span className='shrink-0 font-mono text-xs tabular-nums text-muted-foreground'>{group.items.length}</span>
                 </div>
                 <div className='flex flex-col gap-0.5 p-1'>
                   {group.items.length === 0 ? (
@@ -200,22 +202,24 @@ function Column({
                     group.items.map((it) => <ShowRow key={`${it.name}:${revision}`} it={it} onRename={onRename} />)
                   ) : (
                     group.items.map((it) => (
-                      <div key={it.name} className='flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-secondary/40'>
+                      <div key={it.name} className='flex items-center justify-between gap-3 rounded-item px-2 py-1.5 hover:bg-control-hover/50'>
                         <Tooltip>
-                          <TooltipTrigger asChild><span className='min-w-0 truncate text-sm'>{it.name}</span></TooltipTrigger>
+                          <TooltipTrigger render={<span className='min-w-0 truncate text-sm' />}>{it.name}</TooltipTrigger>
                           <TooltipContent className='font-mono'>{it.location || it.name}</TooltipContent>
                         </Tooltip>
                         {it.present && it.location && (
                           <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                size='icon'
-                                variant='ghost'
-                                onClick={() => onRename({ kind: 'movie', name: it.name, path: it.location! })}
-                                aria-label='Rename the movie folder and matching file'
-                              >
-                                <Pencil />
-                              </Button>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  size='icon-sm'
+                                  variant='ghost'
+                                  onClick={() => onRename({ kind: 'movie', name: it.name, path: it.location! })}
+                                  aria-label='Rename the movie folder and matching file'
+                                />
+                              }
+                            >
+                              <Pencil />
                             </TooltipTrigger>
                             <TooltipContent>Rename the movie folder and matching file</TooltipContent>
                           </Tooltip>
@@ -349,7 +353,7 @@ export default function Server() {
     <div className='flex h-full min-h-0 flex-col gap-6 md:overflow-hidden'>
       <header className='flex flex-wrap items-center justify-between gap-3'>
         <div className='flex items-baseline gap-2'>
-          <h1 className='text-2xl font-semibold'>Library</h1>
+          <h1 className='font-heading text-3xl font-light'>Library</h1>
           <span className='text-sm text-muted-foreground'>— What already lives on the media server.</span>
         </div>
         <div className='flex gap-2'>
@@ -361,8 +365,8 @@ export default function Server() {
         </div>
       </header>
 
-      <Card>
-        <CardContent className='grid gap-4 pt-6 md:grid-cols-2 xl:grid-cols-3'>
+      <Card className='[--card-padding:20px]'>
+        <CardContent className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
           {KINDS.map(({ kind, title, icon, hint }) => (
             <DirManager
               key={kind}
@@ -381,12 +385,16 @@ export default function Server() {
       </Card>
 
       {error ? (
-        <EmptyState icon={ServerIcon} title='Could not read server' description={error} />
+        <Empty>
+          <EmptyMedia><ServerIcon /></EmptyMedia>
+          <EmptyTitle>Could not read server</EmptyTitle>
+          <EmptyDescription>{error}</EmptyDescription>
+        </Empty>
       ) : loading ? (
         <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2 xl:grid-cols-3'>
-          <Skeleton className='h-96' />
-          <Skeleton className='h-96' />
-          <Skeleton className='h-96' />
+          <Skeleton shape='card' className='h-96' />
+          <Skeleton shape='card' className='h-96' />
+          <Skeleton shape='card' className='h-96' />
         </div>
       ) : (
         <div className='grid min-h-0 flex-1 gap-4 md:grid-cols-2 xl:grid-cols-3'>
@@ -468,10 +476,10 @@ function DirManager({
           <p className='text-xs text-muted-foreground'>No directories configured.</p>
         ) : (
           dirs.map((d) => (
-            <div key={d} className='flex items-center justify-between gap-2 rounded-md bg-secondary/40 px-2 py-1.5'>
-              <code className='truncate text-xs'>{d}</code>
-              <Button size='icon' variant='ghost' onClick={() => onRemove(d)} disabled={busy} title='Remove'>
-                <Trash2 className='h-4 w-4 text-red-400' />
+            <div key={d} className='flex items-center justify-between gap-2 rounded-item border border-field-edge bg-control-surface px-2 py-1.5'>
+              <code className='truncate font-mono text-xs'>{d}</code>
+              <Button size='icon-sm' variant='ghost' onClick={() => onRemove(d)} disabled={busy} title='Remove' aria-label='Remove'>
+                <Trash2 className='h-4 w-4 text-destructive' />
               </Button>
             </div>
           ))
@@ -485,7 +493,7 @@ function DirManager({
           placeholder={hint}
           className='flex-1'
         />
-        <Button size='icon' variant='outline' onClick={onAdd} disabled={busy || !value.trim()}>
+        <Button size='icon' variant='secondary' onClick={onAdd} disabled={busy || !value.trim()} aria-label='Add directory'>
           <Plus className='h-4 w-4' />
         </Button>
       </div>

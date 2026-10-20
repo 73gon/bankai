@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles } from 'lucide-react';
-import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
+import { toast } from '@/lib/toast';
+import { cn } from '@/zon/lib/cn';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
-import { Button } from '@/components/ui/button';
-import { Separator } from '@/components/ui/separator';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Button } from '@/zon/ui/button';
+import { Separator } from '@/zon/ui/separator';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
 import Dashboard from '@/pages/Dashboard';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
@@ -150,7 +150,7 @@ function useSidebarState() {
 function BrandMark() {
   return (
     <div className='flex items-center gap-2.5'>
-      <span className='raised flex size-7 shrink-0 items-center justify-center rounded-lg text-foreground' aria-hidden='true'>
+      <span className='flex size-7 shrink-0 items-center justify-center rounded-item border border-field-edge bg-control-surface bg-linear-to-b from-control-inner-edge to-transparent text-foreground shadow-raised' aria-hidden='true'>
         <Clapperboard className='size-4' strokeWidth={1.7} />
       </span>
       <span className='font-mono text-sm font-semibold tracking-tight text-foreground'>bankai</span>
@@ -217,14 +217,16 @@ function UpdateSidebarStatus({ collapsed }: { collapsed: boolean }) {
     : <RefreshCw data-icon='inline-start' />;
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <Button variant='secondary' size={collapsed ? 'icon' : 'default'} className={cn(!collapsed && 'w-full justify-start')}
-          style={status?.available ? { borderColor: 'var(--success)' } : undefined}
-          onClick={() => void click()} disabled={busy || updating || status?.checking} aria-label={label}>
-          {icon}{!collapsed && <span className={status?.available ? 'text-success' : undefined}>{label}</span>}
-        </Button>
+      <TooltipTrigger
+        render={
+          <Button variant='secondary' size={collapsed ? 'icon' : 'default'} className={cn(!collapsed && 'w-full justify-start')}
+            style={status?.available ? { borderColor: 'var(--success)' } : undefined}
+            onClick={() => void click()} disabled={busy || updating || status?.checking} aria-label={label} />
+        }
+      >
+        {icon}{!collapsed && <span className={status?.available ? 'text-success' : undefined}>{label}</span>}
       </TooltipTrigger>
-      <TooltipContent side='right' className='max-w-72'>{detail}</TooltipContent>
+      <TooltipContent side='right' variant='text' className='max-w-72'>{detail}</TooltipContent>
     </Tooltip>
   );
 }
@@ -287,15 +289,17 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
   if (collapsed) {
     return (
       <Tooltip>
-        <TooltipTrigger asChild>
-          {disconnected ? (
-            <Button size='icon' variant='ghost' onClick={() => void connect()} disabled={connecting} aria-label={`${statusLabel}. Reconnect VPN`}>
-              {connecting ? <Loader2 data-icon='inline-start' className='animate-spin' /> : dot}
-            </Button>
-          ) : (
-            <div className='flex size-10 items-center justify-center' aria-label={statusLabel}>{dot}</div>
-          )}
-        </TooltipTrigger>
+        <TooltipTrigger
+          render={
+            disconnected ? (
+              <Button size='icon' variant='ghost' onClick={() => void connect()} disabled={connecting} aria-label={`${statusLabel}. Reconnect VPN`}>
+                {connecting ? <Loader2 data-icon='inline-start' className='animate-spin' /> : dot}
+              </Button>
+            ) : (
+              <div className='flex size-10 items-center justify-center' aria-label={statusLabel}>{dot}</div>
+            )
+          }
+        />
         <TooltipContent side='right'>{disconnected ? `${statusLabel} — click to connect` : statusLabel}</TooltipContent>
       </Tooltip>
     );
@@ -339,12 +343,12 @@ export default function App() {
   }, []);
 
   return (
-    <TooltipProvider delayDuration={350} skipDelayDuration={400}>
+    <>
       <div className='flex min-h-screen flex-col md:h-screen md:min-h-0 md:flex-row md:overflow-hidden'>
         {/* Sidebar (desktop) / top bar (mobile) */}
         <aside
           className={cn(
-            'sticky top-0 z-30 flex min-w-0 shrink-0 flex-row items-center gap-3 border-b border-sidebar-border bg-sidebar px-3 py-2',
+            'sticky top-0 z-30 flex min-w-0 shrink-0 flex-row items-center gap-3 border-b border-border/60 bg-background px-3 py-2',
             'md:h-dvh md:flex-col md:items-stretch md:gap-0 md:border-b-0 md:border-r md:p-0',
             collapsed ? 'md:w-16' : 'md:w-60',
           )}
@@ -385,7 +389,7 @@ export default function App() {
           <nav aria-label='Main navigation' className={cn('flex min-h-0 min-w-0 flex-1 flex-row gap-1 overflow-x-auto py-1 md:flex-col md:gap-0 md:overflow-y-auto md:overflow-x-hidden md:py-3', collapsed && 'md:items-center')}>
             {NAV_GROUPS.map((group, groupIndex) => (
               <div
-                key={group.label}
+                key={group.label || groupIndex}
                 className={cn(
                   'contents md:flex md:w-full md:flex-col md:gap-0.5 md:px-3',
                   collapsed && 'md:items-center md:px-2',
@@ -393,7 +397,7 @@ export default function App() {
               >
                 {groupIndex > 0 && <Separator className='my-3 hidden md:block' />}
                 {!collapsed && group.label && (
-                  <p className='hidden px-2 pb-2 pt-1 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground md:block'>
+                  <p className='hidden px-2.5 pb-2 pt-1 eyebrow text-[11px] md:block'>
                     {group.label}
                   </p>
                 )}
@@ -405,12 +409,14 @@ export default function App() {
                     <NavLink
                       key={to}
                       to={to}
-                      className={() =>
-                        cn(
-                          'sidebar-link group flex shrink-0 items-center gap-2 whitespace-nowrap px-2.5 text-[13px] font-medium',
-                          collapsed && 'md:size-9 md:justify-center md:gap-0 md:p-0',
-                        )
-                      }
+                      // A string, not a function: the collapsed row is a tooltip
+                      // trigger's render element, and Base UI merges string class
+                      // names. NavLink still sets aria-current='page' when active,
+                      // which material-row draws as the raised current row.
+                      className={cn(
+                        'group flex min-h-(--control-h-sm) shrink-0 items-center gap-2 whitespace-nowrap rounded-button material-row px-2.5 text-[13px] font-medium focus-ring',
+                        collapsed && 'md:size-9 md:min-h-0 md:justify-center md:gap-0 md:p-0',
+                      )}
                     >
                       <Icon className='size-4 shrink-0' strokeWidth={1.65} aria-hidden='true' />
                       <span className={cn('md:inline', collapsed && 'md:hidden')}>{label}</span>
@@ -428,7 +434,7 @@ export default function App() {
                   );
                   return collapsed ? (
                     <Tooltip key={to}>
-                      <TooltipTrigger asChild>{link}</TooltipTrigger>
+                      <TooltipTrigger render={link} />
                       <TooltipContent side='right'>
                         {group.label ? `${group.label}: ${label}` : label}
                         {typeof badge === 'number' && badge > 0 ? ` (${badge})` : ''}
@@ -448,7 +454,7 @@ export default function App() {
         </aside>
 
         <main className='min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-6'>
-          <div className='h-full w-full animate-fade-in'>
+          <div className='h-full w-full'>
             <Routes>
               <Route path='/' element={<Navigate to='/dashboard' replace />} />
           <Route path='/dashboard' element={<Dashboard />} />
@@ -499,6 +505,6 @@ export default function App() {
           </div>
         </main>
       </div>
-    </TooltipProvider>
+    </>
   );
 }

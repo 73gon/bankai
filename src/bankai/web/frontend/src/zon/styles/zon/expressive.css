@@ -1,0 +1,200 @@
+/*
+ * Expressive layer — the drawing-board vocabulary shared by zon.sh and zon.sh:
+ * grain, blueprint grids, dot fields, rails, crosshair marks, marquees, and the
+ * motion that drives scroll-linked illustrations.
+ *
+ * Everything here is decorative: pointer-events none, aria-hidden at the call site,
+ * and static under prefers-reduced-motion.
+ */
+
+/* ── Grain ─────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  :root {
+    /* The film-grain tile zon.sh uses: grey fractal noise, 200px, seamless. */
+    --grain-noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.68' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+  }
+
+  /*
+   * The page ground, on every page by default — zon.sh's resting background: the grain, still,
+   * fixed to the viewport behind everything, under a faint light from above (--page-glow). The
+   * two layers sit at z-index -1 in the root stacking context, so they texture the ground and
+   * never a card, a field or the text, which all paint above them. Still on purpose: a moving
+   * page would never let the eye rest. Overlay on dark grounds, as zon.sh; multiply on light
+   * ones, where overlay shows nothing (--page-grain-blend).
+   *
+   * Anything opaque in --background between the body and the content hides it, so page-level
+   * wrappers stay transparent. Opt out with `body::before, body::after { content: none }`.
+   */
+  body {
+    background-image: radial-gradient(110% 65% at 50% -10%, var(--page-glow), transparent 60%);
+    background-attachment: fixed;
+  }
+  body::before,
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image: var(--grain-noise);
+    background-size: 200px auto;
+  }
+  body::before {
+    mix-blend-mode: var(--page-grain-blend);
+    opacity: var(--page-grain-opacity);
+  }
+  body::after {
+    mix-blend-mode: screen;
+    opacity: calc(var(--grain-opacity) * 0.35);
+    /* Offset, so the two layers never line up into a visible tile. */
+    background-position: 97px 61px;
+  }
+}
+
+/* The moving grain: an overlay for large or dark expressive regions (`<Grain />`). */
+@utility grain {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+
+  &::before,
+  &::after {
+    content: "";
+    position: absolute;
+    inset: -40%;
+    background-image: var(--grain-noise);
+    background-size: 200px auto;
+    animation: ep-grain 0.8s steps(5) infinite;
+  }
+  &::before {
+    mix-blend-mode: overlay;
+    opacity: calc(var(--grain-opacity) * 1.5);
+  }
+  &::after {
+    mix-blend-mode: screen;
+    opacity: calc(var(--grain-opacity) * 0.35);
+    animation-delay: -0.4s;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    &::before,
+    &::after {
+      animation: none;
+    }
+  }
+}
+
+@keyframes ep-grain {
+  0% { transform: translate(0); }
+  20% { transform: translate(-6%, 4%); }
+  40% { transform: translate(5%, -7%); }
+  60% { transform: translate(-3%, 8%); }
+  80% { transform: translate(7%, 2%); }
+  100% { transform: translate(0); }
+}
+
+/* ── Blueprint grid (lights up under the pointer when data-lit="true") ───────── */
+
+@utility blueprint {
+  --cell: 64px;
+  position: relative;
+  isolation: isolate;
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: var(--cell) var(--cell);
+  background-position: -1px -1px;
+
+  &::before,
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.7s var(--ease);
+  }
+  &::before {
+    background-image: radial-gradient(circle 380px at var(--mx, 70%) var(--my, 30%), var(--glow), transparent 70%);
+  }
+  &::after {
+    background-image:
+      linear-gradient(to right, var(--grid-bright) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-bright) 1px, transparent 1px);
+    background-size: var(--cell) var(--cell);
+    background-position: -1px -1px;
+    mask-image: radial-gradient(circle 240px at var(--mx, 70%) var(--my, 30%), #000, transparent 75%);
+  }
+  @media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+    &[data-lit="true"]::before,
+    &[data-lit="true"]::after {
+      opacity: 1;
+    }
+  }
+}
+
+@utility dots {
+  background-image: radial-gradient(circle at center, var(--grid-bright) 1px, transparent 1.4px);
+  background-size: 24px 24px;
+}
+
+/* ── Rails: two hairlines framing the page column ──────────────────────────── */
+
+@utility rails {
+  position: relative;
+
+  &::before,
+  &::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    z-index: 1;
+    pointer-events: none;
+    background: color-mix(in oklab, var(--border) 70%, transparent);
+  }
+  &::before {
+    left: 0;
+  }
+  &::after {
+    right: 0;
+  }
+}
+
+/* ── Marquee ───────────────────────────────────────────────────────────────── */
+
+@keyframes ep-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@utility marquee-track {
+  display: flex;
+  width: max-content;
+  animation: ep-marquee var(--marquee-duration, 40s) linear infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+/* ── Reveal (scroll-in) ────────────────────────────────────────────────────── */
+
+@keyframes ep-reveal {
+  from {
+    opacity: 0;
+    translate: 0 var(--reveal-distance, 16px);
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes ep-draw {
+  from { stroke-dashoffset: var(--len, 1000); }
+  to { stroke-dashoffset: 0; }
+}

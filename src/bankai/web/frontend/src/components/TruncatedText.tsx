@@ -1,6 +1,6 @@
 import { useRef, useState, type ElementType } from 'react';
 
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
 import { cn } from '@/lib/utils';
 
 /**
@@ -24,11 +24,7 @@ export function TruncatedText({
   };
   return (
     <Tooltip open={open} onOpenChange={(next) => setOpen(next && cut())}>
-      <TooltipTrigger asChild>
-        <Tag ref={ref} className={cn('min-w-0', className)}>
-          {text}
-        </Tag>
-      </TooltipTrigger>
+      <TooltipTrigger render={<Tag ref={ref} className={cn('min-w-0', className)} />}>{text}</TooltipTrigger>
       <TooltipContent side='top' align='start' className='max-w-md'>
         {text}
       </TooltipContent>

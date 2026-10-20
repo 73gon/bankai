@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Film, Tv, RefreshCw, Search, LayoutGrid, Rows3, ExternalLink, HardDrive } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type MasMovie, type MasShow } from '@/lib/api';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { EmptyState, Spinner } from '@/components/ui/empty';
-import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Input } from '@/components/ui/input';
+import { StatusTag } from '@/components/status-tag';
+import { Button } from '@/zon/ui/button';
+import { Card } from '@/zon/ui/card';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Spinner } from '@/zon/ui/spinner';
+import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/zon/ui/drawer';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
+import { Meter } from '@/zon/ui/meter';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
 import { AnimePoster } from '@/components/AnimePoster';
-import { Meter, rampParts } from '@/components/ui/meter';
 
 function formatSize(bytes: number) {
   const tib = bytes / 1024 ** 4;
@@ -42,11 +44,23 @@ function summary(row: Row): string {
   return formatSize(row.size);
 }
 
+/** The meter's ink ramps as a series fills: red, then amber, then complete. */
+const RAMP = {
+  low: '[&_[data-slot=meter-indicator]]:bg-destructive',
+  mid: '[&_[data-slot=meter-indicator]]:bg-warning',
+  high: '[&_[data-slot=meter-indicator]]:bg-success',
+} as const;
+
+function rampIndicator(value: number, total: number): string {
+  const ratio = total > 0 ? value / total : 0;
+  return ratio >= 0.85 ? RAMP.high : ratio >= 0.5 ? RAMP.mid : RAMP.low;
+}
+
 function PosterCard({ row, onOpen }: { row: Row; onOpen: () => void }) {
   const show = isShow(row) ? row : null;
   return (
     <button type='button' onClick={onOpen} aria-label={'View ' + row.title} className='block w-full text-left'>
-      <Card className='poster-card h-full overflow-hidden border-border'>
+      <Card className='poster-card h-full gap-0 overflow-hidden [--card-padding:0]'>
         <AnimePoster url={row.poster_url} title={row.title} />
         <div className='flex flex-col gap-1.5 p-3'>
           <p className='truncate text-[13px] font-medium leading-tight' title={row.title}>{row.title}</p>
@@ -55,10 +69,15 @@ function PosterCard({ row, onOpen }: { row: Row; onOpen: () => void }) {
             {row.year ? <span className='font-mono tabular-nums'>{row.year}</span> : null}
           </div>
           {show && show.total_count > 0 && (
-            <Meter parts={rampParts(show.downloaded_count, show.total_count)} total={show.total_count} />
+            <Meter
+              value={show.downloaded_count}
+              max={show.total_count}
+              aria-label={`${show.downloaded_count} of ${show.total_count} episodes`}
+              className={rampIndicator(show.downloaded_count, show.total_count)}
+            />
           )}
           {/* Two roots means the same title is stored twice over. */}
-          {row.roots.length > 1 && <Badge variant='warning'>{row.roots.length} copies</Badge>}
+          {row.roots.length > 1 && <StatusTag variant='warning'>{row.roots.length} copies</StatusTag>}
         </div>
       </Card>
     </button>
@@ -113,7 +132,13 @@ export default function MasLibrary() {
   function Panel({ rows, empty }: { rows: Row[]; empty: string }) {
     if (loading) return <div className='flex min-h-40 items-center justify-center'><Spinner /></div>;
     if (rows.length === 0) {
-      return <EmptyState icon={HardDrive} title={empty} description='Add a directory in Settings, then rescan.' />;
+      return (
+        <Empty>
+          <EmptyMedia><HardDrive /></EmptyMedia>
+          <EmptyTitle>{empty}</EmptyTitle>
+          <EmptyDescription>Add a directory in Settings, then rescan.</EmptyDescription>
+        </Empty>
+      );
     }
     if (view === 'grid') {
       return (
@@ -123,34 +148,32 @@ export default function MasLibrary() {
       );
     }
     return (
-      <div className='table-bleed overflow-x-auto'>
-        <table className='w-full border-collapse text-sm'>
-          <thead>
-            <tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'>
-              <th className='py-2.5 pr-3 font-medium'>Title</th>
-              <th className='px-3 py-2.5 font-medium'>Year</th>
-              <th className='px-3 py-2.5 font-medium'>Held</th>
-              <th className='py-2.5 pl-3 text-right font-medium'>Size</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr
-                key={row.key}
-                tabIndex={0}
-                onClick={() => setSelected(row)}
-                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(row); } }}
-                className='data-row cursor-pointer border-b border-border/70 last:border-0 hover:bg-accent/40 focus-visible:outline-none'
-              >
-                <td className='py-2.5 pr-3'>{row.title}</td>
-                <td className='px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground'>{row.year ?? '—'}</td>
-                <td className='px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground'>{summary(row)}</td>
-                <td className='py-2.5 pl-3 text-right font-mono text-xs tabular-nums text-muted-foreground'>{formatSize(row.size)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <Table dense>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Title</TableHead>
+            <TableHead>Year</TableHead>
+            <TableHead>Held</TableHead>
+            <TableHead numeric>Size</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow
+              key={row.key}
+              tabIndex={0}
+              onClick={() => setSelected(row)}
+              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(row); } }}
+              className='data-row cursor-pointer focus-ring'
+            >
+              <TableCell className='text-foreground'>{row.title}</TableCell>
+              <TableCell className='font-mono text-xs tabular-nums text-muted-foreground'>{row.year ?? '—'}</TableCell>
+              <TableCell className='font-mono text-xs tabular-nums text-muted-foreground'>{summary(row)}</TableCell>
+              <TableCell numeric className='text-xs text-muted-foreground'>{formatSize(row.size)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     );
   }
 
@@ -172,16 +195,16 @@ export default function MasLibrary() {
     <div className='flex flex-col gap-4'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='label-mono'>Movies &amp; Shows</p>
-          <h1 className='font-serif text-3xl'>Library</h1>
+          <p className='eyebrow'>Movies &amp; Shows</p>
+          <h1 className='font-heading text-3xl font-light'>Library</h1>
         </div>
         <div className='flex items-center gap-2'>
-          <div className='relative'>
-            <Search className='pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground' />
-            <Input aria-label='Search the library' placeholder='Search titles…' value={query} onChange={(event) => setQuery(event.target.value)} className='w-60 pl-9' />
-          </div>
-          <Button variant={view === 'grid' ? 'secondary' : 'ghost'} size='icon' aria-label='Grid view' title='Grid view' onClick={() => setView('grid')}><LayoutGrid /></Button>
-          <Button variant={view === 'table' ? 'secondary' : 'ghost'} size='icon' aria-label='Table view' title='Table view' onClick={() => setView('table')}><Rows3 /></Button>
+          <InputGroup className='w-60'>
+            <InputGroupAddon><Search /></InputGroupAddon>
+            <InputGroupInput aria-label='Search the library' placeholder='Search titles…' value={query} onChange={(event) => setQuery(event.target.value)} />
+          </InputGroup>
+          <Button variant={view === 'grid' ? 'secondary' : 'ghost'} size='icon' aria-label='Grid view' aria-pressed={view === 'grid'} title='Grid view' onClick={() => setView('grid')}><LayoutGrid /></Button>
+          <Button variant={view === 'table' ? 'secondary' : 'ghost'} size='icon' aria-label='Table view' aria-pressed={view === 'table'} title='Table view' onClick={() => setView('table')}><Rows3 /></Button>
           <Button variant='secondary' onClick={() => void load(true)} disabled={loading}>
             <RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan
           </Button>
@@ -190,30 +213,30 @@ export default function MasLibrary() {
 
       <Tabs defaultValue='movies'>
         <TabsList>
-          <TabsTrigger value='movies'><Film data-icon='inline-start' /> Movies</TabsTrigger>
-          <TabsTrigger value='shows'><Tv data-icon='inline-start' /> Shows</TabsTrigger>
+          <TabsTab value='movies'><Film data-icon='inline-start' /> Movies</TabsTab>
+          <TabsTab value='shows'><Tv data-icon='inline-start' /> Shows</TabsTab>
         </TabsList>
-        <TabsContent value='movies'><Panel rows={visibleMovies} empty='No movies found' /></TabsContent>
-        <TabsContent value='shows'><Panel rows={visibleShows} empty='No shows found' /></TabsContent>
+        <TabsPanel value='movies'><Panel rows={visibleMovies} empty='No movies found' /></TabsPanel>
+        <TabsPanel value='shows'><Panel rows={visibleShows} empty='No shows found' /></TabsPanel>
       </Tabs>
 
       {!loading && (
-        <div className='sticky bottom-0 -mx-1 flex flex-wrap items-center gap-x-6 gap-y-1 border-t border-border bg-background/95 px-1 py-2.5 text-xs text-muted-foreground backdrop-blur'>
+        <div className='sticky bottom-0 -mx-1 flex flex-wrap items-center gap-x-6 gap-y-1 border-t border-border/60 bg-background/95 px-1 py-2.5 text-xs text-muted-foreground backdrop-blur'>
           <span><span className='font-mono tabular-nums text-foreground'>{totals.movies}</span> movies</span>
           <span><span className='font-mono tabular-nums text-foreground'>{totals.shows}</span> shows</span>
           <span><span className='font-mono tabular-nums text-foreground'>{formatSize(totals.size)}</span> stored</span>
         </div>
       )}
 
-      <Drawer open={Boolean(active)} onOpenChange={(open) => { if (!open) setSelected(null); }}>
-        <DrawerContent aria-describedby={undefined}>
+      <Drawer side='right' open={Boolean(active)} onOpenChange={(open) => { if (!open) setSelected(null); }}>
+        <DrawerContent className='w-full md:w-1/2'>
           {active && (
             <>
               <DrawerHeader>
-                <div className='flex items-start gap-4 pr-8'>
+                <div className='flex items-start gap-4'>
                   <AnimePoster url={active.poster_url} title={active.title} className='w-16 shrink-0' />
                   <div className='flex min-w-0 flex-col gap-2'>
-                    <DrawerTitle className='text-base font-semibold leading-tight'>
+                    <DrawerTitle className='text-xl leading-tight'>
                       {active.title}{active.year ? ' (' + active.year + ')' : ''}
                     </DrawerTitle>
                     <p className='text-xs text-muted-foreground'>
@@ -226,10 +249,13 @@ export default function MasLibrary() {
                     )}
                     {active.tvdb_id && (
                       <div>
-                        <Button asChild variant='secondary' size='sm'>
-                          <a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer'>
-                            <ExternalLink data-icon='inline-start' /> TVDB
-                          </a>
+                        <Button
+                          variant='secondary'
+                          size='sm'
+                          nativeButton={false}
+                          render={<a href={'https://thetvdb.com/dereferrer/series/' + active.tvdb_id} target='_blank' rel='noreferrer' />}
+                        >
+                          <ExternalLink data-icon='inline-start' /> TVDB
                         </Button>
                       </div>
                     )}
@@ -239,19 +265,19 @@ export default function MasLibrary() {
 
               {activeShow ? (
                 <Tabs key={active.key} defaultValue={String(seasons[0])} className='flex min-h-0 flex-1 flex-col'>
-                  <TabsList className='flex h-auto flex-wrap justify-start px-5 pt-3'>
+                  <TabsList variant='underline' className='flex-wrap justify-start gap-y-0'>
                     {seasons.map((season) => (
-                      <TabsTrigger key={String(season)} value={String(season)}>
+                      <TabsTab key={String(season)} value={String(season)}>
                         {season === null ? 'Other files' : season === 0 ? 'Specials' : 'Season ' + season}
-                      </TabsTrigger>
+                      </TabsTab>
                     ))}
                   </TabsList>
                   {seasons.map((season) => (
-                    <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>
+                    <TabsPanel key={String(season)} value={String(season)} className='min-h-0 flex-1'>
                       <table className='w-full border-collapse text-sm'>
                         <tbody>
                           {activeShow.episodes.filter((entry) => entry.season_number === season).map((entry) => (
-                            <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className='border-b border-border/70 last:border-0'>
+                            <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className='border-b border-border/60 last:border-0'>
                               <td className='w-10 py-2.5 pr-3 font-mono text-xs tabular-nums'>{entry.episode ?? '—'}</td>
                               <td className='px-3 py-2.5 text-xs text-muted-foreground'>
                                 {entry.episode_title && <p className='text-sm text-foreground'>{entry.episode_title}</p>}
@@ -265,14 +291,14 @@ export default function MasLibrary() {
                           ))}
                         </tbody>
                       </table>
-                    </TabsContent>
+                    </TabsPanel>
                   ))}
                 </Tabs>
               ) : (
-                <div className='min-h-0 flex-1 overflow-y-auto px-5 py-4'>
+                <div className='min-h-0 flex-1'>
                   <ul className='flex flex-col gap-1'>
                     {(active as MasMovie).files.map((file) => (
-                      <li key={file.path} className='flex items-center justify-between gap-3 rounded-md px-2 py-1.5'>
+                      <li key={file.path} className='flex items-center justify-between gap-3 rounded-item px-2 py-1.5'>
                         <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={file.path}>{file.rel_path}</span>
                         <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatSize(file.size)}</span>
                       </li>

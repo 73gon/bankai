@@ -1,5 +1,5 @@
 import { AlertTriangle, FileVideo2 } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { StatusTag } from '@/components/status-tag';
 import { cn } from '@/lib/utils';
 
 function releaseTier(value: string): { label: string; risky: boolean } | null {
@@ -20,14 +20,14 @@ export function GermanRelease({ value, className }: { value?: string | null; cla
       <FileVideo2 className='mt-0.5 size-3.5 shrink-0 text-muted-foreground' />
       <span className='min-w-0 break-all font-mono text-xs leading-5 text-foreground'>{value}</span>
       {tier && (
-        <Badge
+        <StatusTag
           variant={tier.risky ? 'destructive' : 'success'}
           className='shrink-0 gap-1'
           title={tier.risky ? 'Low-quality cinema recording. You may want to wait for a WEB or Blu-ray release.' : undefined}
         >
           {tier.risky && <AlertTriangle className='size-3' />}
           {tier.label}
-        </Badge>
+        </StatusTag>
       )}
     </div>
   );
