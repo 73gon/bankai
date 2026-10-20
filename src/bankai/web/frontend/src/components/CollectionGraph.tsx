@@ -863,6 +863,7 @@ function SeasonsPanel({
   onDiscard,
   onSave,
   onReset,
+  onDragging,
 }: {
   arrangement: Arrangement;
   byId: Map<number, CollectionNode>;
@@ -875,6 +876,7 @@ function SeasonsPanel({
   onDiscard: () => void;
   onSave: () => void;
   onReset: () => void;
+  onDragging?: (dragging: boolean) => void;
 }) {
   // While something is dragged the board moves on its own; it becomes the arrangement on drop.
   const [live, setLive] = useState<Board | null>(null);
@@ -921,6 +923,7 @@ function SeasonsPanel({
     const data = event.active.data.current;
     setLive(toBoard(arrangement));
     setActive(data?.type === 'season' ? { type: 'season', key: data.key } : { type: 'entry', id: data?.id });
+    onDragging?.(true);
   };
 
   // An entry moving into another container joins it at once, so the boxes there make room for it.
@@ -941,6 +944,8 @@ function SeasonsPanel({
     if (next) onChange(fromBoard(next));
     setLive(null);
     setActive(null);
+    // After the key event that ended it has reached the dialog.
+    setTimeout(() => onDragging?.(false), 0);
   };
 
   const onDragEnd = (event: DragEndEvent) => {
@@ -1124,6 +1129,8 @@ export function CollectionGraph({
   // The season arrangement as edited here; saved only with "Save arrangement".
   const [draft, setDraft] = useState<Arrangement | null>(null);
   const [seasonsOpen, setSeasonsOpen] = useState(true);
+  // While a box is dragged in the Seasons panel, Escape cancels the drag, not the dialog.
+  const [seasonDrag, setSeasonDrag] = useState(false);
   const saved = useMemo<Arrangement | null>(
     () => (graph?.arrangement ? { seasons: graph.arrangement.seasons, specials: graph.arrangement.specials } : null),
     [graph],
@@ -1296,7 +1303,12 @@ export function CollectionGraph({
 
   return (
     <Dialog open={target !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className='flex h-[98dvh] w-[98vw] max-w-none flex-col gap-3'>
+      <DialogContent
+        className='flex h-[98dvh] w-[98vw] max-w-none flex-col gap-3'
+        onEscapeKeyDown={(event) => {
+          if (seasonDrag) event.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'><Network className='size-4' /> {graph?.name ?? 'Collection'}</DialogTitle>
           <DialogDescription>
@@ -1334,6 +1346,7 @@ export function CollectionGraph({
                 onDiscard={() => setDraft(saved)}
                 onSave={() => void saveArrangement(false)}
                 onReset={() => void saveArrangement(true)}
+                onDragging={setSeasonDrag}
               />
             )}
           </div>
