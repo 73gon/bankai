@@ -532,20 +532,24 @@ export default function AnimeLibrary() {
     }
   }
 
-  /** The AniList entry a row of the drawer is an episode of: its tab's entry. */
+  /** The AniList entry a row of the drawer is an episode of: its own, else its tab's first entry. */
   function entryOf(show: AnimeLibraryShow, episode: AnimeLibraryEpisode): number | null {
+    if (episode.anilist_id != null) return episode.anilist_id;
     if (episode.season_number == null) return null;
     return show.season_anilist?.[String(episode.season_number)]?.[0]?.anilist_id ?? null;
   }
 
   async function searchMissing(show: AnimeLibraryShow, episode: AnimeLibraryEpisode, q?: string) {
     const anilistId = entryOf(show, episode);
-    if (anilistId == null || episode.episode == null) return;
+    // The entry's own episode number: in a season made of several entries the
+    // row's number counts on from the entries before it.
+    const number = episode.anilist_episode ?? episode.episode;
+    if (anilistId == null || number == null) return;
     setSearchTarget({ show, episode });
     setSearching(true);
     setResults([]);
     try {
-      const result = await api.animeEpisodeSearch(anilistId, episode.episode, q);
+      const result = await api.animeEpisodeSearch(anilistId, number, q);
       setResults(result.items);
       setSearchQuery(q ?? result.queries[0] ?? '');
     } catch (error: any) {

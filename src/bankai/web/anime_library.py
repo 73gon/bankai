@@ -668,45 +668,63 @@ def roster(aid: int) -> list[EntryEpisode] | None:
     return [EntryEpisode(n, title, aired or started) for n, title, aired in rows]
 
 
-def merge_entry_episodes(
-    rows: list[dict],
-    entries: list[tuple[int, str, list | None, bool]],
+def merge_season_episodes(
+    files: list[dict],
+    tabs: list[dict],
     *,
-    codecs: dict[tuple[int, int], str] | None = None,
-    german_dubbed: set[tuple[int, int]] | None = None,
-    optional: set[int] | None = None,
+    codecs_of: Callable[[list[dict]], dict[tuple[int, int], str]] = lambda rows: {},
+    dubbed_of: Callable[[list[dict]], set[tuple[int, int]]] = lambda rows: set(),
 ) -> dict:
-    """Episodes of a card made of AniList entries, one tab per entry.
+    """Episodes of a card made of AniList entries, a tab per season as it is on disk.
 
-    ``rows`` are the card's files, ``season_number`` the tab of their entry
-    and ``episode`` its own number. ``entries`` are (AniList id, tab label,
-    episode list or None when unknown, finished), in tab order. The missing
-    episodes of ``optional`` entries -- the specials -- are listed but not
-    counted: a show is complete without its recap movie.
+    ``files`` carry their entry and episode (``anilist_id``, ``anilist_episode``).
+    ``tabs`` are in order, each ``{"label", "parts": [(AniList id, offset,
+    episode list or None, finished)], "optional"}``: a season made of several
+    entries numbers each after the ones before it, as the files are named --
+    the Final Chapters as Season 6's episodes 13 and 14. The missing episodes
+    of an ``optional`` tab -- the specials -- are listed but not counted: a
+    show is complete without its recap movie.
     """
     today = date.today().isoformat()
 
     def ended(listed: list | None, finished: bool) -> bool:
         return finished or (bool(listed) and all(ep.aired and ep.aired[:10] <= today for ep in listed))
 
-    items = [
-        _Episode(season=index, episode=ep.number, name=ep.title, aired=ep.aired)
-        for index, (_aid, _label, listed, _finished) in enumerate(entries, start=1)
-        for ep in listed or []
-    ]
+    where: dict[int, tuple[int, int]] = {}
+    items: list[_Episode] = []
+    owner: dict[tuple[int, int], tuple[int, int]] = {}
+    for tab, spec in enumerate(tabs, start=1):
+        for aid, offset, listed, _finished in spec["parts"]:
+            where[aid] = (tab, offset)
+            for ep in listed or []:
+                number = offset + ep.number
+                items.append(_Episode(season=tab, episode=number, name=ep.title, aired=ep.aired))
+                owner[(tab, number)] = (aid, ep.number)
+    rows = []
+    for file in files:
+        place = where.get(file.get("anilist_id"))
+        if place is None:
+            rows.append({**file, "season_number": None, "episode": None})
+            continue
+        tab, offset = place
+        rows.append({**file, "season_number": tab, "episode": offset + file["anilist_episode"]})
     merged = merge_episodes(
         rows,
         items,
-        ended=all(ended(listed, finished) for _aid, _label, listed, finished in entries),
-        codecs=codecs,
-        german_dubbed=german_dubbed,
+        ended=all(ended(listed, done) for spec in tabs for _aid, _offset, listed, done in spec["parts"]),
+        codecs=codecs_of(rows),
+        german_dubbed=dubbed_of(rows),
     )
-    labels = {index: label for index, (_aid, label, _listed, _finished) in enumerate(entries, start=1)}
     for row in merged["episodes"]:
-        if row.get("season_number") in labels:
-            row["season"] = labels[row["season_number"]]
-    merged["metadata_available"] = any(listed for _aid, _label, listed, _finished in entries)
-    skipped = {index for index, (aid, *_rest) in enumerate(entries, start=1) if aid in (optional or set())}
+        tab = row.get("season_number")
+        if tab is None or not 1 <= tab <= len(tabs):
+            continue
+        row["season"] = tabs[tab - 1]["label"]
+        if row.get("missing") and (tab, row["episode"]) in owner:
+            # Which entry's episode it is, for searching it and matching files to it.
+            row["anilist_id"], row["anilist_episode"] = owner[(tab, row["episode"])]
+    merged["metadata_available"] = any(listed for spec in tabs for _aid, _offset, listed, _done in spec["parts"])
+    skipped = {tab for tab, spec in enumerate(tabs, start=1) if spec.get("optional")}
     if skipped:
         counted = [
             row for row in merged["episodes"]
@@ -728,7 +746,11 @@ def merge_entry_episodes(
             total_count=len(counted),
             completion_state=state,
             finished=state == "complete"
-            and all(ended(listed, done) for aid, _label, listed, done in entries if aid not in (optional or set())),
+            and all(
+                ended(listed, done)
+                for spec in tabs if not spec.get("optional")
+                for _aid, _offset, listed, done in spec["parts"]
+            ),
         )
     return merged
 
@@ -905,20 +927,26 @@ async def group_shows(
                 main = order[0]
                 seasons = {}
             labels = tab_labels(order, slot["title"] if row is not None else None)
-            place = {aid: number for number, aid in enumerate(order, start=1)}
-            rows = []
-            for file in files:
-                aid = file["anilist_id"]
-                if aid not in place:
-                    rows.append({**file, "season_number": None, "episode": None})
-                    continue
-                rows.append({**file, "season_number": place[aid], "season": labels[aid], "episode": file["anilist_episode"]})
-            merged = merge_entry_episodes(
-                rows,
-                [(aid, labels[aid], roster(aid), anilist.finished(aid)) for aid in order],
-                codecs=probed_codecs(rows),
-                german_dubbed=german_dubbed_episodes(rows),
-                optional=set(placing.specials) if row is not None else None,
+
+            def part(aid: int, offset: int) -> tuple:
+                return (aid, offset, roster(aid), anilist.finished(aid))
+
+            if row is not None:
+                # The seasons as they are on disk and in Jellyfin: arranged by
+                # hand or by the sequel chain, the specials last.
+                tabs = []
+                for number, ids in enumerate(placing.season_lists(), start=1):
+                    label = f"S{number} · {labels[ids[0]]}" + (f" +{len(ids) - 1}" if len(ids) > 1 else "")
+                    tabs.append({"label": label, "parts": [part(aid, placing.offsets.get(aid, 0)) for aid in ids]})
+                specials = sorted(placing.specials, key=placing.specials.__getitem__)
+                if specials:
+                    tabs.append(
+                        {"label": "Specials", "parts": [part(aid, placing.specials[aid]) for aid in specials], "optional": True}
+                    )
+            else:
+                tabs = [{"label": labels[aid], "parts": [part(aid, 0)]} for aid in order]
+            merged = merge_season_episodes(
+                files, tabs, codecs_of=probed_codecs, dubbed_of=german_dubbed_episodes
             )
             romaji = anilist.media(main).get("romaji")
             result = {
@@ -945,8 +973,10 @@ async def group_shows(
                 **counts(merged["episodes"]),
                 **merged,
                 "season_anilist": {
-                    str(number): [{"anilist_id": aid, "title": anime_collections.entry_name(aid)}]
-                    for aid, number in place.items()
+                    str(tab): [
+                        {"anilist_id": aid, "title": anime_collections.entry_name(aid)} for aid, *_rest in spec["parts"]
+                    ]
+                    for tab, spec in enumerate(tabs, start=1)
                 },
             }
         if not include_episodes:
