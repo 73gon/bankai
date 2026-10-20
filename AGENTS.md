@@ -267,7 +267,7 @@ yielding empty `MediaInfo` with 0 audio tracks. This is already applied in
 | Component library | shadcn/ui (Radix Primitives)                                                         |
 | Theme             | Eigenpair mono design system — oklch tokens, `@theme inline`, `@custom-variant dark` |
 | Dark mode         | Always on (`<html class="dark">`)                                                    |
-| Fonts             | Geist Variable (body/UI), Geist Mono Variable (mono), Libre Baskerville (headings)   |
+| Fonts             | Licht (zon.sh/licht), self-hosted in `public/fonts/licht`: Licht Serif (headings), Licht Sans (body/UI), Licht Mono (mono) |
 | State             | React hooks only (no Redux/Zustand)                                                  |
 | API               | `src/lib/api.ts` — typed `fetch` wrappers, all endpoints relative to window origin   |
 
