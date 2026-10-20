@@ -198,13 +198,12 @@ export function CollectionGraph({
                       <path d='M 0 0 L 10 5 L 0 10 z' className='fill-foreground/60' />
                     </marker>
                   </defs>
+                  {/* The related entries' band, under the collection's own row. */}
+                  {placed.nodes.some((node) => !node.in_collection) && (
+                    <rect x={0} y={PAD + NODE_H + BAND / 2} width={placed.width} height={placed.height - PAD - NODE_H - BAND / 2} className='fill-white/[0.025]' />
+                  )}
                   {graph!.edges.map(edge)}
                 </svg>
-                {placed.nodes.some((node) => !node.in_collection) && (
-                  <p className='absolute text-[0.68rem] uppercase tracking-wide text-muted-foreground' style={{ left: PAD, top: PAD + NODE_H + 12 }}>
-                    Related, not in this collection
-                  </p>
-                )}
                 {placed.nodes.map((node) => (
                   <button
                     key={node.anidb_id}
@@ -242,8 +241,8 @@ export function CollectionGraph({
             {picked.length === 0 ? (
               <div className='flex flex-col gap-2 text-xs text-muted-foreground'>
                 <p className='text-sm text-foreground'>Pick entries to change the collection.</p>
-                <p>In the collection (top row): name it after one, or split entries off into a collection of their own.</p>
-                <p>Related (below): pull one in, or merge the whole collection it is in.</p>
+                <p>Top row, as they aired: the collection. Name it after one, or split entries off into a collection of their own.</p>
+                <p>Shaded band below, dashed: entries AniDB relates to them that are not in it. Pull one in, or merge the whole collection it is in.</p>
                 <p>Not downloaded entries are kept where you put them and handed to Shoko once they are on disk. Cutting one out takes the entries reached only through it as well.</p>
               </div>
             ) : (
