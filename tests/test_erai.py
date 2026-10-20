@@ -2221,6 +2221,33 @@ def test_an_avc_episode_bankai_never_downloaded_is_upgraded_too(monkeypatch, tmp
     assert len(qbit.added) == 2
 
 
+def test_a_season_batch_upgrades_every_avc_episode_it_covers_in_one_download(monkeypatch, tmp_path):
+    """Fire Force on Nyaa is two HEVC batches of 24: two downloads, not forty-eight."""
+    state, avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path)
+    folder = tmp_path / "shows_anime" / "Show"
+    (folder / "Show - 03.mkv").write_bytes(b"video")
+    from bankai.web import anime_library
+
+    probes = {**anime_library._load_codec_cache(), str(folder / "Show - 03.mkv"): {"codec": "avc"}}
+    monkeypatch.setattr(anime_library, "_load_codec_cache", lambda: probes)
+    batch = entry("[Erai-raws] Show - 01 ~ 03 [1080p CR WEBRip HEVC EAC3][MultiSub][GER] [BATCH]", 9)
+
+    async def on_nyaa(_client, term, _category, _page):
+        return [batch] if "HEVC" in term else []
+
+    monkeypatch.setattr(erai.anime_mod, "_fetch_rss", on_nyaa)
+
+    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+
+    assert (result["queued"], result["downloads"]) == (2, 1)
+    assert len(qbit.added) == 1
+    queued = state["releases"][batch.info_hash]
+    assert sorted(Path(row["path"]).name for row in queued["replace_files"]) == ["Show - 02.mkv", "Show - 03.mkv"]
+    assert state["canonical"]["anidb:555|3"]["info_hash"] == batch.info_hash
+    # The single release of episode 2 lost to the batch.
+    assert replacement.info_hash not in state["releases"]
+
+
 def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch, tmp_path):
     state, avc_done, _replacement, qbit = _published_show(monkeypatch, tmp_path, twin_available=False)
     result = asyncio.run(erai.upgrade_show_to_hevc([555]))

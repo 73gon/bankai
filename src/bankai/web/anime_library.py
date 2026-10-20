@@ -757,7 +757,9 @@ async def search_episode(anidb_id: int, episode: int, query: str | None = None) 
         for field in ["catalog_1080", "catalog_720"]
         for row in index.get(field, {}).values()
     ]
+    # Relative to Nyaa: _fetch_rss asks for "/".
     async with httpx.AsyncClient(
+        base_url="https://nyaa.si",
         timeout=30,
         follow_redirects=True,
         headers={"User-Agent": get_settings().scraper.user_agent},

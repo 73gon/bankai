@@ -2383,7 +2383,8 @@ def _upgrade_targets(entries: dict[int, Any]) -> dict[str, Any]:
 
     probes = _load_codec_cache()
     targets: list[tuple[int, int, list[dict[str, Any]]]] = []
-    already = dubbed = unprobed = 0
+    dubs: dict[int, set[int]] = {}
+    already = unprobed = 0
     for aid in entries:
         for episode, paths in sorted(_entry_episode_files(aid).items()):
             codecs = {(probes.get(str(path)) or {}).get("codec") for path in paths}
@@ -2394,7 +2395,7 @@ def _upgrade_targets(entries: dict[int, Any]) -> dict[str, Any]:
                     already += 1
                 continue
             if any(_is_german_dub(path) for path in paths):
-                dubbed += 1
+                dubs.setdefault(aid, set()).add(episode)
                 continue
             rows = []
             for path in paths:
@@ -2402,16 +2403,23 @@ def _upgrade_targets(entries: dict[int, Any]) -> dict[str, Any]:
                     stat = path.stat()
                     rows.append({"path": str(path), "episode": episode, "size": stat.st_size, "mtime": stat.st_mtime})
             targets.append((aid, episode, rows))
-    return {"targets": targets, "already": already, "dubbed": dubbed, "unprobed": unprobed}
+    return {
+        "targets": targets,
+        "dubs": dubs,
+        "already": already,
+        "dubbed": sum(len(episodes) for episodes in dubs.values()),
+        "unprobed": unprobed,
+    }
 
 
 async def _hevc_releases(
-    entries: dict[int, Any], wanted: set[tuple[int, int]], client: httpx.AsyncClient
-) -> dict[tuple[int, int], anime_mod.NyaaEntry]:
-    """The best HEVC Erai release of each wanted (entry, episode).
+    entries: dict[int, Any], wanted: set[tuple[int, int]], headers: dict[str, str]
+) -> dict[tuple[int, int], tuple[anime_mod.NyaaEntry, int, int]]:
+    """The HEVC Erai release to take for each wanted (entry, episode), with its range.
 
     From the catalogue already crawled, then Nyaa searched under each entry's
-    names, every result identified as the automation would.
+    names, every result identified as the automation would. A batch that
+    covers more of the wanted episodes wins: one download for a season.
     """
     state = await asyncio.to_thread(_load_state)
     mappings = await asyncio.to_thread(_load_mappings)
@@ -2427,42 +2435,53 @@ async def _hevc_releases(
         prefix = f"anidb:{aid}|"
         for release in (state.get("releases") or {}).values():
             if str(release.get("canonical") or "").startswith(prefix):
-                parsed = _erai_name_episode(str(release.get("title") or ""))
+                parsed = _erai_identity_name(str(release.get("title") or ""))
                 if parsed:
                     names.add(parsed[0])
-    for name in sorted(names):
-        for page in range(3):
-            try:
-                rows = await anime_mod._fetch_rss(client, f'"{name}" HEVC', "1_2", page)
-            except Exception as exc:
-                log.warning("Nyaa search for %s failed: %s", name, exc)
-                break
-            for item in rows:
-                pool.setdefault(item.info_hash, item)
-            if len(rows) < 75:
-                break
-            await asyncio.sleep(get_settings().anime.backfill_request_delay_seconds)
-    best: dict[tuple[int, int], anime_mod.NyaaEntry] = {}
+    # Relative to Nyaa: _fetch_rss asks for "/".
+    async with httpx.AsyncClient(base_url=_NYAA_BASE, headers=headers, timeout=30, follow_redirects=True) as nyaa:
+        for name in sorted(names):
+            for page in range(3):
+                try:
+                    rows = await anime_mod._fetch_rss(nyaa, f'"{name}" HEVC', "1_2", page)
+                except Exception as exc:
+                    log.warning("Nyaa search for %s failed: %s", name, exc)
+                    break
+                for item in rows:
+                    pool.setdefault(item.info_hash, item)
+                if len(rows) < 75:
+                    break
+                await asyncio.sleep(get_settings().anime.backfill_request_delay_seconds)
+    best: dict[tuple[int, int], tuple[anime_mod.NyaaEntry, int, int, int]] = {}
     for item in pool.values():
         if not _is_hevc(item) or (item.publisher or "Erai-raws").casefold() != "erai-raws":
             continue
+        span = _release_range(item.title)
         match = anime_mod.anidb_match(item.title, table=table, mappings=mappings)
-        if not match or match.get("episode") is None:
+        if not span or not match:
             continue
-        key = (int(match["anidb_id"]), int(match["episode"]))
-        if key in wanted and (key not in best or _rank(item) > _rank(best[key])):
-            best[key] = item
-    return best
+        aid = int(match["anidb_id"])
+        first, last = span
+        if first == last and match.get("episode") is not None:
+            first = last = int(match["episode"])  # settled into the right part of a split season
+        covered = [episode for episode in range(first, min(last, SEASON_PACK_LAST - 1) + 1) if (aid, episode) in wanted]
+        for episode in covered:
+            key = (aid, episode)
+            score = (len(covered), *_rank(item))
+            if key not in best or score > best[key][3]:
+                best[key] = (item, first, last, score)
+    return {key: (item, first, last) for key, (item, first, last, _score) in best.items()}
 
 
 async def upgrade_show_to_hevc(anidb_ids: list[int]) -> dict[str, Any]:
     """Queue HEVC replacements for the AVC episodes on disk of a card's AniDB entries.
 
     Unlike the backlog upgrade, these episodes are on disk and watchable. The
-    replacement is downloaded first; once it is published the AVC file it
-    takes the place of is removed -- wherever it is, a folder of the TVDB
-    days included -- so a failed upgrade costs bandwidth and nothing else. An
-    episode with no HEVC release carrying German subtitles is left as it is.
+    replacement is downloaded first; once it is published the AVC files it
+    takes the place of are removed -- wherever they are, a folder of the TVDB
+    days included -- so a failed upgrade costs bandwidth and nothing else. A
+    season batch covering several episodes is one download. An episode with
+    no HEVC release carrying German subtitles is left as it is.
     """
     settings = get_settings()
     index = await anidb_mod.index()
@@ -2478,6 +2497,7 @@ async def upgrade_show_to_hevc(anidb_ids: list[int]) -> dict[str, Any]:
     result = {
         "ok": True,
         "queued": 0,
+        "downloads": 0,
         "no_replacement": 0,
         "already_hevc": found["already"],
         "german_dub_kept": found["dubbed"],
@@ -2488,6 +2508,20 @@ async def upgrade_show_to_hevc(anidb_ids: list[int]) -> dict[str, Any]:
     from bankai.torrent.qbittorrent import QBittorrentClient
 
     headers = {"User-Agent": settings.scraper.user_agent}
+    releases = await _hevc_releases(entries, {(aid, ep) for aid, ep, _rows in targets}, headers)
+    # One download per release: a batch takes every episode it was picked for.
+    plans: dict[str, dict[str, Any]] = {}
+    for aid, episode, rows in targets:
+        picked = releases.get((aid, episode))
+        if picked is None:
+            result["no_replacement"] += 1
+            continue
+        item, first, last = picked
+        plan = plans.setdefault(
+            item.info_hash, {"item": item, "aid": aid, "first": first, "last": last, "episodes": [], "rows": []}
+        )
+        plan["episodes"].append(episode)
+        plan["rows"].extend(rows)
     qbit = QBittorrentClient()
     try:
         await qbit.login()
@@ -2496,15 +2530,18 @@ async def upgrade_show_to_hevc(anidb_ids: list[int]) -> dict[str, Any]:
         raise RuntimeError(f"qBittorrent is unavailable: {exc}") from exc
     try:
         async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
-            releases = await _hevc_releases(entries, {(aid, ep) for aid, ep, _rows in targets}, client)
-            for aid, episode, rows in targets:
-                twin = releases.get((aid, episode))
-                if twin is None or not await _carries_german(twin, client):
-                    result["no_replacement"] += 1
+            for plan in plans.values():
+                twin, aid, episodes = plan["item"], plan["aid"], sorted(plan["episodes"])
+                if not await _carries_german(twin, client):
+                    result["no_replacement"] += len(episodes)
                     continue
                 anime = entries[aid]
-                # Publishing has to overwrite an episode filed where the new one goes.
-                args = [*_anidb_args(twin, anime, episode), "--replace-existing"]
+                # Publishing has to overwrite an episode filed where the new one
+                # goes; a German dub in a batch's range is kept as it is.
+                args = [*_anidb_args(twin, anime, episodes[0]), "--replace-existing"]
+                for episode in sorted(found["dubs"].get(aid, ())):
+                    if plan["first"] <= episode <= plan["last"]:
+                        args.extend(["--keep-episode", str(episode)])
                 try:
                     await qbit.add(
                         magnet=twin.magnet_uri or None,
@@ -2516,33 +2553,35 @@ async def upgrade_show_to_hevc(anidb_ids: list[int]) -> dict[str, Any]:
                     )
                 except Exception as exc:
                     log.warning("Could not queue HEVC upgrade for %s: %s", twin.title, exc)
-                    result["no_replacement"] += 1
+                    result["no_replacement"] += len(episodes)
                     continue
-                canonical = f"anidb:{aid}|{episode}"
+                span = f"{episodes[0]:02d}" + (f"-{episodes[-1]:02d}" if len(episodes) > 1 else "")
                 with _STATE_LOCK:
                     state = _load_state()
                     state["releases"][twin.info_hash] = {
                         "status": "queued",
                         "title": twin.title,
-                        "display_title": f"{anime.english_title or anime.title} - {episode:02d}",
-                        "canonical": canonical,
+                        "display_title": f"{anime.english_title or anime.title} - {span}",
+                        "canonical": f"anidb:{aid}|{episodes[0]}",
                         "resolution": _resolution(twin),
                         "size_bytes": twin.size_bytes,
                         "args": args,
                         "anidb_id": aid,
-                        "episode": episode,
+                        "episode": episodes[0],
                         # The AVC files go once the upgrade is published.
-                        "replace_files": rows,
+                        "replace_files": plan["rows"],
                         "updated_at": time.time(),
                     }
-                    # The upgrade takes over the episode's slot; the original
-                    # stays on disk and playable until the replacement lands.
-                    state["canonical"][canonical] = {
-                        "info_hash": twin.info_hash,
-                        "resolution": _resolution(twin),
-                    }
+                    # The upgrade takes over the episodes' slots; the originals
+                    # stay on disk and playable until the replacement lands.
+                    for episode in episodes:
+                        state["canonical"][f"anidb:{aid}|{episode}"] = {
+                            "info_hash": twin.info_hash,
+                            "resolution": _resolution(twin),
+                        }
                     _save_state(state)
-                result["queued"] += 1
+                result["queued"] += len(episodes)
+                result["downloads"] += 1
                 await asyncio.sleep(settings.anime.backfill_request_delay_seconds)
     finally:
         await qbit.aclose()
