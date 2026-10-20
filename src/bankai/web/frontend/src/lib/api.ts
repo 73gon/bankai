@@ -582,6 +582,47 @@ export interface AnimeLibraryShow {
   episodes: AnimeLibraryEpisode[];
 }
 
+/** One AniDB entry in a collection's relation graph. */
+export interface CollectionNode {
+  anidb_id: number;
+  title: string;
+  /** AniDB's main (romaji) title. */
+  main_title: string | null;
+  type: string | null;
+  year: number | null;
+  first_aired: string | null;
+  episodes: number | null;
+  /** Episodes of it on disk. */
+  on_disk: number;
+  /** Shoko holds it: it is on disk. */
+  owned: boolean;
+  poster_url: string | null;
+  in_collection: boolean;
+  /** The entry the collection is named and pictured after. */
+  title_entry: boolean;
+  /** Where a suggestion is now: another collection, or none. */
+  collection_id: number | null;
+  collection_name: string | null;
+  /** Taken out of every collection by hand. */
+  alone: boolean;
+}
+
+export interface CollectionEdge {
+  from: number;
+  to: number;
+  /** "sequel", "side story", "summary", "alternative setting", ... */
+  label: string;
+  main_line: boolean;
+}
+
+export interface CollectionGraph {
+  collection_id: number;
+  name: string;
+  title_entry: number | null;
+  nodes: CollectionNode[];
+  edges: CollectionEdge[];
+}
+
 /** A film on the server, as the Movies & Shows library presents it. */
 export interface MasMovie {
   key: string;
@@ -1056,6 +1097,33 @@ export const api = {
     }),
   anidbSearch: (q: string) =>
     request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
+  /** A collection's entries and the ones related to them. */
+  collectionGraph: (groupId: number) => request<CollectionGraph>(`/api/anime/collections/${groupId}/graph`),
+  /** Entries of a collection into a new one of their own. */
+  collectionSplit: (groupId: number, anidbIds: number[]) =>
+    request<{ ok: boolean; result: number | null }>(`/api/anime/collections/${groupId}/split`, {
+      method: 'POST', body: JSON.stringify({ anidb_ids: anidbIds }),
+    }),
+  /** One entry out of a collection. */
+  collectionExclude: (groupId: number, anidbId: number) =>
+    request<{ ok: boolean }>(`/api/anime/collections/${groupId}/exclude`, {
+      method: 'POST', body: JSON.stringify({ anidb_id: anidbId }),
+    }),
+  /** A related entry into a collection. */
+  collectionInclude: (groupId: number, anidbId: number) =>
+    request<{ ok: boolean }>(`/api/anime/collections/${groupId}/include`, {
+      method: 'POST', body: JSON.stringify({ anidb_id: anidbId }),
+    }),
+  /** Every entry of another collection into this one. */
+  collectionMerge: (groupId: number, otherId: number) =>
+    request<{ ok: boolean; result: number }>(`/api/anime/collections/${groupId}/merge`, {
+      method: 'POST', body: JSON.stringify({ group_id: otherId }),
+    }),
+  /** Name a collection after one of its entries on disk. */
+  collectionTitle: (groupId: number, anidbId: number) =>
+    request<{ ok: boolean }>(`/api/anime/collections/${groupId}/title`, {
+      method: 'POST', body: JSON.stringify({ anidb_id: anidbId }),
+    }),
   /** Name and picture a collection after one of its entries, in Shoko and so in Jellyfin. */
   setCollectionTitle: (key: string, anidbId: number) =>
     request<{ ok: boolean; name: string | null; anidb_id: number }>('/api/anime/collections/title', {

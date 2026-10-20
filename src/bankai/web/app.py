@@ -1596,6 +1596,15 @@ def create_app() -> Any:
 
         catalog = await shoko_catalog.fetch() or shoko_catalog.Catalog()
         await asyncio.to_thread(shoko_catalog.save_links, catalog)
+        # Choices made in the relation graph for entries since downloaded go
+        # to Shoko now; read again so the cards show where they went.
+        from bankai.web import anime_collections
+
+        try:
+            if await anime_collections.apply_places(catalog):
+                catalog = await shoko_catalog.fetch() or catalog
+        except Exception as exc:
+            log.warning("Could not apply collection choices to Shoko: %s", exc)
         return catalog
 
     snaps.add(
@@ -2184,6 +2193,104 @@ def create_app() -> Any:
         snaps["anime_library"].invalidate()
         return {"ok": True, "name": (group or {}).get("Name"), "anidb_id": int(aid)}
 
+    async def _collection_graph(group_id: int) -> tuple[Any, dict]:
+        """A collection's catalogue and graph, or a 404 when Shoko has no such group."""
+        from bankai.metadata import anidb as anidb_mod
+        from bankai.web import anime_collections
+
+        catalog = await _catalog()
+        if catalog is None or group_id not in catalog.groups:
+            raise HTTPException(status_code=404, detail="Shoko has no such collection")
+        table = await anidb_mod.index()
+        places = await asyncio.to_thread(anime_collections.load_places)
+        graph = await asyncio.to_thread(
+            anime_collections.graph, catalog, group_id, table=table, places=places
+        )
+        return catalog, graph
+
+    async def _collection_change(work: Any) -> dict:
+        """Run one change to a collection; what Shoko answers is the page's to show."""
+        try:
+            result = await work
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Shoko did not take it: {exc}") from exc
+        snaps["shoko_catalog"].invalidate()
+        snaps["anime_library"].invalidate()
+        return {"ok": True, "result": result}
+
+    def _picked(req: dict, field_name: str = "anidb_id") -> int:
+        raw = req.get(field_name)
+        if not str(raw or "").isdigit():
+            raise HTTPException(status_code=422, detail=f"{field_name} is required")
+        return int(raw)
+
+    @app.get("/api/anime/collections/{group_id}/graph")
+    async def anime_collection_graph(group_id: int) -> dict:
+        """A collection's entries and the entries related to them, as nodes and edges."""
+        return (await _collection_graph(group_id))[1]
+
+    @app.post("/api/anime/collections/{group_id}/split")
+    async def anime_collection_split(group_id: int, req: dict) -> dict:
+        """Entries of a collection into a new one of their own."""
+        from bankai.web import anime_collections
+
+        catalog, graph = await _collection_graph(group_id)
+        wanted = {int(aid) for aid in req.get("anidb_ids") or [] if str(aid).isdigit()}
+        members = {node["anidb_id"] for node in graph["nodes"] if node["in_collection"]}
+        if not wanted or not wanted <= members:
+            raise HTTPException(status_code=422, detail="pick entries of this collection to split off")
+        if wanted == members:
+            raise HTTPException(status_code=422, detail="that is the whole collection; nothing would be split")
+        return await _collection_change(anime_collections.split(catalog, group_id, sorted(wanted)))
+
+    @app.post("/api/anime/collections/{group_id}/exclude")
+    async def anime_collection_exclude(group_id: int, req: dict) -> dict:
+        """One entry out of a collection: on disk into a group of its own, else into none."""
+        from bankai.web import anime_collections
+
+        catalog, graph = await _collection_graph(group_id)
+        aid = _picked(req)
+        members = {node["anidb_id"] for node in graph["nodes"] if node["in_collection"]}
+        if aid not in members or members == {aid}:
+            raise HTTPException(status_code=422, detail="that entry is not one this collection can lose")
+        return await _collection_change(anime_collections.split(catalog, group_id, [aid]))
+
+    @app.post("/api/anime/collections/{group_id}/include")
+    async def anime_collection_include(group_id: int, req: dict) -> dict:
+        """Pull a related entry into a collection."""
+        from bankai.web import anime_collections
+
+        catalog, graph = await _collection_graph(group_id)
+        aid = _picked(req)
+        suggested = {node["anidb_id"] for node in graph["nodes"] if not node["in_collection"]}
+        if aid not in suggested:
+            raise HTTPException(status_code=422, detail="that entry is not related to this collection")
+        return await _collection_change(anime_collections.include(catalog, group_id, aid))
+
+    @app.post("/api/anime/collections/{group_id}/merge")
+    async def anime_collection_merge(group_id: int, req: dict) -> dict:
+        """Every entry of another collection into this one."""
+        from bankai.web import anime_collections
+
+        catalog, _graph = await _collection_graph(group_id)
+        return await _collection_change(anime_collections.merge(catalog, group_id, _picked(req, "group_id")))
+
+    @app.post("/api/anime/collections/{group_id}/title")
+    async def anime_collection_title_entry(group_id: int, req: dict) -> dict:
+        """Name and picture a collection after one of its entries on disk."""
+        from bankai.web import anime_collections
+
+        catalog, graph = await _collection_graph(group_id)
+        aid = _picked(req)
+        entry = catalog.entries.get(aid)
+        if entry is None or entry.group_id != group_id or entry.series_id is None:
+            raise HTTPException(status_code=422, detail="only an entry of this collection on disk can name it")
+        return await _collection_change(anime_collections.set_title(group_id, entry.series_id))
+
     @app.post("/api/anime/library/link")
     async def anime_library_link(req: dict) -> dict:
         """Link a show's folders to an AniDB entry, for the files Shoko has not matched."""
@@ -2300,6 +2407,7 @@ def create_app() -> Any:
         "erai_series_policies.json",
         "anime_codecs.json",
         "anime_library_prefs.json",
+        "anime_collection_places.json",
         "review.json",
     )
     snaps.add(

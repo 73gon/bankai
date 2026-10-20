@@ -204,3 +204,172 @@ def test_only_an_entry_of_the_card_s_own_group_can_name_it(client: TestClient) -
     response = client.post("/api/anime/collections/title", json={"key": "Nothing here", "anidb_id": 5})
     assert response.status_code == 404
     assert client.post("/api/anime/collections/title", json={"key": "x"}).status_code == 422
+
+
+# -- Phase 2: the relation graph and changing a collection ---------------------
+
+
+def _kaguya() -> Catalog:
+    """Two seasons on disk in one group, a third not on disk, a side story and a sequel elsewhere."""
+    return Catalog(
+        entries={
+            101: _entry(101, "Kaguya-sama", 7, series=1),
+            102: _entry(102, "Kaguya-sama 2", 7, series=2),
+            300: _entry(300, "Kaguya-sama Movie", 9, series=3),
+        },
+        groups={7: Group(7, "Kaguya-sama", 101), 9: Group(9, "Kaguya-sama Movie", 300)},
+        relations=[
+            (101, 102, "Sequel"), (102, 101, "Prequel"),
+            (102, 103, "Sequel"),
+            (101, 200, "SideStory"), (200, 101, "MainStory"),
+            (103, 300, "Sequel"),
+        ],
+        files={"/library/a.mkv": [(101, 1)], "/library/b.mkv": [(102, 1)]},
+    )
+
+
+def test_the_graph_is_the_collection_and_what_is_related_to_it() -> None:
+    found = anime_collections.graph(_kaguya(), 7)
+
+    nodes = {node["anidb_id"]: node for node in found["nodes"]}
+    assert {aid for aid, node in nodes.items() if node["in_collection"]} == {101, 102, 103}
+    # The side story is a suggestion; so is the movie, a sequel kept elsewhere.
+    assert {aid for aid, node in nodes.items() if not node["in_collection"]} == {200, 300}
+    assert nodes[101]["title_entry"] and nodes[101]["owned"] and nodes[101]["on_disk"] == 1
+    assert not nodes[103]["owned"]
+    # Each link once, read the same way round whichever end listed it.
+    assert sorted((e["from"], e["to"], e["label"]) for e in found["edges"]) == [
+        (101, 102, "sequel"), (101, 200, "side story"), (102, 103, "sequel"), (103, 300, "sequel"),
+    ]
+
+
+def test_a_sequel_kept_in_another_collection_is_offered_to_be_merged() -> None:
+    nodes = {node["anidb_id"]: node for node in anime_collections.graph(_kaguya(), 7)["nodes"]}
+
+    assert nodes[300]["in_collection"] is False
+    assert (nodes[300]["collection_id"], nodes[300]["collection_name"]) == (9, "Kaguya-sama Movie")
+
+
+def test_an_entry_not_on_disk_taken_out_takes_what_is_reached_only_through_it() -> None:
+    """Cutting a prequel off cuts off the prequels behind it as well."""
+    catalog = Catalog(
+        entries={1: _entry(1, "Precure 5", 10)},
+        groups={10: Group(10, "Precure 5", 1)},
+        relations=[(1, 2, "Prequel"), (2, 3, "Prequel")],
+    )
+
+    assert anime_collections.assign(catalog).members(10) == [1, 2, 3]
+    cut = anime_collections.assign(catalog, {2: None})
+    assert cut.members(10) == [1]
+    assert cut.alone == {2}
+
+
+def test_an_entry_not_on_disk_can_be_pulled_into_a_collection() -> None:
+    found = anime_collections.assign(_kaguya(), {200: 7})
+    assert 200 in found.members(7)
+
+
+@pytest.fixture()
+def shoko_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    from bankai.web import shoko
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    sent: list[tuple] = []
+
+    async def get(endpoint, /, **params):
+        return {"List": []}
+
+    async def send(method, endpoint, /, *, json_body=None, **params):
+        sent.append((method, endpoint, json_body))
+        return {"IDs": {"ID": 77}} if method == "POST" else True
+
+    monkeypatch.setattr(shoko, "_get", get)
+    monkeypatch.setattr(shoko, "_send", send)
+    return sent
+
+
+def test_splitting_makes_a_new_shoko_group_and_the_entries_not_on_disk_follow(shoko_calls) -> None:
+    created = asyncio.run(anime_collections.split(_kaguya(), 7, [102, 103]))
+
+    assert created == 77
+    assert shoko_calls == [("POST", "/api/v3/Group", {"SeriesIDs": [2]})]
+    assert anime_collections.load_places() == {103: 77}
+
+
+def test_splitting_off_only_entries_not_on_disk_puts_them_in_no_collection(shoko_calls) -> None:
+    assert asyncio.run(anime_collections.split(_kaguya(), 7, [103])) is None
+    assert shoko_calls == []
+    assert anime_collections.load_places() == {103: None}
+
+
+def test_pulling_in_moves_a_series_in_shoko_or_keeps_the_choice_until_it_is_downloaded(shoko_calls) -> None:
+    asyncio.run(anime_collections.include(_kaguya(), 7, 300))
+    asyncio.run(anime_collections.include(_kaguya(), 7, 200))
+
+    assert shoko_calls == [("PATCH", "/api/v3/Series/3/Move/7", None)]
+    assert anime_collections.load_places() == {200: 7}
+
+
+def test_merging_moves_every_series_of_the_other_collection(shoko_calls) -> None:
+    anime_collections.place([555], 9)
+
+    moved = asyncio.run(anime_collections.merge(_kaguya(), 7, 9))
+
+    assert moved == 1
+    assert shoko_calls == [("PATCH", "/api/v3/Series/3/Move/7", None)]
+    # A choice made for the merged collection follows it.
+    assert anime_collections.load_places() == {555: 7}
+
+
+def test_a_choice_is_handed_to_shoko_once_the_entry_is_downloaded(shoko_calls) -> None:
+    """Pulled in while not on disk; Shoko then grouped it by its own rules."""
+    anime_collections.place([300], 7)
+    anime_collections.place([102], None)
+
+    moved = asyncio.run(anime_collections.apply_places(_kaguya()))
+
+    assert moved == 2
+    assert ("PATCH", "/api/v3/Series/3/Move/7", None) in shoko_calls
+    assert ("POST", "/api/v3/Group", {"SeriesIDs": [2]}) in shoko_calls
+    # Shoko keeps them from here.
+    assert anime_collections.load_places() == {}
+
+
+def test_without_shoko_s_catalogue_there_is_no_collection_to_change(client: TestClient) -> None:
+    assert client.get("/api/anime/collections/7/graph").status_code == 404
+    assert client.post("/api/anime/collections/7/include", json={"anidb_id": 999}).status_code == 404
+
+
+def test_the_graph_actions_take_only_entries_of_that_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The request picks among the graph's own entries; anything else is refused."""
+    from bankai.config import reset_settings_cache
+    from bankai.web import anime_collections as collections_mod
+    from bankai.web import shoko_catalog
+    from bankai.web.app import create_app
+
+    async def fetch():
+        return _kaguya()
+
+    async def nothing_to_apply(catalog):
+        return 0
+
+    monkeypatch.setenv("BANKAI_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("BANKAI_ANIME__ENABLED", "false")
+    monkeypatch.setattr(shoko_catalog, "fetch", fetch)
+    monkeypatch.setattr(collections_mod, "apply_places", nothing_to_apply)
+    reset_settings_cache()
+    with TestClient(create_app()) as client:
+        graph = client.get("/api/anime/collections/7/graph").json()
+        assert graph["name"] == "Kaguya-sama"
+        assert {node["anidb_id"] for node in graph["nodes"]} == {101, 102, 103, 200, 300}
+        # A member is not a suggestion, and the whole collection is not a split.
+        assert client.post("/api/anime/collections/7/include", json={"anidb_id": 101}).status_code == 422
+        assert client.post("/api/anime/collections/7/split", json={"anidb_ids": [101, 102, 103]}).status_code == 422
+        assert client.post("/api/anime/collections/7/split", json={"anidb_ids": [200]}).status_code == 422
+        # Only an entry on disk can name the collection.
+        assert client.post("/api/anime/collections/7/title", json={"anidb_id": 103}).status_code == 422
+        # Pulling in an entry not on disk is kept here, with no call to Shoko.
+        assert client.post("/api/anime/collections/7/include", json={"anidb_id": 200}).status_code == 200
+        assert collections_mod.load_places() == {200: 7}
+    reset_settings_cache()

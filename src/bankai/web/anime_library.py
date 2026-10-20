@@ -1049,7 +1049,9 @@ async def group_shows(
     # Collections: the cards of one Shoko group are one card, named after the
     # group, and the group's sequels and prequels not on disk are its missing
     # tabs. Without Shoko's groups, cards stay as their folders made them.
-    collections = anime_collections.assign(catalog)
+    collections = anime_collections.assign(
+        catalog, await asyncio.to_thread(anime_collections.load_places)
+    )
     groups = getattr(catalog, "groups", None) or {}
     if collections.of:
         regrouped: dict[str, dict] = {}

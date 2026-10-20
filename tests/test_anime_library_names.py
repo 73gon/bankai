@@ -197,6 +197,7 @@ def _run_library(
     catalog=None,
     only_key=None,
     reads=None,
+    places=None,
 ):
     """group_shows over a library holding ``folders`` -> {folder: [episode, ...]}.
 
@@ -236,6 +237,9 @@ def _run_library(
     monkeypatch.setattr(anime_library, "german_dubbed_episodes", lambda files: set())
     monkeypatch.setattr(anidb_art, "facts", lambda aid: {})
     monkeypatch.setattr(anidb_art, "cover", lambda aid: None)
+    from bankai.web import anime_collections
+
+    monkeypatch.setattr(anime_collections, "load_places", lambda: dict(places or {}))
 
     entries = [
         {

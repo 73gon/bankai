@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2 } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AniDBAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
+import { CollectionGraph } from '@/components/CollectionGraph';
 import { Meter, rampParts } from '@/components/ui/meter';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
@@ -154,6 +155,8 @@ export default function AnimeLibrary() {
   const [episodeTarget, setEpisodeTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
   const [deletingEpisode, setDeletingEpisode] = useState(false);
   const [titling, setTitling] = useState(false);
+  // The collection whose relation graph is open.
+  const [graphFor, setGraphFor] = useState<number | null>(null);
   // Shows being removed in the background: kept off the page until done.
   const removing = useRef<Set<string>>(new Set());
 
@@ -551,6 +554,16 @@ export default function AnimeLibrary() {
                       {/* First, always: every card is an AniDB entry now, so the
                           tabs' own links no longer stand in for it. */}
                       {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries; each tab links its own' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
+                      {active.collection_id != null && (
+                        <Button
+                          size='sm'
+                          variant='secondary'
+                          onClick={() => setGraphFor(active.collection_id ?? null)}
+                          title='How this collection&apos;s entries relate on AniDB: split, merge, pull entries in'
+                        >
+                          <Network data-icon='inline-start' /> Relations
+                        </Button>
+                      )}
                       {(active.collection_entries?.filter((entry) => entry.owned).length ?? 0) > 1 && (
                         <Select
                           value={String(active.anidb_id ?? '')}
@@ -744,6 +757,11 @@ export default function AnimeLibrary() {
         </DialogContent>
       </Dialog>
       <AniDBLinkDialog name={linkFor ? linkFor.source_title || linkFor.title : null} onClose={() => setLinkFor(null)} onPick={linkShow} />
+      <CollectionGraph
+        groupId={graphFor}
+        onClose={() => setGraphFor(null)}
+        onChanged={() => { void load(); if (selected) void openShow(selected); }}
+      />
     </div>
   );
 }
