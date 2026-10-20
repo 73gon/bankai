@@ -81,9 +81,18 @@ class Collection:
     # The order its Season 00 blocks were given in, so a newcomer does not
     # renumber the specials already on disk.
     specials: list[int] = field(default_factory=list)
+    # Seasons arranged by hand, each the entries that make it up in order: a
+    # movie appended to the season it ends. Empty: the sequel chain decides.
+    arrangement: list[list[int]] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return {"members": self.members, "title": self.title, "name": self.name, "specials": self.specials}
+        return {
+            "members": self.members,
+            "title": self.title,
+            "name": self.name,
+            "specials": self.specials,
+            "arrangement": self.arrangement,
+        }
 
 
 @dataclass
@@ -117,6 +126,8 @@ class Store:
                 row.members.remove(aid)
                 if aid in row.specials:
                     row.specials.remove(aid)
+                row.arrangement = [[a for a in season if a != aid] for season in row.arrangement]
+                row.arrangement = [season for season in row.arrangement if season]
                 if not row.members:
                     del self.collections[cid]
                 elif row.title == aid:
@@ -154,6 +165,11 @@ def _read() -> Store:
             int(title) if str(title or "").isdigit() and int(title) in members else members[0],
             str(row["name"]) if row.get("name") else None,
             [int(a) for a in row.get("specials") or [] if str(a).isdigit()],
+            [
+                [int(a) for a in season if str(a).isdigit()]
+                for season in row.get("arrangement") or []
+                if isinstance(season, list)
+            ],
         )
     store.next = max([store.next, *(cid + 1 for cid in store.collections)])
     return store
@@ -458,17 +474,43 @@ class Plan:
 
     seasons: dict[int, int] = field(default_factory=dict)   # AniList id -> season number
     specials: dict[int, int] = field(default_factory=dict)  # AniList id -> first S00 episode - 1
+    # An entry appended to a season: the episodes of the season before it.
+    offsets: dict[int, int] = field(default_factory=dict)
+    custom: bool = False
 
     def place(self, aid: int, episode: int) -> tuple[int, int] | None:
         if aid in self.seasons:
-            return self.seasons[aid], episode
+            return self.seasons[aid], self.offsets.get(aid, 0) + episode
         if aid in self.specials:
             return 0, self.specials[aid] + episode
         return None
 
     def order(self) -> list[int]:
         """The entries as tabs: seasons in order, then the specials."""
-        return [*sorted(self.seasons, key=self.seasons.__getitem__), *sorted(self.specials, key=self.specials.__getitem__)]
+        return [
+            *sorted(self.seasons, key=lambda aid: (self.seasons[aid], self.offsets.get(aid, 0))),
+            *sorted(self.specials, key=self.specials.__getitem__),
+        ]
+
+    def season_lists(self) -> list[list[int]]:
+        """Season 1..n as the entries making each up, in order."""
+        grouped: dict[int, list[int]] = {}
+        for aid in self.order():
+            if aid in self.seasons:
+                grouped.setdefault(self.seasons[aid], []).append(aid)
+        return [grouped[number] for number in sorted(grouped)]
+
+    def first_of(self, season: int) -> int | None:
+        """The entry a season is named and pictured after: its first."""
+        found = [aid for aid in self.order() if self.seasons.get(aid) == season]
+        return found[0] if found else None
+
+    def arrangement(self) -> dict:
+        return {
+            "seasons": self.season_lists(),
+            "specials": sorted(self.specials, key=self.specials.__getitem__),
+            "custom": self.custom,
+        }
 
 
 def seasons(row: Collection, *, relations: list[tuple[int, int, str]] | None = None, store: Store | None = None) -> list[int]:
@@ -512,16 +554,58 @@ def plan(row: Collection, *, episodes_on_disk: Callable[[int], int] = lambda aid
     in the order the specials were given (``row.specials``), newcomers after
     them by air date.
     """
+    def length(aid: int) -> int:
+        return max(anilist.episode_count(aid) or 0, episodes_on_disk(aid), 1)
+
     line = seasons(row, relations=relations, store=store)
-    result = Plan(seasons={aid: number for number, aid in enumerate(line, start=1)})
+    members = set(row.members)
+    arranged = [[aid for aid in season if aid in members] for season in row.arrangement]
+    arranged = [season for season in arranged if season]
+    if arranged:
+        # By hand: the seasons as arranged; a sequel listed since, in none of
+        # them and not put among the specials, is a season of its own after them.
+        placed = {aid for season in arranged for aid in season}
+        arranged += [[aid] for aid in line if aid not in placed and aid not in row.specials]
+    else:
+        arranged = [[aid] for aid in line]
+    result = Plan(custom=bool(row.arrangement))
+    for number, season in enumerate(arranged, start=1):
+        offset = 0
+        for aid in season:
+            result.seasons[aid] = number
+            if offset:
+                result.offsets[aid] = offset
+            offset += length(aid)
     rest = [aid for aid in row.members if aid not in result.seasons]
     ordered = [aid for aid in row.specials if aid in rest]
     ordered += sorted((aid for aid in rest if aid not in ordered), key=lambda aid: (start(aid), aid))
     offset = 0
     for aid in ordered:
         result.specials[aid] = offset
-        offset += max(anilist.episode_count(aid) or 0, episodes_on_disk(aid), 1)
+        offset += length(aid)
     return result
+
+
+def arrange(store: Store, cid: int, seasons_: list[list[int]] | None, specials: list[int] | None) -> None:
+    """Arrange a collection's seasons by hand, or (None) let the sequel chain do it again.
+
+    Every member must be placed exactly once, in a season or among the specials.
+    """
+    row = store.collections.get(cid)
+    if row is None:
+        raise ValueError("there is no such collection")
+    if seasons_ is None:
+        row.arrangement = []
+        return
+    lists = [[int(aid) for aid in season] for season in seasons_ if season]
+    extra = [int(aid) for aid in specials or []]
+    placed = [aid for season in lists for aid in season] + extra
+    if sorted(placed) != sorted(row.members) or len(set(placed)) != len(placed):
+        raise ValueError("every entry of the collection must be placed exactly once")
+    if not lists:
+        raise ValueError("a collection needs at least one season")
+    row.arrangement = lists
+    row.specials = extra
 
 
 def settle_specials(row: Collection) -> None:
@@ -713,6 +797,7 @@ def graph(
         "title_entry": title_aid,
         "nodes": nodes,
         "edges": edges,
+        "arrangement": placing.arrangement() if row is not None else {"seasons": [], "specials": [], "custom": False},
     }
 
 
@@ -721,6 +806,7 @@ __all__ = [
     "Collection",
     "Plan",
     "Store",
+    "arrange",
     "chain",
     "editing",
     "entry_name",

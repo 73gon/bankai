@@ -15,7 +15,26 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { ArrowRightToLine, ExternalLink, Merge, Network, Plus, Scissors, Star } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowRightToLine,
+  ArrowUp,
+  ArrowUpToLine,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  ListOrdered,
+  Merge,
+  MoreHorizontal,
+  Network,
+  Plus,
+  RotateCcw,
+  Save,
+  Scissors,
+  SplitSquareHorizontal,
+  Star,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type CollectionGraph as Graph, type CollectionNode } from '@/lib/api';
 import { anilistUrl } from '@/lib/anilist';
@@ -23,6 +42,8 @@ import { AnimePoster } from '@/components/AnimePoster';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { cn } from '@/lib/utils';
 
@@ -53,7 +74,7 @@ function typeOf(node: CollectionNode) {
   return TYPES[format === 'TV_SHORT' ? 'TV' : format] ?? OTHER_TYPE;
 }
 
-type EntryData = { node: CollectionNode; selected: boolean };
+type EntryData = { node: CollectionNode; selected: boolean; /** Where the unsaved arrangement files it, when that differs. */ draft?: string | null };
 type FrameData = { name: string; width: number; height: number };
 type FlowNode = Node<EntryData, 'entry'> | Node<FrameData, 'frame'>;
 type Point = { x: number; y: number };
@@ -65,6 +86,65 @@ function aired(node: CollectionNode) {
 
 function meta(node: CollectionNode) {
   return [node.year ? String(node.year) : null, node.episodes ? `${node.episodes} eps` : null].filter(Boolean).join(' · ');
+}
+
+/** A collection's seasons as edited here: AniList ids per season, in order, and the specials. */
+type Arrangement = { seasons: number[][]; specials: number[] };
+
+function sameArrangement(a: Arrangement, b: Arrangement) {
+  return JSON.stringify(a.seasons) === JSON.stringify(b.seasons) && JSON.stringify(a.specials) === JSON.stringify(b.specials);
+}
+
+/** Every edit works on a copy with the entry taken out (empty seasons kept, so indexes hold), then tidies. */
+function edit(arrangement: Arrangement, change: (draft: Arrangement) => void): Arrangement {
+  const draft = { seasons: arrangement.seasons.map((season) => [...season]), specials: [...arrangement.specials] };
+  change(draft);
+  return { seasons: draft.seasons.filter((season) => season.length > 0), specials: draft.specials };
+}
+
+function takeOut(draft: Arrangement, id: number) {
+  draft.seasons = draft.seasons.map((season) => season.filter((other) => other !== id));
+  draft.specials = draft.specials.filter((other) => other !== id);
+}
+
+function swap<T>(list: T[], at: number, by: number) {
+  const to = at + by;
+  if (to < 0 || to >= list.length) return;
+  [list[at], list[to]] = [list[to], list[at]];
+}
+
+/** The entry to the end of season ``index`` (a new last season when past the end). */
+function appendTo(arrangement: Arrangement, id: number, index: number) {
+  return edit(arrangement, (draft) => {
+    takeOut(draft, id);
+    if (index >= draft.seasons.length) draft.seasons.push([id]);
+    else draft.seasons[index].push(id);
+  });
+}
+
+function toSpecials(arrangement: Arrangement, id: number) {
+  return edit(arrangement, (draft) => {
+    takeOut(draft, id);
+    draft.specials.push(id);
+  });
+}
+
+/** The entry out of its season into a new one straight after it. */
+function ownSeason(arrangement: Arrangement, id: number) {
+  return edit(arrangement, (draft) => {
+    const at = draft.seasons.findIndex((season) => season.includes(id));
+    if (at < 0) return;
+    draft.seasons[at] = draft.seasons[at].filter((other) => other !== id);
+    draft.seasons.splice(at + 1, 0, [id]);
+  });
+}
+
+/** Where each entry is filed under an arrangement: "Season 2", "Specials". */
+function labels(arrangement: Arrangement) {
+  const out = new Map<number, string>();
+  arrangement.seasons.forEach((season, index) => season.forEach((id) => out.set(id, 'Season ' + (index + 1))));
+  arrangement.specials.forEach((id) => out.set(id, 'Specials'));
+  return out;
 }
 
 /** Entries in sequel order, prequel first, with the row each goes in; what the links do not order goes by air date. */
@@ -300,9 +380,15 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
       <div className='relative'>
         <AnimePoster url={node.poster_url} title={node.title} className={cn('w-full rounded-lg', !node.in_collection && node.collection_id === null && 'opacity-70')} />
         {/* Where a member is filed on disk: Season 2, Specials. */}
-        {node.in_collection && node.season && (
-          <span className='absolute left-1.5 top-1.5 rounded border border-white/15 bg-background/85 px-1.5 py-px text-[0.62rem] font-medium text-foreground backdrop-blur-sm'>
-            {node.season}
+        {node.in_collection && (data.draft || node.season) && (
+          <span
+            className={cn(
+              'absolute left-1.5 top-1.5 rounded border bg-background/85 px-1.5 py-px text-[0.62rem] font-medium backdrop-blur-sm',
+              data.draft ? 'border-info/70 text-info' : 'border-white/15 text-foreground',
+            )}
+            title={data.draft ? 'Not saved yet: now ' + (node.season ?? 'unfiled') : undefined}
+          >
+            {data.draft ?? node.season}
           </span>
         )}
       </div>
@@ -346,11 +432,14 @@ function joins(from: Point, to: Point) {
 function Canvas({
   graph,
   selected,
+  drafts,
   onPick,
   onClear,
 }: {
   graph: Graph;
   selected: number[];
+  /** Entries the unsaved arrangement files elsewhere, and where. */
+  drafts: Map<number, string>;
   onPick: (id: number, add: boolean) => void;
   onClear: () => void;
 }) {
@@ -382,8 +471,11 @@ function Canvas({
         zIndex: -1,
       }];
     });
-    return [...boxes, ...nodes.map((item) => ({ ...item, data: { ...item.data, selected: selected.includes(Number(item.id)) } }))];
-  }, [frames, nodes, selected]);
+    return [...boxes, ...nodes.map((item) => ({
+      ...item,
+      data: { ...item.data, selected: selected.includes(Number(item.id)), draft: drafts.get(Number(item.id)) ?? null },
+    }))];
+  }, [frames, nodes, selected, drafts]);
   const edges = useMemo<Edge[]>(() => graph.edges.map((item) => {
     const from = positions.get(item.from) ?? { x: 0, y: 0 };
     const to = positions.get(item.to) ?? { x: 0, y: 0 };
@@ -484,6 +576,238 @@ function Action({ icon: Icon, children, ...props }: React.ComponentProps<typeof 
   );
 }
 
+/** "Append to season…": an entry to the end of a season, a new season, or the specials. */
+function SeasonPicker({
+  arrangement,
+  id,
+  disabled,
+  onChange,
+  label = 'Append to season…',
+}: {
+  arrangement: Arrangement;
+  id: number;
+  disabled?: boolean;
+  onChange: (next: Arrangement) => void;
+  label?: string;
+}) {
+  const special = arrangement.specials.includes(id);
+  return (
+    <Select
+      value=''
+      disabled={disabled}
+      onValueChange={(value) => {
+        if (value === 'specials') onChange(toSpecials(arrangement, id));
+        else if (value === 'new') onChange(appendTo(arrangement, id, arrangement.seasons.length));
+        else onChange(appendTo(arrangement, id, Number(value)));
+      }}
+    >
+      <SelectTrigger data-size='sm' className='w-full' aria-label={label}>
+        <SelectValue placeholder={label} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          {arrangement.seasons.map((season, index) => (
+            <SelectItem key={index} value={String(index)}>
+              Append to Season {index + 1}{season.includes(id) && season[season.length - 1] === id ? ' (already last)' : ''}
+            </SelectItem>
+          ))}
+          <SelectItem value='new'>Make it a new last season</SelectItem>
+          {!special && <SelectItem value='specials'>To specials</SelectItem>}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
+
+/** One entry in the Seasons panel: its type colour, title and episodes, with what can be done to it. */
+function SeasonChip({
+  id,
+  node,
+  first,
+  last,
+  onMove,
+  children,
+}: {
+  id: number;
+  node: CollectionNode | undefined;
+  first: boolean;
+  last: boolean;
+  onMove: (by: number) => void;
+  /** The chip's menu. */
+  children: React.ReactNode;
+}) {
+  const kind = node ? typeOf(node) : OTHER_TYPE;
+  const title = node?.title ?? 'AniList ' + id;
+  return (
+    <span className={cn('inline-flex max-w-full items-center gap-0.5 rounded-md border py-0.5 pl-0.5 pr-0.5 text-xs', kind.chip, node && !node.owned && 'opacity-70')}>
+      <Button size='icon' variant='ghost' className='size-6 shrink-0' disabled={first} aria-label={'Move ' + title + ' earlier'} onClick={() => onMove(-1)}>
+        <ChevronLeft />
+      </Button>
+      <span className='min-w-0 truncate px-0.5 text-foreground' title={title + ' · ' + kind.label}>{title}</span>
+      <span className='shrink-0 font-mono text-[0.62rem] opacity-80'>{node?.episodes ? node.episodes + ' eps' : '? eps'}</span>
+      <Button size='icon' variant='ghost' className='size-6 shrink-0' disabled={last} aria-label={'Move ' + title + ' later'} onClick={() => onMove(1)}>
+        <ChevronRight />
+      </Button>
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button size='icon' variant='ghost' className='size-6 shrink-0' aria-label={'More for ' + title}>
+            <MoreHorizontal />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align='start' className='flex w-64 flex-col gap-2 p-3'>
+          <p className='break-words text-xs font-medium text-foreground'>{title}</p>
+          {children}
+        </PopoverContent>
+      </Popover>
+    </span>
+  );
+}
+
+/**
+ * The collection's seasons, edited here before they are saved: which
+ * entries make up each season and in what order (an entry after the first
+ * continues the season's numbering), and which are specials.
+ */
+function SeasonsPanel({
+  arrangement,
+  byId,
+  open,
+  onToggle,
+  dirty,
+  custom,
+  busy,
+  onChange,
+  onDiscard,
+  onSave,
+  onReset,
+}: {
+  arrangement: Arrangement;
+  byId: Map<number, CollectionNode>;
+  open: boolean;
+  onToggle: () => void;
+  dirty: boolean;
+  custom: boolean;
+  busy: boolean;
+  onChange: (next: Arrangement) => void;
+  onDiscard: () => void;
+  onSave: () => void;
+  onReset: () => void;
+}) {
+  const { seasons, specials } = arrangement;
+  const change = (work: (draft: Arrangement) => void) => onChange(edit(arrangement, work));
+  return (
+    <section className='flex max-h-[45%] shrink-0 flex-col rounded-lg border border-border bg-card/40'>
+      <header className='flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2'>
+        <button
+          type='button'
+          onClick={onToggle}
+          aria-expanded={open}
+          className='flex items-center gap-1.5 text-sm font-medium text-foreground'
+        >
+          <ChevronDown className={cn('size-4 transition-transform', !open && '-rotate-90')} />
+          <ListOrdered className='size-4' /> Seasons
+        </button>
+        <span className='text-xs text-muted-foreground'>
+          {custom ? 'Arranged by hand' : 'Automatic: the sequel chain by air date'}
+          {dirty && <span className='text-info'> · unsaved changes</span>}
+        </span>
+        <div className='ml-auto flex flex-wrap gap-2'>
+          {dirty && <Button size='sm' variant='ghost' disabled={busy} onClick={onDiscard}>Discard</Button>}
+          <Button
+            size='sm'
+            variant='secondary'
+            disabled={busy || !custom}
+            onClick={onReset}
+            title={custom ? 'Forget the hand arrangement: seasons follow the sequel chain by air date again' : 'Already arranged automatically'}
+          >
+            <RotateCcw data-icon='inline-start' /> Reset to automatic
+          </Button>
+          <Button size='sm' disabled={busy || !dirty} onClick={onSave}>
+            <Save data-icon='inline-start' /> Save arrangement
+          </Button>
+        </div>
+      </header>
+      {open && (
+        <div className='flex min-h-0 flex-col gap-2 overflow-y-auto border-t border-border px-3 py-2'>
+          <p className='text-xs text-muted-foreground'>
+            Saving renames the files on disk into their new seasons and episode numbers; the moves are journaled and can be undone.
+          </p>
+          {seasons.map((season, index) => (
+            <div key={index} className='flex flex-col gap-1.5 border-b border-border/50 pb-2 last:border-0 sm:flex-row sm:items-start'>
+              <div className='flex shrink-0 items-center gap-1 sm:w-44'>
+                <span className='w-[4.5rem] text-xs font-medium text-foreground'>Season {index + 1}</span>
+                <Button size='icon' variant='ghost' className='size-6' disabled={busy || index === 0} aria-label={'Move season ' + (index + 1) + ' up'} onClick={() => change((draft) => swap(draft.seasons, index, -1))}>
+                  <ArrowUp />
+                </Button>
+                <Button size='icon' variant='ghost' className='size-6' disabled={busy || index === seasons.length - 1} aria-label={'Move season ' + (index + 1) + ' down'} onClick={() => change((draft) => swap(draft.seasons, index, 1))}>
+                  <ArrowDown />
+                </Button>
+                {index > 0 && (
+                  <Button
+                    size='icon'
+                    variant='ghost'
+                    className='size-6'
+                    disabled={busy}
+                    aria-label={'Append season ' + (index + 1) + ' to season ' + index}
+                    title={'Append to season above: its entries continue Season ' + index}
+                    onClick={() => change((draft) => {
+                      draft.seasons[index - 1].push(...draft.seasons[index]);
+                      draft.seasons[index] = [];
+                    })}
+                  >
+                    <ArrowUpToLine />
+                  </Button>
+                )}
+              </div>
+              <div className='flex min-w-0 flex-wrap gap-1.5'>
+                {season.map((id, at) => (
+                  <SeasonChip
+                    key={id}
+                    id={id}
+                    node={byId.get(id)}
+                    first={at === 0}
+                    last={at === season.length - 1}
+                    onMove={(by) => change((draft) => swap(draft.seasons[index], at, by))}
+                  >
+                    <Button size='sm' variant='secondary' className='justify-start' disabled={busy || season.length < 2} onClick={() => onChange(ownSeason(arrangement, id))}>
+                      <SplitSquareHorizontal data-icon='inline-start' /> Own season
+                    </Button>
+                    <Button size='sm' variant='secondary' className='justify-start' disabled={busy} onClick={() => onChange(toSpecials(arrangement, id))}>
+                      <Star data-icon='inline-start' /> To specials
+                    </Button>
+                    <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
+                  </SeasonChip>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div className='flex flex-col gap-1.5 sm:flex-row sm:items-start'>
+            <span className='shrink-0 text-xs font-medium text-foreground sm:w-44'>Specials</span>
+            <div className='flex min-w-0 flex-wrap gap-1.5'>
+              {specials.length === 0 && <span className='text-xs text-muted-foreground'>None</span>}
+              {specials.map((id, at) => (
+                <SeasonChip
+                  key={id}
+                  id={id}
+                  node={byId.get(id)}
+                  first={at === 0}
+                  last={at === specials.length - 1}
+                  onMove={(by) => change((draft) => swap(draft.specials, at, by))}
+                >
+                  <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
+                  <Button size='sm' variant='secondary' className='justify-start' disabled={busy} onClick={() => onChange(appendTo(arrangement, id, seasons.length))}>
+                    <Plus data-icon='inline-start' /> Make season
+                  </Button>
+                </SeasonChip>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** What to show: a collection, or one entry that is in none. */
 export type GraphTarget = { collection: number } | { entry: number } | null;
 
@@ -511,6 +835,23 @@ export function CollectionGraph({
   const [armed, setArmed] = useState<number | null>(null);
   const collectionId = target && 'collection' in target ? target.collection : null;
   const rootAid = target && 'entry' in target ? target.entry : null;
+  // The season arrangement as edited here; saved only with "Save arrangement".
+  const [draft, setDraft] = useState<Arrangement | null>(null);
+  const [seasonsOpen, setSeasonsOpen] = useState(true);
+  const saved = useMemo<Arrangement | null>(
+    () => (graph?.arrangement ? { seasons: graph.arrangement.seasons, specials: graph.arrangement.specials } : null),
+    [graph],
+  );
+  useEffect(() => setDraft(saved), [saved]);
+  const dirty = Boolean(draft && saved && !sameArrangement(draft, saved));
+  // On the cards: where the unsaved arrangement files an entry, where that differs from the saved one.
+  const drafts = useMemo(() => {
+    const out = new Map<number, string>();
+    if (!draft || !saved || !dirty) return out;
+    const before = labels(saved);
+    for (const [id, label] of labels(draft)) if (before.get(id) !== label) out.set(id, label);
+    return out;
+  }, [draft, saved, dirty]);
 
   async function load() {
     if (!target) return;
@@ -569,6 +910,25 @@ export function CollectionGraph({
     }
   }
 
+  /** The arrangement on disk: the edited one, or back to the automatic one. */
+  async function saveArrangement(reset: boolean) {
+    if (collectionId === null || (!reset && !draft)) return;
+    setBusy(true);
+    try {
+      const result = await api.arrangeCollection(collectionId, reset ? { reset: true } : { seasons: draft!.seasons, specials: draft!.specials });
+      toast.success(
+        (reset ? 'Seasons arranged automatically again' : 'Arrangement saved')
+        + ' — ' + result.moved + ' file' + (result.moved === 1 ? '' : 's') + ' moved',
+      );
+      onChanged();
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const root = rootAid !== null ? byId.get(rootAid) : undefined;
 
   function actions() {
@@ -606,6 +966,14 @@ export function CollectionGraph({
             )}>
               {members.length === 1 ? 'Split off into its own collection' : `Split these ${members.length} off into a new collection`}
             </Action>
+          )}
+          {members.length === 1 && draft && (
+            <SeasonPicker
+              arrangement={draft}
+              id={members[0].anilist_id}
+              disabled={busy}
+              onChange={setDraft}
+            />
           )}
           {members.length === 1 && !members[0].owned && !members[0].title_entry && (
             <p className='text-xs text-muted-foreground'>Not downloaded: named after it, the collection takes its name (unless renamed by hand) and its cover, on disk and in Jellyfin.</p>
@@ -651,22 +1019,39 @@ export function CollectionGraph({
               : 'The main line runs top to bottom, sequel collections continuing it; side stories, recaps and movies sit beside the entry they belong to.'}
           </DialogDescription>
         </DialogHeader>
-        <div className='flex min-h-0 flex-1 gap-3'>
-          <div className='relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-black/30'>
-            {loading && !graph ? (
-              <div className='flex h-full items-center justify-center'><Spinner /></div>
-            ) : !graph ? (
-              <EmptyState icon={Network} title='No graph' description='The relations of this collection could not be read.' />
-            ) : (
-              <Canvas key={version} graph={graph} selected={selected} onPick={pick} onClear={clear} />
-            )}
-            {busy && (
-              <div className='absolute right-3 top-3 flex items-center gap-2 rounded-md bg-card/90 px-3 py-1.5 text-xs text-muted-foreground'>
-                <Spinner /> Saving…
-              </div>
+        <div className='flex min-h-0 flex-1 flex-col gap-3 md:flex-row'>
+          <div className='flex min-h-0 min-w-0 flex-1 flex-col gap-3'>
+            <div className='relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-black/30'>
+              {loading && !graph ? (
+                <div className='flex h-full items-center justify-center'><Spinner /></div>
+              ) : !graph ? (
+                <EmptyState icon={Network} title='No graph' description='The relations of this collection could not be read.' />
+              ) : (
+                <Canvas key={version} graph={graph} selected={selected} drafts={drafts} onPick={pick} onClear={clear} />
+              )}
+              {busy && (
+                <div className='absolute right-3 top-3 flex items-center gap-2 rounded-md bg-card/90 px-3 py-1.5 text-xs text-muted-foreground'>
+                  <Spinner /> Saving…
+                </div>
+              )}
+            </div>
+            {collectionId !== null && draft && (
+              <SeasonsPanel
+                arrangement={draft}
+                byId={byId}
+                open={seasonsOpen}
+                onToggle={() => setSeasonsOpen((value) => !value)}
+                dirty={dirty}
+                custom={Boolean(graph?.arrangement?.custom)}
+                busy={busy}
+                onChange={setDraft}
+                onDiscard={() => setDraft(saved)}
+                onSave={() => void saveArrangement(false)}
+                onReset={() => void saveArrangement(true)}
+              />
             )}
           </div>
-          <aside className='flex w-80 shrink-0 flex-col gap-3 overflow-y-auto rounded-lg border border-border bg-card/40 p-3 text-sm'>
+          <aside className='flex max-h-[35%] w-full shrink-0 flex-col md:max-h-none md:w-80 gap-3 overflow-y-auto rounded-lg border border-border bg-card/40 p-3 text-sm'>
             {picked.length === 0 ? (
               <Legend />
             ) : (

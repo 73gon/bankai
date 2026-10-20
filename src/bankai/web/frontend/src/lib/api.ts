@@ -542,6 +542,10 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
   episode_title?: string | null;
   season_number: number | null;
   episode: number | null;
+  /** The AniList entry a matched file is, on cards made of AniList entries. */
+  anilist_id?: number | null;
+  /** That entry's episode the file is. */
+  anilist_episode?: number | null;
 }
 
 /** The three kinds of root the server library scans. */
@@ -637,6 +641,17 @@ export interface CollectionGraph {
   title_entry: number | null;
   nodes: CollectionNode[];
   edges: CollectionEdge[];
+  /** How the collection's entries make up its seasons; absent for an entry in no collection. */
+  arrangement?: CollectionArrangement | null;
+}
+
+/** A collection's seasons: ``seasons[i]`` are the AniList ids of Season i+1 in
+ *  order (later ones continue its numbering); ``specials`` make up Season 00. */
+export interface CollectionArrangement {
+  seasons: number[][];
+  specials: number[];
+  /** Arranged by hand rather than by the sequel chain. */
+  custom: boolean;
 }
 
 /** A film on the server, as the Movies & Shows library presents it. */
@@ -1160,9 +1175,27 @@ export const api = {
     request<{ ok: boolean; name: string | null; anilist_id: number }>('/api/anime/collections/title', {
       method: 'POST', body: JSON.stringify({ key, anilist_id: anilistId }),
     }),
-  /** Delete a show's folders and torrents, and blacklist it. Decided server-side from the key. */
-  removeAnimeLibraryShow: (key: string, label = '') =>
-    runAction<PurgeResult & { anilist_id: number | null }>('/api/anime/library/remove', { key, label }),
+  /** Delete a show's folders and torrents and stop following it; blacklist it too unless ``blacklist`` is false. */
+  removeAnimeLibraryShow: (key: string, label = '', blacklist = true) =>
+    runAction<PurgeResult & { anilist_id: number | null }>('/api/anime/library/remove', { key, label, blacklist }),
+  /** Files of a card become episodes of an AniList entry (``episodes[i]`` for ``paths[i]``, else the
+   *  number in each name), moved into place; ``anilistId`` null un-matches them. */
+  assignFiles: (key: string, paths: string[], anilistId: number | null, episodes?: number[]) =>
+    request<{ ok: boolean; assigned?: number; moved?: number; unmatched?: number; anilist_id?: number | null }>(
+      '/api/anime/library/assign',
+      {
+        method: 'POST',
+        body: JSON.stringify(
+          episodes ? { key, paths, anilist_id: anilistId, episodes } : { key, paths, anilist_id: anilistId },
+        ),
+      },
+    ),
+  /** A collection's whole season arrangement, or back to the automatic one; files are renamed into place. */
+  arrangeCollection: (collectionId: number, body: { seasons: number[][]; specials: number[] } | { reset: true }) =>
+    request<{ ok: boolean; moved: number; result: CollectionArrangement }>(
+      `/api/anime/collections/${collectionId}/arrange`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
   /** Delete episode files of one show, subtitles with them; only files the library lists under it. */
   deleteAnimeEpisodes: (key: string, paths: string[]) =>
     request<Pick<PurgeResult, 'deleted_files' | 'deleted_folders' | 'freed_bytes'>>('/api/anime/library/episodes/delete', {

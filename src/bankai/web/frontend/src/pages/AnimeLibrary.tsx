@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
@@ -137,7 +137,31 @@ type EntryRef = { anilist_id: number; title: string };
 /** What the AniList picker is open for: an Unmatched card's folders, or one entry of a card to swap. */
 type PickTarget =
   | { mode: 'match'; show: AnimeLibraryShow }
-  | { mode: 'rematch'; show: AnimeLibraryShow; from: EntryRef };
+  | { mode: 'rematch'; show: AnimeLibraryShow; from: EntryRef }
+  /** Only choosing the entry selected files are matched to; the match dialog does the rest. */
+  | { mode: 'assign'; query: string };
+
+/** The selected files of a card that "Match to AniList entry…" is open for, in the card's order. */
+type AssignTarget = { show: AnimeLibraryShow; rows: AnimeLibraryEpisode[] };
+
+/** The entries a card's files can be matched to without searching: its collection's and its tabs'. */
+function knownEntries(show: AnimeLibraryShow): EntryRef[] {
+  const seen = new Set<number>();
+  const out: EntryRef[] = [];
+  const add = (entry: EntryRef) => {
+    if (seen.has(entry.anilist_id)) return;
+    seen.add(entry.anilist_id);
+    out.push({ anilist_id: entry.anilist_id, title: entry.title });
+  };
+  for (const entry of show.collection_entries ?? []) add(entry);
+  for (const entries of Object.values(show.season_anilist ?? {})) for (const entry of entries) add(entry);
+  return out;
+}
+
+/** A row that is a file on disk, and so can be selected. */
+function hasFile(episode: AnimeLibraryEpisode) {
+  return !episode.missing && Boolean(episode.path);
+}
 
 /** The entry "Change AniList entry" swaps: the open tab's, when the tab is one entry. */
 function tabEntry(show: AnimeLibraryShow, tab: string): EntryRef | null {
@@ -181,7 +205,16 @@ export default function AnimeLibrary() {
   const [searching, setSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [downloading, setDownloading] = useState<string | null>(null);
-  const [removeTarget, setRemoveTarget] = useState<AnimeLibraryShow | null>(null);
+  // The show to remove, and whether it is blacklisted too.
+  const [removeTarget, setRemoveTarget] = useState<{ show: AnimeLibraryShow; blacklist: boolean } | null>(null);
+  // The episode files ticked in the drawer, and the card they are of.
+  const [checked, setChecked] = useState<{ key: string; paths: string[] }>({ key: '', paths: [] });
+  // "Match to AniList entry…": the files, the entry, the first episode and each file's episode.
+  const [assignFor, setAssignFor] = useState<AssignTarget | null>(null);
+  const [assignEntry, setAssignEntry] = useState<EntryRef | null>(null);
+  const [assignFirst, setAssignFirst] = useState('1');
+  const [assignEpisodes, setAssignEpisodes] = useState<string[]>([]);
+  const [assigning, setAssigning] = useState(false);
   const [episodeTarget, setEpisodeTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
   const [deletingEpisode, setDeletingEpisode] = useState(false);
   const [titling, setTitling] = useState(false);
@@ -214,10 +247,15 @@ export default function AnimeLibrary() {
     }
   }
 
-  /** After a change that may rename the open card: open the card it became, or close the drawer. */
-  async function reopen(find: (show: AnimeLibraryShow) => boolean) {
+  /** After a change that may rename the open card: open the card it became, or close the drawer.
+   *  Several ways to find it are tried in order. */
+  async function reopen(...finds: Array<(show: AnimeLibraryShow) => boolean>) {
     const fresh = await load();
-    const card = fresh?.find(find);
+    let card: AnimeLibraryShow | undefined;
+    for (const find of finds) {
+      card = fresh?.find(find);
+      if (card) break;
+    }
     if (card) {
       await openShow(card.key);
     } else {
@@ -245,6 +283,12 @@ export default function AnimeLibrary() {
     const target = pickFor;
     if (!target) return;
     const name = anilistName(anime);
+    if (target.mode === 'assign') {
+      // Only the choice: the match dialog still asks for the episode numbers.
+      setAssignEntry({ anilist_id: anime.anilist_id, title: name });
+      setPickFor(null);
+      return;
+    }
     try {
       if (target.mode === 'match') {
         const folders = target.show.folders?.length ? target.show.folders : [target.show.key];
@@ -311,8 +355,8 @@ export default function AnimeLibrary() {
   }
 
   async function removeShow() {
-    const target = removeTarget;
-    if (!target) return;
+    if (!removeTarget) return;
+    const { show: target, blacklist } = removeTarget;
     // Off the page at once; deleting runs in the background, where the
     // Dashboard shows it under "Your actions".
     removing.current.add(target.key);
@@ -322,9 +366,9 @@ export default function AnimeLibrary() {
     setSelectedShow(null);
     toast.info('Removing ' + target.title + ' in the background…');
     try {
-      const result = await api.removeAnimeLibraryShow(target.key, target.title);
+      const result = await api.removeAnimeLibraryShow(target.key, target.title, blacklist);
       toast.success(
-        target.title + ' removed and blacklisted — deleted ' + result.deleted_files + ' file'
+        target.title + (blacklist ? ' removed and blacklisted' : ' removed') + ' — deleted ' + result.deleted_files + ' file'
         + (result.deleted_files === 1 ? '' : 's')
         + (result.freed_bytes ? ' (' + formatSize(result.freed_bytes) + ')' : '')
         + (result.removed_torrents ? ', ' + result.removed_torrents + ' torrent' + (result.removed_torrents === 1 ? '' : 's') : ''),
@@ -373,6 +417,101 @@ export default function AnimeLibrary() {
       toast.error(error.message);
     } finally {
       setRenaming(false);
+    }
+  }
+
+  /** The ticked files of the open card that are still on disk, in the card's order. */
+  function checkedRows(show: AnimeLibraryShow | null): AnimeLibraryEpisode[] {
+    if (!show || checked.key !== show.key || !checked.paths.length) return [];
+    const ticked = new Set(checked.paths);
+    return show.episodes.filter((episode) => hasFile(episode) && ticked.has(episode.path));
+  }
+
+  function toggleChecked(show: AnimeLibraryShow, paths: string[], on: boolean) {
+    setChecked((current) => {
+      const mine = current.key === show.key ? current.paths : [];
+      const rest = mine.filter((path) => !paths.includes(path));
+      return { key: show.key, paths: on ? [...rest, ...paths] : rest };
+    });
+  }
+
+  function clearChecked() {
+    setChecked({ key: '', paths: [] });
+  }
+
+  function openAssign(show: AnimeLibraryShow, rows: AnimeLibraryEpisode[]) {
+    if (!rows.length) return;
+    const ids = new Set(rows.map((row) => row.anilist_id ?? null));
+    const only = ids.size === 1 ? [...ids][0] : null;
+    setAssignEntry(only != null ? knownEntries(show).find((entry) => entry.anilist_id === only) ?? null : null);
+    const first = rows[0].anilist_episode ?? 1;
+    setAssignFirst(String(first));
+    // Matched files keep their own number; the rest count on from the first.
+    setAssignEpisodes(rows.map((row, index) => String(row.anilist_episode ?? first + index)));
+    setAssignFor({ show, rows });
+  }
+
+  /** A new first episode numbers every file consecutively from it. */
+  function changeAssignFirst(value: string) {
+    setAssignFirst(value);
+    const first = Number(value);
+    if (!assignFor || !value.trim() || !Number.isInteger(first) || first < 0) return;
+    setAssignEpisodes(assignFor.rows.map((_, index) => String(first + index)));
+  }
+
+  async function assign() {
+    const target = assignFor;
+    const entry = assignEntry;
+    if (!target || !entry) return;
+    const numbers = assignEpisodes.map((value) => Number(value));
+    if (numbers.some((value, index) => !assignEpisodes[index].trim() || !Number.isInteger(value) || value < 0)) {
+      toast.error('Every file needs a whole episode number');
+      return;
+    }
+    if (new Set(numbers).size !== numbers.length) {
+      toast.error('Two files cannot be the same episode');
+      return;
+    }
+    setAssigning(true);
+    try {
+      const result = await api.assignFiles(target.show.key, target.rows.map((row) => row.path), entry.anilist_id, numbers);
+      const count = result.assigned ?? target.rows.length;
+      toast.success(
+        count + ' file' + (count === 1 ? '' : 's') + ' matched to ' + entry.title
+        + (result.moved ? ' · ' + result.moved + ' moved into place' : ''),
+      );
+      setAssignFor(null);
+      clearChecked();
+      const id = entry.anilist_id;
+      // The card stays open while files are left on it; else the card the files went to.
+      await reopen(
+        (card) => card.key === target.show.key,
+        (card) => card.anilist_id === id || Boolean(card.anilist_ids?.includes(id)),
+      );
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setAssigning(false);
+    }
+  }
+
+  async function unmatch(show: AnimeLibraryShow, rows: AnimeLibraryEpisode[]) {
+    if (!rows.length) return;
+    setAssigning(true);
+    try {
+      const result = await api.assignFiles(show.key, rows.map((row) => row.path), null);
+      const count = result.unmatched ?? rows.length;
+      toast.success(count + ' file' + (count === 1 ? '' : 's') + ' unmatched; they are on an Unmatched card now');
+      clearChecked();
+      const folders = new Set(show.folders ?? []);
+      await reopen(
+        (card) => card.key === show.key,
+        (card) => isUnmatched(card) && (card.folders ?? []).some((folder) => folders.has(folder)),
+      );
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setAssigning(false);
     }
   }
 
@@ -467,6 +606,9 @@ export default function AnimeLibrary() {
   // Another card opens on its first tab; a refreshed one stays where it was, while that tab is still there.
   const openTab = tab && tab.key === active?.key && seasons.map(String).includes(tab.value) ? tab.value : String(seasons[0]);
   const swappable = active && !isUnmatched(active) ? tabEntry(active, openTab) : null;
+  // The open card's ticked files, across its tabs.
+  const activeChecked = checkedRows(active);
+  const checkedPaths = new Set(activeChecked.map((entry) => entry.path));
   // Read absolutely, a season tab is one of the user's own arc folders: named after it.
   const seasonLabel = (season: number | null) => {
     if (season === null) return 'Other files';
@@ -623,7 +765,7 @@ export default function AnimeLibrary() {
         </footer>
       )}
 
-      <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); setTab(null); } }}>
+      <Drawer open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); setTab(null); clearChecked(); } }}>
         <DrawerContent aria-describedby={undefined} className='md:w-3/4'>
           {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner /></div>}
           {active && (
@@ -731,8 +873,16 @@ export default function AnimeLibrary() {
                       )}
                       <Button
                         size='sm'
+                        variant='secondary'
+                        onClick={() => setRemoveTarget({ show: active, blacklist: false })}
+                        title='Delete this show from disk and stop following it, without blacklisting: search can still find new releases'
+                      >
+                        <Trash2 data-icon='inline-start' /> Remove
+                      </Button>
+                      <Button
+                        size='sm'
                         variant='destructive'
-                        onClick={() => setRemoveTarget(active)}
+                        onClick={() => setRemoveTarget({ show: active, blacklist: true })}
                         title='Delete this show from disk and never download it again'
                       >
                         <Trash2 data-icon='inline-start' /> Remove and blacklist
@@ -745,6 +895,35 @@ export default function AnimeLibrary() {
                 <TabsList className='flex h-auto flex-wrap justify-start px-5 pt-3'>
                   {seasons.map((season) => <TabsTrigger key={String(season)} value={String(season)}>{seasonLabel(season)}</TabsTrigger>)}
                 </TabsList>
+                {activeChecked.length > 0 && (
+                  <div className='mx-5 mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card/60 px-3 py-2'>
+                    <span className='text-xs text-muted-foreground'>
+                      <span className='font-mono tabular-nums text-foreground'>{activeChecked.length}</span> file{activeChecked.length === 1 ? '' : 's'} selected
+                    </span>
+                    <Button
+                      size='sm'
+                      disabled={assigning}
+                      onClick={() => openAssign(active, activeChecked)}
+                      title='Make the selected files episodes of one AniList entry, numbered as you set; they are moved into place'
+                    >
+                      <Link2 data-icon='inline-start' /> Match to AniList entry…
+                    </Button>
+                    {!isUnmatched(active) && (
+                      <Button
+                        size='sm'
+                        variant='secondary'
+                        disabled={assigning}
+                        onClick={() => void unmatch(active, activeChecked)}
+                        title='Take the selected files off their AniList entry: they move to an Unmatched card'
+                      >
+                        <Unlink data-icon='inline-start' /> {assigning ? 'Working…' : 'Unmatch'}
+                      </Button>
+                    )}
+                    <Button size='sm' variant='ghost' onClick={clearChecked} className='ml-auto'>
+                      <X data-icon='inline-start' /> Clear
+                    </Button>
+                  </div>
+                )}
                 {seasons.map((season) => (
                   <TabsContent key={String(season)} value={String(season)} className='min-h-0 flex-1 overflow-y-auto px-5 pb-4'>
                     {season !== null && (active.season_anilist?.[String(season)]?.length ?? 0) > 0 && (
@@ -778,9 +957,36 @@ export default function AnimeLibrary() {
                     )}
                     <div className='overflow-x-auto'>
                       <table className='w-full border-collapse text-sm'>
-                        <thead><tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'><th className='py-2.5 pr-3 font-medium'>Ep</th><th className='px-3 py-2.5 font-medium'>Episode / File</th><th className='px-3 py-2.5 font-medium'>Encode</th><th className='px-3 py-2.5 text-right font-medium'>Size</th><th className='py-2.5 pl-3 text-right font-medium'>State</th></tr></thead>
+                        <thead><tr className='border-b border-border text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground'><th className='w-7 py-2.5 pr-2 font-medium'>{(() => {
+                          // "Select all in this tab": every row of it that is a file.
+                          const files = active.episodes.filter((entry) => entry.season_number === season && hasFile(entry)).map((entry) => entry.path);
+                          const ticked = files.filter((path) => checkedPaths.has(path)).length;
+                          return (
+                            <input
+                              type='checkbox'
+                              className='size-3.5 cursor-pointer accent-foreground align-middle disabled:cursor-not-allowed'
+                              aria-label='Select every file in this tab'
+                              title='Select every file in this tab'
+                              disabled={files.length === 0}
+                              checked={files.length > 0 && ticked === files.length}
+                              ref={(element) => { if (element) element.indeterminate = ticked > 0 && ticked < files.length; }}
+                              onChange={(event) => toggleChecked(active, files, event.target.checked)}
+                            />
+                          );
+                        })()}</th><th className='py-2.5 pr-3 font-medium'>Ep</th><th className='px-3 py-2.5 font-medium'>Episode / File</th><th className='px-3 py-2.5 font-medium'>Encode</th><th className='px-3 py-2.5 text-right font-medium'>Size</th><th className='py-2.5 pl-3 text-right font-medium'>State</th></tr></thead>
                         <tbody>{active.episodes.filter((entry) => entry.season_number === season).map((entry) => (
-                          <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className='border-b border-border/70 last:border-0'>
+                          <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className={cn('border-b border-border/70 last:border-0', hasFile(entry) && checkedPaths.has(entry.path) && 'bg-accent/30')}>
+                            <td className='w-7 py-2.5 pr-2'>
+                              {hasFile(entry) && (
+                                <input
+                                  type='checkbox'
+                                  className='size-3.5 cursor-pointer accent-foreground align-middle'
+                                  aria-label={'Select ' + entry.name}
+                                  checked={checkedPaths.has(entry.path)}
+                                  onChange={(event) => toggleChecked(active, [entry.path], event.target.checked)}
+                                />
+                              )}
+                            </td>
                             <td className='py-2.5 pr-3 font-mono text-xs tabular-nums'>{entry.episode ?? '—'}</td>
                             <td className='px-3 py-2.5 text-xs text-muted-foreground'>{entry.episode_title && <p className='text-sm text-foreground'>{entry.episode_title}</p>}{!entry.missing && <p className='font-mono text-[0.68rem]'>{entry.name}</p>}{entry.missing && <p>{entry.tba ? 'TBA' : 'Missing'}{entry.aired ? ' · ' + entry.aired : ''}</p>}</td>
                             <td className='px-3 py-2.5'>
@@ -823,18 +1029,20 @@ export default function AnimeLibrary() {
       <Dialog open={Boolean(removeTarget)} onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}>
         <DialogContent className='max-w-md'>
           <DialogHeader>
-            <DialogTitle>Remove {removeTarget?.title}?</DialogTitle>
+            <DialogTitle>Remove {removeTarget?.show.title}?</DialogTitle>
             <DialogDescription>
-              This deletes {removeTarget?.downloaded_count ?? 0} episode{removeTarget?.downloaded_count === 1 ? '' : 's'}
-              {removeTarget ? ' (' + formatSize(removeTarget.size) + ')' : ''} from disk, removes its torrents,
-              and blacklists the show so no season of it is downloaded again. It moves to the Blacklist tab,
-              where you can restore it. The deleted files cannot be recovered.
+              This deletes {removeTarget?.show.downloaded_count ?? 0} episode{removeTarget?.show.downloaded_count === 1 ? '' : 's'}
+              {removeTarget ? ' (' + formatSize(removeTarget.show.size) + ')' : ''} from disk and removes its torrents.
+              {removeTarget?.blacklist
+                ? ' It also blacklists the show so no season of it is downloaded again. It moves to the Blacklist tab, where you can restore it.'
+                : ' bankai stops following it, but it is not blacklisted: new releases can still be found by search and downloaded.'}
+              {' '}The deleted files cannot be recovered.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant='secondary' onClick={() => setRemoveTarget(null)}>Cancel</Button>
             <Button variant='destructive' onClick={() => void removeShow()}>
-              <Trash2 data-icon='inline-start' /> Delete and blacklist
+              <Trash2 data-icon='inline-start' /> {removeTarget?.blacklist ? 'Delete and blacklist' : 'Delete'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -878,15 +1086,123 @@ export default function AnimeLibrary() {
           </div>
         </DialogContent>
       </Dialog>
+      <Dialog open={assignFor !== null} onOpenChange={(open) => { if (!open && !assigning) setAssignFor(null); }}>
+        <DialogContent className='flex max-h-[90dvh] w-[min(44rem,calc(100vw-2rem))] max-w-2xl flex-col'>
+          <DialogHeader>
+            <DialogTitle>Match {assignFor?.rows.length ?? 0} file{assignFor?.rows.length === 1 ? '' : 's'} to an AniList entry</DialogTitle>
+            <DialogDescription>
+              Each file becomes the episode of the entry you set below and is renamed into place; the entry joins a
+              collection if it is in none.
+            </DialogDescription>
+          </DialogHeader>
+          {assignFor && (() => {
+            const known = knownEntries(assignFor.show);
+            const options = assignEntry && !known.some((entry) => entry.anilist_id === assignEntry.anilist_id) ? [assignEntry, ...known] : known;
+            return (
+              <div className='flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1'>
+                <section className='flex flex-col gap-2'>
+                  <span className='text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground'>Entry</span>
+                  {options.length > 0 && (
+                    <ul className='flex flex-col gap-1' role='radiogroup' aria-label='AniList entry'>
+                      {options.map((entry) => {
+                        const on = assignEntry?.anilist_id === entry.anilist_id;
+                        return (
+                          <li key={entry.anilist_id}>
+                            <button
+                              type='button'
+                              role='radio'
+                              aria-checked={on}
+                              onClick={() => setAssignEntry(entry)}
+                              className={cn(
+                                'flex w-full items-center gap-2.5 rounded-md border px-3 py-2 text-left text-sm transition-colors',
+                                on ? 'border-foreground/60 bg-accent/50 text-foreground' : 'border-border text-foreground-soft hover:bg-accent/30',
+                              )}
+                            >
+                              <span className={cn('size-3 shrink-0 rounded-full border', on ? 'border-foreground bg-foreground' : 'border-muted-foreground')} aria-hidden='true' />
+                              <span className='min-w-0 flex-1 break-words'>{entry.title}</span>
+                              <span className='shrink-0 font-mono text-[0.65rem] text-muted-foreground'>id {entry.anilist_id}</span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <Button
+                    size='sm'
+                    variant='secondary'
+                    className='self-start'
+                    onClick={() => setPickFor({ mode: 'assign', query: assignFor.show.source_title || assignFor.show.title })}
+                  >
+                    <Search data-icon='inline-start' /> Search AniList…
+                  </Button>
+                </section>
+                <section className='flex flex-col gap-2'>
+                  <div className='flex flex-wrap items-center justify-between gap-2'>
+                    <span className='text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground'>Episodes</span>
+                    <label className='flex items-center gap-2 text-xs text-muted-foreground'>
+                      First episode
+                      <Input
+                        type='number'
+                        min={0}
+                        inputMode='numeric'
+                        aria-label='First episode'
+                        value={assignFirst}
+                        onChange={(event) => changeAssignFirst(event.target.value)}
+                        className='w-20 font-mono tabular-nums'
+                      />
+                    </label>
+                  </div>
+                  <p className='text-xs text-muted-foreground'>The files in their order on the card; changing the first episode numbers them all on from it.</p>
+                  <ul className='flex flex-col divide-y divide-border/70 rounded-md border border-border'>
+                    {assignFor.rows.map((row, index) => (
+                      <li key={row.path} className='flex items-center gap-3 px-3 py-2'>
+                        <div className='min-w-0 flex-1'>
+                          <p className='break-all font-mono text-[0.7rem] text-foreground'>{row.name}</p>
+                          {row.anilist_id != null && (
+                            <p className='text-[0.65rem] text-muted-foreground'>
+                              Now: {known.find((entry) => entry.anilist_id === row.anilist_id)?.title ?? 'AniList ' + row.anilist_id}
+                              {row.anilist_episode != null ? ' · episode ' + row.anilist_episode : ''}
+                            </p>
+                          )}
+                        </div>
+                        <Input
+                          type='number'
+                          min={0}
+                          inputMode='numeric'
+                          aria-label={'Episode of ' + row.name}
+                          value={assignEpisodes[index] ?? ''}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setAssignEpisodes((current) => current.map((old, at) => (at === index ? value : old)));
+                          }}
+                          className='w-20 shrink-0 font-mono tabular-nums'
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setAssignFor(null)} disabled={assigning}>Cancel</Button>
+            <Button onClick={() => void assign()} disabled={assigning || !assignEntry}>
+              <Link2 data-icon='inline-start' /> {assigning ? 'Matching…' : assignEntry ? 'Match to ' + assignEntry.title : 'Pick an entry'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <AniListPickDialog
-        query={pickFor ? (pickFor.mode === 'match' ? pickFor.show.source_title || pickFor.show.title : pickFor.from.title) : null}
+        query={pickFor ? (pickFor.mode === 'match' ? pickFor.show.source_title || pickFor.show.title : pickFor.mode === 'assign' ? pickFor.query : pickFor.from.title) : null}
         onClose={() => setPickFor(null)}
         onPick={pickEntry}
-        title={pickFor?.mode === 'rematch' ? 'Change the AniList entry of ' + pickFor.from.title : 'Match on AniList'}
+        title={pickFor?.mode === 'rematch' ? 'Change the AniList entry of ' + pickFor.from.title : pickFor?.mode === 'assign' ? 'Choose the AniList entry' : 'Match on AniList'}
         description={pickFor?.mode === 'rematch'
           ? 'Its files become the picked entry, with the same episode numbers, and are moved into place.'
-          : "This card's files become the picked entry's episodes, by the number in each file name, and are moved into place."}
-        action={pickFor?.mode === 'rematch' ? 'Change' : 'Match'}
+          : pickFor?.mode === 'assign'
+            ? 'The selected files are matched to it once you confirm their episode numbers.'
+            : "This card's files become the picked entry's episodes, by the number in each file name, and are moved into place."}
+        action={pickFor?.mode === 'rematch' ? 'Change' : pickFor?.mode === 'assign' ? 'Choose' : 'Match'}
       />
       <Dialog open={renameFor !== null} onOpenChange={(open) => { if (!open && !renaming) setRenameFor(null); }}>
         <DialogContent className='max-w-md'>

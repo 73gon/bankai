@@ -674,12 +674,15 @@ def merge_entry_episodes(
     *,
     codecs: dict[tuple[int, int], str] | None = None,
     german_dubbed: set[tuple[int, int]] | None = None,
+    optional: set[int] | None = None,
 ) -> dict:
     """Episodes of a card made of AniList entries, one tab per entry.
 
     ``rows`` are the card's files, ``season_number`` the tab of their entry
     and ``episode`` its own number. ``entries`` are (AniList id, tab label,
-    episode list or None when unknown, finished), in tab order.
+    episode list or None when unknown, finished), in tab order. The missing
+    episodes of ``optional`` entries -- the specials -- are listed but not
+    counted: a show is complete without its recap movie.
     """
     today = date.today().isoformat()
 
@@ -703,6 +706,30 @@ def merge_entry_episodes(
         if row.get("season_number") in labels:
             row["season"] = labels[row["season_number"]]
     merged["metadata_available"] = any(listed for _aid, _label, listed, _finished in entries)
+    skipped = {index for index, (aid, *_rest) in enumerate(entries, start=1) if aid in (optional or set())}
+    if skipped:
+        counted = [
+            row for row in merged["episodes"]
+            if row.get("season_number") is not None
+            and not (row.get("missing") and row["season_number"] in skipped)
+        ]
+        downloaded = sum(not row.get("missing", False) and not row["staged"] for row in counted)
+        outstanding = [row for row in counted if row.get("missing", False) or row["staged"]]
+        state = (
+            "empty" if downloaded == 0
+            else "upcoming" if outstanding and all(row.get("tba", False) for row in outstanding)
+            else "partial" if outstanding
+            else "complete"
+        )
+        if merged["completion_state"] == "unknown" and downloaded:
+            state = "unknown"
+        merged.update(
+            downloaded_count=downloaded,
+            total_count=len(counted),
+            completion_state=state,
+            finished=state == "complete"
+            and all(ended(listed, done) for aid, _label, listed, done in entries if aid not in (optional or set())),
+        )
     return merged
 
 
@@ -891,6 +918,7 @@ async def group_shows(
                 [(aid, labels[aid], roster(aid), anilist.finished(aid)) for aid in order],
                 codecs=probed_codecs(rows),
                 german_dubbed=german_dubbed_episodes(rows),
+                optional=set(placing.specials) if row is not None else None,
             )
             romaji = anilist.media(main).get("romaji")
             result = {

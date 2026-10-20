@@ -2002,13 +2002,16 @@ def create_app() -> Any:
 
         The show is looked up here from its card key, never taken as paths from
         the request: what gets deleted is decided by the library itself. A
-        collection is its own folder; every AniList entry of it is blacklisted.
+        collection is its own folder; every AniList entry of it is blacklisted --
+        unless ``blacklist`` is false: then its files go and the automation stops
+        following it, but new releases of it can still be found and taken.
         """
         from bankai.web import anime_collections, anime_files, library_walk
 
         key = str(req.get("key") or "").strip()
         if not key:
             raise HTTPException(status_code=422, detail="key is required")
+        blacklist = req.get("blacklist") is not False
 
         async def remove(action: Any) -> dict:
             action.detail = "Finding the show's folders"
@@ -2019,15 +2022,31 @@ def create_app() -> Any:
             root = Path(listing["root"])
             folders = [root / name for name in show.get("folders") or [] if name]
             entries = [int(aid) for aid in show.get("anilist_ids") or []]
-            action.detail = f"Blacklisting it and deleting {len(folders)} folder" + (
-                "" if len(folders) == 1 else "s"
+            action.detail = ("Blacklisting it and deleting " if blacklist else "Deleting ") + (
+                f"{len(folders)} folder" + ("" if len(folders) == 1 else "s")
             )
-            result = await erai_mod.blacklist_show(
-                title=str(show.get("title") or key),
-                source_title=str(show.get("source_title") or show.get("title") or ""),
-                anilist_ids=entries,
-                folders=folders,
-            )
+            if blacklist:
+                result = await erai_mod.blacklist_show(
+                    title=str(show.get("title") or key),
+                    source_title=str(show.get("source_title") or show.get("title") or ""),
+                    anilist_ids=entries,
+                    folders=folders,
+                )
+            else:
+                # Only off the disk: not blacklisted, but no longer followed
+                # either, or the card would stay behind as an empty one.
+                result = await asyncio.to_thread(
+                    erai_mod._delete_series_files, delete_files=True, extra_folders=folders, extra_files=None
+                )
+
+                def unfollow() -> None:
+                    with erai_mod._STATE_LOCK:
+                        state = erai_mod._load_state()
+                        for aid in entries:
+                            state.get("anime", {}).pop(str(aid), None)
+                        erai_mod._save_state(state)
+
+                await asyncio.to_thread(unfollow)
 
             def forget() -> None:
                 # Gone from disk: out of the index, and the collection with it.
@@ -2044,7 +2063,7 @@ def create_app() -> Any:
             return {**result, "anilist_id": show.get("anilist_id")}
 
         return await _run_action(
-            req, kind="remove", title="Remove and blacklist: " + _label(req, key),
+            req, kind="remove", title=("Remove and blacklist: " if blacklist else "Remove: ") + _label(req, key),
             path="/api/anime/library/remove", work=remove,
         )
 
@@ -2312,6 +2331,89 @@ def create_app() -> Any:
             return anime_collections.name(store.collections[cid]), {cid}
 
         return await _collection_change(change)
+
+    @app.post("/api/anime/collections/{cid}/arrange")
+    async def anime_collection_arrange(cid: int, req: dict) -> dict:
+        """Arrange a collection's seasons by hand -- a movie appended to the season it ends,
+        seasons reordered -- or (``reset``) let the sequel chain decide again."""
+        from bankai.web import anime_collections
+
+        await _collection_graph(cid)
+        if req.get("reset"):
+            seasons, specials = None, None
+        else:
+            try:
+                seasons = [[int(aid) for aid in season] for season in req.get("seasons") or []]
+                specials = [int(aid) for aid in req.get("specials") or []]
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail="seasons and specials are lists of AniList ids") from exc
+
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.arrange(store, cid, seasons, specials)
+            return anime_collections.plan(store.collections[cid], store=store).arrangement(), {cid}
+
+        return await _collection_change(change)
+
+    @app.post("/api/anime/library/assign")
+    async def anime_library_assign(req: dict) -> dict:
+        """Files of one card become episodes of an AniList entry -- or (``anilist_id`` null) of none.
+
+        For what no whole-entry rematch can do: eight OVA files in one folder
+        that are three AniList entries. The paths only pick among the episode
+        files the library itself lists on the card.
+        """
+        from bankai.web import anime_files
+
+        key = str(req.get("key") or "").strip()
+        paths = [str(raw) for raw in req.get("paths") or [] if str(raw).strip()]
+        if not key or not paths:
+            raise HTTPException(status_code=422, detail="key and paths are required")
+        listing = await _anime_library_payload(show=key)
+        listed = {
+            str(row["path"])
+            for show in listing.get("shows") or []
+            for row in show.get("episodes") or []
+            if row.get("path") and not row.get("missing")
+        }
+        unknown = [raw for raw in paths if raw not in listed]
+        if unknown:
+            raise HTTPException(status_code=404, detail="not an episode of this show: " + Path(unknown[0]).name)
+        if req.get("anilist_id") is None:
+            for raw in paths:
+                await asyncio.to_thread(anime_files.forget, raw)
+            snaps["anime_library"].invalidate()
+            return {"ok": True, "unmatched": len(paths)}
+        entry = await _anilist_entry(req.get("anilist_id"))
+        episodes = req.get("episodes")
+        if episodes is not None:
+            if not isinstance(episodes, list) or len(episodes) != len(paths) or not all(
+                str(number).isdigit() and int(number) > 0 for number in episodes
+            ):
+                raise HTTPException(status_code=422, detail="one positive episode number per file")
+            numbers = [int(number) for number in episodes]
+        else:
+            from bankai.processor.anime import episode_number
+            from bankai.torrent.matcher import parse_se
+
+            numbers = []
+            for raw in paths:
+                numbered = parse_se(Path(raw).name)
+                number = numbered[1] if numbered else episode_number(Path(raw).name)
+                if not number:
+                    raise HTTPException(status_code=422, detail=f"no episode number in {Path(raw).name}")
+                numbers.append(int(number))
+
+        def assign() -> int:
+            with anime_files.editing() as rows:
+                for raw, number in zip(paths, numbers, strict=True):
+                    rel = anime_files.key(raw)
+                    if rel is not None:
+                        rows[rel] = [(entry.id, number)]
+            return len(paths)
+
+        assigned = await asyncio.to_thread(assign)
+        layout = await _relayout_entries({entry.id})
+        return {"ok": True, "assigned": assigned, "moved": layout.get("moved", 0), "anilist_id": entry.id}
 
     @app.post("/api/anime/collections/{cid}/name")
     async def anime_collection_name(cid: int, req: dict) -> dict:

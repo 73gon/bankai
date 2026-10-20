@@ -530,7 +530,8 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
         if anilist.media(main).get("banner"):
             pictures.append(Picture(folder / "fanart.jpg", anilist.media(main)["banner"]))
         plan = layout.plans[cid]
-        by_season = {number: aid for aid, number in plan.seasons.items()}
+        # A season made of several entries is named and pictured after its first.
+        by_season = {number: plan.first_of(number) for number in set(plan.seasons.values())}
         for season_dir in folder.glob("Season *"):
             match = re.fullmatch(r"Season (\d+)", season_dir.name)
             if not match or not season_dir.is_dir():

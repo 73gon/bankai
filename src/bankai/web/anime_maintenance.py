@@ -71,7 +71,7 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
         }
         files = sorted((rel, rel in published) for rel in by_collection.get(cid, []))
         material = json.dumps(
-            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.specials, media, files],
+            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files],
             sort_keys=True,
             default=str,
         )

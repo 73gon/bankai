@@ -140,7 +140,8 @@ def test_missing_episodes_are_counted_from_anilist(titan, library) -> None:
 
     show = _shows(_titan_files(library), library.anime)[AOT]
 
-    assert (show["downloaded_count"], show["total_count"]) == (4, 12)
+    # The OVA's missing episode is listed, but a show is complete without it.
+    assert (show["downloaded_count"], show["total_count"]) == (4, 11)
     assert show["completion_state"] == "partial"
     assert show["metadata_available"] is True
     missing = [(row["season_number"], row["episode"]) for row in show["episodes"] if row["missing"]]
@@ -224,7 +225,8 @@ def test_a_followed_entry_of_a_collection_is_that_collections_card(titan, librar
     shows = _shows([], library.anime)
 
     assert list(shows) == [AOT]
-    assert (shows[AOT]["episode_count"], shows[AOT]["total_count"]) == (0, 12)
+    # Its seasons' episodes; the OVA's do not count while none is on disk.
+    assert (shows[AOT]["episode_count"], shows[AOT]["total_count"]) == (0, 10)
 
 
 def test_a_blacklisted_followed_entry_gets_no_card(titan, library) -> None:

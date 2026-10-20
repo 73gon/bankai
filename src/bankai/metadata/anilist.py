@@ -362,15 +362,37 @@ def episode_count(anilist_id: object) -> int | None:
     return media(anilist_id).get("episodes") or offline.entry(anilist_id).get("episodes")
 
 
+def _own_numbers(numbered: dict, count: int) -> dict[int, str]:
+    """An entry's episodes by its own numbers, from a list AniList may number another way.
+
+    Streaming sites list a second season as "Episode 26".."Episode 37", or
+    list the first season's episodes on the second's page. Numbers that fit
+    the entry are taken as they are; a run of exactly as many as the entry has
+    is renumbered from 1; anything else says nothing about this entry.
+    """
+    rows = {int(number): value for number, value in numbered.items() if str(number).isdigit()}
+    if not rows or not count:
+        return rows
+    keys = sorted(rows)
+    if keys[-1] <= count:
+        return rows
+    if len(keys) == count and keys[-1] - keys[0] == count - 1:
+        return {number - keys[0] + 1: rows[number] for number in keys}
+    return {}
+
+
 def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
-    """(number, title, air date) of each of its episodes, as far as known."""
+    """(number, title, air date) of each of its episodes, as far as known.
+
+    As many as AniList says it has; while it is airing and has no count yet,
+    as many as are scheduled.
+    """
     kept = media(anilist_id)
     count = episode_count(anilist_id) or 0
-    known = {int(number) for number in (kept.get("airing") or {})} | {int(n) for n in (kept.get("streaming") or {})}
-    last = max([count, *known], default=0)
-    airing = kept.get("airing") or {}
-    streaming = kept.get("streaming") or {}
-    return [(n, streaming.get(str(n)), airing.get(str(n))) for n in range(1, last + 1)]
+    airing = _own_numbers(kept.get("airing") or {}, count)
+    streaming = _own_numbers(kept.get("streaming") or {}, count)
+    last = count or max([*airing, *streaming], default=0)
+    return [(n, streaming.get(n), airing.get(n)) for n in range(1, last + 1)]
 
 
 def finished(anilist_id: object) -> bool:
