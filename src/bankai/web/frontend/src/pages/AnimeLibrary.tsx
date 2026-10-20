@@ -229,9 +229,14 @@ export default function AnimeLibrary() {
     try {
       const result = await api.upgradeShowToHevc(show.anidb_ids);
       if (result.queued === 0) {
+        // Say what was found, not what is assumed: "already HEVC" only when it is.
         toast.info(result.no_replacement > 0
-          ? 'No HEVC release is available for the remaining ' + result.no_replacement + ' episode(s)'
-          : 'Nothing to upgrade — every episode is already HEVC');
+          ? 'No HEVC release with German subtitles was found for ' + result.no_replacement + ' AVC episode(s)'
+          : result.not_probed
+            ? result.not_probed + ' episode(s) have not been checked for their codec yet; try again later'
+            : result.german_dub_kept
+              ? 'Nothing to upgrade: the AVC episodes left carry a German dub'
+              : 'Nothing to upgrade — every episode is already HEVC');
       } else {
         toast.success(
           'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')

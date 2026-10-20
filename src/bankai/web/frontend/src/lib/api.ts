@@ -1155,6 +1155,8 @@ export const api = {
       no_replacement: number;
       already_hevc: number;
       german_dub_kept: number;
+      /** Episodes whose files the codec sweep has not probed yet. */
+      not_probed?: number;
     }>(
       '/api/anime/library/upgrade-hevc',
       { method: 'POST', body: JSON.stringify({ anidb_ids: anidbIds }) },

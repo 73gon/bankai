@@ -2143,6 +2143,17 @@ def _published_show(monkeypatch, tmp_path, *, twin_available=True):
     )
     # No German dub anywhere unless a test says so; the real check runs ffprobe.
     monkeypatch.setattr(erai, "_is_german_dub", lambda path: False)
+    # What the files are, as the codec sweep probed them: E01 HEVC, E02 AVC.
+    probes = {
+        str(folder / "Show - 01.mkv"): {"codec": "hevc"},
+        str(folder / "Show - 02.mkv"): {"codec": "avc"},
+    }
+    monkeypatch.setattr("bankai.web.anime_library._load_codec_cache", lambda: probes)
+
+    async def nothing_on_nyaa(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(erai.anime_mod, "_fetch_rss", nothing_on_nyaa)
 
     async def no_sleep(_seconds):
         pass
@@ -2163,13 +2174,51 @@ def test_upgrading_a_show_queues_hevc_only_for_its_avc_episodes(monkeypatch, tmp
     assert queued["status"] == "queued"
     assert queued["canonical"] == "anidb:555|2"
     assert (queued["anidb_id"], queued["episode"]) == (555, 2)
-    # Publishing must overwrite the episode it replaces.
+    # Publishing must overwrite the episode it replaces, and the AVC file goes once it has.
     assert "--replace-existing" in queued["args"]
+    assert [Path(row["path"]).name for row in queued["replace_files"]] == ["Show - 02.mkv"]
     assert queued["args"][queued["args"].index("--anidb-id") + 1] == "555"
     assert queued["args"][queued["args"].index("--episode") + 1] == "2"
     assert len(qbit.added) == 1
     # The original stays on disk and playable until the replacement lands.
     assert state["releases"][avc_done.info_hash]["status"] == "done"
+
+
+def test_an_avc_episode_bankai_never_downloaded_is_upgraded_too(monkeypatch, tmp_path):
+    """Fire Force: downloaded before the automation, filed in a TVDB folder, no record.
+
+    Its AVC episodes were reported as already HEVC: the upgrade looked only
+    at bankai's own download records.
+    """
+    state, _avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path)
+    state["releases"].clear()
+    state["canonical"].clear()
+    season = tmp_path / "shows_anime" / "The Show" / "Season 01"
+    season.mkdir(parents=True)
+    old = season / "The Show - S01E03.mkv"
+    old.write_bytes(b"video")
+    monkeypatch.setattr(
+        shoko_catalog, "saved_links", lambda: shoko_catalog.Catalog(files={str(old): [(555, 3)]})
+    )
+    from bankai.web import anime_library
+
+    probes = {**anime_library._load_codec_cache(), str(old): {"codec": "avc"}}
+    monkeypatch.setattr(anime_library, "_load_codec_cache", lambda: probes)
+    third = entry("[Erai-raws] Show - 03 [1080p CR WEBRip HEVC AAC][MultiSub][GER]", 4)
+
+    async def on_nyaa(_client, term, _category, _page):
+        return [third] if "HEVC" in term else []
+
+    monkeypatch.setattr(erai.anime_mod, "_fetch_rss", on_nyaa)
+
+    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+
+    assert result["queued"] == 2  # episode 2 from the catalogue, 3 found on Nyaa
+    queued = state["releases"][third.info_hash]
+    assert queued["canonical"] == "anidb:555|3"
+    assert [row["path"] for row in queued["replace_files"]] == [str(old)]
+    assert replacement.info_hash in state["releases"]
+    assert len(qbit.added) == 2
 
 
 def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch, tmp_path):
