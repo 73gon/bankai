@@ -1120,7 +1120,7 @@ export const api = {
     }),
   /** An Unmatched card's files become that entry's episodes (by the number in each name), moved into place. */
   matchLibraryFolders: (folders: string[], anilistId: number) =>
-    request<{ ok: boolean; anilist_id?: number; moved?: number }>('/api/anime/library/match', {
+    request<{ ok: boolean; anilist_id?: number; moved?: number; matched?: string[]; skipped?: string[] }>('/api/anime/library/match', {
       method: 'POST', body: JSON.stringify({ folders, anilist_id: anilistId }),
     }),
   /** Every file of entry ``fromId`` becomes entry ``toId`` (same episode numbers), moved into place. */

@@ -292,8 +292,16 @@ export default function AnimeLibrary() {
     try {
       if (target.mode === 'match') {
         const folders = target.show.folders?.length ? target.show.folders : [target.show.key];
-        await api.matchLibraryFolders(folders, anime.anilist_id);
-        toast.success(target.show.title + ' matched to ' + name);
+        const result = await api.matchLibraryFolders(folders, anime.anilist_id);
+        const skipped = result.skipped?.length ?? 0;
+        if (skipped && !(result.matched?.length ?? 0)) {
+          toast.error(
+            'Nothing matched: the file names carry no episode number. Tick the files and use "Match to AniList entry…" to number them.',
+          );
+          return;
+        }
+        if (skipped) toast.warning(skipped + ' file' + (skipped === 1 ? '' : 's') + ' had no episode number and stayed unmatched; tick them and use "Match to AniList entry…".');
+        else toast.success(target.show.title + ' matched to ' + name);
       } else {
         if (target.from.anilist_id === anime.anilist_id) {
           toast.info(target.from.title + ' is already that entry');

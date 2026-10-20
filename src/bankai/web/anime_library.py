@@ -1031,6 +1031,8 @@ def match_files(paths: list[Path], anilist_id: int) -> dict:
     """Files no entry was known for become one entry's episodes, by the number in each name.
 
     Returns the files matched and the ones whose name carries no episode number.
+    A single file numbered 0 or not at all -- "Show - 00.mkv", a prologue --
+    is the entry's first episode: there is nothing else it could be.
     """
     from bankai.processor.anime import episode_number
     from bankai.web import anime_files
@@ -1041,6 +1043,8 @@ def match_files(paths: list[Path], anilist_id: int) -> dict:
             rel = anime_files.key(path)
             numbered = parse_se(path.name)
             number = numbered[1] if numbered else episode_number(path.name)
+            if not number and len(paths) == 1:
+                number = 1
             if rel is None or not number:
                 skipped.append(str(path))
                 continue

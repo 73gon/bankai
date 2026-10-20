@@ -434,3 +434,24 @@ def test_an_entry_in_no_collection_yet_is_a_card_of_its_own(titan, library) -> N
     show = shows["Attack on Titan Season 2"]
     assert (show["collection_id"], show["anilist_ids"], show["folders"]) == (None, [S2], ["Loose"])
     assert [row["season"] for row in show["episodes"]] == ["Attack on Titan Season 2"] * 2
+
+
+def test_a_single_file_numbered_0_is_the_entrys_first_episode(titan, library) -> None:
+    path = library.anime / "One-Punch Man (2015)" / "One Punch Man (2025) - 00.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("video")
+
+    result = anime_library.match_files([path], S1)
+
+    assert result["matched"] == [str(path)] and anime_files.of(path) == [(S1, 1)]
+
+
+def test_several_files_numbered_0_are_reported_not_guessed(titan, library) -> None:
+    paths = [library.anime / "Extras" / f"Extra {n} - 00.mkv" for n in (1, 2)]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("video")
+
+    result = anime_library.match_files(paths, S1)
+
+    assert result["matched"] == [] and len(result["skipped"]) == 2
