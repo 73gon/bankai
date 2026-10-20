@@ -496,3 +496,102 @@ def test_relations_are_learned_for_entries_shoko_holds_no_series_for(shoko_calls
     asyncio.run(shoko_catalog.fill_relations(fresh, {500, 600}))
     assert calls == []
     assert (500, 501, "Sequel") in fresh.relations
+
+
+# -- AniList names ---------------------------------------------------------------
+
+
+@pytest.fixture()
+def anilist_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """AniList knows entry 101 as "Kaguya-sama: Love Is War"."""
+    from bankai.metadata import anidb_art, anilist
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(anidb_art, "facts", lambda aid: {"anilist": 1000 + int(aid)})
+    rows = {1101: {"english": "Kaguya-sama: Love Is War", "romaji": "Kaguya-sama wa Kokurasetai", "cover": "https://s4.anilist.co/1101.jpg"}}
+    monkeypatch.setattr(anilist, "_load", lambda: rows)
+    return rows
+
+
+def test_anilist_names_an_entry_in_english_else_romaji(anilist_names) -> None:
+    from bankai.metadata import anilist
+
+    assert anilist.name(101) == "Kaguya-sama: Love Is War"
+    anilist_names[1101]["english"] = None
+    assert anilist.name(101) == "Kaguya-sama wa Kokurasetai"
+    assert anilist.cover(101) == "https://s4.anilist.co/1101.jpg"
+    assert anilist.name(555) is None
+
+
+def test_collections_are_named_after_anilist_in_shoko_but_not_over_a_hand_given_name(anilist_names, shoko_calls) -> None:
+    catalog = _kaguya()
+    catalog.groups[9] = Group(9, "My own name", 300, has_custom_name=True)
+
+    changed = asyncio.run(anime_collections.sync_names(catalog))
+
+    assert changed == 1
+    assert shoko_calls[-1] == (
+        "PATCH",
+        "/api/v3/Group/7",
+        [
+            {"op": "replace", "path": "/Name", "value": "Kaguya-sama: Love Is War"},
+            {"op": "replace", "path": "/HasCustomName", "value": True},
+        ],
+    )
+    assert catalog.groups[7].name == "Kaguya-sama: Love Is War"
+    # Named by hand in Shoko: left alone.
+    assert catalog.groups[9].name == "My own name"
+    # Named by bankai, it is kept in step when AniList's name changes.
+    anilist_names[1101]["english"] = "Love Is War"
+    assert asyncio.run(anime_collections.sync_names(catalog)) == 1
+    assert catalog.groups[7].name == "Love Is War"
+
+
+def test_anilist_is_asked_once_per_week_fifty_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bankai.metadata import anidb_art, anilist
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(anilist, "_LOADED", None)
+    monkeypatch.setattr(anidb_art, "facts", lambda aid: {"anilist": 1000 + int(aid)} if int(aid) != 7 else {})
+    asked: list[list[int]] = []
+
+    class Response:
+        def __init__(self, ids):
+            self.ids = ids
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            media = [
+                {"id": i, "title": {"english": f"Show {i}", "romaji": None}, "coverImage": {"extraLarge": f"https://s4.anilist.co/{i}.jpg"}}
+                for i in self.ids if i != 1002
+            ]
+            return {"data": {"Page": {"media": media}}}
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json):
+            asked.append(json["variables"]["ids"])
+            return Response(json["variables"]["ids"])
+
+    monkeypatch.setattr(anilist.httpx, "AsyncClient", Client)
+
+    fetched = asyncio.run(anilist.ensure({1, 2, 7} | set(range(100, 160))))
+
+    # Entry 7 has no AniList match; the rest go in batches of fifty.
+    assert [len(batch) for batch in asked] == [50, 12]
+    assert fetched == 61  # 1002 is not on AniList any more
+    assert anilist.name(1) == "Show 1001" and anilist.cover(1) == "https://s4.anilist.co/1001.jpg"
+    assert anilist.name(2) is None
+    asked.clear()
+    assert asyncio.run(anilist.ensure({1, 2})) == 0
+    assert asked == []  # kept, including the one AniList did not have

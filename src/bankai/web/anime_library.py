@@ -975,11 +975,22 @@ def prepare_anidb_rows(files: list[dict], order: list[int], table: Any) -> list[
 
 
 def _entry_name(aid: int, catalog: Any, known: dict) -> str:
+    """An entry's name as shown: AniList's, else Shoko's, else AniDB's."""
+    from bankai.metadata import anilist
+
     entry = catalog.entries.get(aid) if catalog is not None else None
     anime_entry = known.get(aid)
-    return (entry.title if entry else None) or (
+    return anilist.name(aid) or (entry.title if entry else None) or (
         (anime_entry.english_title or anime_entry.title) if anime_entry else f"AniDB {aid}"
     )
+
+
+def _entry_cover(aid: int, catalog: Any) -> str | None:
+    """An entry's cover: AniList's, else Shoko's, else anime-offline-database's."""
+    from bankai.metadata import anidb_art, anilist
+
+    entry = catalog.entries.get(aid) if catalog is not None else None
+    return anilist.cover(aid) or (entry.poster_url if entry else None) or anidb_art.cover(aid)
 
 
 async def group_shows(
@@ -1231,7 +1242,7 @@ async def group_shows(
                 display_title = _entry_name(anidb_id, catalog, known)
             if anime_entry is not None and not _same_name(anime_entry.title, display_title):
                 source_title = anime_entry.title
-            poster_url = (entry.poster_url if entry else None) or anidb_art.cover(anidb_id)
+            poster_url = _entry_cover(anidb_id, catalog)
             aired = [ep.aired for ep in card["rosters"].get(anidb_id) or [] if ep.aired]
             year = int(min(aired)[:4]) if aired else anidb_art.facts(anidb_id).get("year")
         result = {
@@ -1307,9 +1318,8 @@ async def group_shows(
 
 
 async def queue_covers(rows: list[dict], catalog: Any = None) -> list[dict]:
-    """Each queue row's AniDB cover and name, by the entry its job files under."""
+    """Each queue row's cover and name, by the AniDB entry its job files under."""
     from bankai.metadata import anidb as anidb_mod
-    from bankai.metadata import anidb_art
 
     table = await anidb_mod.index()
     known = getattr(table, "anime", {}) if table is not None else {}
@@ -1319,7 +1329,7 @@ async def queue_covers(rows: list[dict], catalog: Any = None) -> list[dict]:
             continue
         aid = int(raw)
         entry = catalog.entries.get(aid) if catalog is not None else None
-        row["poster_url"] = (entry.poster_url if entry else None) or anidb_art.cover(aid)
+        row["poster_url"] = _entry_cover(aid, catalog)
         if entry is not None or aid in known:
             row["series_title"] = _entry_name(aid, catalog, known)
     return rows
@@ -1329,10 +1339,10 @@ async def enrich_review_rows(rows: list[dict], catalog: Any = None) -> list[dict
     """Each review or blacklist card's name, year and cover, from its AniDB entry.
 
     A card that is one AniDB entry shows that entry's name and cover -- from
-    Shoko, else anime-offline-database. One that no entry answers for yet is
-    shown by its Erai name until one is chosen for it.
+    AniList, else Shoko, else anime-offline-database. One that no entry
+    answers for yet is shown by its Erai name until one is chosen for it.
     """
-    from bankai.metadata import anidb_art
+    from bankai.metadata import anidb_art, anilist
 
     for row in rows:
         row.pop("tvdb_id", None)
@@ -1341,10 +1351,7 @@ async def enrich_review_rows(rows: list[dict], catalog: Any = None) -> list[dict
             row["poster_url"] = row.get("anidb_poster_url")
             continue
         aid = int(row["anidb_id"])
-        entry = catalog.entries.get(aid) if catalog is not None else None
-        row["title"] = row.get("english_title") or row.get("anidb_title") or row["source_title"]
+        row["title"] = anilist.name(aid) or row.get("english_title") or row.get("anidb_title") or row["source_title"]
         row["year"] = anidb_art.facts(aid).get("year")
-        row["poster_url"] = (
-            (entry.poster_url if entry else None) or anidb_art.cover(aid) or row.get("anidb_poster_url")
-        )
+        row["poster_url"] = _entry_cover(aid, catalog) or row.get("anidb_poster_url")
     return rows

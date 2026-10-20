@@ -35,6 +35,7 @@ _URL = (
 )
 _TTL = 7 * 86400
 _ANIDB_SOURCE = re.compile(r"https?://anidb\.net/anime/(\d+)")
+_ANILIST_SOURCE = re.compile(r"https?://anilist\.co/anime/(\d+)")
 # The database's placeholder for an anime without artwork.
 _NO_PICTURE = ("no_pic", "noimage", "placeholder")
 
@@ -51,8 +52,15 @@ def _facts_store(covers_path: Path | None = None) -> Path:
     return (covers_path or _store()).with_name("anidb_facts.json")
 
 
+def _facts_have_anilist() -> bool:
+    try:
+        return '"anilist"' in _facts_store().read_text(encoding="utf-8")[:4096]
+    except OSError:
+        return False
+
+
 def facts(anidb_id: object) -> dict:
-    """{episodes, status, year, type} of one AniDB entry, as far as known; {} if not.
+    """{episodes, status, year, type, anilist} of one AniDB entry, as far as known; {} if not.
 
     ``status`` is the database's: FINISHED, ONGOING, UPCOMING or UNKNOWN.
     """
@@ -115,11 +123,17 @@ def condense(source: Path, target: Path) -> int:
         if not aids:
             continue
         season = item.get("animeSeason") or {}
+        anilist = next(
+            (int(match[1]) for url in item.get("sources") or [] if (match := _ANILIST_SOURCE.match(str(url)))),
+            None,
+        )
         row = {
             "episodes": item.get("episodes") if isinstance(item.get("episodes"), int) else None,
             "status": item.get("status"),
             "year": season.get("year") if isinstance(season.get("year"), int) else None,
             "type": item.get("type"),
+            # The same anime on AniList, whose names and covers bankai shows.
+            "anilist": anilist,
         }
         picture = str(item.get("picture") or "")
         usable = picture.startswith("https://") and not any(mark in picture for mark in _NO_PICTURE)
@@ -140,8 +154,9 @@ async def refresh(*, force: bool = False) -> bool:
     async with _REFRESH_LOCK:
         target = _store()
         try:
-            # The facts came later than the covers: without them, renew now.
-            fresh = time.time() - target.stat().st_mtime < _TTL and _facts_store().exists()
+            # The facts came later than the covers, and AniList ids later still:
+            # without them, renew now.
+            fresh = time.time() - target.stat().st_mtime < _TTL and _facts_have_anilist()
         except OSError:
             fresh = False
         if fresh and not force:

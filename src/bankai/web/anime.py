@@ -308,7 +308,7 @@ def anidb_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | N
     season. None when no single entry answers for the name.
     """
     from bankai.metadata import anidb as anidb_mod
-    from bankai.metadata import anidb_art
+    from bankai.metadata import anidb_art, anilist
     from bankai.web import erai
 
     if table is None:
@@ -332,8 +332,10 @@ def anidb_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | N
         "anidb_id": entry.aid,
         "title": entry.title,
         "english_title": entry.english_title,
+        # How it is shown: AniList's name for it, when known.
+        "name": anilist.name(entry.aid),
         "episode": number,
-        "poster_url": anidb_art.cover(entry.aid),
+        "poster_url": anilist.cover(entry.aid) or anidb_art.cover(entry.aid),
         "year": facts.get("year"),
         "type": facts.get("type"),
     }

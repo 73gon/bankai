@@ -1608,6 +1608,7 @@ def create_app() -> Any:
         # The entries shown but not on disk, with their own relations, so a
         # chain of seasons not downloaded yet is seen whole.
         await asyncio.to_thread(shoko_catalog.add_known_relations, catalog)
+        shown: set[int] = set(catalog.entries)
         try:
             if catalog.groups:
                 found = anime_collections.assign(
@@ -1616,9 +1617,19 @@ def create_app() -> Any:
                 state = await asyncio.to_thread(erai_mod._load_state)
                 wanted = {aid for aid in found.of if aid not in catalog.entries}
                 wanted |= {int(aid) for aid in state.get("anime") or {} if str(aid).isdigit()}
+                shown |= wanted
                 await shoko_catalog.fill_relations(catalog, wanted)
         except Exception as exc:
             log.warning("Could not learn the relations of entries not on disk: %s", exc)
+        # AniList's names and covers for what is shown, and the collections
+        # named after them in Shoko, so Jellyfin shows the same names.
+        from bankai.metadata import anilist
+
+        try:
+            await anilist.ensure(shown)
+            await anime_collections.sync_names(catalog)
+        except Exception as exc:
+            log.warning("Could not take AniList's names: %s", exc)
         return catalog
 
     snaps.add(
@@ -2469,6 +2480,7 @@ def create_app() -> Any:
         "anime_library_prefs.json",
         "anime_collection_places.json",
         "anime_collection_titles.json",
+        "anime_collection_names.json",
         "review.json",
     )
     snaps.add(

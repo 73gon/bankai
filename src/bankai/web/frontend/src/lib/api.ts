@@ -371,6 +371,8 @@ export interface AnimeAniDBMatch {
   anidb_id: number;
   title: string;
   english_title: string | null;
+  /** How it is shown: AniList's name, when known. */
+  name: string | null;
   /** The AniDB episode; null for a batch or when the title carries none. */
   episode: number | null;
   poster_url: string | null;

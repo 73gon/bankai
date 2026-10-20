@@ -231,7 +231,7 @@ def graph(
     Without a collection, ``root_aid`` is an entry not on disk and in none:
     its graph is it and its relations, from which it can be moved into one.
     """
-    from bankai.metadata import anidb_art
+    from bankai.metadata import anidb_art, anilist
 
     found = assign(catalog, places)
     if group_id is None:
@@ -271,7 +271,8 @@ def graph(
         other = found.of.get(aid)
         return {
             "anidb_id": aid,
-            "title": (entry.title if entry else None)
+            "title": anilist.name(aid)
+            or (entry.title if entry else None)
             or ((anime.english_title or anime.title) if anime else f"AniDB {aid}"),
             "main_title": anime.title if anime else None,
             "type": facts.get("type"),
@@ -280,7 +281,7 @@ def graph(
             "episodes": len(entry.episodes) if entry and entry.episodes else facts.get("episodes"),
             "on_disk": len(on_disk.get(aid, ())),
             "owned": entry is not None,
-            "poster_url": (entry.poster_url if entry else None) or anidb_art.cover(aid),
+            "poster_url": anilist.cover(aid) or (entry.poster_url if entry else None) or anidb_art.cover(aid),
             "in_collection": aid in members,
             "title_entry": aid == title_aid,
             # Where a suggestion is now: another collection, or none.
@@ -351,6 +352,84 @@ def _save_titles(titles: dict[int, int]) -> None:
 def title_entry(group: Any, titles: dict[int, int] | None) -> int | None:
     """The entry a collection is named and pictured after."""
     return (titles or {}).get(group.id) or group.main_aid
+
+
+# -- Collection names from AniList ---------------------------------------------
+#
+# A Shoko group is named after its main series as AniDB or TMDB has it; the
+# names people know are AniList's. So each group is named after its title
+# entry as AniList has it, and Jellyfin shows that. A group named by hand in
+# Shoko is left as it is: only the ones Shoko named, or bankai did, are kept
+# in step.
+
+
+def _names_path() -> Path:
+    from bankai.cli import bgjobs
+
+    return bgjobs.jobs_root().parent / "anime_collection_names.json"
+
+
+def load_names() -> dict[int, str]:
+    """Shoko group -> the name bankai gave it."""
+    try:
+        raw = json.loads(_names_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {int(group): str(name) for group, name in (raw.items() if isinstance(raw, dict) else ()) if str(group).isdigit()}
+
+
+def _save_names(names: dict[int, str]) -> None:
+    path = _names_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({str(group): name for group, name in sorted(names.items())}, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+async def sync_names(catalog: Any) -> int:
+    """Name every collection after its title entry as AniList has it; returns how many changed.
+
+    The catalogue's groups are updated in place, so the page shows the new
+    names without reading Shoko again.
+    """
+    from bankai.metadata import anilist
+    from bankai.web import shoko
+    from bankai.web.shoko_catalog import Group
+
+    if catalog is None or not catalog.groups:
+        return 0
+    named = load_names()
+    titles = load_titles()
+    changes: list[tuple[int, str]] = []
+    for group_id, group in catalog.groups.items():
+        aid = title_entry(group, titles)
+        wanted = anilist.name(aid) if aid else None
+        if not wanted or wanted == group.name:
+            continue
+        if group.has_custom_name and named.get(group_id) != group.name:
+            continue  # named by hand in Shoko: the user's, not ours
+        changes.append((group_id, wanted))
+    if not changes:
+        return 0
+    await snapshot()
+    done = 0
+    for group_id, wanted in changes:
+        result = await shoko._send(
+            "PATCH",
+            f"/api/v3/Group/{group_id}",
+            json_body=[
+                {"op": "replace", "path": "/Name", "value": wanted},
+                {"op": "replace", "path": "/HasCustomName", "value": True},
+            ],
+        )
+        if result is None:
+            continue
+        named[group_id] = wanted
+        group = catalog.groups[group_id]
+        catalog.groups[group_id] = Group(group.id, wanted, group.main_aid, True)
+        done += 1
+    _save_names(named)
+    return done
 
 
 # -- Changing a collection in Shoko --------------------------------------------
@@ -425,6 +504,9 @@ async def set_title_entry(catalog: Any, group_id: int, aid: int, name: str) -> d
         if entry.group_id != group_id:
             raise ValueError("that entry is in another collection")
         return await set_title(group_id, entry.series_id)
+    from bankai.metadata import anilist
+
+    name = anilist.name(aid) or name
     await snapshot()
     result = await shoko._send(
         "PATCH",
@@ -439,6 +521,9 @@ async def set_title_entry(catalog: Any, group_id: int, aid: int, name: str) -> d
     titles = load_titles()
     titles[int(group_id)] = int(aid)
     _save_titles(titles)
+    named = load_names()
+    named[int(group_id)] = name
+    _save_names(named)
     return await shoko._get(f"/api/v3/Group/{int(group_id)}")
 
 

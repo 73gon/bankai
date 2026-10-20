@@ -230,7 +230,11 @@ def test_cover_art_and_facts_are_condensed_to_anidb_ids(tmp_path, monkeypatch):
                 "data": [
                     {
                         "picture": "https://cdn.myanimelist.net/images/anime/1/1.jpg",
-                        "sources": ["https://myanimelist.net/anime/5", "https://anidb.net/anime/15449"],
+                        "sources": [
+                            "https://anilist.co/anime/116674",
+                            "https://myanimelist.net/anime/5",
+                            "https://anidb.net/anime/15449",
+                        ],
                         "episodes": 13,
                         "status": "FINISHED",
                         "animeSeason": {"season": "FALL", "year": 2022},
@@ -246,11 +250,12 @@ def test_cover_art_and_facts_are_condensed_to_anidb_ids(tmp_path, monkeypatch):
     assert anidb_art.condense(source, target) == 1
     assert json.loads(target.read_text()) == {"15449": "https://cdn.myanimelist.net/images/anime/1/1.jpg"}
 
-    tybw = {"episodes": 13, "status": "FINISHED", "year": 2022, "type": "TV"}
+    # The same anime on AniList rides along: its names and covers are what bankai shows.
+    tybw = {"episodes": 13, "status": "FINISHED", "year": 2022, "type": "TV", "anilist": 116674}
     # An entry without a usable cover still has its facts; one with no AniDB source has neither.
     assert json.loads((tmp_path / "anidb_facts.json").read_text()) == {
         "15449": tybw,
-        "9": {"episodes": None, "status": None, "year": None, "type": None},
+        "9": {"episodes": None, "status": None, "year": None, "type": None, "anilist": None},
     }
     monkeypatch.setattr(anidb_art, "_store", lambda: target)
     monkeypatch.setattr(anidb_art, "_FACTS", None)

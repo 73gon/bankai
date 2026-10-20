@@ -98,6 +98,7 @@ type Chosen = {
   anidb_id: number;
   title: string;
   english_title: string | null;
+  name?: string | null;
   year: number | null;
   type: string | null;
   poster_url: string | null;
@@ -160,7 +161,7 @@ function ResultCard({ entry, onDownload }: { entry: AnimeEntry; onDownload: () =
           <div className='flex flex-col gap-1'>
             <div className='flex flex-wrap items-center gap-2'>
               <h2 className='text-base font-semibold text-foreground'>
-                {entry.anidb ? entry.anidb.english_title || entry.anidb.title : 'AniDB match needed'}
+                {entry.anidb ? entry.anidb.name || entry.anidb.english_title || entry.anidb.title : 'AniDB match needed'}
                 {entry.anidb?.episode != null && ` — Episode ${entry.anidb.episode}`}
               </h2>
               {entry.anidb?.year && <span className='text-sm text-muted-foreground'>{entry.anidb.year}</span>}
@@ -349,7 +350,7 @@ export default function Anime() {
     setDownloading(true);
     try {
       await api.animeDownload(selectedEntry, chosen.anidb_id, kind, episode);
-      toast.success(`${chosen.english_title || chosen.title} was added to the queue from Nyaa.`);
+      toast.success(`${chosen.name || chosen.english_title || chosen.title} was added to the queue from Nyaa.`);
       setSelectedEntry(null);
     } catch (error: any) {
       toast.error(error.message);
@@ -494,7 +495,7 @@ export default function Anime() {
             <div className='flex gap-3 rounded-lg border border-white/10 bg-black/20 p-3'>
               <Poster url={chosen.poster_url} title={chosen.title} movie={kind === 'movie'} />
               <div className='flex min-w-0 flex-1 flex-col gap-1'>
-                <span className='font-medium text-foreground'>{chosen.english_title || chosen.title}</span>
+                <span className='font-medium text-foreground'>{chosen.name || chosen.english_title || chosen.title}</span>
                 {chosen.english_title && chosen.english_title !== chosen.title && <span className='text-sm text-muted-foreground'>{chosen.title}</span>}
                 <span className='font-mono text-xs text-muted-foreground'>
                   {[chosen.type, chosen.year, 'aid ' + chosen.anidb_id].filter(Boolean).join(' · ')}
