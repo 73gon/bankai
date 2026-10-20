@@ -16,15 +16,9 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
-  ArrowDown,
   ArrowRightToLine,
-  ArrowUp,
-  ArrowUpToLine,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   ExternalLink,
-  GripVertical,
   ListOrdered,
   Merge,
   MoreHorizontal,
@@ -108,12 +102,6 @@ function takeOut(draft: Arrangement, id: number) {
   draft.specials = draft.specials.filter((other) => other !== id);
 }
 
-function swap<T>(list: T[], at: number, by: number) {
-  const to = at + by;
-  if (to < 0 || to >= list.length) return;
-  [list[at], list[to]] = [list[to], list[at]];
-}
-
 /** The entry to the end of season ``index`` (a new last season when past the end). */
 function appendTo(arrangement: Arrangement, id: number, index: number) {
   return edit(arrangement, (draft) => {
@@ -162,12 +150,21 @@ function moveEntry(arrangement: Arrangement, id: number, target: DropTarget) {
   });
 }
 
-/** A whole season to another place in the order. */
-function moveSeason(arrangement: Arrangement, from: number, to: number) {
+/** A whole season into the gap before season ``gap`` (``gap`` = the number of seasons: last). */
+function moveSeason(arrangement: Arrangement, from: number, gap: number) {
   return edit(arrangement, (draft) => {
-    if (from === to) return;
+    if (gap === from || gap === from + 1) return;
     const [season] = draft.seasons.splice(from, 1);
-    draft.seasons.splice(to, 0, season);
+    draft.seasons.splice(gap > from ? gap - 1 : gap, 0, season);
+  });
+}
+
+/** A whole season's entries onto the end of another season. */
+function mergeSeason(arrangement: Arrangement, from: number, into: number) {
+  return edit(arrangement, (draft) => {
+    if (from === into) return;
+    draft.seasons[into].push(...draft.seasons[from]);
+    draft.seasons[from] = [];
   });
 }
 
@@ -654,13 +651,10 @@ function SeasonPicker({
   );
 }
 
-/** One entry in the Seasons panel: its type colour, title and episodes, with what can be done to it. */
+/** One entry in the Seasons panel: its type colour, title and episodes. The whole box drags; ⋯ has the rest. */
 function SeasonChip({
   id,
   node,
-  first,
-  last,
-  onMove,
   dragging,
   over,
   onDragStart,
@@ -671,9 +665,6 @@ function SeasonChip({
 }: {
   id: number;
   node: CollectionNode | undefined;
-  first: boolean;
-  last: boolean;
-  onMove: (by: number) => void;
   /** Whether this chip is the one being dragged. */
   dragging: boolean;
   /** Whether a dragged entry would land just before this chip. */
@@ -693,32 +684,27 @@ function SeasonChip({
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = 'move';
         event.dataTransfer.setData('text/plain', String(id));
+        // An entry, not the season box it sits in.
         event.stopPropagation();
         onDragStart();
       }}
       onDragEnd={onDragEnd}
       onDragOver={onDragOverChip}
       onDrop={onDropChip}
+      title={title + ' · ' + kind.label + ' — drag to move'}
       className={cn(
-        'inline-flex max-w-full cursor-grab items-center gap-0.5 rounded-md border py-0.5 pl-0.5 pr-0.5 text-xs active:cursor-grabbing',
+        'inline-flex max-w-full cursor-grab select-none items-center gap-1 rounded-md border py-1 pl-2 pr-0.5 text-xs active:cursor-grabbing',
         kind.chip,
         node && !node.owned && 'opacity-70',
         dragging && 'opacity-40',
-        over && 'shadow-[-3px_0_0_0_var(--color-info)]',
+        over && 'shadow-[-4px_0_0_0_var(--color-info)]',
       )}
     >
-      <GripVertical className='size-3.5 shrink-0 text-muted-foreground' aria-hidden />
-      <Button size='icon' variant='ghost' className='size-6 shrink-0' disabled={first} aria-label={'Move ' + title + ' earlier'} onClick={() => onMove(-1)}>
-        <ChevronLeft />
-      </Button>
-      <span className='min-w-0 truncate px-0.5 text-foreground' title={title + ' · ' + kind.label}>{title}</span>
+      <span className='min-w-0 truncate text-foreground'>{title}</span>
       <span className='shrink-0 font-mono text-[0.62rem] opacity-80'>{node?.episodes ? node.episodes + ' eps' : '? eps'}</span>
-      <Button size='icon' variant='ghost' className='size-6 shrink-0' disabled={last} aria-label={'Move ' + title + ' later'} onClick={() => onMove(1)}>
-        <ChevronRight />
-      </Button>
       <Popover>
         <PopoverTrigger asChild>
-          <Button size='icon' variant='ghost' className='size-6 shrink-0' aria-label={'More for ' + title}>
+          <Button size='icon' variant='ghost' className='size-6 shrink-0' aria-label={'More for ' + title} draggable={false}>
             <MoreHorizontal />
           </Button>
         </PopoverTrigger>
@@ -762,7 +748,6 @@ function SeasonsPanel({
   onReset: () => void;
 }) {
   const { seasons, specials } = arrangement;
-  const change = (work: (draft: Arrangement) => void) => onChange(edit(arrangement, work));
   const [dragging, setDragging] = useState<Dragging>(null);
   // Where the drop would land, as a key: "season:2", "season:2:before:123", "new", "specials", "order:3".
   const [over, setOver] = useState<string | null>(null);
@@ -787,21 +772,37 @@ function SeasonsPanel({
       stop();
     },
   });
-  /** Handlers for a season row a whole season can be dropped on: it takes that row's place. */
-  const seasonTarget = (index: number) => ({
+  /** Handlers for where a whole season can go: a gap between seasons (moved), or another season (merged into it). */
+  const seasonTarget = (key: string, apply: (from: number) => Arrangement) => ({
     onDragOver: (event: React.DragEvent) => {
       if (dragging?.kind !== 'season' || busy) return;
       event.preventDefault();
+      event.stopPropagation();
       event.dataTransfer.dropEffect = 'move';
-      if (over !== 'order:' + index) setOver('order:' + index);
+      if (over !== key) setOver(key);
     },
     onDrop: (event: React.DragEvent) => {
       if (dragging?.kind !== 'season' || busy) return;
       event.preventDefault();
-      onChange(moveSeason(arrangement, dragging.index, index));
+      event.stopPropagation();
+      onChange(apply(dragging.index));
       stop();
     },
   });
+  /** A gap between seasons a dragged season can be dropped into; shown only while one is dragged. */
+  const gap = (at: number) =>
+    dragging?.kind === 'season' && at !== dragging.index && at !== dragging.index + 1 ? (
+      <div
+        key={'gap' + at}
+        {...seasonTarget('gap:' + at, (from) => moveSeason(arrangement, from, at))}
+        className={cn(
+          'flex h-6 shrink-0 items-center justify-center rounded border border-dashed border-transparent text-[0.68rem] text-muted-foreground',
+          over === 'gap:' + at ? 'border-info bg-info/10 text-info' : 'border-border/60',
+        )}
+      >
+        Move here
+      </div>
+    ) : null;
   const chipProps = (id: number, key: string, target: DropTarget) => {
     const drop = entryTarget(key, target);
     return {
@@ -848,57 +849,32 @@ function SeasonsPanel({
       {open && (
         <div className='flex min-h-0 flex-col gap-2 overflow-y-auto border-t border-border px-3 py-2'>
           <p className='text-xs text-muted-foreground'>
-            Drag an entry to any place in a season, onto Specials or onto "New season"; drag a season by its name to reorder.
+            Drag an entry to any place in a season, onto Specials or onto "New season". Drag a season box between two others to
+            move it, or onto another season to merge them.
             Saving renames the files on disk into their new seasons and episode numbers; the moves are journaled and can be undone.
           </p>
-          {seasons.map((season, index) => (
+          {seasons.map((season, index) => [
+            gap(index),
             <div
               key={index}
-              {...seasonTarget(index)}
+              draggable={!busy}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', 'season ' + (index + 1));
+                setDragging({ kind: 'season', index });
+              }}
+              onDragEnd={stop}
+              {...(dragging?.kind === 'season'
+                ? seasonTarget('merge:' + index, (from) => mergeSeason(arrangement, from, index))
+                : {})}
+              title='Drag between two seasons to move it, onto another season to merge them'
               className={cn(
-                'flex flex-col gap-1.5 rounded-md border-b border-border/50 pb-2 last:border-0 sm:flex-row sm:items-start',
-                over === 'order:' + index && 'ring-2 ring-info',
+                'relative flex cursor-grab select-none flex-col gap-1.5 rounded-md border border-border/60 bg-background/40 p-2 active:cursor-grabbing sm:flex-row sm:items-center',
+                over === 'merge:' + index && 'ring-2 ring-info',
                 dragging?.kind === 'season' && dragging.index === index && 'opacity-40',
               )}
             >
-              <div className='flex shrink-0 items-center gap-1 sm:w-44'>
-                <span
-                  draggable={!busy}
-                  onDragStart={(event) => {
-                    event.dataTransfer.effectAllowed = 'move';
-                    event.dataTransfer.setData('text/plain', 'season ' + index);
-                    setDragging({ kind: 'season', index });
-                  }}
-                  onDragEnd={stop}
-                  title='Drag to reorder seasons'
-                  className='flex w-[5.5rem] cursor-grab items-center gap-0.5 text-xs font-medium text-foreground active:cursor-grabbing'
-                >
-                  <GripVertical className='size-3.5 text-muted-foreground' aria-hidden />
-                  Season {index + 1}
-                </span>
-                <Button size='icon' variant='ghost' className='size-6' disabled={busy || index === 0} aria-label={'Move season ' + (index + 1) + ' up'} onClick={() => change((draft) => swap(draft.seasons, index, -1))}>
-                  <ArrowUp />
-                </Button>
-                <Button size='icon' variant='ghost' className='size-6' disabled={busy || index === seasons.length - 1} aria-label={'Move season ' + (index + 1) + ' down'} onClick={() => change((draft) => swap(draft.seasons, index, 1))}>
-                  <ArrowDown />
-                </Button>
-                {index > 0 && (
-                  <Button
-                    size='icon'
-                    variant='ghost'
-                    className='size-6'
-                    disabled={busy}
-                    aria-label={'Append season ' + (index + 1) + ' to season ' + index}
-                    title={'Append to season above: its entries continue Season ' + index}
-                    onClick={() => change((draft) => {
-                      draft.seasons[index - 1].push(...draft.seasons[index]);
-                      draft.seasons[index] = [];
-                    })}
-                  >
-                    <ArrowUpToLine />
-                  </Button>
-                )}
-              </div>
+              <span className='shrink-0 text-xs font-medium text-foreground sm:w-20'>Season {index + 1}</span>
               <div
                 {...entryTarget('season:' + index, { where: 'season', index })}
                 className={cn(
@@ -906,14 +882,11 @@ function SeasonsPanel({
                   over === 'season:' + index && 'ring-2 ring-info',
                 )}
               >
-                {season.map((id, at) => (
+                {season.map((id) => (
                   <SeasonChip
                     key={id}
                     id={id}
                     node={byId.get(id)}
-                    first={at === 0}
-                    last={at === season.length - 1}
-                    onMove={(by) => change((draft) => swap(draft.seasons[index], at, by))}
                     {...chipProps(id, 'season:' + index + ':before:' + id, { where: 'season', index, before: id })}
                   >
                     <Button size='sm' variant='secondary' className='justify-start' disabled={busy || season.length < 2} onClick={() => onChange(ownSeason(arrangement, id))}>
@@ -926,8 +899,12 @@ function SeasonsPanel({
                   </SeasonChip>
                 ))}
               </div>
-            </div>
-          ))}
+              {over === 'merge:' + index && (
+                <span className='pointer-events-none absolute right-2 top-1 text-[0.68rem] text-info'>Merge into Season {index + 1}</span>
+              )}
+            </div>,
+          ])}
+          {gap(seasons.length)}
           {dragging?.kind === 'entry' && (
             <div
               {...entryTarget('new', { where: 'new' })}
@@ -949,14 +926,11 @@ function SeasonsPanel({
               )}
             >
               {specials.length === 0 && <span className='text-xs text-muted-foreground'>None — drop here</span>}
-              {specials.map((id, at) => (
+              {specials.map((id) => (
                 <SeasonChip
                   key={id}
                   id={id}
                   node={byId.get(id)}
-                  first={at === 0}
-                  last={at === specials.length - 1}
-                  onMove={(by) => change((draft) => swap(draft.specials, at, by))}
                   {...chipProps(id, 'specials:before:' + id, { where: 'specials', before: id })}
                 >
                   <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
