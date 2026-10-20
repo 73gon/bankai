@@ -1,7 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
+import {
+  Background,
+  BackgroundVariant,
+  ConnectionMode,
+  Controls,
+  Handle,
+  MarkerType,
+  Position,
+  ReactFlow,
+  useNodesState,
+  type Edge,
+  type Node,
+  type NodeProps,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import { ExternalLink, Merge, Network, Plus, Scissors, Star } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type CollectionEdge, type CollectionGraph as Graph, type CollectionNode } from '@/lib/api';
+import { api, type CollectionGraph as Graph, type CollectionNode } from '@/lib/api';
 import { AnimePoster } from '@/components/AnimePoster';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -9,74 +24,212 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { EmptyState, Spinner } from '@/components/ui/empty';
 import { cn } from '@/lib/utils';
 
-const NODE_W = 208;
-const NODE_H = 92;
-const GAP_X = 64;
-const GAP_Y = 36;
-const PAD = 24;
-// Room between the collection's row and the suggestions under it, for their heading.
-const BAND = 40;
+// One entry's card: a poster with its title under it.
+const CARD_W = 176;
+const CARD_H = 340;
+const GAP_X = 96;
+const GAP_Y = 72;
 
-type Placed = CollectionNode & { x: number; y: number };
+type EntryData = { node: CollectionNode; selected: boolean };
+type EntryFlowNode = Node<EntryData, 'entry'>;
 
 /** Air date, else year, else last: the order a show's seasons came out in. */
 function aired(node: CollectionNode) {
   return node.first_aired ?? (node.year ? String(node.year) : '9999');
 }
 
-/** The collection left to right by air date; each suggestion under the entry it hangs off. */
-function layout(graph: Graph): { nodes: Placed[]; width: number; height: number } {
-  const members = graph.nodes
-    .filter((node) => node.in_collection)
-    .sort((a, b) => aired(a).localeCompare(aired(b)) || a.anidb_id - b.anidb_id);
-  const column = new Map(members.map((node, index) => [node.anidb_id, index]));
-  const below = new Map<number, number>();
-  const placed: Placed[] = members.map((node, index) => ({ ...node, x: PAD + index * (NODE_W + GAP_X), y: PAD }));
-  const suggestions = graph.nodes
-    .filter((node) => !node.in_collection)
-    .sort((a, b) => aired(a).localeCompare(aired(b)) || a.anidb_id - b.anidb_id);
-  for (const node of suggestions) {
-    const anchors = graph.edges
-      .map((edge) => (edge.from === node.anidb_id ? edge.to : edge.to === node.anidb_id ? edge.from : null))
-      .filter((other): other is number => other !== null && column.has(other))
-      .map((other) => column.get(other)!);
-    const col = anchors.length ? Math.min(...anchors) : 0;
-    const row = (below.get(col) ?? 0) + 1;
-    below.set(col, row);
-    placed.push({ ...node, x: PAD + col * (NODE_W + GAP_X), y: PAD + BAND + row * (NODE_H + GAP_Y) });
-  }
-  const rows = Math.max(0, ...below.values());
-  return {
-    nodes: placed,
-    width: PAD * 2 + Math.max(1, members.length) * (NODE_W + GAP_X) - GAP_X,
-    height: PAD * 2 + NODE_H + (rows ? BAND + rows * (NODE_H + GAP_Y) : 0),
-  };
-}
-
-/** A link between two boxes: side to side within a row, else bottom to top. */
-function path(from: Placed, to: Placed) {
-  if (from.y === to.y) {
-    const [left, right] = from.x < to.x ? [from, to] : [to, from];
-    const y = left.y + NODE_H / 2;
-    return { d: `M ${left.x + NODE_W} ${y} L ${right.x} ${y}`, mid: [(left.x + NODE_W + right.x) / 2, y] };
-  }
-  const [upper, lower] = from.y < to.y ? [from, to] : [to, from];
-  const x1 = upper.x + NODE_W / 2;
-  const y1 = upper.y + NODE_H;
-  const x2 = lower.x + NODE_W / 2;
-  const y2 = lower.y;
-  const bend = (y2 - y1) / 2;
-  return {
-    d: `M ${x1} ${y1} C ${x1} ${y1 + bend}, ${x2} ${y2 - bend}, ${x2} ${y2}`,
-    mid: [(x1 + x2) / 2, (y1 + y2) / 2],
-  };
-}
-
 function meta(node: CollectionNode) {
   const parts = [node.type, node.year ? String(node.year) : null];
   if (node.owned) parts.push(`${node.on_disk}/${node.episodes ?? '?'} on disk`);
-  else parts.push(node.episodes ? `${node.episodes} eps, not downloaded` : 'not downloaded');
+  else parts.push(node.episodes ? `${node.episodes} eps · not downloaded` : 'not downloaded');
   return parts.filter(Boolean).join(' · ');
+}
+
+/**
+ * Where each entry goes: the sequel chain the collection is named after runs
+ * left to right as the spine, in sequel order; everything else -- side
+ * stories, recaps, movies, a sequel chain of their own -- hangs below the
+ * spine entry it is related to, whether it is in the collection or not.
+ */
+function layout(graph: Graph): Map<number, { x: number; y: number }> {
+  const ids = graph.nodes.map((node) => node.anidb_id);
+  const byId = new Map(graph.nodes.map((node) => [node.anidb_id, node]));
+  const sequelsOf = new Map<number, number[]>(ids.map((id) => [id, []]));
+  const prequelsOf = new Map<number, number[]>(ids.map((id) => [id, []]));
+  const linked = new Map<number, number[]>(ids.map((id) => [id, []]));
+  for (const edge of graph.edges) {
+    linked.get(edge.from)?.push(edge.to);
+    linked.get(edge.to)?.push(edge.from);
+    if (edge.label === 'sequel') {
+      sequelsOf.get(edge.from)?.push(edge.to);
+      prequelsOf.get(edge.to)?.push(edge.from);
+    }
+  }
+  // The spine: the sequel chain holding the title entry.
+  const start = graph.title_entry ?? graph.nodes.find((node) => node.in_collection)?.anidb_id ?? ids[0];
+  const spine = new Set<number>();
+  const walk = [start];
+  while (walk.length) {
+    const id = walk.pop()!;
+    if (spine.has(id) || !byId.has(id)) continue;
+    spine.add(id);
+    walk.push(...sequelsOf.get(id)!, ...prequelsOf.get(id)!);
+  }
+  // Columns in sequel order: each entry one after its latest prequel.
+  const column = new Map<number, number>();
+  const order = [...spine].sort((a, b) => aired(byId.get(a)!).localeCompare(aired(byId.get(b)!)) || a - b);
+  for (let pass = 0; pass < order.length + 1; pass += 1) {
+    let changed = false;
+    for (const id of order) {
+      const before = prequelsOf.get(id)!.filter((other) => spine.has(other) && column.has(other));
+      const col = before.length ? Math.max(...before.map((other) => column.get(other)!)) + 1 : column.get(id) ?? 0;
+      if (column.get(id) !== col) {
+        column.set(id, col);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const positions = new Map<number, { x: number; y: number }>();
+  const used = new Map<number, number>(); // column -> rows taken below the spine
+  const above = new Map<number, number>(); // column -> parallel sequels stacked above
+  for (const id of order) {
+    const col = column.get(id)!;
+    const stacked = above.get(col) ?? 0;
+    above.set(col, stacked + 1);
+    positions.set(id, { x: col * (CARD_W + GAP_X), y: -stacked * (CARD_H + GAP_Y) });
+  }
+  // Everything else hangs off the spine entry it is reached from first.
+  const anchor = new Map<number, number>();
+  const queue = [...order];
+  for (const id of order) anchor.set(id, id);
+  while (queue.length) {
+    const id = queue.shift()!;
+    const others = [...linked.get(id)!].sort((a, b) => aired(byId.get(a)!).localeCompare(aired(byId.get(b)!)) || a - b);
+    for (const other of others) {
+      if (anchor.has(other)) continue;
+      anchor.set(other, anchor.get(id)!);
+      queue.push(other);
+    }
+  }
+  const lastColumn = Math.max(0, ...column.values());
+  let loose = 0;
+  for (const node of [...graph.nodes].sort((a, b) => aired(a).localeCompare(aired(b)) || a.anidb_id - b.anidb_id)) {
+    if (positions.has(node.anidb_id)) continue;
+    const root = anchor.get(node.anidb_id);
+    const col = root !== undefined ? column.get(root)! : lastColumn + 1 + loose++;
+    const row = (used.get(col) ?? 0) + 1;
+    used.set(col, row);
+    positions.set(node.anidb_id, { x: col * (CARD_W + GAP_X), y: row * (CARD_H + GAP_Y) });
+  }
+  return positions;
+}
+
+const hidden = '!h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent';
+
+function EntryCard({ data }: NodeProps<EntryFlowNode>) {
+  const { node, selected } = data;
+  return (
+    <div
+      className={cn(
+        'flex flex-col gap-2 rounded-xl border bg-card p-2 shadow-lg transition-shadow',
+        node.in_collection ? 'border-border' : 'border-dashed border-muted-foreground/40 bg-card/70',
+        node.title_entry && 'ring-2 ring-primary/70',
+        selected && 'ring-2 ring-info',
+      )}
+      style={{ width: CARD_W, height: CARD_H }}
+      title={node.main_title && node.main_title !== node.title ? node.main_title : node.title}
+    >
+      {(['left', 'right', 'top', 'bottom'] as const).map((side) => (
+        <Handle key={side} id={side} type='source' position={Position[side === 'left' ? 'Left' : side === 'right' ? 'Right' : side === 'top' ? 'Top' : 'Bottom']} isConnectable={false} className={hidden} />
+      ))}
+      <AnimePoster url={node.poster_url} title={node.title} className={cn('w-full rounded-lg', !node.in_collection && 'opacity-70')} />
+      <div className='flex min-h-0 flex-1 flex-col gap-1'>
+        <span className='line-clamp-2 text-[0.8rem] font-medium leading-tight text-foreground'>
+          {node.title_entry && <Star className='mr-1 inline size-3.5 -translate-y-px fill-current text-primary' aria-label='Title entry' />}
+          {node.title}
+        </span>
+        <span className='truncate font-mono text-[0.62rem] text-muted-foreground'>{meta(node)}</span>
+        <span className='mt-auto flex flex-wrap gap-1'>
+          {!node.in_collection && node.collection_name && <Badge variant='info' className='max-w-full truncate text-[0.6rem]'>In: {node.collection_name}</Badge>}
+          {!node.in_collection && !node.collection_name && <Badge variant='muted' className='text-[0.6rem]'>{node.alone ? 'In no collection' : 'Not in this collection'}</Badge>}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+const nodeTypes = { entry: EntryCard };
+
+/** Which sides of two cards a link joins: side to side within a row, else bottom to top. */
+function sides(from: { x: number; y: number }, to: { x: number; y: number }) {
+  if (from.y === to.y) return from.x < to.x ? ['right', 'left'] : ['left', 'right'];
+  return from.y < to.y ? ['bottom', 'top'] : ['top', 'bottom'];
+}
+
+/** The graph itself: laid out once per loaded graph, then free to pan, zoom and drag. */
+function Canvas({ graph, selected, onToggle }: { graph: Graph; selected: number[]; onToggle: (id: number) => void }) {
+  const positions = useMemo(() => layout(graph), [graph]);
+  const [nodes, , onNodesChange] = useNodesState<EntryFlowNode>(
+    graph.nodes.map((node) => ({
+      id: String(node.anidb_id),
+      type: 'entry',
+      position: positions.get(node.anidb_id) ?? { x: 0, y: 0 },
+      data: { node, selected: false },
+    })),
+  );
+  const shown = useMemo(
+    () => nodes.map((item) => ({ ...item, data: { ...item.data, selected: selected.includes(Number(item.id)) } })),
+    [nodes, selected],
+  );
+  const edges = useMemo<Edge[]>(() => graph.edges.map((item) => {
+    const from = positions.get(item.from) ?? { x: 0, y: 0 };
+    const to = positions.get(item.to) ?? { x: 0, y: 0 };
+    const [sourceHandle, targetHandle] = sides(from, to);
+    const spine = item.label === 'sequel' && from.y === to.y;
+    return {
+      id: `${item.from}-${item.to}-${item.label}`,
+      source: String(item.from),
+      target: String(item.to),
+      sourceHandle,
+      targetHandle,
+      type: spine ? 'straight' : 'smoothstep',
+      label: spine ? undefined : item.label,
+      markerEnd: item.label === 'sequel' || item.label === 'side story' || item.label === 'summary'
+        ? { type: MarkerType.ArrowClosed, width: 18, height: 18, color: spine ? 'var(--foreground-soft)' : 'var(--muted-foreground)' }
+        : undefined,
+      style: spine
+        ? { stroke: 'var(--foreground-soft)', strokeWidth: 2.5 }
+        : { stroke: 'var(--muted-foreground)', strokeWidth: 1.5, strokeDasharray: '6 5' },
+      labelStyle: { fill: 'var(--foreground-soft)', fontSize: 11 },
+      labelBgStyle: { fill: 'var(--card)' },
+      labelBgPadding: [6, 3] as [number, number],
+      labelBgBorderRadius: 6,
+    };
+  }), [graph, positions]);
+
+  return (
+    <ReactFlow
+      nodes={shown}
+      edges={edges}
+      nodeTypes={nodeTypes}
+      onNodesChange={onNodesChange}
+      onNodeClick={(_event, node) => onToggle(Number(node.id))}
+      connectionMode={ConnectionMode.Loose}
+      nodesConnectable={false}
+      elementsSelectable={false}
+      colorMode='dark'
+      fitView
+      fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
+      minZoom={0.15}
+      maxZoom={1.6}
+      proOptions={{ hideAttribution: true }}
+      style={{ background: 'transparent' }}
+    >
+      <Background variant={BackgroundVariant.Dots} gap={22} size={1} color='var(--muted-foreground)' style={{ opacity: 0.25 }} />
+      <Controls showInteractive={false} position='bottom-left' />
+    </ReactFlow>
+  );
 }
 
 /**
@@ -96,6 +249,7 @@ export function CollectionGraph({
   onChanged: () => void;
 }) {
   const [graph, setGraph] = useState<Graph | null>(null);
+  const [version, setVersion] = useState(0);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
@@ -106,6 +260,7 @@ export function CollectionGraph({
     setLoading(true);
     try {
       setGraph(await api.collectionGraph(id));
+      setVersion((value) => value + 1);
     } catch (error: any) {
       toast.error(error.message);
       setGraph(null);
@@ -121,9 +276,8 @@ export function CollectionGraph({
     if (groupId !== null) void load(groupId);
   }, [groupId]);
 
-  const placed = useMemo(() => (graph ? layout(graph) : null), [graph]);
-  const byId = useMemo(() => new Map((placed?.nodes ?? []).map((node) => [node.anidb_id, node])), [placed]);
-  const picked = selected.map((id) => byId.get(id)).filter((node): node is Placed => Boolean(node));
+  const byId = useMemo(() => new Map((graph?.nodes ?? []).map((node) => [node.anidb_id, node])), [graph]);
+  const picked = selected.map((id) => byId.get(id)).filter((node): node is CollectionNode => Boolean(node));
   const members = picked.filter((node) => node.in_collection);
   const suggestions = picked.filter((node) => !node.in_collection);
   const memberCount = graph?.nodes.filter((node) => node.in_collection).length ?? 0;
@@ -150,99 +304,38 @@ export function CollectionGraph({
     }
   }
 
-  function edge(item: CollectionEdge) {
-    const from = byId.get(item.from);
-    const to = byId.get(item.to);
-    if (!from || !to) return null;
-    const { d, mid } = path(from, to);
-    return (
-      <g key={`${item.from}-${item.to}-${item.label}`}>
-        <path
-          d={d}
-          fill='none'
-          className={item.main_line ? 'stroke-foreground/60' : 'stroke-muted-foreground/50'}
-          strokeWidth={item.main_line ? 2 : 1.5}
-          strokeDasharray={item.main_line ? undefined : '5 4'}
-          markerEnd={item.label === 'sequel' || item.label === 'side story' || item.label === 'summary' ? 'url(#arrow)' : undefined}
-        />
-        {!item.main_line && (
-          <text x={mid[0]} y={mid[1] - 4} textAnchor='middle' className='fill-muted-foreground text-[10px]'>
-            {item.label}
-          </text>
-        )}
-      </g>
-    );
-  }
-
   return (
     <Dialog open={groupId !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className='flex h-[88dvh] w-[min(96vw,1400px)] max-w-none flex-col gap-3'>
+      <DialogContent className='flex h-[90dvh] w-[min(97vw,1600px)] max-w-none flex-col gap-3'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'><Network className='size-4' /> {graph?.name ?? 'Collection'}</DialogTitle>
           <DialogDescription>
-            The collection&apos;s entries left to right as they aired, sequels joined by solid arrows. Below: entries AniDB relates to
-            them that are not in it. Changes go to Shoko&apos;s groups, so Jellyfin shows the same; a snapshot is kept before each.
+            The sequel chain runs left to right; side stories, recaps and other related entries hang below the entry they belong to,
+            dashed when they are not in this collection. Drag to move around, scroll or pinch to zoom, click entries to change them.
           </DialogDescription>
         </DialogHeader>
         <div className='flex min-h-0 flex-1 gap-3'>
-          <div className='relative min-h-0 flex-1 overflow-auto rounded-lg border border-border bg-black/20'>
+          <div className='relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-black/30'>
             {loading && !graph ? (
               <div className='flex h-full items-center justify-center'><Spinner /></div>
-            ) : !placed ? (
+            ) : !graph ? (
               <EmptyState icon={Network} title='No graph' description='Shoko could not be read for this collection.' />
             ) : (
-              <div className='relative' style={{ width: placed.width, height: placed.height }}>
-                <svg className='pointer-events-none absolute inset-0' width={placed.width} height={placed.height} aria-hidden='true'>
-                  <defs>
-                    <marker id='arrow' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='7' markerHeight='7' orient='auto-start-reverse'>
-                      <path d='M 0 0 L 10 5 L 0 10 z' className='fill-foreground/60' />
-                    </marker>
-                  </defs>
-                  {/* The related entries' band, under the collection's own row. */}
-                  {placed.nodes.some((node) => !node.in_collection) && (
-                    <rect x={0} y={PAD + NODE_H + BAND / 2} width={placed.width} height={placed.height - PAD - NODE_H - BAND / 2} className='fill-white/[0.025]' />
-                  )}
-                  {graph!.edges.map(edge)}
-                </svg>
-                {placed.nodes.map((node) => (
-                  <button
-                    key={node.anidb_id}
-                    type='button'
-                    onClick={() => toggle(node.anidb_id)}
-                    aria-pressed={selected.includes(node.anidb_id)}
-                    title={node.main_title && node.main_title !== node.title ? node.main_title : node.title}
-                    className={cn(
-                      'absolute flex gap-2 rounded-lg border p-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                      node.in_collection ? 'border-border bg-card' : 'border-dashed border-border/80 bg-card/60',
-                      !node.owned && 'opacity-80',
-                      node.title_entry && 'ring-1 ring-primary/70',
-                      selected.includes(node.anidb_id) && 'ring-2 ring-ring',
-                    )}
-                    style={{ left: node.x, top: node.y, width: NODE_W, height: NODE_H }}
-                  >
-                    <AnimePoster url={node.poster_url} title={node.title} className='h-full w-auto shrink-0 rounded' />
-                    <span className='flex min-w-0 flex-1 flex-col gap-1'>
-                      <span className='line-clamp-2 text-xs font-medium leading-tight text-foreground'>
-                        {node.title_entry && <Star className='mr-1 inline size-3 fill-current text-primary' aria-label='Title entry' />}
-                        {node.title}
-                      </span>
-                      <span className='truncate font-mono text-[0.62rem] text-muted-foreground'>{meta(node)}</span>
-                      {!node.in_collection && node.collection_name && (
-                        <Badge variant='info' className='max-w-full truncate text-[0.6rem]'>In: {node.collection_name}</Badge>
-                      )}
-                      {node.alone && <Badge variant='muted' className='text-[0.6rem]'>In no collection</Badge>}
-                    </span>
-                  </button>
-                ))}
+              <Canvas key={version} graph={graph} selected={selected} onToggle={toggle} />
+            )}
+            {busy && (
+              <div className='absolute right-3 top-3 flex items-center gap-2 rounded-md bg-card/90 px-3 py-1.5 text-xs text-muted-foreground'>
+                <Spinner /> Asking Shoko…
               </div>
             )}
           </div>
           <aside className='flex w-80 shrink-0 flex-col gap-3 overflow-y-auto rounded-lg border border-border bg-card/40 p-3 text-sm'>
             {picked.length === 0 ? (
               <div className='flex flex-col gap-2 text-xs text-muted-foreground'>
-                <p className='text-sm text-foreground'>Pick entries to change the collection.</p>
-                <p>Top row, as they aired: the collection. Name it after one, or split entries off into a collection of their own.</p>
-                <p>Shaded band below, dashed: entries AniDB relates to them that are not in it. Pull one in, or merge the whole collection it is in.</p>
+                <p className='text-sm text-foreground'>Click entries to change the collection.</p>
+                <p><span className='text-foreground'>Solid cards</span> are in this collection: name it after one, or split entries off into a collection of their own.</p>
+                <p><span className='text-foreground'>Dashed cards</span> are related but not in it: pull one in, or merge the whole collection it is in.</p>
+                <p>The ★ entry names and pictures the collection, here and in Jellyfin.</p>
                 <p>Not downloaded entries are kept where you put them and handed to Shoko once they are on disk. Cutting one out takes the entries reached only through it as well.</p>
               </div>
             ) : (
@@ -301,7 +394,6 @@ export function CollectionGraph({
                 ) : (
                   <p className='text-xs text-muted-foreground'>Pull related entries in one at a time.</p>
                 )}
-                {busy && <div className='flex items-center gap-2 text-xs text-muted-foreground'><Spinner /> Asking Shoko…</div>}
               </>
             )}
           </aside>
