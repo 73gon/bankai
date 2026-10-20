@@ -763,8 +763,9 @@ function MergeZone({ seasonKey, number }: { seasonKey: string; number: number })
     <div
       ref={setNodeRef}
       className={cn(
-        'flex shrink-0 items-center justify-center self-stretch rounded-md border border-dashed px-3 text-[0.7rem] transition-colors',
-        isOver ? 'border-info bg-info/15 text-info' : 'border-border text-muted-foreground',
+        // Over the box's right end rather than beside it: appearing, it must not move anything.
+        'absolute inset-y-1 right-1 flex items-center justify-center rounded-md border border-dashed px-3 text-[0.7rem] backdrop-blur-sm transition-colors',
+        isOver ? 'border-info bg-info/20 text-info' : 'border-border bg-background/80 text-muted-foreground',
       )}
     >
       <Merge className='mr-1 size-3.5' /> Merge into Season {number}
@@ -797,7 +798,7 @@ function SeasonBox({
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition }}
       className={cn(
-        'flex touch-none flex-col gap-1.5 rounded-md border border-border/60 bg-background/60 p-2 sm:flex-row sm:items-center',
+        'relative flex touch-none flex-col gap-1.5 rounded-md border border-border/60 bg-background/60 p-2 sm:flex-row sm:items-center',
         disabled ? 'cursor-default' : 'cursor-grab active:cursor-grabbing',
         isDragging && 'opacity-30',
       )}
@@ -823,15 +824,15 @@ function SeasonFace({ number, ids, byId }: { number: number; ids: number[]; byId
   );
 }
 
-/** The "new season" target at the end, shown while an entry is dragged. */
-function NewSeasonZone({ number }: { number: number }) {
+/** The "new season" target after the last season: always there, so a drag starting never moves the list. */
+function NewSeasonZone({ number, active }: { number: number; active: boolean }) {
   const { setNodeRef, isOver } = useDroppable({ id: NEW_SEASON, data: { type: 'container', container: NEW_SEASON } });
   return (
     <div
       ref={setNodeRef}
       className={cn(
-        'flex min-h-10 items-center justify-center rounded-md border border-dashed text-xs transition-colors',
-        isOver ? 'border-info bg-info/10 text-info' : 'border-border text-muted-foreground',
+        'flex min-h-9 items-center justify-center rounded-md border border-dashed text-xs transition-colors',
+        isOver ? 'border-info bg-info/10 text-info' : active ? 'border-border text-muted-foreground' : 'border-border/40 text-muted-foreground/50',
       )}
     >
       <Plus className='mr-1 size-3.5' /> New season {number}
@@ -1055,7 +1056,7 @@ function SeasonsPanel({
                 ))}
               </div>
             </SortableContext>
-            {active?.type === 'entry' && <NewSeasonZone number={board.seasons.filter((season) => season.ids.length).length + 1} />}
+            <NewSeasonZone number={board.seasons.filter((season) => season.ids.length).length + 1} active={active?.type === 'entry'} />
             <div className='flex flex-col gap-1.5 rounded-md border border-border/40 p-2 sm:flex-row sm:items-center'>
               <span className='shrink-0 text-xs font-medium text-foreground sm:w-20'>Specials</span>
               <SortableContext items={board.specials.map(entryId)} strategy={rectSortingStrategy}>
