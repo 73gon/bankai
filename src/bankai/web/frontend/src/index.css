@@ -41,6 +41,15 @@
     word-break: break-word;
   }
 
+  /* A plain table on a page runs the full width of the page, out to the
+     sidebar and the window edge; its first and last cells keep the text in
+     line with the page's gutter. Tables in dialogs and drawers stay put. */
+  main [data-slot='table-container'][data-variant='plain'] {
+    margin-inline: calc(var(--page-gutter, 0px) * -1);
+    width: calc(100% + 2 * var(--page-gutter, 0px));
+    max-width: none;
+  }
+
   /* Dense library rows. The whole row is the control, so it gets the press
      feedback a button would -- background rather than scale, since a
      full-width row scaling reads as the table itself shifting. */

@@ -7,7 +7,12 @@ const TableDenseContext = React.createContext(false);
 export interface TableProps extends React.ComponentProps<"table"> {
   /** 30px rows for data-heavy screens (admin, dashboards). Default rows are 46px. */
   dense?: boolean;
-  /** Props for the card that wraps and scrolls the table. */
+  /**
+   * `card` (default): the table as an object, a 20px card. `plain`: the same table without the
+   * card — no edge, corners, shadow or ground — across the full width of its column.
+   */
+  variant?: "card" | "plain";
+  /** Props for the container that wraps and scrolls the table (the card, unless `plain`). */
   containerProps?: React.ComponentProps<"div">;
 }
 
@@ -17,23 +22,27 @@ export interface TableProps extends React.ComponentProps<"table"> {
  * a subtle `--control-hover` on hover; headers are eyebrows; numbers are mono and tabular.
  *
  * The card's padding is carried by the cells so rules and hover run edge to edge — do not
- * pad the table at the call site. The rule people break: zebra stripes, vertical rules or a
- * second border around the table. Hairlines between rows are the whole grid.
+ * pad the table at the call site. `variant="plain"` is the same table without the card, for
+ * tables that are part of the page rather than an object on it. The rule people break: zebra
+ * stripes, vertical rules or a second border around the table. Hairlines between rows are the whole grid.
  */
-export function Table({ dense = false, containerProps, className, ...props }: TableProps) {
+export function Table({ dense = false, variant = "card", containerProps, className, ...props }: TableProps) {
   return (
     <TableDenseContext.Provider value={dense}>
       <div
         data-slot="table-container"
+        data-variant={variant}
         {...containerProps}
         className={cn(
-          "relative w-full overflow-x-auto surface-card [--card-padding:0]",
+          "relative w-full overflow-x-auto",
+          variant === "card" && "surface-card [--card-padding:0]",
           containerProps?.className,
         )}
       >
         <table
           data-slot="table"
           data-dense={dense ? "" : undefined}
+          data-variant={variant}
           className={cn("w-full caption-bottom border-collapse text-left font-body text-sm", className)}
           {...props}
         />

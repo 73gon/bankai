@@ -453,7 +453,7 @@ export default function App() {
           </div>
         </aside>
 
-        <main className='min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-6'>
+        <main className='min-h-0 min-w-0 flex-1 overflow-y-auto px-(--page-gutter) py-6 [--page-gutter:1rem] md:[--page-gutter:1.5rem]'>
           <div className='h-full w-full'>
             <Routes>
               <Route path='/' element={<Navigate to='/dashboard' replace />} />

@@ -280,8 +280,8 @@ function TorrentCandidateTable({
   onSelect: (candidate: TorrentCandidate) => void | Promise<void>;
 }) {
   return (
-    <Table dense containerProps={{ className: 'min-h-0 overflow-auto' }} className='min-w-[58rem] table-fixed text-foreground'>
-      <TableHeader className='sticky top-0 z-10 bg-card'>
+    <Table variant='plain' dense containerProps={{ className: 'min-h-0 overflow-auto' }} className='min-w-[58rem] table-fixed text-foreground'>
+      <TableHeader className='sticky top-0 z-10 bg-(--field-surface)'>
         <TableRow>
           <TableHead className='w-[46%]'>Title</TableHead>
           <TableHead className='w-32'>Policy</TableHead>
@@ -1614,8 +1614,8 @@ export default function Library() {
       ) : filtered.length === 0 ? (
         <EmptyNote icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
       ) : (
-        <Table containerProps={{ ref: tableScrollRef, className: 'min-h-0 flex-1 overflow-auto' }}>
-          <TableHeader className='sticky top-0 z-10 bg-card'>
+        <Table variant='plain' containerProps={{ ref: tableScrollRef, className: 'min-h-0 flex-1 overflow-auto' }}>
+          <TableHeader className='sticky top-0 z-10 bg-background'>
             <TableRow>
               <TableHead className='w-14 px-2' />
               <SortHeader column='title' label='Title' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />

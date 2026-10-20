@@ -317,7 +317,7 @@ export default function AnimeQueue() {
               )}
             </Empty>
           ) : (
-            <Table className='min-w-[900px] table-fixed'>
+            <Table variant='plain' className='min-w-[900px] table-fixed'>
               <colgroup>
                 <col />
                 <col className='w-28' />

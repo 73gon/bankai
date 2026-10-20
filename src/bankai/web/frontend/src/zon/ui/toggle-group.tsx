@@ -115,7 +115,7 @@ export function ToggleGroupItem<Value extends string = string>({
       data-slot="toggle-group-item"
       className={sx(
         [
-          "relative inline-flex min-h-(--control-h-sm) flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-item border border-transparent px-3 font-body text-[13px] leading-none font-medium whitespace-nowrap text-control-muted select-none",
+          "relative inline-flex min-h-(--control-h-sm) flex-auto cursor-pointer items-center justify-center gap-1.5 rounded-item border border-transparent px-3 font-body text-[13px] leading-none font-medium whitespace-nowrap text-control-muted select-none",
           "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
           // Hover only brightens the label; the raised material means "selected".
           "hover:text-foreground",

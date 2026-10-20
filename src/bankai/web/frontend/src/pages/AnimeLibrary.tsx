@@ -772,8 +772,8 @@ export default function AnimeLibrary() {
         </div>
         </div>
       ) : (
-        <Table className='min-w-[820px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
-            <TableHeader className='sticky top-0 z-10 bg-control-surface'>
+        <Table variant='plain' className='min-w-[820px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+            <TableHeader className='sticky top-0 z-10 bg-background'>
               <TableRow>
                 <SortHeader label='Series' column='title' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Seasons' column='seasons' sort={sort} onSort={toggleSort} />
@@ -1038,7 +1038,7 @@ export default function AnimeLibrary() {
                         ))}
                       </p>
                     )}
-                    <Table dense containerProps={{ className: 'shrink-0' }}>
+                    <Table variant='plain' dense containerProps={{ className: 'shrink-0' }}>
                         <TableHeader><TableRow><TableHead className='w-7 pr-2'>{(() => {
                           // "Select all in this tab": every row of it that is a file.
                           const files = active.episodes.filter((entry) => entry.season_number === season && hasFile(entry)).map((entry) => entry.path);

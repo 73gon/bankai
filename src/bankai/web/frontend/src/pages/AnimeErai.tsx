@@ -231,8 +231,8 @@ export default function AnimeErai({
             <span className='ml-auto text-xs text-muted-foreground'>{data ? data.total.toLocaleString() + ' releases' : ''}</span>
           </div>
 
-          <Table dense className='min-w-[980px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
-              <TableHeader className='sticky top-0 z-10 bg-card'>
+          <Table variant='plain' dense className='min-w-[980px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+              <TableHeader className='sticky top-0 z-10 bg-background'>
                 <TableRow>
                   <TableHead>Release</TableHead>
                   <TableHead>Subtitles</TableHead>

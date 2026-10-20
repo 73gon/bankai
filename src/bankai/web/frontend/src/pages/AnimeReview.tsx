@@ -298,8 +298,8 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           <EmptyDescription>{blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}</EmptyDescription>
         </Empty>
       ) : blacklist && view === 'table' ? (
-        <Table className='min-w-[720px]' containerProps={{ className: 'overflow-auto' }}>
-            <TableHeader className='sticky top-0 z-10 bg-control-surface'>
+        <Table variant='plain' className='min-w-[720px]' containerProps={{ className: 'overflow-auto' }}>
+            <TableHeader className='sticky top-0 z-10 bg-background'>
               <TableRow>
                 <TableHead>Show</TableHead>
                 <TableHead>Erai name</TableHead>
