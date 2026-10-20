@@ -24,6 +24,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  GripVertical,
   ListOrdered,
   Merge,
   MoreHorizontal,
@@ -138,6 +139,40 @@ function ownSeason(arrangement: Arrangement, id: number) {
     draft.seasons.splice(at + 1, 0, [id]);
   });
 }
+
+/** Where an entry is dropped: into a season (before ``before``, else at its end), a new last season, or the specials. */
+type DropTarget =
+  | { where: 'season'; index: number; before?: number }
+  | { where: 'new' }
+  | { where: 'specials'; before?: number };
+
+function moveEntry(arrangement: Arrangement, id: number, target: DropTarget) {
+  return edit(arrangement, (draft) => {
+    if ('before' in target && target.before === id) return;
+    takeOut(draft, id);
+    const insert = (list: number[]) => {
+      const at = target.where !== 'new' && target.before !== undefined ? list.indexOf(target.before) : -1;
+      if (at < 0) list.push(id);
+      else list.splice(at, 0, id);
+    };
+    if (target.where === 'new') draft.seasons.push([id]);
+    else if (target.where === 'specials') insert(draft.specials);
+    else if (target.index < draft.seasons.length) insert(draft.seasons[target.index]);
+    else draft.seasons.push([id]);
+  });
+}
+
+/** A whole season to another place in the order. */
+function moveSeason(arrangement: Arrangement, from: number, to: number) {
+  return edit(arrangement, (draft) => {
+    if (from === to) return;
+    const [season] = draft.seasons.splice(from, 1);
+    draft.seasons.splice(to, 0, season);
+  });
+}
+
+/** What is being dragged in the Seasons panel. */
+type Dragging = { kind: 'entry'; id: number } | { kind: 'season'; index: number } | null;
 
 /** Where each entry is filed under an arrangement: "Season 2", "Specials". */
 function labels(arrangement: Arrangement) {
@@ -626,6 +661,12 @@ function SeasonChip({
   first,
   last,
   onMove,
+  dragging,
+  over,
+  onDragStart,
+  onDragEnd,
+  onDragOverChip,
+  onDropChip,
   children,
 }: {
   id: number;
@@ -633,13 +674,40 @@ function SeasonChip({
   first: boolean;
   last: boolean;
   onMove: (by: number) => void;
+  /** Whether this chip is the one being dragged. */
+  dragging: boolean;
+  /** Whether a dragged entry would land just before this chip. */
+  over: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDragOverChip: (event: React.DragEvent) => void;
+  onDropChip: (event: React.DragEvent) => void;
   /** The chip's menu. */
   children: React.ReactNode;
 }) {
   const kind = node ? typeOf(node) : OTHER_TYPE;
   const title = node?.title ?? 'AniList ' + id;
   return (
-    <span className={cn('inline-flex max-w-full items-center gap-0.5 rounded-md border py-0.5 pl-0.5 pr-0.5 text-xs', kind.chip, node && !node.owned && 'opacity-70')}>
+    <span
+      draggable
+      onDragStart={(event) => {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', String(id));
+        event.stopPropagation();
+        onDragStart();
+      }}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOverChip}
+      onDrop={onDropChip}
+      className={cn(
+        'inline-flex max-w-full cursor-grab items-center gap-0.5 rounded-md border py-0.5 pl-0.5 pr-0.5 text-xs active:cursor-grabbing',
+        kind.chip,
+        node && !node.owned && 'opacity-70',
+        dragging && 'opacity-40',
+        over && 'shadow-[-3px_0_0_0_var(--color-info)]',
+      )}
+    >
+      <GripVertical className='size-3.5 shrink-0 text-muted-foreground' aria-hidden />
       <Button size='icon' variant='ghost' className='size-6 shrink-0' disabled={first} aria-label={'Move ' + title + ' earlier'} onClick={() => onMove(-1)}>
         <ChevronLeft />
       </Button>
@@ -695,6 +763,56 @@ function SeasonsPanel({
 }) {
   const { seasons, specials } = arrangement;
   const change = (work: (draft: Arrangement) => void) => onChange(edit(arrangement, work));
+  const [dragging, setDragging] = useState<Dragging>(null);
+  // Where the drop would land, as a key: "season:2", "season:2:before:123", "new", "specials", "order:3".
+  const [over, setOver] = useState<string | null>(null);
+  const stop = () => {
+    setDragging(null);
+    setOver(null);
+  };
+  /** Handlers for a place an entry can be dropped on. */
+  const entryTarget = (key: string, target: DropTarget) => ({
+    onDragOver: (event: React.DragEvent) => {
+      if (dragging?.kind !== 'entry' || busy) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'move';
+      if (over !== key) setOver(key);
+    },
+    onDrop: (event: React.DragEvent) => {
+      if (dragging?.kind !== 'entry' || busy) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onChange(moveEntry(arrangement, dragging.id, target));
+      stop();
+    },
+  });
+  /** Handlers for a season row a whole season can be dropped on: it takes that row's place. */
+  const seasonTarget = (index: number) => ({
+    onDragOver: (event: React.DragEvent) => {
+      if (dragging?.kind !== 'season' || busy) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      if (over !== 'order:' + index) setOver('order:' + index);
+    },
+    onDrop: (event: React.DragEvent) => {
+      if (dragging?.kind !== 'season' || busy) return;
+      event.preventDefault();
+      onChange(moveSeason(arrangement, dragging.index, index));
+      stop();
+    },
+  });
+  const chipProps = (id: number, key: string, target: DropTarget) => {
+    const drop = entryTarget(key, target);
+    return {
+      dragging: dragging?.kind === 'entry' && dragging.id === id,
+      over: over === key,
+      onDragStart: () => setDragging({ kind: 'entry', id }),
+      onDragEnd: stop,
+      onDragOverChip: drop.onDragOver,
+      onDropChip: drop.onDrop,
+    };
+  };
   return (
     <section className='flex max-h-[45%] shrink-0 flex-col rounded-lg border border-border bg-card/40'>
       <header className='flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2'>
@@ -730,12 +848,34 @@ function SeasonsPanel({
       {open && (
         <div className='flex min-h-0 flex-col gap-2 overflow-y-auto border-t border-border px-3 py-2'>
           <p className='text-xs text-muted-foreground'>
+            Drag an entry to any place in a season, onto Specials or onto "New season"; drag a season by its name to reorder.
             Saving renames the files on disk into their new seasons and episode numbers; the moves are journaled and can be undone.
           </p>
           {seasons.map((season, index) => (
-            <div key={index} className='flex flex-col gap-1.5 border-b border-border/50 pb-2 last:border-0 sm:flex-row sm:items-start'>
+            <div
+              key={index}
+              {...seasonTarget(index)}
+              className={cn(
+                'flex flex-col gap-1.5 rounded-md border-b border-border/50 pb-2 last:border-0 sm:flex-row sm:items-start',
+                over === 'order:' + index && 'ring-2 ring-info',
+                dragging?.kind === 'season' && dragging.index === index && 'opacity-40',
+              )}
+            >
               <div className='flex shrink-0 items-center gap-1 sm:w-44'>
-                <span className='w-[4.5rem] text-xs font-medium text-foreground'>Season {index + 1}</span>
+                <span
+                  draggable={!busy}
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = 'move';
+                    event.dataTransfer.setData('text/plain', 'season ' + index);
+                    setDragging({ kind: 'season', index });
+                  }}
+                  onDragEnd={stop}
+                  title='Drag to reorder seasons'
+                  className='flex w-[5.5rem] cursor-grab items-center gap-0.5 text-xs font-medium text-foreground active:cursor-grabbing'
+                >
+                  <GripVertical className='size-3.5 text-muted-foreground' aria-hidden />
+                  Season {index + 1}
+                </span>
                 <Button size='icon' variant='ghost' className='size-6' disabled={busy || index === 0} aria-label={'Move season ' + (index + 1) + ' up'} onClick={() => change((draft) => swap(draft.seasons, index, -1))}>
                   <ArrowUp />
                 </Button>
@@ -759,7 +899,13 @@ function SeasonsPanel({
                   </Button>
                 )}
               </div>
-              <div className='flex min-w-0 flex-wrap gap-1.5'>
+              <div
+                {...entryTarget('season:' + index, { where: 'season', index })}
+                className={cn(
+                  'flex min-h-8 min-w-0 flex-1 flex-wrap items-center gap-1.5 rounded-md p-0.5',
+                  over === 'season:' + index && 'ring-2 ring-info',
+                )}
+              >
                 {season.map((id, at) => (
                   <SeasonChip
                     key={id}
@@ -768,6 +914,7 @@ function SeasonsPanel({
                     first={at === 0}
                     last={at === season.length - 1}
                     onMove={(by) => change((draft) => swap(draft.seasons[index], at, by))}
+                    {...chipProps(id, 'season:' + index + ':before:' + id, { where: 'season', index, before: id })}
                   >
                     <Button size='sm' variant='secondary' className='justify-start' disabled={busy || season.length < 2} onClick={() => onChange(ownSeason(arrangement, id))}>
                       <SplitSquareHorizontal data-icon='inline-start' /> Own season
@@ -781,10 +928,27 @@ function SeasonsPanel({
               </div>
             </div>
           ))}
+          {dragging?.kind === 'entry' && (
+            <div
+              {...entryTarget('new', { where: 'new' })}
+              className={cn(
+                'flex min-h-9 items-center justify-center rounded-md border border-dashed border-border text-xs text-muted-foreground',
+                over === 'new' && 'border-info text-info',
+              )}
+            >
+              <Plus className='mr-1 size-3.5' /> New season {seasons.length + 1}
+            </div>
+          )}
           <div className='flex flex-col gap-1.5 sm:flex-row sm:items-start'>
             <span className='shrink-0 text-xs font-medium text-foreground sm:w-44'>Specials</span>
-            <div className='flex min-w-0 flex-wrap gap-1.5'>
-              {specials.length === 0 && <span className='text-xs text-muted-foreground'>None</span>}
+            <div
+              {...entryTarget('specials', { where: 'specials' })}
+              className={cn(
+                'flex min-h-8 min-w-0 flex-1 flex-wrap items-center gap-1.5 rounded-md p-0.5',
+                over === 'specials' && 'ring-2 ring-info',
+              )}
+            >
+              {specials.length === 0 && <span className='text-xs text-muted-foreground'>None — drop here</span>}
               {specials.map((id, at) => (
                 <SeasonChip
                   key={id}
@@ -793,6 +957,7 @@ function SeasonsPanel({
                   first={at === 0}
                   last={at === specials.length - 1}
                   onMove={(by) => change((draft) => swap(draft.specials, at, by))}
+                  {...chipProps(id, 'specials:before:' + id, { where: 'specials', before: id })}
                 >
                   <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
                   <Button size='sm' variant='secondary' className='justify-start' disabled={busy} onClick={() => onChange(appendTo(arrangement, id, seasons.length))}>
