@@ -187,6 +187,101 @@ def saved_links() -> Catalog | None:
     return Catalog(files=files)
 
 
+# -- Relations of entries Shoko holds no series for ------------------------------
+#
+# Shoko lists the AniDB relations of the anime it has a record of: the ones on
+# disk, and one step out from them. A season further out -- the sequel of a
+# sequel not downloaded yet -- has none, so it showed with only the one link
+# pointing at it. Those are asked for here, one anime at a time: what Shoko
+# already has is read from it, and a record it lacks is fetched by Shoko from
+# AniDB (no series is created), a few per refresh and a hundred a day at most,
+# so AniDB is never pressed. Answers are kept a week.
+
+_RELATIONS_KEEP = 7 * 86400
+_ASK_PER_RUN = 3
+_ASK_PER_DAY = 100
+
+
+def _relations_path() -> Path:
+    from bankai.cli import bgjobs
+
+    return bgjobs.jobs_root().parent / "anidb_relations.json"
+
+
+def _load_relations() -> dict:
+    try:
+        raw = json.loads(_relations_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_relations(data: dict) -> None:
+    path = _relations_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(path)
+
+
+def add_known_relations(catalog: Catalog) -> None:
+    """Add the relations kept for entries Shoko holds no series for; no requests."""
+    have = set(catalog.relations)
+    for row in (_load_relations().get("aids") or {}).values():
+        for left, right, kind in row.get("relations") or []:
+            if (left, right, kind) not in have:
+                have.add((left, right, kind))
+                catalog.relations.append((int(left), int(right), str(kind)))
+
+
+async def fill_relations(catalog: Catalog, wanted: set[int]) -> int:
+    """Learn the relations of the wanted entries Shoko lists none for; returns how many."""
+    import time
+
+    data = _load_relations()
+    kept: dict = data.setdefault("aids", {})
+    today = time.strftime("%Y-%m-%d")
+    if data.get("day") != today:
+        data.update(day=today, asked=0)
+    listed = {left for left, _right, _kind in catalog.relations}
+    learned = asked = 0
+    for aid in sorted(wanted):
+        if aid in catalog.entries or aid in listed:
+            continue
+        hit = kept.get(str(aid))
+        if hit and time.time() - float(hit.get("fetched_at", 0)) < _RELATIONS_KEEP:
+            continue
+        rows = await shoko._send("GET", f"/api/v3/Series/AniDB/{aid}/Relations")
+        if rows is None:
+            # No record of it at all: Shoko fetches one from AniDB, within its own limits.
+            if asked >= _ASK_PER_RUN or int(data.get("asked", 0)) >= _ASK_PER_DAY:
+                continue
+            asked += 1
+            data["asked"] = int(data.get("asked", 0)) + 1
+            await shoko._send(
+                "POST",
+                f"/api/v3/Series/AniDB/{aid}/Refresh",
+                createSeriesEntry="false",
+                downloadRelations="false",
+                skipTmdbUpdate="true",
+                immediate="true",
+            )
+            rows = await shoko._send("GET", f"/api/v3/Series/AniDB/{aid}/Relations")
+            if rows is None:
+                continue
+        relations = []
+        for row in rows if isinstance(rows, list) else []:
+            left = (row.get("IDs") or {}).get("AniDB")
+            right = (row.get("RelatedIDs") or {}).get("AniDB")
+            if isinstance(left, int) and isinstance(right, int) and row.get("Type"):
+                relations.append([left, right, str(row["Type"])])
+        kept[str(aid)] = {"fetched_at": time.time(), "relations": relations}
+        learned += 1
+    _save_relations(data)
+    add_known_relations(catalog)
+    return learned
+
+
 async def fetch() -> Catalog | None:
     """Read both listings from Shoko, or None when it is not connected."""
     if not shoko.configured():

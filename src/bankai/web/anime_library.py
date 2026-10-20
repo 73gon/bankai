@@ -1052,6 +1052,7 @@ async def group_shows(
     collections = anime_collections.assign(
         catalog, await asyncio.to_thread(anime_collections.load_places)
     )
+    titles = await asyncio.to_thread(anime_collections.load_titles)
     groups = getattr(catalog, "groups", None) or {}
     if collections.of:
         regrouped: dict[str, dict] = {}
@@ -1082,7 +1083,7 @@ async def group_shows(
             if group is None:
                 keys.add(_name(slot["key"]))
                 continue
-            slot["main_aid"] = group.main_aid
+            slot["main_aid"] = anime_collections.title_entry(group, titles)
             # The group's name is the card's; its key must still be its own.
             key = group.name if _name(group.name) not in keys else f"{group.name} ({group.id})"
             slot["key"] = key
@@ -1154,16 +1155,20 @@ async def group_shows(
         def folders_of(aid: int) -> set[str]:
             return {str(row.get("season") or "") for row in slot["files"] if row.get("anidb_id") == aid}
 
-        order = sorted(aids, key=lambda aid: (first_aired(aid), min(folders_of(aid), default=""), aid))
-        labels = {}
-        for aid in order:
-            folders = folders_of(aid) - {""}
-            # A cour kept in its own season folder is labelled by that folder.
-            labels[aid] = (
-                next(iter(folders))
-                if len(order) > 1 and len(folders) == 1
-                else _entry_name(aid, catalog, known)
-            )
+        # The sequel chain prequel to sequel, then side stories and specials;
+        # by air date alone a 2013 OVA sat between seasons one and two.
+        order = anime_collections.sequel_order(
+            aids,
+            getattr(catalog, "relations", None) or [],
+            lambda aid: (first_aired(aid), min(folders_of(aid), default="")),
+        )
+        # Each tab is its entry, named without the collection's own name.
+        # Named after season folders, two cours sharing one were two "Season 03".
+        collection = slot["key"] if slot.get("collection_id") is not None else None
+        labels = {
+            aid: anime_collections.short_label(_entry_name(aid, catalog, known), collection)
+            for aid in order
+        }
         return {"order": order, "rosters": rosters, "labels": labels, "finished": finished}
 
     def build(slot: dict) -> dict:

@@ -13,7 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniDBLinkDialog } from '@/components/AniDBLinkDialog';
-import { CollectionGraph } from '@/components/CollectionGraph';
+import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph';
 import { Meter, rampParts } from '@/components/ui/meter';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/ui/sort-header';
@@ -156,7 +156,7 @@ export default function AnimeLibrary() {
   const [deletingEpisode, setDeletingEpisode] = useState(false);
   const [titling, setTitling] = useState(false);
   // The collection whose relation graph is open.
-  const [graphFor, setGraphFor] = useState<number | null>(null);
+  const [graphFor, setGraphFor] = useState<GraphTarget>(null);
   // Shows being removed in the background: kept off the page until done.
   const removing = useRef<Set<string>>(new Set());
 
@@ -554,17 +554,17 @@ export default function AnimeLibrary() {
                       {/* First, always: every card is an AniDB entry now, so the
                           tabs' own links no longer stand in for it. */}
                       {active.anidb_id && <Button asChild variant='secondary' size='sm'><a href={'https://anidb.net/anime/' + active.anidb_id} target='_blank' rel='noreferrer' title={(active.anidb_ids?.length ?? 0) > 1 ? 'The first of its ' + active.anidb_ids!.length + ' AniDB entries; each tab links its own' : 'This show on AniDB'}><ExternalLink data-icon='inline-start' /> AniDB</a></Button>}
-                      {active.collection_id != null && (
+                      {(active.collection_id != null || active.anidb_id != null) && (
                         <Button
                           size='sm'
                           variant='secondary'
-                          onClick={() => setGraphFor(active.collection_id ?? null)}
+                          onClick={() => setGraphFor(active.collection_id != null ? { group: active.collection_id } : { entry: active.anidb_id! })}
                           title='How this collection&apos;s entries relate on AniDB: split, merge, pull entries in'
                         >
                           <Network data-icon='inline-start' /> Relations
                         </Button>
                       )}
-                      {(active.collection_entries?.filter((entry) => entry.owned).length ?? 0) > 1 && (
+                      {(active.collection_entries?.length ?? 0) > 1 && active.collection_id != null && (
                         <Select
                           value={String(active.anidb_id ?? '')}
                           onValueChange={(value) => void setTitle(active, Number(value))}
@@ -580,8 +580,10 @@ export default function AnimeLibrary() {
                           </SelectTrigger>
                           <SelectContent>
                             <SelectGroup>
-                              {active.collection_entries!.filter((entry) => entry.owned).map((entry) => (
-                                <SelectItem key={entry.anidb_id} value={String(entry.anidb_id)}>Shown as: {entry.title}</SelectItem>
+                              {active.collection_entries!.map((entry) => (
+                                <SelectItem key={entry.anidb_id} value={String(entry.anidb_id)}>
+                                  Shown as: {entry.title}{entry.owned ? '' : ' (not downloaded)'}
+                                </SelectItem>
                               ))}
                             </SelectGroup>
                           </SelectContent>
@@ -758,7 +760,7 @@ export default function AnimeLibrary() {
       </Dialog>
       <AniDBLinkDialog name={linkFor ? linkFor.source_title || linkFor.title : null} onClose={() => setLinkFor(null)} onPick={linkShow} />
       <CollectionGraph
-        groupId={graphFor}
+        target={graphFor}
         onClose={() => setGraphFor(null)}
         onChanged={() => { void load(); if (selected) void openShow(selected); }}
       />

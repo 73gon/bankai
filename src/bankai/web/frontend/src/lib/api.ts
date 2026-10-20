@@ -616,7 +616,10 @@ export interface CollectionEdge {
 }
 
 export interface CollectionGraph {
-  collection_id: number;
+  /** The Shoko group shown; null for the graph of an entry in no collection. */
+  collection_id: number | null;
+  /** That entry, when the graph is of one entry in no collection. */
+  root_aid: number | null;
   name: string;
   title_entry: number | null;
   nodes: CollectionNode[];
@@ -1099,6 +1102,13 @@ export const api = {
     request<{ items: AniDBAnime[] }>('/api/anime/anidb/search?q=' + encodeURIComponent(q)),
   /** A collection's entries and the ones related to them. */
   collectionGraph: (groupId: number) => request<CollectionGraph>(`/api/anime/collections/${groupId}/graph`),
+  /** An entry in no collection, and what it is related to. */
+  entryGraph: (anidbId: number) => request<CollectionGraph>(`/api/anime/entries/${anidbId}/graph`),
+  /** An entry in no collection into a collection it is related to. */
+  entryMove: (anidbId: number, groupId: number) =>
+    request<{ ok: boolean }>(`/api/anime/entries/${anidbId}/move`, {
+      method: 'POST', body: JSON.stringify({ group_id: groupId }),
+    }),
   /** Entries of a collection into a new one of their own. */
   collectionSplit: (groupId: number, anidbIds: number[]) =>
     request<{ ok: boolean; result: number | null }>(`/api/anime/collections/${groupId}/split`, {

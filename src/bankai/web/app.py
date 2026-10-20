@@ -1605,6 +1605,20 @@ def create_app() -> Any:
                 catalog = await shoko_catalog.fetch() or catalog
         except Exception as exc:
             log.warning("Could not apply collection choices to Shoko: %s", exc)
+        # The entries shown but not on disk, with their own relations, so a
+        # chain of seasons not downloaded yet is seen whole.
+        await asyncio.to_thread(shoko_catalog.add_known_relations, catalog)
+        try:
+            if catalog.groups:
+                found = anime_collections.assign(
+                    catalog, await asyncio.to_thread(anime_collections.load_places)
+                )
+                state = await asyncio.to_thread(erai_mod._load_state)
+                wanted = {aid for aid in found.of if aid not in catalog.entries}
+                wanted |= {int(aid) for aid in state.get("anime") or {} if str(aid).isdigit()}
+                await shoko_catalog.fill_relations(catalog, wanted)
+        except Exception as exc:
+            log.warning("Could not learn the relations of entries not on disk: %s", exc)
         return catalog
 
     snaps.add(
@@ -2181,11 +2195,16 @@ def create_app() -> Any:
         listing = await _anime_library_payload(show=key)
         show = next((row for row in listing.get("shows") or [] if row.get("collection_id")), None)
         catalog = await _catalog()
-        entry = catalog.entries.get(int(aid)) if catalog is not None else None
-        if show is None or entry is None or entry.series_id is None or entry.group_id != show["collection_id"]:
-            raise HTTPException(status_code=404, detail="that entry is not one of this collection's in Shoko")
+        member = next(
+            (row for row in (show or {}).get("collection_entries") or [] if row["anidb_id"] == int(aid)),
+            None,
+        )
+        if show is None or member is None or catalog is None:
+            raise HTTPException(status_code=404, detail="that entry is not one of this collection's")
         try:
-            group = await anime_collections.set_title(show["collection_id"], entry.series_id)
+            group = await anime_collections.set_title_entry(
+                catalog, show["collection_id"], int(aid), member["title"]
+            )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Shoko did not take it: {exc}") from exc
         # Shoko's name for the group follows; the next page load reads it.
@@ -2203,8 +2222,9 @@ def create_app() -> Any:
             raise HTTPException(status_code=404, detail="Shoko has no such collection")
         table = await anidb_mod.index()
         places = await asyncio.to_thread(anime_collections.load_places)
+        titles = await asyncio.to_thread(anime_collections.load_titles)
         graph = await asyncio.to_thread(
-            anime_collections.graph, catalog, group_id, table=table, places=places
+            anime_collections.graph, catalog, group_id, table=table, places=places, titles=titles
         )
         return catalog, graph
 
@@ -2227,6 +2247,44 @@ def create_app() -> Any:
         if not str(raw or "").isdigit():
             raise HTTPException(status_code=422, detail=f"{field_name} is required")
         return int(raw)
+
+    async def _entry_graph(aid: int) -> dict:
+        """The graph of an entry not on disk and in no collection, or a 404."""
+        from bankai.metadata import anidb as anidb_mod
+        from bankai.web import anime_collections
+
+        catalog = await _catalog()
+        if catalog is None or not catalog.groups:
+            raise HTTPException(status_code=404, detail="Shoko's collections cannot be read")
+        table = await anidb_mod.index()
+        places = await asyncio.to_thread(anime_collections.load_places)
+        try:
+            return await asyncio.to_thread(
+                anime_collections.graph, catalog, None, table=table, places=places, root_aid=aid
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/anime/entries/{aid}/graph")
+    async def anime_entry_graph(aid: int) -> dict:
+        """An entry in no collection, and what it is related to."""
+        return await _entry_graph(aid)
+
+    @app.post("/api/anime/entries/{aid}/move")
+    async def anime_entry_move(aid: int, req: dict) -> dict:
+        """An entry in no collection into one of the collections it is related to."""
+        from bankai.web import anime_collections
+
+        graph = await _entry_graph(aid)
+        target = _picked(req, "group_id")
+        if target not in {node["collection_id"] for node in graph["nodes"] if node["collection_id"]}:
+            raise HTTPException(status_code=422, detail="that collection is not related to this entry")
+
+        async def move() -> int:
+            await asyncio.to_thread(anime_collections.place, [aid], target)
+            return target
+
+        return await _collection_change(move())
 
     @app.get("/api/anime/collections/{group_id}/graph")
     async def anime_collection_graph(group_id: int) -> dict:
@@ -2286,10 +2344,12 @@ def create_app() -> Any:
 
         catalog, graph = await _collection_graph(group_id)
         aid = _picked(req)
-        entry = catalog.entries.get(aid)
-        if entry is None or entry.group_id != group_id or entry.series_id is None:
-            raise HTTPException(status_code=422, detail="only an entry of this collection on disk can name it")
-        return await _collection_change(anime_collections.set_title(group_id, entry.series_id))
+        node = next((row for row in graph["nodes"] if row["anidb_id"] == aid and row["in_collection"]), None)
+        if node is None:
+            raise HTTPException(status_code=422, detail="only an entry of this collection can name it")
+        return await _collection_change(
+            anime_collections.set_title_entry(catalog, group_id, aid, node["title"])
+        )
 
     @app.post("/api/anime/library/link")
     async def anime_library_link(req: dict) -> dict:
@@ -2408,6 +2468,7 @@ def create_app() -> Any:
         "anime_codecs.json",
         "anime_library_prefs.json",
         "anime_collection_places.json",
+        "anime_collection_titles.json",
         "review.json",
     )
     snaps.add(

@@ -367,9 +367,132 @@ def test_the_graph_actions_take_only_entries_of_that_graph(tmp_path: Path, monke
         assert client.post("/api/anime/collections/7/include", json={"anidb_id": 101}).status_code == 422
         assert client.post("/api/anime/collections/7/split", json={"anidb_ids": [101, 102, 103]}).status_code == 422
         assert client.post("/api/anime/collections/7/split", json={"anidb_ids": [200]}).status_code == 422
-        # Only an entry on disk can name the collection.
-        assert client.post("/api/anime/collections/7/title", json={"anidb_id": 103}).status_code == 422
+        # Only an entry of the collection can name it; a related one cannot.
+        assert client.post("/api/anime/collections/7/title", json={"anidb_id": 200}).status_code == 422
         # Pulling in an entry not on disk is kept here, with no call to Shoko.
         assert client.post("/api/anime/collections/7/include", json={"anidb_id": 200}).status_code == 200
         assert collections_mod.load_places() == {200: 7}
     reset_settings_cache()
+
+
+def test_tabs_follow_the_sequel_chain_then_the_side_stories() -> None:
+    """By air date alone a 2013 OVA came between a show's first and second season."""
+    aired = {1: "2013-04", 2: "2017-04", 3: "2018-07", 4: "2019-04", 9: "2013-12", 8: "2023-11"}
+    relations = [
+        (1, 2, "Sequel"), (2, 3, "Sequel"), (4, 3, "Prequel"),
+        (1, 9, "SideStory"), (4, 8, "SideStory"),
+    ]
+
+    order = anime_collections.sequel_order([9, 4, 8, 2, 1, 3], relations, lambda aid: aired[aid])
+
+    assert order == [1, 2, 3, 4, 9, 8]
+
+
+def test_a_tab_is_named_without_the_collection_s_own_name() -> None:
+    assert anime_collections.short_label("Attack on Titan Season 2", "Attack on Titan") == "Season 2"
+    assert anime_collections.short_label("Attack on Titan: The Final Season", "Attack on Titan") == "The Final Season"
+    # Nothing left over: the whole name, not an empty tab.
+    assert anime_collections.short_label("Attack on Titan", "Attack on Titan") == "Attack on Titan"
+    assert anime_collections.short_label("Junior High", "Attack on Titan") == "Junior High"
+
+
+def test_a_related_entry_in_another_collection_brings_that_whole_collection() -> None:
+    """Seen whole, it reads as another collection, not as one stray entry."""
+    catalog = _kaguya()
+    catalog.entries[301] = _entry(301, "Kaguya-sama Movie 2", 9, series=4)
+    catalog.relations.append((300, 301, "Sequel"))
+
+    nodes = {node["anidb_id"]: node for node in anime_collections.graph(catalog, 7)["nodes"]}
+
+    assert nodes[301]["collection_id"] == 9 and nodes[301]["in_collection"] is False
+    edges = anime_collections.graph(catalog, 7)["edges"]
+    assert {"from": 300, "to": 301, "label": "sequel", "main_line": True} in edges
+
+
+def test_a_season_not_downloaded_can_name_the_collection(shoko_calls) -> None:
+    """Shoko's group takes its name; bankai keeps which entry it is, for the cover."""
+    asyncio.run(anime_collections.set_title_entry(_kaguya(), 7, 103, "Kaguya-sama 3"))
+
+    assert shoko_calls[-1] == (
+        "PATCH",
+        "/api/v3/Group/7",
+        [
+            {"op": "replace", "path": "/Name", "value": "Kaguya-sama 3"},
+            {"op": "replace", "path": "/HasCustomName", "value": True},
+        ],
+    )
+    assert anime_collections.load_titles() == {7: 103}
+    group = _kaguya().groups[7]
+    assert anime_collections.title_entry(group, anime_collections.load_titles()) == 103
+
+    # Back to a season on disk: Shoko names the group after it again.
+    asyncio.run(anime_collections.set_title_entry(_kaguya(), 7, 102, "Kaguya-sama 2"))
+
+    assert shoko_calls[-1] == (
+        "PATCH",
+        "/api/v3/Group/7",
+        [
+            {"op": "replace", "path": "/PreferredSeriesID", "value": 2},
+            {"op": "replace", "path": "/HasCustomName", "value": False},
+        ],
+    )
+    assert anime_collections.load_titles() == {}
+
+
+def test_an_entry_of_another_collection_cannot_name_this_one(shoko_calls) -> None:
+    with pytest.raises(ValueError):
+        asyncio.run(anime_collections.set_title_entry(_kaguya(), 7, 300, "Movie"))
+    assert shoko_calls == []
+
+
+def test_an_entry_in_no_collection_has_a_graph_of_its_own_to_move_from() -> None:
+    """Cut out of every collection, it is still related to them, and can go into one."""
+    found = anime_collections.graph(_kaguya(), None, places={103: None}, root_aid=103)
+
+    nodes = {node["anidb_id"]: node for node in found["nodes"]}
+    assert found["collection_id"] is None and found["root_aid"] == 103
+    assert nodes[103]["in_collection"] and nodes[103]["title_entry"]
+    # Its prequel's collection and its sequel's are both offered, whole.
+    assert {nodes[102]["collection_id"], nodes[300]["collection_id"]} == {7, 9}
+    assert 101 in nodes
+
+
+def test_an_entry_in_a_collection_is_opened_through_it() -> None:
+    with pytest.raises(ValueError):
+        anime_collections.graph(_kaguya(), None, root_aid=103)
+
+
+def test_relations_are_learned_for_entries_shoko_holds_no_series_for(shoko_calls, monkeypatch) -> None:
+    """A record Shoko lacks is fetched by it, within a few per run; answers are kept."""
+    from bankai.web import shoko, shoko_catalog
+
+    calls: list[tuple] = []
+
+    async def send(method, endpoint, /, *, json_body=None, **params):
+        calls.append((method, endpoint))
+        if endpoint.endswith("/Relations"):
+            if endpoint == "/api/v3/Series/AniDB/500/Relations" and ("POST", "/api/v3/Series/AniDB/500/Refresh") not in calls:
+                return None  # no record until Shoko fetched it
+            aid = int(endpoint.split("/")[-2])
+            return [{"IDs": {"AniDB": aid}, "RelatedIDs": {"AniDB": aid + 1}, "Type": "Sequel"}]
+        return True
+
+    monkeypatch.setattr(shoko, "_send", send)
+    catalog = _kaguya()
+
+    learned = asyncio.run(shoko_catalog.fill_relations(catalog, {101, 103, 500, 600}))
+
+    # 101 is on disk and 103's links are listed already: neither is asked about.
+    assert learned == 2
+    assert ("GET", "/api/v3/Series/AniDB/103/Relations") not in calls
+    # 600 has a record, 500 had to be fetched by Shoko first.
+    assert ("POST", "/api/v3/Series/AniDB/600/Refresh") not in calls
+    assert ("POST", "/api/v3/Series/AniDB/500/Refresh") in calls
+    assert (500, 501, "Sequel") in catalog.relations and (600, 601, "Sequel") in catalog.relations
+
+    # Kept: the next refresh adds them without asking again.
+    calls.clear()
+    fresh = _kaguya()
+    asyncio.run(shoko_catalog.fill_relations(fresh, {500, 600}))
+    assert calls == []
+    assert (500, 501, "Sequel") in fresh.relations

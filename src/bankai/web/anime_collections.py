@@ -71,6 +71,69 @@ def main_line(relations: list[tuple[int, int, str]]) -> dict[int, set[int]]:
     return graph
 
 
+def sequel_order(aids: list[int], relations: list[tuple[int, int, str]], aired: Any) -> list[int]:
+    """A collection's entries in the order to show them.
+
+    The sequel chain first, prequel to sequel -- the longest chain among them,
+    or the earliest aired at equal length -- then the rest, side stories,
+    recaps, specials, as they aired. By air date alone a 2013 OVA came
+    between a show's first and second season. ``aired`` gives each entry a
+    sortable date.
+    """
+    members = set(aids)
+    after: dict[int, set[int]] = {aid: set() for aid in members}
+    before: dict[int, set[int]] = {aid: set() for aid in members}
+    for left, right, kind in relations:
+        if left == right or left not in members or right not in members:
+            continue
+        if kind == "Sequel":
+            after[left].add(right)
+            before[right].add(left)
+        elif kind == "Prequel":
+            after[right].add(left)
+            before[left].add(right)
+    by_date = sorted(members, key=lambda aid: (aired(aid), aid))
+    chains: list[list[int]] = []
+    seen: set[int] = set()
+    for aid in by_date:
+        if aid in seen or not (after[aid] or before[aid]):
+            continue
+        chain, stack = [], [aid]
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            chain.append(current)
+            stack.extend(after[current] | before[current])
+        chains.append(chain)
+    spine = min(chains, key=lambda chain: (-len(chain), min(aired(aid) for aid in chain)), default=[])
+    ordered: list[int] = []
+    waiting = {aid: len(before[aid] & set(spine)) for aid in spine}
+    ready = sorted((aid for aid in spine if waiting[aid] == 0), key=lambda aid: (aired(aid), aid))
+    while ready:
+        current = ready.pop(0)
+        ordered.append(current)
+        for nxt in after[current]:
+            if nxt in waiting:
+                waiting[nxt] -= 1
+                if waiting[nxt] == 0:
+                    ready.append(nxt)
+                    ready.sort(key=lambda aid: (aired(aid), aid))
+    # A loop in AniDB's links would leave entries waiting: they follow by date.
+    ordered.extend(aid for aid in by_date if aid in waiting and aid not in ordered)
+    return ordered + [aid for aid in by_date if aid not in ordered]
+
+
+def short_label(title: str, collection: str | None) -> str:
+    """An entry's tab name without the collection's own: "Attack on Titan Season 2" -> "Season 2"."""
+    if collection and title.casefold().startswith(collection.casefold()):
+        rest = title[len(collection):].lstrip(" :-–~,.")
+        if rest:
+            return rest
+    return title
+
+
 # -- Choices for entries Shoko does not hold -----------------------------------
 
 
@@ -148,27 +211,52 @@ def assign(catalog: Any, places: dict[int, int | None] | None = None) -> Collect
 # -- The relation graph of one collection --------------------------------------
 
 
-def graph(catalog: Any, group_id: int, *, table: Any = None, places: dict[int, int | None] | None = None) -> dict:
+def graph(
+    catalog: Any,
+    group_id: int | None,
+    *,
+    table: Any = None,
+    places: dict[int, int | None] | None = None,
+    titles: dict[int, int] | None = None,
+    root_aid: int | None = None,
+) -> dict:
     """One collection as nodes and edges: its entries, and the ones related to them.
 
     The collection's own entries are the nodes it is made of. Every entry an
     AniDB relation ties to one of them, but which is not in it, is a
     suggestion: a side story, a recap, a sequel kept in another collection.
+    A related entry kept in another collection brings that whole collection
+    along, so it is seen for what it is, not as one stray entry.
+
+    Without a collection, ``root_aid`` is an entry not on disk and in none:
+    its graph is it and its relations, from which it can be moved into one.
     """
     from bankai.metadata import anidb_art
 
     found = assign(catalog, places)
-    group = catalog.groups.get(group_id) if catalog is not None else None
-    if group is None:
-        raise ValueError("Shoko has no such collection")
-    members = set(found.members(group_id))
+    if group_id is None:
+        if root_aid is None or root_aid in catalog.entries or found.of.get(root_aid) is not None:
+            raise ValueError("that entry is in a collection; open the collection")
+        group = None
+        title_aid = root_aid
+        members = {root_aid}
+    else:
+        group = catalog.groups.get(group_id) if catalog is not None else None
+        if group is None:
+            raise ValueError("Shoko has no such collection")
+        title_aid = title_entry(group, titles)
+        members = set(found.members(group_id))
+    # Both ways: a link can be listed on either end, and an entry Shoko holds
+    # no record of has its links listed only on the other.
     related: dict[int, list[tuple[int, str]]] = {}
     for left, right, kind in catalog.relations:
         related.setdefault(left, []).append((right, kind))
-        related.setdefault(right, [])
+        related.setdefault(right, []).append((left, kind))
     suggestions = {
         other for aid in members for other, _kind in related.get(aid, ()) if other not in members
     }
+    elsewhere = {found.of[aid] for aid in suggestions if found.of.get(aid) not in (None, group_id)}
+    suggestions |= {aid for aid, other in found.of.items() if other in elsewhere}
     on_disk: dict[int, set[int]] = {}
     for links in catalog.files.values():
         for aid, number in links:
@@ -194,7 +282,7 @@ def graph(catalog: Any, group_id: int, *, table: Any = None, places: dict[int, i
             "owned": entry is not None,
             "poster_url": (entry.poster_url if entry else None) or anidb_art.cover(aid),
             "in_collection": aid in members,
-            "title_entry": aid == group.main_aid,
+            "title_entry": aid == title_aid,
             # Where a suggestion is now: another collection, or none.
             "collection_id": other,
             "collection_name": catalog.groups[other].name if other in catalog.groups else None,
@@ -202,11 +290,10 @@ def graph(catalog: Any, group_id: int, *, table: Any = None, places: dict[int, i
         }
 
     nodes = [node(aid) for aid in sorted(members | suggestions)]
+    name = group.name if group is not None else next(row["title"] for row in nodes if row["anidb_id"] == root_aid)
     seen: set[tuple] = set()
     edges = []
     for left, right, kind in catalog.relations:
-        if left not in members and right not in members:
-            continue
         if left not in members | suggestions or right not in members | suggestions:
             continue
         label, flipped = _EDGES.get(kind, (kind.lower(), False))
@@ -218,11 +305,52 @@ def graph(catalog: Any, group_id: int, *, table: Any = None, places: dict[int, i
         edges.append({"from": source, "to": target, "label": label, "main_line": kind in MAIN_LINE})
     return {
         "collection_id": group_id,
-        "name": group.name,
-        "title_entry": group.main_aid,
+        "root_aid": root_aid if group is None else None,
+        "name": name,
+        "title_entry": title_aid,
         "nodes": nodes,
         "edges": edges,
     }
+
+
+# -- A collection's title entry ------------------------------------------------
+#
+# Shoko names and pictures a group after its preferred series, which has to be
+# one it holds. A season not downloaded yet can still be the title: Shoko's
+# group then gets its name as a custom name, and bankai keeps which entry it
+# is, for the cover on the card.
+
+
+def _titles_path() -> Path:
+    from bankai.cli import bgjobs
+
+    return bgjobs.jobs_root().parent / "anime_collection_titles.json"
+
+
+def load_titles() -> dict[int, int]:
+    """Shoko group -> the entry not on disk chosen to name it."""
+    try:
+        raw = json.loads(_titles_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {
+        int(group): int(aid)
+        for group, aid in (raw.items() if isinstance(raw, dict) else ())
+        if str(group).isdigit() and str(aid).isdigit()
+    }
+
+
+def _save_titles(titles: dict[int, int]) -> None:
+    path = _titles_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({str(group): aid for group, aid in sorted(titles.items())}), encoding="utf-8")
+    tmp.replace(path)
+
+
+def title_entry(group: Any, titles: dict[int, int] | None) -> int | None:
+    """The entry a collection is named and pictured after."""
+    return (titles or {}).get(group.id) or group.main_aid
 
 
 # -- Changing a collection in Shoko --------------------------------------------
@@ -276,13 +404,41 @@ async def set_title(group_id: int, series_id: int) -> dict:
     from bankai.web import shoko
 
     await snapshot()
+    patch = [{"op": "replace", "path": "/PreferredSeriesID", "value": int(series_id)}]
+    titles = load_titles()
+    # A name given for an entry not on disk is taken back: the series names it again.
+    if titles.pop(int(group_id), None) is not None:
+        patch.append({"op": "replace", "path": "/HasCustomName", "value": False})
+    result = await shoko._send("PATCH", f"/api/v3/Group/{int(group_id)}", json_body=patch)
+    if result is None:
+        raise ValueError("Shoko has no such group")
+    _save_titles(titles)
+    return await shoko._get(f"/api/v3/Group/{int(group_id)}")
+
+
+async def set_title_entry(catalog: Any, group_id: int, aid: int, name: str) -> dict:
+    """Name a collection after any of its entries; one not on disk by its name only."""
+    from bankai.web import shoko
+
+    entry = catalog.entries.get(int(aid))
+    if entry is not None and entry.series_id is not None:
+        if entry.group_id != group_id:
+            raise ValueError("that entry is in another collection")
+        return await set_title(group_id, entry.series_id)
+    await snapshot()
     result = await shoko._send(
         "PATCH",
         f"/api/v3/Group/{int(group_id)}",
-        json_body=[{"op": "replace", "path": "/PreferredSeriesID", "value": int(series_id)}],
+        json_body=[
+            {"op": "replace", "path": "/Name", "value": name},
+            {"op": "replace", "path": "/HasCustomName", "value": True},
+        ],
     )
     if result is None:
         raise ValueError("Shoko has no such group")
+    titles = load_titles()
+    titles[int(group_id)] = int(aid)
+    _save_titles(titles)
     return await shoko._get(f"/api/v3/Group/{int(group_id)}")
 
 

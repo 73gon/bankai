@@ -115,8 +115,9 @@ def test_bleach_and_its_sequel_are_two_cards(library):
     assert tybw["title"] == "Bleach: Thousand-Year Blood War"
     assert (tybw["downloaded_count"], tybw["total_count"]) == (5, 6)
     missing = [row for row in tybw["episodes"] if row.get("missing")]
+    # Each tab is its entry, named after it rather than the folder it is in.
     assert [(row["season"], row["episode"]) for row in missing] == [
-        ("Season 02 - Sennen Kessen Hen - Ketsubetsu Tan", 2)
+        ("Bleach: Sennen Kessen Hen - Ketsubetsu Tan", 2)
     ]
     # Each card wears its own entry's cover, not one shared by the whole show.
     assert tybw["poster_url"] == "cover:15449"
