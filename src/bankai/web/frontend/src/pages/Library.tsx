@@ -1615,7 +1615,7 @@ export default function Library() {
         <EmptyNote icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
       ) : (
         <Table variant='plain' containerProps={{ ref: tableScrollRef, className: 'min-h-0 flex-1 overflow-auto' }}>
-          <TableHeader className='sticky top-0 z-10 bg-background'>
+          <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
             <TableRow>
               <TableHead className='w-14 px-2' />
               <SortHeader column='title' label='Title' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />

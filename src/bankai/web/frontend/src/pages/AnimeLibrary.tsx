@@ -773,7 +773,7 @@ export default function AnimeLibrary() {
         </div>
       ) : (
         <Table variant='plain' className='min-w-[820px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
-            <TableHeader className='sticky top-0 z-10 bg-background'>
+            <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
               <TableRow>
                 <SortHeader label='Series' column='title' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Seasons' column='seasons' sort={sort} onSort={toggleSort} />

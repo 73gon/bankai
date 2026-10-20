@@ -50,6 +50,12 @@
     max-width: none;
   }
 
+  /* Its header row sits on the secondary surface rather than the near-black page,
+     like the sidebar, so the column names read as a band above the rows. */
+  main [data-slot='table'][data-variant='plain'] > thead {
+    background-color: var(--secondary);
+  }
+
   /* Dense library rows. The whole row is the control, so it gets the press
      feedback a button would -- background rather than scale, since a
      full-width row scaling reads as the table itself shifting. */

@@ -299,7 +299,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </Empty>
       ) : blacklist && view === 'table' ? (
         <Table variant='plain' className='min-w-[720px]' containerProps={{ className: 'overflow-auto' }}>
-            <TableHeader className='sticky top-0 z-10 bg-background'>
+            <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
               <TableRow>
                 <TableHead>Show</TableHead>
                 <TableHead>Erai name</TableHead>

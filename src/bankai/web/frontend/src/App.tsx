@@ -348,7 +348,7 @@ export default function App() {
         {/* Sidebar (desktop) / top bar (mobile) */}
         <aside
           className={cn(
-            'sticky top-0 z-30 flex min-w-0 shrink-0 flex-row items-center gap-3 border-b border-border/60 bg-background px-3 py-2',
+            'sticky top-0 z-30 flex min-w-0 shrink-0 flex-row items-center gap-3 border-b border-border/60 bg-(--secondary) px-3 py-2',
             'md:h-dvh md:flex-col md:items-stretch md:gap-0 md:border-b-0 md:border-r md:p-0',
             collapsed ? 'md:w-16' : 'md:w-60',
           )}

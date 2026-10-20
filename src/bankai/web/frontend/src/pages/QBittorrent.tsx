@@ -382,7 +382,7 @@ export default function QBittorrent() {
         </Empty>
       ) : (
           <Table variant='plain' dense className='min-w-[1180px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
-            <TableHeader className='sticky top-0 z-10 bg-background'>
+            <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
               <TableRow>
                 <SortHeader label='Name' column='name' sort={sort} onSort={toggleSort} />
                 <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />

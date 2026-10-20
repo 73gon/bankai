@@ -232,7 +232,7 @@ export default function AnimeErai({
           </div>
 
           <Table variant='plain' dense className='min-w-[980px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
-              <TableHeader className='sticky top-0 z-10 bg-background'>
+              <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
                 <TableRow>
                   <TableHead>Release</TableHead>
                   <TableHead>Subtitles</TableHead>
