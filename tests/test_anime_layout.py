@@ -553,6 +553,42 @@ def test_a_renamed_collection_leaves_no_empty_show_behind(titan, roots) -> None:
     assert (roots.anime / _place("Shingeki", 1, 1)).is_file()
 
 
+def test_a_name_changed_only_in_case_is_renamed_too(titan, roots) -> None:
+    """NTFS takes "ATTACK ON TITAN" for "Attack on Titan": the file and its folder must still take the new case."""
+    _touch(roots.anime / _place(AOT, 1, 1))
+    _index({_place(AOT, 1, 1): [(S1, 1)]})
+    store = _titan_store()
+    collections.set_name(store, 1, AOT.upper())
+    _save(store)
+
+    result = asyncio.run(anime_layout.relayout({1}))
+
+    assert result["moved"] == 1 and result["skipped"] == []
+    assert [path.name for path in roots.anime.iterdir()] == [AOT.upper()]
+    season = roots.anime / AOT.upper() / "Season 01"
+    assert [path.name for path in season.iterdir() if path.suffix == ".mkv"] == [f"{AOT.upper()} - S01E01.mkv"]
+    assert anime_files.load() == {_place(AOT.upper(), 1, 1): [(S1, 1)]}
+
+
+def test_a_folder_left_in_its_old_case_takes_its_collection_s_name(titan, roots) -> None:
+    """On a disk that ignores case, files moved into "ATTACK ON TITAN" landed in "Attack on Titan"."""
+    probe = roots.anime / "Probe"
+    probe.mkdir()
+    if not (roots.anime / "PROBE").exists():
+        pytest.skip("only a disk that ignores case can hold a folder under the wrong case")
+    probe.rmdir()
+    _touch(roots.anime / AOT / "Season 01" / f"{AOT.upper()} - S01E01.mkv")
+    _index({_place(AOT.upper(), 1, 1): [(S1, 1)]})
+    store = _titan_store()
+    collections.set_name(store, 1, AOT.upper())
+    _save(store)
+
+    asyncio.run(anime_layout.relayout({1}))
+
+    assert [path.name for path in roots.anime.iterdir()] == [AOT.upper()]
+    assert anime_files.existing(_place(AOT.upper(), 1, 1))
+
+
 def test_a_folder_keeps_what_bankai_did_not_write(titan, roots) -> None:
     _touch(roots.anime / _place(AOT, 1, 1))
     _touch(roots.anime / AOT / "notes.txt", "mine")

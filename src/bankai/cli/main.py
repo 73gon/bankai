@@ -1690,6 +1690,22 @@ def anime_migrate_anilist(
         console.print("[yellow]dry run: nothing was changed[/yellow]")
 
 
+@anime_app.command("layout")
+def anime_layout_run() -> None:
+    """Lay the whole anime library out again: rename files into place and write the NFO files."""
+    from bankai.web.anime_layout import relayout
+
+    result = asyncio.run(relayout(None, label="manual"))
+    console.print(
+        f"{result['moved']} moved, {len(result['skipped'])} skipped, {len(result['duplicates'])} duplicates, "
+        f"{len(result['unplaced'])} in no collection, {result['nfo_written']} NFO files written"
+    )
+    for line in result["skipped"][:20]:
+        console.print(f"  skipped: {line}")
+    if result.get("log"):
+        console.print(f"undo with: bankai anime layout-undo {result['log']}")
+
+
 @anime_app.command("layout-undo")
 def anime_layout_undo(
     log_file: Path = typer.Argument(..., help="A file from anime_layout_moves/ in the state directory"),

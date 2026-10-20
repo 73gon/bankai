@@ -240,12 +240,13 @@ def apply(moves: Moves, *, label: str = "layout") -> dict:
         number += 1
         log_path = folder / f"{stamp}-{number}.jsonl"
     renamed: dict[str, str] = {}
+    done: set[Path] = set()
     pending = list(moves.moves)
     with log_path.open("a", encoding="utf-8") as journal:
         while pending:
             waiting = []
             for move in pending:
-                outcome = _move(move, journal)
+                outcome = _move(move, journal, done)
                 if outcome == "blocked":
                     waiting.append(move)
                 elif outcome == "moved":
@@ -264,27 +265,102 @@ def apply(moves: Moves, *, label: str = "layout") -> dict:
     return {"moved": len(renamed), "skipped": skipped, "log": str(log_path) if renamed else None}
 
 
-def _move(move: Move, journal) -> str:
+def _same_file(left: Path, right: Path) -> bool:
+    """One file under two spellings: the library's disk ignores case."""
+    try:
+        return left.samefile(right)
+    except OSError:
+        return False
+
+
+def _rename(old: Path, new: Path) -> None:
+    """A rename that also works when only the case of the name changes.
+
+    The library is on NTFS, which takes "BLUE LOCK" for "Blue Lock": renamed
+    straight across, the name keeps its old case. Going through a temporary
+    name makes it take the new one.
+    """
+    if old.name != new.name and old.name.casefold() == new.name.casefold() and old.parent == new.parent:
+        step = old.with_name(f".{old.name}.{os.getpid()}.case")
+        old.replace(step)
+        step.replace(new)
+    else:
+        old.replace(new)
+
+
+def _exact_folders(root: Path, target: Path, done: set[Path]) -> None:
+    """Give each folder on the way to ``target`` exactly its name, case and all.
+
+    A collection renamed only in case ("Blue Lock" -> "BLUE LOCK") would
+    otherwise keep its old folder, which the disk takes for the new one, and
+    the index -- which compares names exactly -- would not know its files.
+    """
+    current = root
+    for part in target.relative_to(root).parts[:-1]:
+        wanted = current / part
+        if wanted not in done:
+            done.add(wanted)
+            try:
+                actual = next(
+                    (child for child in current.iterdir() if child.name.casefold() == part.casefold()), None
+                )
+            except OSError:
+                return
+            if actual is not None and actual.name != part:
+                _rename(actual, wanted)
+        current = wanted
+
+
+def repair_folder_case(folders: Iterable[str]) -> int:
+    """Give show folders that differ from their collection's name only in case that name.
+
+    Moves into a folder renamed only in case went into the old one -- NTFS
+    took one for the other -- and the index, which compares names exactly,
+    then knew none of its files. Returns how many folders were renamed.
+    """
+    wanted = {name.casefold(): name for name in folders}
+    fixed = 0
+    for root in (anime_files.anime_root(), anime_files.staging_root()):
+        try:
+            children = [child for child in root.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            name = wanted.get(child.name.casefold())
+            if name is None or child.name == name:
+                continue
+            target = root / name
+            if target.exists() and not _same_file(child, target):
+                continue  # a folder of its own, on a disk that tells case apart
+            _rename(child, target)
+            fixed += 1
+    return fixed
+
+
+def _move(move: Move, journal, done: set[Path] | None = None) -> str:
     """One file and its companions, in the library and in staging: moved, blocked or missing."""
     outcome = "missing"
+    done = done if done is not None else set()
     for root in (anime_files.anime_root(), anime_files.staging_root()):
         source = root.joinpath(*PurePosixPath(move.old).parts)
         target = root.joinpath(*PurePosixPath(move.new).parts)
         if not source.is_file():
             continue
-        if target.exists():
+        if target.exists() and not _same_file(source, target):
             return "blocked"
+        # A folder renamed in case only is still found under its old spelling.
+        _exact_folders(root, target, done)
         pairs = [(source, target)] + [
             (extra, target.with_name(target.stem + extra.name[len(source.stem):]))
             for extra in _companions(source)
         ]
         target.parent.mkdir(parents=True, exist_ok=True)
         for old, new in pairs:
-            if new.exists():
+            if new.exists() and not _same_file(old, new):
                 continue
             journal.write(json.dumps({"from": str(old), "to": str(new)}, ensure_ascii=False) + "\n")
             journal.flush()
-            old.replace(new)
+            _rename(old, new)
         _prune(source.parent, root)
         outcome = "moved"
     return outcome
@@ -555,6 +631,7 @@ async def relayout(cids: set[int] | None = None, *, pictures: bool = True, label
     rows = await asyncio.to_thread(anime_files.load)
     targets = set(store.collections) if cids is None else {cid for cid in cids if cid in store.collections}
     layout = await asyncio.to_thread(Layout.build, store, rows)
+    await asyncio.to_thread(repair_folder_case, [layout.folders[cid] for cid in targets if cid in layout.folders])
     # All of them: the files of no collection are reported too.
     moves = plan_moves(layout, cids=None if cids is None else targets)
     result = await asyncio.to_thread(apply, moves, label=label)
