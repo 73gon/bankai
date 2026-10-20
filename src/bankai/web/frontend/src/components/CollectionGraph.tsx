@@ -1010,7 +1010,7 @@ export function CollectionGraph({
 
   return (
     <Dialog open={target !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className='flex h-[92dvh] w-[min(98vw,1700px)] max-w-none flex-col gap-3'>
+      <DialogContent className='flex h-[98dvh] w-[98vw] max-w-none flex-col gap-3'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'><Network className='size-4' /> {graph?.name ?? 'Collection'}</DialogTitle>
           <DialogDescription>
