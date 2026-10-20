@@ -440,13 +440,18 @@ def season_nfo(season: int, aid: int | None, show: str) -> str:
     return f'<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n<season>\n{body}</season>\n'
 
 
-def episode_nfo(show: str, season: int, number: int, pairs: list[tuple[int, int]]) -> str:
+def episode_nfo(
+    show: str, season: int, number: int, pairs: list[tuple[int, int]], *, on_disk: int = 0
+) -> str:
+    """An episode's NFO. A special is titled by its entry, and by its episode too
+    when the entry has more than one -- by AniList's count, or by the files on
+    disk (``on_disk``) where AniList counts a two-part special as one."""
     aid, episode = pairs[0]
     known = {n: (title, aired) for n, title, aired in anilist.episodes(aid)}
     title, aired = known.get(episode, (None, None))
     if season == 0:
         name = collections.entry_name(aid)
-        many = (anilist.episode_count(aid) or 1) > 1
+        many = max(anilist.episode_count(aid) or 1, on_disk, episode) > 1
         title = f"{name} - {title or f'Episode {episode}'}" if many else name
         aired = aired or anilist.media(aid).get("start")
     title = title or f"Episode {episode}"
@@ -504,6 +509,7 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
     written = 0
     pictures: list[Picture] = []
     root = anime_files.anime_root()
+    held = anime_files.by_entry(layout.rows)
     by_folder: dict[int, list[str]] = {}
     for rel, pairs in layout.rows.items():
         cid = layout.of.get(pairs[0][0])
@@ -542,7 +548,10 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
             place = plan.place(*pairs[0])
             if place is None:
                 continue
-            written += _write_text(video.with_suffix(".nfo"), episode_nfo(show, place[0], place[1], pairs))
+            on_disk = len(held.get(pairs[0][0], {}))
+            written += _write_text(
+                video.with_suffix(".nfo"), episode_nfo(show, place[0], place[1], pairs, on_disk=on_disk)
+            )
     return written, pictures
 
 

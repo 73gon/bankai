@@ -400,6 +400,14 @@ def test_a_special_is_titled_by_its_entry(titan) -> None:
     assert (movie.findtext("season"), movie.findtext("episode")) == ("0", "9")
 
 
+def test_a_special_anilist_counts_as_one_but_on_disk_as_two_is_titled_by_episode(titan) -> None:
+    first = _xml(anime_layout.episode_nfo(AOT, 0, 9, [(MOVIE, 1)], on_disk=2)).findtext("title")
+    second = _xml(anime_layout.episode_nfo(AOT, 0, 10, [(MOVIE, 2)], on_disk=2)).findtext("title")
+
+    assert first != second
+    assert first == "Attack on Titan: Crimson Bow and Arrow - Episode 1"
+
+
 def test_a_file_of_two_episodes_says_so(titan) -> None:
     nfo = _xml(anime_layout.episode_nfo(AOT, 1, 1, [(S1, 1), (S1, 2)]))
 
