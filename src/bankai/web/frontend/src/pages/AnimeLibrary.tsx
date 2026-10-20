@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
@@ -986,8 +986,45 @@ export default function AnimeLibrary() {
                             />
                           );
                         })()}</th><th className='py-2.5 pr-3 font-medium'>Ep</th><th className='px-3 py-2.5 font-medium'>Episode / File</th><th className='px-3 py-2.5 font-medium'>Encode</th><th className='px-3 py-2.5 text-right font-medium'>Size</th><th className='py-2.5 pl-3 text-right font-medium'>State</th></tr></thead>
-                        <tbody>{active.episodes.filter((entry) => entry.season_number === season).map((entry) => (
-                          <tr key={entry.path || String(entry.season_number) + ':' + entry.episode} className={cn('border-b border-border/70 last:border-0', hasFile(entry) && checkedPaths.has(entry.path) && 'bg-accent/30')}>
+                        <tbody>{(() => {
+                          // A season made of several AniList entries: each entry's episodes under a row naming it.
+                          const tabRows = active.episodes.filter((entry) => entry.season_number === season);
+                          const parts = active.season_anilist?.[String(season)] ?? [];
+                          const grouped = parts.length > 1;
+                          return tabRows.map((entry, index) => {
+                            const starts = grouped && entry.anilist_id != null && entry.anilist_id !== tabRows[index - 1]?.anilist_id;
+                            const own = starts ? tabRows.filter((row) => row.anilist_id === entry.anilist_id) : [];
+                            const part = starts ? parts.find((item) => item.anilist_id === entry.anilist_id) : undefined;
+                            const numbers = own.map((row) => row.episode ?? 0).filter(Boolean);
+                            return (
+                          <Fragment key={entry.path || String(entry.season_number) + ':' + entry.episode}>
+                          {starts && (
+                            <tr className='border-b border-border bg-muted/40'>
+                              <td colSpan={6} className='px-2 py-1.5'>
+                                <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-xs'>
+                                  <span className='font-medium text-foreground'>{part?.title ?? 'AniList ' + entry.anilist_id}</span>
+                                  {numbers.length > 0 && (
+                                    <span className='font-mono text-muted-foreground'>
+                                      ep {Math.min(...numbers)}{numbers.length > 1 ? '–' + Math.max(...numbers) : ''}
+                                    </span>
+                                  )}
+                                  <span className='text-muted-foreground'>
+                                    {own.filter((row) => !row.missing).length}/{own.length} on disk
+                                  </span>
+                                  <a
+                                    href={anilistUrl(entry.anilist_id!)}
+                                    target='_blank'
+                                    rel='noreferrer'
+                                    className='inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground'
+                                    title='This entry on AniList'
+                                  >
+                                    <ExternalLink className='size-3' /> AniList
+                                  </a>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                          <tr className={cn('border-b border-border/70 last:border-0', hasFile(entry) && checkedPaths.has(entry.path) && 'bg-accent/30')}>
                             <td className='w-7 py-2.5 pr-2'>
                               {hasFile(entry) && (
                                 <input
@@ -1027,7 +1064,10 @@ export default function AnimeLibrary() {
                               </div>
                             )}</td>
                           </tr>
-                        ))}</tbody>
+                          </Fragment>
+                            );
+                          });
+                        })()}</tbody>
                       </table>
                     </div>
                   </TabsContent>
