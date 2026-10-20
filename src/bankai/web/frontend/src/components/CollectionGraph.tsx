@@ -20,6 +20,7 @@ import {
   DndContext,
   DragOverlay,
   KeyboardSensor,
+  MeasuringStrategy,
   PointerSensor,
   pointerWithin,
   useDroppable,
@@ -672,6 +673,8 @@ type DragKind = { type: 'entry'; id: number } | { type: 'season'; key: string };
 
 const entryId = (id: number) => 'entry-' + id;
 const mergeId = (key: string) => 'merge-' + key;
+/** A season's entry area: not the season's own id, which its sortable box has. */
+const areaId = (key: string) => 'area-' + key;
 
 /** An entry's face: type colour, title, episodes. Shared by the box in its place and the one floating under the cursor. */
 function ChipFace({ id, node, floating, menu }: { id: number; node: CollectionNode | undefined; floating?: boolean; menu?: React.ReactNode }) {
@@ -905,8 +908,13 @@ function SeasonsPanel({
 
   const containerFromOver = (overId: string, current: Board): string | null => {
     if (overId === NEW_SEASON) return NEW_SEASON;
+    if (overId === SPECIALS) return SPECIALS;
     if (overId.startsWith('entry-')) return containerOf(current, Number(overId.slice('entry-'.length)));
-    return overId === SPECIALS || current.seasons.some((season) => season.key === overId) ? overId : null;
+    if (overId.startsWith('area-')) {
+      const key = overId.slice('area-'.length);
+      return current.seasons.some((season) => season.key === key) ? key : null;
+    }
+    return null;
   };
 
   const onDragStart = (event: DragStartEvent) => {
@@ -1034,6 +1042,8 @@ function SeasonsPanel({
           <DndContext
             sensors={sensors}
             collisionDetection={collide}
+            // Merge zones and the boxes making room appear and move during a drag: measure them as they are.
+            measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
             onDragStart={onDragStart}
             onDragOver={onDragOver}
             onDragEnd={onDragEnd}
@@ -1044,7 +1054,7 @@ function SeasonsPanel({
                 {board.seasons.map((season, index) => (
                   <SeasonBox key={season.key} season={season} number={index + 1} disabled={busy} seasonDragged={active?.type === 'season' ? active.key : null}>
                     <SortableContext items={season.ids.map(entryId)} strategy={rectSortingStrategy}>
-                      <EntryArea id={season.key}>
+                      <EntryArea id={areaId(season.key)}>
                         {season.ids.map((id) => (
                           <SortableChip key={id} id={id} node={byId.get(id)} disabled={busy}>
                             {menu(id, season)}
