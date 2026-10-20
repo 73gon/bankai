@@ -16,6 +16,30 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
+  closestCenter,
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  pointerWithin,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type CollisionDetection,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  rectSortingStrategy,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import {
   ArrowRightToLine,
   ChevronDown,
   ExternalLink,
@@ -127,49 +151,6 @@ function ownSeason(arrangement: Arrangement, id: number) {
     draft.seasons.splice(at + 1, 0, [id]);
   });
 }
-
-/** Where an entry is dropped: into a season (before ``before``, else at its end), a new last season, or the specials. */
-type DropTarget =
-  | { where: 'season'; index: number; before?: number }
-  | { where: 'new' }
-  | { where: 'specials'; before?: number };
-
-function moveEntry(arrangement: Arrangement, id: number, target: DropTarget) {
-  return edit(arrangement, (draft) => {
-    if ('before' in target && target.before === id) return;
-    takeOut(draft, id);
-    const insert = (list: number[]) => {
-      const at = target.where !== 'new' && target.before !== undefined ? list.indexOf(target.before) : -1;
-      if (at < 0) list.push(id);
-      else list.splice(at, 0, id);
-    };
-    if (target.where === 'new') draft.seasons.push([id]);
-    else if (target.where === 'specials') insert(draft.specials);
-    else if (target.index < draft.seasons.length) insert(draft.seasons[target.index]);
-    else draft.seasons.push([id]);
-  });
-}
-
-/** A whole season into the gap before season ``gap`` (``gap`` = the number of seasons: last). */
-function moveSeason(arrangement: Arrangement, from: number, gap: number) {
-  return edit(arrangement, (draft) => {
-    if (gap === from || gap === from + 1) return;
-    const [season] = draft.seasons.splice(from, 1);
-    draft.seasons.splice(gap > from ? gap - 1 : gap, 0, season);
-  });
-}
-
-/** A whole season's entries onto the end of another season. */
-function mergeSeason(arrangement: Arrangement, from: number, into: number) {
-  return edit(arrangement, (draft) => {
-    if (from === into) return;
-    draft.seasons[into].push(...draft.seasons[from]);
-    draft.seasons[from] = [];
-  });
-}
-
-/** What is being dragged in the Seasons panel. */
-type Dragging = { kind: 'entry'; id: number } | { kind: 'season'; index: number } | null;
 
 /** Where each entry is filed under an arrangement: "Season 2", "Specials". */
 function labels(arrangement: Arrangement) {
@@ -651,76 +632,220 @@ function SeasonPicker({
   );
 }
 
-/** One entry in the Seasons panel: its type colour, title and episodes. The whole box drags; ⋯ has the rest. */
-function SeasonChip({
-  id,
-  node,
-  dragging,
-  over,
-  onDragStart,
-  onDragEnd,
-  onDragOverChip,
-  onDropChip,
-  children,
-}: {
-  id: number;
-  node: CollectionNode | undefined;
-  /** Whether this chip is the one being dragged. */
-  dragging: boolean;
-  /** Whether a dragged entry would land just before this chip. */
-  over: boolean;
-  onDragStart: () => void;
-  onDragEnd: () => void;
-  onDragOverChip: (event: React.DragEvent) => void;
-  onDropChip: (event: React.DragEvent) => void;
-  /** The chip's menu. */
-  children: React.ReactNode;
-}) {
+/** What the Seasons panel shows while it is edited: each season with a key that holds still while it moves. */
+type Board = { seasons: { key: string; ids: number[] }[]; specials: number[] };
+
+const SPECIALS = 'specials';
+const NEW_SEASON = 'new-season';
+
+function toBoard(arrangement: Arrangement): Board {
+  return {
+    seasons: arrangement.seasons.map((ids) => ({ key: 'season-' + ids.join('-'), ids: [...ids] })),
+    specials: [...arrangement.specials],
+  };
+}
+
+function fromBoard(board: Board): Arrangement {
+  return {
+    seasons: board.seasons.map((season) => season.ids).filter((ids) => ids.length > 0),
+    specials: board.specials,
+  };
+}
+
+/** The container an entry is in: a season's key, or the specials. */
+function containerOf(board: Board, id: number): string | null {
+  if (board.specials.includes(id)) return SPECIALS;
+  return board.seasons.find((season) => season.ids.includes(id))?.key ?? null;
+}
+
+function idsOf(board: Board, container: string): number[] {
+  return container === SPECIALS ? board.specials : board.seasons.find((season) => season.key === container)?.ids ?? [];
+}
+
+/** A board with ``ids`` as the contents of ``container``. */
+function withIds(board: Board, container: string, ids: number[]): Board {
+  if (container === SPECIALS) return { ...board, specials: ids };
+  return { ...board, seasons: board.seasons.map((season) => (season.key === container ? { ...season, ids } : season)) };
+}
+
+type DragKind = { type: 'entry'; id: number } | { type: 'season'; key: string };
+
+const entryId = (id: number) => 'entry-' + id;
+const mergeId = (key: string) => 'merge-' + key;
+
+/** An entry's face: type colour, title, episodes. Shared by the box in its place and the one floating under the cursor. */
+function ChipFace({ id, node, floating, menu }: { id: number; node: CollectionNode | undefined; floating?: boolean; menu?: React.ReactNode }) {
   const kind = node ? typeOf(node) : OTHER_TYPE;
   const title = node?.title ?? 'AniList ' + id;
   return (
     <span
-      draggable
-      onDragStart={(event) => {
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/plain', String(id));
-        // An entry, not the season box it sits in.
-        event.stopPropagation();
-        onDragStart();
-      }}
-      onDragEnd={onDragEnd}
-      onDragOver={onDragOverChip}
-      onDrop={onDropChip}
-      title={title + ' · ' + kind.label + ' — drag to move'}
+      title={title + ' · ' + kind.label}
       className={cn(
-        'inline-flex max-w-full cursor-grab select-none items-center gap-1 rounded-md border py-1 pl-2 pr-0.5 text-xs active:cursor-grabbing',
+        'inline-flex max-w-full select-none items-center gap-1 rounded-md border py-1 pl-2 pr-1 text-xs',
         kind.chip,
-        node && !node.owned && 'opacity-70',
-        dragging && 'opacity-40',
-        over && 'shadow-[-4px_0_0_0_var(--color-info)]',
+        node && !node.owned && !floating && 'opacity-70',
+        floating ? 'cursor-grabbing bg-card shadow-xl ring-1 ring-info/60' : 'cursor-grab',
       )}
     >
       <span className='min-w-0 truncate text-foreground'>{title}</span>
       <span className='shrink-0 font-mono text-[0.62rem] opacity-80'>{node?.episodes ? node.episodes + ' eps' : '? eps'}</span>
-      <Popover>
-        <PopoverTrigger asChild>
-          <Button size='icon' variant='ghost' className='size-6 shrink-0' aria-label={'More for ' + title} draggable={false}>
-            <MoreHorizontal />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent align='start' className='flex w-64 flex-col gap-2 p-3'>
-          <p className='break-words text-xs font-medium text-foreground'>{title}</p>
-          {children}
-        </PopoverContent>
-      </Popover>
+      {menu ?? <span className='size-6 shrink-0' />}
     </span>
+  );
+}
+
+/** An entry in its place: sortable within and across seasons and the specials. */
+function SortableChip({ id, node, disabled, children }: { id: number; node: CollectionNode | undefined; disabled: boolean; children: React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: entryId(id),
+    data: { type: 'entry', id },
+    disabled,
+  });
+  const title = node?.title ?? 'AniList ' + id;
+  return (
+    <span
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+      className={cn('inline-flex max-w-full touch-none', isDragging && 'opacity-30')}
+      {...attributes}
+      {...listeners}
+      // The season box around it is draggable too: this press is the entry's.
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        listeners?.onPointerDown?.(event);
+      }}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        listeners?.onKeyDown?.(event);
+      }}
+    >
+      <ChipFace
+        id={id}
+        node={node}
+        menu={
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                size='icon'
+                variant='ghost'
+                className='size-6 shrink-0'
+                aria-label={'More for ' + title}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <MoreHorizontal />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align='start' className='flex w-64 flex-col gap-2 p-3'>
+              <p className='break-words text-xs font-medium text-foreground'>{title}</p>
+              {children}
+            </PopoverContent>
+          </Popover>
+        }
+      />
+    </span>
+  );
+}
+
+/** Where entries can be dropped when the container itself is empty or the pointer is past its last entry. */
+function EntryArea({ id, children, className }: { id: string; children: React.ReactNode; className?: string }) {
+  const { setNodeRef, isOver } = useDroppable({ id, data: { type: 'container', container: id } });
+  return (
+    <div ref={setNodeRef} className={cn('flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-1.5 rounded-md p-1', isOver && 'bg-info/10', className)}>
+      {children}
+    </div>
+  );
+}
+
+/** A drop zone on a season, shown while another season is dragged: dropped here, the two are merged. */
+function MergeZone({ seasonKey, number }: { seasonKey: string; number: number }) {
+  const { setNodeRef, isOver } = useDroppable({ id: mergeId(seasonKey), data: { type: 'merge', key: seasonKey } });
+  return (
+    <div
+      ref={setNodeRef}
+      className={cn(
+        'flex shrink-0 items-center justify-center self-stretch rounded-md border border-dashed px-3 text-[0.7rem] transition-colors',
+        isOver ? 'border-info bg-info/15 text-info' : 'border-border text-muted-foreground',
+      )}
+    >
+      <Merge className='mr-1 size-3.5' /> Merge into Season {number}
+    </div>
+  );
+}
+
+/** A season's box: sortable among the seasons as a whole, holding its entries. */
+function SeasonBox({
+  season,
+  number,
+  disabled,
+  seasonDragged,
+  children,
+}: {
+  season: { key: string; ids: number[] };
+  number: number;
+  disabled: boolean;
+  /** Which season is being dragged, if any: every other one then offers to merge. */
+  seasonDragged: string | null;
+  children: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: season.key,
+    data: { type: 'season', key: season.key },
+    disabled,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+      className={cn(
+        'flex touch-none flex-col gap-1.5 rounded-md border border-border/60 bg-background/60 p-2 sm:flex-row sm:items-center',
+        disabled ? 'cursor-default' : 'cursor-grab active:cursor-grabbing',
+        isDragging && 'opacity-30',
+      )}
+      {...attributes}
+      {...listeners}
+    >
+      <span className='shrink-0 select-none text-xs font-medium text-foreground sm:w-20'>Season {number}</span>
+      {children}
+      {seasonDragged && seasonDragged !== season.key && <MergeZone seasonKey={season.key} number={number} />}
+    </div>
+  );
+}
+
+/** A dragged season floating under the cursor. */
+function SeasonFace({ number, ids, byId }: { number: number; ids: number[]; byId: Map<number, CollectionNode> }) {
+  return (
+    <div className='flex cursor-grabbing flex-wrap items-center gap-1.5 rounded-md border border-info/60 bg-card p-2 shadow-2xl'>
+      <span className='text-xs font-medium text-foreground sm:w-20'>Season {number}</span>
+      {ids.map((id) => (
+        <ChipFace key={id} id={id} node={byId.get(id)} />
+      ))}
+    </div>
+  );
+}
+
+/** The "new season" target at the end, shown while an entry is dragged. */
+function NewSeasonZone({ number }: { number: number }) {
+  const { setNodeRef, isOver } = useDroppable({ id: NEW_SEASON, data: { type: 'container', container: NEW_SEASON } });
+  return (
+    <div
+      ref={setNodeRef}
+      className={cn(
+        'flex min-h-10 items-center justify-center rounded-md border border-dashed text-xs transition-colors',
+        isOver ? 'border-info bg-info/10 text-info' : 'border-border text-muted-foreground',
+      )}
+    >
+      <Plus className='mr-1 size-3.5' /> New season {number}
+    </div>
   );
 }
 
 /**
  * The collection's seasons, edited here before they are saved: which
  * entries make up each season and in what order (an entry after the first
- * continues the season's numbering), and which are specials.
+ * continues the season's numbering), and which are specials. Everything is
+ * dragged: an entry to any place in a season, onto the specials or a new
+ * season; a season to another place in the order, or onto another season's
+ * merge zone. The dragged box floats under the cursor, the others make room.
  */
 function SeasonsPanel({
   arrangement,
@@ -747,73 +872,125 @@ function SeasonsPanel({
   onSave: () => void;
   onReset: () => void;
 }) {
-  const { seasons, specials } = arrangement;
-  const [dragging, setDragging] = useState<Dragging>(null);
-  // Where the drop would land, as a key: "season:2", "season:2:before:123", "new", "specials", "order:3".
-  const [over, setOver] = useState<string | null>(null);
-  const stop = () => {
-    setDragging(null);
-    setOver(null);
+  // While something is dragged the board moves on its own; it becomes the arrangement on drop.
+  const [live, setLive] = useState<Board | null>(null);
+  const [active, setActive] = useState<DragKind | null>(null);
+  const board = live ?? toBoard(arrangement);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  // An entry is placed by what is under the pointer; a season by the nearest place in the list or a merge zone.
+  const collide: CollisionDetection = (args) => {
+    const kind = args.active.data.current?.type;
+    const pool = args.droppableContainers.filter((container) => {
+      const type = container.data.current?.type;
+      return kind === 'season' ? type === 'season' || type === 'merge' : type === 'entry' || type === 'container';
+    });
+    const scoped = { ...args, droppableContainers: pool };
+    if (kind === 'season') {
+      const merge = pointerWithin(scoped).filter((hit) => String(hit.id).startsWith('merge-'));
+      return merge.length ? merge : closestCenter({ ...scoped, droppableContainers: pool.filter((c) => c.data.current?.type === 'season') });
+    }
+    const within = pointerWithin(scoped);
+    if (within.length) {
+      // On an entry rather than the area around it, when both are under the pointer.
+      const entry = within.find((hit) => String(hit.id).startsWith('entry-'));
+      return entry ? [entry] : within;
+    }
+    return closestCenter(scoped);
   };
-  /** Handlers for a place an entry can be dropped on. */
-  const entryTarget = (key: string, target: DropTarget) => ({
-    onDragOver: (event: React.DragEvent) => {
-      if (dragging?.kind !== 'entry' || busy) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'move';
-      if (over !== key) setOver(key);
-    },
-    onDrop: (event: React.DragEvent) => {
-      if (dragging?.kind !== 'entry' || busy) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onChange(moveEntry(arrangement, dragging.id, target));
-      stop();
-    },
-  });
-  /** Handlers for where a whole season can go: a gap between seasons (moved), or another season (merged into it). */
-  const seasonTarget = (key: string, apply: (from: number) => Arrangement) => ({
-    onDragOver: (event: React.DragEvent) => {
-      if (dragging?.kind !== 'season' || busy) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'move';
-      if (over !== key) setOver(key);
-    },
-    onDrop: (event: React.DragEvent) => {
-      if (dragging?.kind !== 'season' || busy) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onChange(apply(dragging.index));
-      stop();
-    },
-  });
-  /** A gap between seasons a dragged season can be dropped into; shown only while one is dragged. */
-  const gap = (at: number) =>
-    dragging?.kind === 'season' && at !== dragging.index && at !== dragging.index + 1 ? (
-      <div
-        key={'gap' + at}
-        {...seasonTarget('gap:' + at, (from) => moveSeason(arrangement, from, at))}
-        className={cn(
-          'flex h-6 shrink-0 items-center justify-center rounded border border-dashed border-transparent text-[0.68rem] text-muted-foreground',
-          over === 'gap:' + at ? 'border-info bg-info/10 text-info' : 'border-border/60',
-        )}
-      >
-        Move here
-      </div>
-    ) : null;
-  const chipProps = (id: number, key: string, target: DropTarget) => {
-    const drop = entryTarget(key, target);
-    return {
-      dragging: dragging?.kind === 'entry' && dragging.id === id,
-      over: over === key,
-      onDragStart: () => setDragging({ kind: 'entry', id }),
-      onDragEnd: stop,
-      onDragOverChip: drop.onDragOver,
-      onDropChip: drop.onDrop,
-    };
+
+  const containerFromOver = (overId: string, current: Board): string | null => {
+    if (overId === NEW_SEASON) return NEW_SEASON;
+    if (overId.startsWith('entry-')) return containerOf(current, Number(overId.slice('entry-'.length)));
+    return overId === SPECIALS || current.seasons.some((season) => season.key === overId) ? overId : null;
   };
+
+  const onDragStart = (event: DragStartEvent) => {
+    const data = event.active.data.current;
+    setLive(toBoard(arrangement));
+    setActive(data?.type === 'season' ? { type: 'season', key: data.key } : { type: 'entry', id: data?.id });
+  };
+
+  // An entry moving into another container joins it at once, so the boxes there make room for it.
+  const onDragOver = (event: DragOverEvent) => {
+    if (!live || active?.type !== 'entry' || !event.over) return;
+    const from = containerOf(live, active.id);
+    const to = containerFromOver(String(event.over.id), live);
+    if (!from || !to || to === NEW_SEASON || from === to) return;
+    const target = idsOf(live, to).filter((id) => id !== active.id);
+    const overId = String(event.over.id);
+    const at = overId.startsWith('entry-') ? target.indexOf(Number(overId.slice('entry-'.length))) : -1;
+    if (at < 0) target.push(active.id);
+    else target.splice(at, 0, active.id);
+    setLive(withIds(withIds(live, from, idsOf(live, from).filter((id) => id !== active.id)), to, target));
+  };
+
+  const finish = (next: Board | null) => {
+    if (next) onChange(fromBoard(next));
+    setLive(null);
+    setActive(null);
+  };
+
+  const onDragEnd = (event: DragEndEvent) => {
+    const current = live;
+    const over = event.over ? String(event.over.id) : null;
+    if (!current || !active || !over) return finish(null);
+    if (active.type === 'season') {
+      if (over.startsWith('merge-')) {
+        const into = over.slice('merge-'.length);
+        const moving = current.seasons.find((season) => season.key === active.key);
+        if (!moving) return finish(null);
+        return finish({
+          ...current,
+          seasons: current.seasons
+            .map((season) => (season.key === into ? { ...season, ids: [...season.ids, ...moving.ids] } : season))
+            .filter((season) => season.key !== active.key),
+        });
+      }
+      const from = current.seasons.findIndex((season) => season.key === active.key);
+      const to = current.seasons.findIndex((season) => season.key === over);
+      return finish(from < 0 || to < 0 ? null : { ...current, seasons: arrayMove(current.seasons, from, to) });
+    }
+    const container = containerOf(current, active.id);
+    if (!container) return finish(null);
+    if (over === NEW_SEASON) {
+      const without = withIds(current, container, idsOf(current, container).filter((id) => id !== active.id));
+      return finish({ ...without, seasons: [...without.seasons, { key: 'season-new-' + active.id, ids: [active.id] }] });
+    }
+    if (over.startsWith('entry-')) {
+      const ids = idsOf(current, container);
+      const from = ids.indexOf(active.id);
+      const to = ids.indexOf(Number(over.slice('entry-'.length)));
+      if (from >= 0 && to >= 0 && from !== to) return finish(withIds(current, container, arrayMove(ids, from, to)));
+    }
+    return finish(current);
+  };
+
+  const seasonNumber = (key: string) => board.seasons.findIndex((season) => season.key === key) + 1;
+  const dragged = active?.type === 'season' ? board.seasons.find((season) => season.key === active.key) : null;
+  const menu = (id: number, inSeason: { ids: number[] } | null) =>
+    inSeason ? (
+      <>
+        <Button size='sm' variant='secondary' className='justify-start' disabled={busy || inSeason.ids.length < 2} onClick={() => onChange(ownSeason(arrangement, id))}>
+          <SplitSquareHorizontal data-icon='inline-start' /> Own season
+        </Button>
+        <Button size='sm' variant='secondary' className='justify-start' disabled={busy} onClick={() => onChange(toSpecials(arrangement, id))}>
+          <Star data-icon='inline-start' /> To specials
+        </Button>
+        <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
+      </>
+    ) : (
+      <>
+        <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
+        <Button size='sm' variant='secondary' className='justify-start' disabled={busy} onClick={() => onChange(appendTo(arrangement, id, arrangement.seasons.length))}>
+          <Plus data-icon='inline-start' /> Make season
+        </Button>
+      </>
+    );
+
   return (
     <section className='flex max-h-[45%] shrink-0 flex-col rounded-lg border border-border bg-card/40'>
       <header className='flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2'>
@@ -849,98 +1026,57 @@ function SeasonsPanel({
       {open && (
         <div className='flex min-h-0 flex-col gap-2 overflow-y-auto border-t border-border px-3 py-2'>
           <p className='text-xs text-muted-foreground'>
-            Drag an entry to any place in a season, onto Specials or onto "New season". Drag a season box between two others to
-            move it, or onto another season to merge them.
-            Saving renames the files on disk into their new seasons and episode numbers; the moves are journaled and can be undone.
+            Drag an entry to any place in a season, onto Specials or onto "New season". Drag a season to another place in the
+            order, or onto another season's "Merge" zone. Saving renames the files on disk into their new seasons and episode
+            numbers; the moves are journaled and can be undone.
           </p>
-          {seasons.map((season, index) => [
-            gap(index),
-            <div
-              key={index}
-              draggable={!busy}
-              onDragStart={(event) => {
-                event.dataTransfer.effectAllowed = 'move';
-                event.dataTransfer.setData('text/plain', 'season ' + (index + 1));
-                setDragging({ kind: 'season', index });
-              }}
-              onDragEnd={stop}
-              {...(dragging?.kind === 'season'
-                ? seasonTarget('merge:' + index, (from) => mergeSeason(arrangement, from, index))
-                : {})}
-              title='Drag between two seasons to move it, onto another season to merge them'
-              className={cn(
-                'relative flex cursor-grab select-none flex-col gap-1.5 rounded-md border border-border/60 bg-background/40 p-2 active:cursor-grabbing sm:flex-row sm:items-center',
-                over === 'merge:' + index && 'ring-2 ring-info',
-                dragging?.kind === 'season' && dragging.index === index && 'opacity-40',
-              )}
-            >
-              <span className='shrink-0 text-xs font-medium text-foreground sm:w-20'>Season {index + 1}</span>
-              <div
-                {...entryTarget('season:' + index, { where: 'season', index })}
-                className={cn(
-                  'flex min-h-8 min-w-0 flex-1 flex-wrap items-center gap-1.5 rounded-md p-0.5',
-                  over === 'season:' + index && 'ring-2 ring-info',
-                )}
-              >
-                {season.map((id) => (
-                  <SeasonChip
-                    key={id}
-                    id={id}
-                    node={byId.get(id)}
-                    {...chipProps(id, 'season:' + index + ':before:' + id, { where: 'season', index, before: id })}
-                  >
-                    <Button size='sm' variant='secondary' className='justify-start' disabled={busy || season.length < 2} onClick={() => onChange(ownSeason(arrangement, id))}>
-                      <SplitSquareHorizontal data-icon='inline-start' /> Own season
-                    </Button>
-                    <Button size='sm' variant='secondary' className='justify-start' disabled={busy} onClick={() => onChange(toSpecials(arrangement, id))}>
-                      <Star data-icon='inline-start' /> To specials
-                    </Button>
-                    <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
-                  </SeasonChip>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={collide}
+            onDragStart={onDragStart}
+            onDragOver={onDragOver}
+            onDragEnd={onDragEnd}
+            onDragCancel={() => finish(null)}
+          >
+            <SortableContext items={board.seasons.map((season) => season.key)} strategy={verticalListSortingStrategy}>
+              <div className='flex flex-col gap-2'>
+                {board.seasons.map((season, index) => (
+                  <SeasonBox key={season.key} season={season} number={index + 1} disabled={busy} seasonDragged={active?.type === 'season' ? active.key : null}>
+                    <SortableContext items={season.ids.map(entryId)} strategy={rectSortingStrategy}>
+                      <EntryArea id={season.key}>
+                        {season.ids.map((id) => (
+                          <SortableChip key={id} id={id} node={byId.get(id)} disabled={busy}>
+                            {menu(id, season)}
+                          </SortableChip>
+                        ))}
+                      </EntryArea>
+                    </SortableContext>
+                  </SeasonBox>
                 ))}
               </div>
-              {over === 'merge:' + index && (
-                <span className='pointer-events-none absolute right-2 top-1 text-[0.68rem] text-info'>Merge into Season {index + 1}</span>
-              )}
-            </div>,
-          ])}
-          {gap(seasons.length)}
-          {dragging?.kind === 'entry' && (
-            <div
-              {...entryTarget('new', { where: 'new' })}
-              className={cn(
-                'flex min-h-9 items-center justify-center rounded-md border border-dashed border-border text-xs text-muted-foreground',
-                over === 'new' && 'border-info text-info',
-              )}
-            >
-              <Plus className='mr-1 size-3.5' /> New season {seasons.length + 1}
+            </SortableContext>
+            {active?.type === 'entry' && <NewSeasonZone number={board.seasons.filter((season) => season.ids.length).length + 1} />}
+            <div className='flex flex-col gap-1.5 rounded-md border border-border/40 p-2 sm:flex-row sm:items-center'>
+              <span className='shrink-0 text-xs font-medium text-foreground sm:w-20'>Specials</span>
+              <SortableContext items={board.specials.map(entryId)} strategy={rectSortingStrategy}>
+                <EntryArea id={SPECIALS}>
+                  {board.specials.length === 0 && <span className='text-xs text-muted-foreground'>None — drop entries here</span>}
+                  {board.specials.map((id) => (
+                    <SortableChip key={id} id={id} node={byId.get(id)} disabled={busy}>
+                      {menu(id, null)}
+                    </SortableChip>
+                  ))}
+                </EntryArea>
+              </SortableContext>
             </div>
-          )}
-          <div className='flex flex-col gap-1.5 sm:flex-row sm:items-start'>
-            <span className='shrink-0 text-xs font-medium text-foreground sm:w-44'>Specials</span>
-            <div
-              {...entryTarget('specials', { where: 'specials' })}
-              className={cn(
-                'flex min-h-8 min-w-0 flex-1 flex-wrap items-center gap-1.5 rounded-md p-0.5',
-                over === 'specials' && 'ring-2 ring-info',
-              )}
-            >
-              {specials.length === 0 && <span className='text-xs text-muted-foreground'>None — drop here</span>}
-              {specials.map((id) => (
-                <SeasonChip
-                  key={id}
-                  id={id}
-                  node={byId.get(id)}
-                  {...chipProps(id, 'specials:before:' + id, { where: 'specials', before: id })}
-                >
-                  <SeasonPicker arrangement={arrangement} id={id} disabled={busy} onChange={onChange} />
-                  <Button size='sm' variant='secondary' className='justify-start' disabled={busy} onClick={() => onChange(appendTo(arrangement, id, seasons.length))}>
-                    <Plus data-icon='inline-start' /> Make season
-                  </Button>
-                </SeasonChip>
-              ))}
-            </div>
-          </div>
+            <DragOverlay dropAnimation={{ duration: 180, easing: 'cubic-bezier(0.2, 0, 0, 1)' }}>
+              {active?.type === 'entry' ? (
+                <ChipFace id={active.id} node={byId.get(active.id)} floating />
+              ) : dragged ? (
+                <SeasonFace number={seasonNumber(dragged.key)} ids={dragged.ids} byId={byId} />
+              ) : null}
+            </DragOverlay>
+          </DndContext>
         </div>
       )}
     </section>
