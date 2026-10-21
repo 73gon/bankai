@@ -41,6 +41,10 @@ from bankai.web import anime_files
 
 log = get_logger(__name__)
 
+# What a layout pass is doing right now, for the dashboard: its step, and how
+# far along when it counts something (pictures). Empty between passes.
+progress: dict[str, object] = {}
+
 VIDEO_SUFFIXES = frozenset({".mkv", ".mp4", ".m4v", ".avi", ".webm"})
 # What travels with a video when it is renamed: subtitles, its NFO, a thumbnail.
 _COMPANIONS = re.compile(r"^(?:\.[\w-]+)*\.(?:ass|ssa|srt|sub|idx|vtt|sup|nfo)$|^-thumb\.(?:jpg|png)$", re.IGNORECASE)
@@ -609,7 +613,8 @@ async def fetch_pictures(pictures: list[Picture]) -> int:
     due = [p for p in pictures if not p.path.exists() or sources.get(str(p.path)) != p.url]
     fetched = 0
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        for picture in due:
+        for index, picture in enumerate(due):
+            progress.update(step="Downloading posters and artwork", done=index, total=len(due))
             try:
                 response = await client.get(picture.url)
                 response.raise_for_status()
@@ -667,6 +672,15 @@ async def relayout(cids: set[int] | None = None, *, pictures: bool = True, label
     store = await asyncio.to_thread(collections.load)
     rows = await asyncio.to_thread(anime_files.load)
     targets = set(store.collections) if cids is None else {cid for cid in cids if cid in store.collections}
+    progress.clear()
+    progress.update(step=f"Laying out {len(targets)} collection{'' if len(targets) == 1 else 's'}")
+    try:
+        return await _relayout(store, rows, targets, cids, pictures=pictures, label=label)
+    finally:
+        progress.clear()
+
+
+async def _relayout(store, rows, targets: set[int], cids: set[int] | None, *, pictures: bool, label: str) -> dict:
     layout = await asyncio.to_thread(Layout.build, store, rows)
     await asyncio.to_thread(repair_folder_case, [layout.folders[cid] for cid in targets if cid in layout.folders])
     # All of them: the files of no collection are reported too.

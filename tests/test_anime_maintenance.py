@@ -256,3 +256,15 @@ def test_a_season_folder_left_without_episodes_goes_rather_than_reading_specials
     assert anime_layout._clear_empty_season(kept) is False
     assert anime_layout._clear_empty_season(foreign) is False
     assert (kept / "season.nfo").exists() and (foreign / "notes.txt").exists()
+
+
+def test_the_dashboard_sees_how_far_the_poster_download_is(monkeypatch) -> None:
+    from bankai.web import jobs
+
+    monkeypatch.setattr(jobs, "_PASSES", {"anime_metadata": {"running": True, "last_run": 1.0, "task": None}})
+    monkeypatch.setattr(anime_layout, "progress", {"step": "Downloading posters and artwork", "done": 3, "total": 40})
+
+    rows = {row["name"]: row for row in jobs.scheduled_passes()}
+
+    assert rows["anime_metadata"]["progress"] == {"step": "Downloading posters and artwork", "done": 3, "total": 40}
+    assert rows["library_walk"]["progress"] is None

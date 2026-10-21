@@ -240,6 +240,12 @@ def build(
 
     # -- Scheduler -----------------------------------------------------------
     running_passes = [row for row in passes if row.get("running")]
+    stepping = next((row["progress"] for row in running_passes if row.get("progress")), None)
+    step_detail = step_percent = None
+    if stepping:
+        done, total = stepping.get("done"), stepping.get("total")
+        step_detail = str(stepping.get("step") or "") + (f" — {done} of {total}" if total else "")
+        step_percent = 100.0 * done / total if total and done is not None else None
     scheduler = _lane(
         "scheduler",
         "Scheduler",
@@ -251,6 +257,8 @@ def build(
                 "busy": bool(running_passes),
                 "task": _task(
                     " · ".join(str(row["label"]) for row in running_passes),
+                    detail=step_detail,
+                    percent=step_percent,
                     started_at=min(
                         (row["last_run"] for row in running_passes if row.get("last_run")),
                         default=None,

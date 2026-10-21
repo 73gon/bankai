@@ -18,6 +18,7 @@ import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty'
 import { Input } from '@/zon/ui/input';
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
+import { Skeleton } from '@/zon/ui/skeleton';
 import { Spinner } from '@/zon/ui/spinner';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
@@ -228,6 +229,29 @@ function tabEntry(show: AnimeLibraryShow, tab: string): EntryRef | null {
   return null;
 }
 
+/** The drawer's shape while a show loads: poster and title, the action row, the season tabs, episode rows. */
+function DrawerSkeleton() {
+  return (
+    <div className='flex flex-col gap-6' aria-busy='true' aria-label='Loading the show'>
+      <div className='flex items-start gap-4'>
+        <Skeleton shape='item' className='aspect-[2/3] w-16' />
+        <div className='flex min-w-0 flex-1 flex-col gap-2 pt-1'>
+          <Skeleton className='w-72 max-w-full text-[22px]' />
+          <Skeleton className='w-40 text-xs' />
+          <Skeleton className='w-56 text-xs' />
+          <div className='mt-1 flex flex-wrap gap-2'>
+            {[20, 24, 36, 22, 28].map((width) => <Skeleton key={width} shape='button' className='min-h-8' style={{ width: width * 4 }} />)}
+          </div>
+        </div>
+      </div>
+      <div className='flex flex-col gap-3'>
+        <Skeleton shape='field' className='w-80 max-w-full' />
+        {Array.from({ length: 10 }, (_, index) => <Skeleton key={index} shape='item' className='h-8 w-full' />)}
+      </div>
+    </div>
+  );
+}
+
 export default function AnimeLibrary() {
   // Started from the last answer this browser saw, refreshed straight after.
   const [shows, setShows] = useState<AnimeLibraryShow[]>(() => recall<{ shows: AnimeLibraryShow[] }>(pagePaths.animeLibrary)?.shows ?? []);
@@ -374,6 +398,12 @@ export default function AnimeLibrary() {
   }
 
   async function openShow(key: string) {
+    // Another show: the one open goes at once, so it neither lingers nor moves while the next loads.
+    if (selectedShow?.key !== key) {
+      setSelectedShow(null);
+      setTab(null);
+      clearChecked();
+    }
     setSelected(key);
     setDetailLoading(true);
     try {
@@ -837,7 +867,8 @@ export default function AnimeLibrary() {
 
       <Drawer side='right' open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); setTab(null); clearChecked(); } }}>
         <DrawerContent className='w-full md:w-[85%]'>
-          {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner label='Loading the show' /></div>}
+          {/* Loading another show: its shape. Reloading the open one keeps it on screen. */}
+          {detailLoading && !active && <DrawerSkeleton />}
           {active && (
             <>
               <DrawerHeader>

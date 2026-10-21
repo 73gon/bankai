@@ -490,10 +490,13 @@ def _pass_task(name: str, task: asyncio.Future) -> None:
 
 def scheduled_passes() -> list[dict]:
     """Every periodic pass: its label, interval, next due time and whether it runs now."""
+    from bankai.web import anime_layout
+
     out = []
     for name, (label, every) in _PASS_LABELS.items():
         row = _PASSES.get(name, {})
         task = row.get("task")
+        running = bool(row.get("running") or (task is not None and not task.done()))
         out.append(
             {
                 "name": name,
@@ -501,7 +504,9 @@ def scheduled_passes() -> list[dict]:
                 "every_seconds": every,
                 "due_at": row.get("due_at"),
                 "last_run": row.get("last_run"),
-                "running": bool(row.get("running") or (task is not None and not task.done())),
+                "running": running,
+                # The layout says what it is at: laying out, downloading posters (n of m).
+                "progress": dict(anime_layout.progress) if running and name == "anime_metadata" else None,
             }
         )
     return out
