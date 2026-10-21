@@ -3859,9 +3859,9 @@ async def _reconcile_releases() -> dict[str, int]:
     if updates.maintenance_active():
         return {}
     # Off, the pass still finishes what is already downloaded: publishing is a
-    # hard link that needs no space, and removing the torrent afterwards frees
-    # what it held. It only stops bringing bytes in: no torrent is re-added,
-    # and hold_downloads keeps the unfinished ones paused.
+    # hard link that needs no space, and removing the torrent afterwards leaves
+    # the bytes to the library alone. It only stops bringing bytes in: no
+    # torrent is re-added, and hold_downloads keeps the unfinished ones paused.
     downloading = settings.anime.enabled
 
     qbit = QBittorrentClient()

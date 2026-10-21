@@ -536,6 +536,10 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
             match = re.fullmatch(r"Season (\d+)", season_dir.name)
             if not match or not season_dir.is_dir():
                 continue
+            if _clear_empty_season(season_dir):
+                # Its episodes moved to another season: left with only its NFO,
+                # Jellyfin would show it as one more season called "Specials".
+                continue
             number = int(match[1])
             aid = by_season.get(number)
             written += _write_text(season_dir / "season.nfo", season_nfo(number, aid, show))
@@ -556,6 +560,33 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
     return written, pictures
 
 
+def _clear_empty_season(season_dir: Path) -> bool:
+    """A season folder with no video left: take away bankai's own files and the folder. True if gone."""
+    try:
+        files = [path for path in season_dir.iterdir() if path.is_file()]
+    except OSError:
+        return False
+    if any(path.suffix.casefold() in VIDEO_SUFFIXES for path in files):
+        return False
+    if not all(path.name.casefold() in _OWN_FILES for path in files):
+        return False
+    for path in files:
+        path.unlink(missing_ok=True)
+    try:
+        season_dir.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+def pictures_allowed() -> bool:
+    """Is there room on the library's disk for pictures? Below the reserve they are left out."""
+    try:
+        return shutil.disk_usage(anime_files.anime_root()).free >= _IMAGE_RESERVE
+    except OSError:
+        return False
+
+
 def _pictures_path() -> Path:
     return bgjobs.jobs_root().parent / "anime_layout_pictures.json"
 
@@ -568,11 +599,7 @@ async def fetch_pictures(pictures: list[Picture]) -> int:
     """
     if not pictures:
         return 0
-    try:
-        free = shutil.disk_usage(anime_files.anime_root()).free
-    except OSError:
-        return 0
-    if free < _IMAGE_RESERVE:
+    if not pictures_allowed():
         log.info("anime layout: %d pictures left out, the library disk is nearly full", len(pictures))
         return 0
     try:
@@ -693,6 +720,7 @@ __all__ = [
     "file_name",
     "folder_names",
     "moves_dir",
+    "pictures_allowed",
     "place_new",
     "plan_moves",
     "relayout",

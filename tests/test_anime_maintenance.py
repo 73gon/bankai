@@ -222,3 +222,37 @@ def test_a_fingerprint_changes_with_what_the_layout_is_made_of_not_with_when_it_
     after = fingerprints()
     assert (after["1"], after["2"] != before["2"]) == (before["1"], True)
     assert fingerprints({"a/a - 01.mkv"})["1"] != after["1"]
+
+
+def test_room_for_pictures_again_lays_every_collection_out_anew(titan, library, monkeypatch) -> None:
+    """Laid out while the disk was full, a collection got no posters; once there is room it gets them."""
+    with collections.editing() as store:
+        collections.join([S1, KNY1], store)
+    rows = {"a/a - 01.mkv": [(S1, 1)], "k/k - 01.mkv": [(KNY1, 1)]}
+    layout = anime_layout.Layout.build(collections.load(), rows)
+
+    monkeypatch.setattr(anime_layout, "pictures_allowed", lambda: False)
+    full = anime_maintenance.fingerprints(layout, set())
+    monkeypatch.setattr(anime_layout, "pictures_allowed", lambda: True)
+    room = anime_maintenance.fingerprints(layout, set())
+
+    assert all(full[cid] != room[cid] for cid in full)
+
+
+def test_a_season_folder_left_without_episodes_goes_rather_than_reading_specials(tmp_path) -> None:
+    show = tmp_path / "Attack on Titan"
+    kept, emptied, foreign = show / "Season 01", show / "Season 05", show / "Season 06"
+    for folder in (kept, emptied, foreign):
+        folder.mkdir(parents=True)
+    (kept / "Attack on Titan - S01E01.mkv").write_bytes(b"v")
+    (kept / "season.nfo").write_text("<season/>", encoding="utf-8")
+    (emptied / "season.nfo").write_text("<season><title>Specials</title></season>", encoding="utf-8")
+    (emptied / "poster.jpg").write_bytes(b"p")
+    (foreign / "notes.txt").write_text("mine", encoding="utf-8")
+
+    assert anime_layout._clear_empty_season(emptied) is True
+    assert not emptied.exists()
+    # Episodes in it, or a file bankai did not write: left as it is.
+    assert anime_layout._clear_empty_season(kept) is False
+    assert anime_layout._clear_empty_season(foreign) is False
+    assert (kept / "season.nfo").exists() and (foreign / "notes.txt").exists()

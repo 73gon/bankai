@@ -71,6 +71,12 @@ function VolumeCard({ volume, areas }: { volume: StorageVolume; areas: StorageAr
         </CardDescription>
       </CardHeader>
       <CardContent className='flex flex-col gap-3'>
+        {/* The layout leaves pictures out below this (anime_layout._IMAGE_RESERVE); say so rather than let posters go missing unexplained. */}
+        {areas.some((area) => area.key === 'anime') && volume.free < 2 * 1024 ** 3 && (
+          <p className='rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-foreground'>
+            Posters and artwork for the anime library are held back while less than 2 GB is free here, so Jellyfin shows those shows without pictures. They are fetched by themselves once there is room.
+          </p>
+        )}
         <div className='flex flex-col gap-1.5'>
           {/* The drive end to end: each area, what bankai does not know, and the free rest as empty track. */}
           <div

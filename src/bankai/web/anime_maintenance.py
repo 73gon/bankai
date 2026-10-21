@@ -56,7 +56,12 @@ def _save_fingerprints(rows: dict[str, str]) -> None:
 
 
 def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, str]:
-    """What each collection's layout is made of, hashed: its folder, places, names, AniList data, files."""
+    """What each collection's layout is made of, hashed: its folder, places, names, AniList data, files.
+
+    And whether the disk has room for pictures: a collection laid out while it
+    had none got no posters, so once there is room again it is laid out anew.
+    """
+    pictures = anime_layout.pictures_allowed()
     by_collection: dict[int, list[str]] = {}
     for rel, pairs in layout.rows.items():
         cid = layout.of.get(pairs[0][0])
@@ -71,7 +76,7 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
         }
         files = sorted((rel, rel in published) for rel in by_collection.get(cid, []))
         material = json.dumps(
-            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files],
+            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures],
             sort_keys=True,
             default=str,
         )
