@@ -147,7 +147,13 @@ function VolumeCard({ volume, areas }: { volume: StorageVolume; areas: StorageAr
                         <span className='eyebrow text-[0.62rem]'>qBittorrent — {area.torrents.count} torrents</span>
                         {area.torrents.groups.map((group) => (
                           <div key={group.label} className='grid grid-cols-[1fr_auto] gap-3'>
-                            <span className='text-muted-foreground'>{group.label} <span className='font-mono text-[0.68rem]'>· {group.torrents}</span></span>
+                            <span className='text-muted-foreground'>
+                              {group.label} <span className='font-mono text-[0.68rem]'>· {group.torrents}</span>
+                              {/* Unfinished files are full size on this mount from the start: say how little of it has arrived. */}
+                              {group.downloaded !== undefined && group.downloaded < group.bytes * 0.9 && (
+                                <span className='text-[0.68rem]'> · only <span className='font-mono'>{formatBytes(group.downloaded)}</span> of it downloaded</span>
+                              )}
+                            </span>
                             <span className='font-mono tabular-nums text-foreground'>{formatBytes(group.bytes)}</span>
                           </div>
                         ))}

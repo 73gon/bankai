@@ -54,6 +54,16 @@ def _task(
     }
 
 
+def _ago(seconds: float) -> str:
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} h ago"
+    return f"{int(seconds // 86400)} d ago"
+
+
 def _job_task(row: dict[str, Any], href: str) -> dict[str, Any]:
     return _task(
         str(row.get("title") or row.get("id") or "Job"),
@@ -239,34 +249,39 @@ def build(
     )
 
     # -- Scheduler -----------------------------------------------------------
-    running_passes = [row for row in passes if row.get("running")]
-    stepping = next((row["progress"] for row in running_passes if row.get("progress")), None)
-    step_detail = step_percent = None
-    if stepping:
-        done, total = stepping.get("done"), stepping.get("total")
-        step_detail = str(stepping.get("step") or "") + (f" — {done} of {total}" if total else "")
-        step_percent = 100.0 * done / total if total and done is not None else None
+    # One row a pass: running, what it is at; idle, when it last ran and what it did.
+
+    def pass_task(row: dict[str, Any]) -> dict[str, Any]:
+        stepping = row.get("progress") if row.get("running") else None
+        if stepping:
+            done, total = stepping.get("done"), stepping.get("total")
+            detail = str(stepping.get("step") or "") + (f" — {done} of {total}" if total else "")
+            percent = 100.0 * done / total if total and done is not None else None
+        else:
+            last = row.get("last_run")
+            when = None if row.get("running") or not last else _ago(now - float(last))
+            summary = row.get("summary")
+            detail = ": ".join(text for text in (when, summary) if text) or None
+            percent = None
+        return _task(
+            str(row["label"]),
+            detail=detail,
+            percent=percent,
+            started_at=row.get("last_run") if row.get("running") else None,
+        )
+
     scheduler = _lane(
         "scheduler",
         "Scheduler",
-        "The web server's periodic passes.",
+        "The web server's periodic passes: one runs at a time.",
         [
             {
-                "id": "scheduler",
-                "name": "Passes",
-                "busy": bool(running_passes),
-                "task": _task(
-                    " · ".join(str(row["label"]) for row in running_passes),
-                    detail=step_detail,
-                    percent=step_percent,
-                    started_at=min(
-                        (row["last_run"] for row in running_passes if row.get("last_run")),
-                        default=None,
-                    ),
-                )
-                if running_passes
-                else None,
+                "id": "pass:" + str(row.get("name") or row["label"]),
+                "name": _interval(float(row["every_seconds"])) if row.get("every_seconds") else "",
+                "busy": bool(row.get("running")),
+                "task": pass_task(row),
             }
+            for row in sorted(passes, key=lambda row: not row.get("running"))
         ],
         capacity=1,
     )

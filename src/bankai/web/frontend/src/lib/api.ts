@@ -203,7 +203,8 @@ export interface StorageArea {
   shared_bytes: number;
   parts: StoragePart[];
   /** The downloads only: qBittorrent's torrents by how far they got. */
-  torrents?: { count: number; groups: Array<{ label: string; bytes: number; torrents: number }> } | null;
+  /** ``bytes`` is what their files take on disk; ``downloaded`` what has arrived of them. */
+  torrents?: { count: number; groups: Array<{ label: string; bytes: number; torrents: number; downloaded?: number }> } | null;
 }
 
 export interface StorageVolume {

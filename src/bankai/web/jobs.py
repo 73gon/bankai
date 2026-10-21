@@ -488,6 +488,53 @@ def _pass_task(name: str, task: asyncio.Future) -> None:
     row["last_run"] = time.time()
 
 
+def _pass_result(name: str, result: object) -> None:
+    """What a pass did, kept to say on the dashboard after it is done."""
+    _PASSES.setdefault(name, {"running": False, "last_run": None, "task": None})["result"] = result
+
+
+def _plural(count: int, one: str, many: str | None = None) -> str:
+    return f"{count} {one if count == 1 else (many or one + 's')}"
+
+
+def _pass_summary(name: str, result: object) -> str | None:
+    """A pass's last result in words, for the dashboard."""
+    if not isinstance(result, dict):
+        return None
+    number = lambda key: int(result.get(key) or 0)  # noqa: E731
+    if name == "anime_metadata":
+        if result.get("skipped"):
+            return str(result["skipped"])
+        bits = [
+            text
+            for count, text in (
+                (number("laid_out"), _plural(number("laid_out"), "collection") + " laid out"),
+                (number("pictures"), _plural(number("pictures"), "poster or artwork", "posters & artwork") + " downloaded"),
+                (number("moved"), _plural(number("moved"), "file") + " moved into place"),
+                (number("nfo_written"), _plural(number("nfo_written"), "NFO file") + " written"),
+                (number("fetched"), _plural(number("fetched"), "AniList record") + " refreshed"),
+                (number("collections_grown"), _plural(number("collections_grown"), "collection") + " grown"),
+            )
+            if count
+        ]
+        return ", ".join(bits) or "Everything already current"
+    if name == "release_reconcile":
+        words = {
+            "transferring": "publishing",
+            "complete": "finished, waiting to publish",
+            "downloading": "downloading",
+            "queued": "waiting in qBittorrent",
+            "held": "held",
+            "deleting": "removing their torrent",
+            "waiting_for_automation": "waiting for automation",
+        }
+        bits = [f"{number(key)} {text}" for key, text in words.items() if number(key)]
+        return " · ".join(bits) or "No releases in flight"
+    if name == "codec_sweep":
+        return f"{_plural(number('probed'), 'encode')} identified, {number('remaining')} to go"
+    return None
+
+
 def scheduled_passes() -> list[dict]:
     """Every periodic pass: its label, interval, next due time and whether it runs now."""
     from bankai.web import anime_layout
@@ -497,6 +544,8 @@ def scheduled_passes() -> list[dict]:
         row = _PASSES.get(name, {})
         task = row.get("task")
         running = bool(row.get("running") or (task is not None and not task.done()))
+        if task is not None and task.done() and not task.cancelled() and task.exception() is None:
+            row["result"] = task.result()
         out.append(
             {
                 "name": name,
@@ -507,6 +556,7 @@ def scheduled_passes() -> list[dict]:
                 "running": running,
                 # The layout says what it is at: laying out, downloading posters (n of m).
                 "progress": dict(anime_layout.progress) if running and name == "anime_metadata" else None,
+                "summary": _pass_summary(name, row.get("result")),
             }
         )
     return out
@@ -612,7 +662,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 from bankai.web import erai
 
                 with _pass_running("release_reconcile"):
-                    await erai.reconcile_releases()
+                    _pass_result("release_reconcile", await erai.reconcile_releases())
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -631,6 +681,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                         Path(get_settings().transfer.anime_shows_dir),
                         limit=_CODEC_SWEEP_BATCH,
                     )
+                _pass_result("codec_sweep", result)
                 if result["probed"]:
                     log.info(
                         "Identified the encode of %d episode(s); %d still unidentified",

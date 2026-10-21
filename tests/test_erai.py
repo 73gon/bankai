@@ -1385,6 +1385,23 @@ def test_automation_off_never_re_adds_a_missing_torrent(monkeypatch, tmp_path):
     assert counts.get("waiting_for_automation") == 1
 
 
+def test_a_release_held_for_a_qbittorrent_error_goes_on_once_it_clears(monkeypatch, tmp_path):
+    """A full disk errors torrents; once qBittorrent seeds them again, they are published."""
+    cleared, still = "7" * 40, "8" * 40
+    releases = {
+        cleared: _release(cleared, status="held", reason="qBittorrent reports error"),
+        still: _release(still, status="held", reason="qBittorrent reports error"),
+    }
+    torrents = [
+        _Torrent(cleared, progress=1.0, state="stalledUP"),
+        _Torrent(still, progress=1.0, state="error"),
+    ]
+    state, _counts, _qbit, spawned = _run_reconcile(monkeypatch, tmp_path, releases, torrents)
+    assert [row["args"][2] for row in spawned] == [cleared]
+    assert state["releases"][cleared]["status"] == "transferring"
+    assert state["releases"][still]["status"] == "held"
+
+
 def test_release_is_held_when_it_cannot_be_re_added(monkeypatch, tmp_path):
     info_hash = "e" * 40
     releases = {info_hash: _release(info_hash)}

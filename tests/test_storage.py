@@ -54,3 +54,42 @@ def test_disk_usage_counts_a_linked_episode_once_and_breaks_areas_down(
     assert "work" not in areas
     volume = next(item for item in result["volumes"] if item["path"] == areas["anime"]["volume"])
     assert volume["total"] >= volume["used"] >= 0
+
+
+def test_an_unfinished_download_counts_what_its_files_take_not_what_arrived(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over the Windows drive mount an unfinished file is full size from the start."""
+    from types import SimpleNamespace
+
+    from bankai.web import erai
+
+    downloads = tmp_path / "qbit"
+    batch = downloads / "[Erai-raws] Spy x Family - 01 ~ 12"
+    batch.mkdir(parents=True)
+    (batch / "01.mkv").write_bytes(b"x" * 800)
+    (batch / "02.mkv").write_bytes(b"x" * 800)
+    torrents = [
+        SimpleNamespace(hash="a" * 40, content_path=str(batch), size_bytes=1600, progress=0.01),
+        # Still fetching its metadata: it names the download folder itself.
+        SimpleNamespace(hash="b" * 40, content_path=str(downloads), size_bytes=0, progress=0.0),
+    ]
+
+    class Client:
+        async def login(self):
+            pass
+
+        async def list_torrents(self, **_kwargs):
+            return torrents
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", Client)
+    monkeypatch.setattr(erai, "_load_state", lambda: {"releases": {}})
+    monkeypatch.setattr(storage, "get_settings", lambda: Settings(paths={"downloads_dir": downloads}))
+
+    groups = {group["label"]: group for group in storage._torrents()["groups"]}
+
+    assert groups["Still downloading"] == {"label": "Still downloading", "bytes": 1600, "torrents": 2, "downloaded": 16}

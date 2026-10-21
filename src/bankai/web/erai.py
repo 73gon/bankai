@@ -3533,6 +3533,7 @@ def _worth_republishing(release: dict[str, Any], torrent: Any) -> bool:
         return False
     return time.time() >= float(release.get("publish_retry_after") or 0.0)
 _STALE_READD_REASON = "Torrent could not be re-added"
+_QBIT_ERROR_REASON = "qBittorrent reports"
 # A release being deleted still has a job, but that job already reads "done"
 # and is hidden from the queue by default, so the release row is what keeps
 # the last step visible.
@@ -3917,6 +3918,17 @@ async def _reconcile_releases() -> dict[str, int]:
                     status = "queued"
                     release["status"] = status
                     release.pop("reason", None)
+                elif (
+                    status == "held"
+                    and str(release.get("reason") or "").startswith(_QBIT_ERROR_REASON)
+                    and (current := by_hash.get(info_hash.casefold())) is not None
+                    and _torrent_phase(current) != "error"
+                ):
+                    # Held while qBittorrent reported an error -- a full disk
+                    # does it. The error is gone, so the release goes on.
+                    status = "queued"
+                    release["status"] = status
+                    release.pop("reason", None)
                 if status not in _ACTIVE_RELEASE_STATES:
                     continue
                 torrent = by_hash.get(info_hash.casefold())
@@ -3995,7 +4007,7 @@ async def _reconcile_releases() -> dict[str, int]:
                 phase = _torrent_phase(torrent)
                 if phase == "error":
                     release["status"] = "held"
-                    release["reason"] = f"qBittorrent reports {torrent.state}"
+                    release["reason"] = f"{_QBIT_ERROR_REASON} {torrent.state}"
                     release["retry_after"] = 0
                     release["updated_at"] = time.time()
                     tally("held")

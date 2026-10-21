@@ -183,3 +183,47 @@ def test_recent_episodes_are_one_row_each():
     rows = dashboard.recent_episodes(files, {}, href="/a/library")
     assert [row["episode_label"] for row in rows] == ["S01E05", "S01E04"]
     assert rows[0]["kind"] == "episode"
+
+
+def test_an_idle_pass_says_when_it_ran_and_what_it_did():
+    board = _build(
+        passes=[
+            {
+                "name": "anime_metadata",
+                "label": "Keep anime metadata and layout current",
+                "every_seconds": 300,
+                "last_run": NOW - 720,
+                "running": False,
+                "summary": "192 collections laid out, 420 posters & artwork downloaded",
+            },
+            {
+                "name": "release_reconcile",
+                "label": "Publish finished downloads",
+                "every_seconds": 20,
+                "last_run": NOW - 5,
+                "running": True,
+                "progress": None,
+            },
+        ],
+    )
+    workers = _lane(board, "scheduler")["workers"]
+    assert [worker["busy"] for worker in workers] == [True, False]
+    assert workers[1]["task"]["detail"] == "12 min ago: 192 collections laid out, 420 posters & artwork downloaded"
+
+
+def test_a_running_layout_pass_shows_how_far_the_posters_are():
+    board = _build(
+        passes=[
+            {
+                "name": "anime_metadata",
+                "label": "Keep anime metadata and layout current",
+                "every_seconds": 300,
+                "last_run": NOW - 30,
+                "running": True,
+                "progress": {"step": "Downloading posters and artwork", "done": 105, "total": 420},
+            },
+        ],
+    )
+    task = _lane(board, "scheduler")["workers"][0]["task"]
+    assert task["detail"] == "Downloading posters and artwork — 105 of 420"
+    assert task["percent"] == 25.0

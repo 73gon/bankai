@@ -181,35 +181,58 @@ def _torrents() -> dict[str, Any] | None:
     except Exception:
         releases = {}
     groups: dict[str, list[int]] = {}
+    root = Path(get_settings().paths.downloads_dir).resolve()
 
-    def add(label: str, size: int) -> None:
-        bucket = groups.setdefault(label, [0, 0])
+    def add(label: str, size: int, downloaded: int) -> None:
+        bucket = groups.setdefault(label, [0, 0, 0])
         bucket[0] += size
         bucket[1] += 1
+        bucket[2] += downloaded
 
     for torrent in torrents:
         have = int(torrent.size_bytes * torrent.progress)
+        # What its files take on the disk: an unfinished download's files are
+        # full size from the start over the Windows drive mount, whatever has arrived.
+        taken = _on_disk(torrent.content_path, root, fallback=have)
         if torrent.progress < 1.0:
-            add("Still downloading (so far)", have)
+            add("Still downloading", taken, have)
             continue
         status = str((releases.get(torrent.hash.casefold()) or {}).get("status") or "")
         if status == "failed":
-            add("Finished, publishing failed", have)
+            label = "Finished, publishing failed"
         elif status == "held":
-            add("Finished, held back", have)
+            label = "Finished, held back"
         elif status in {"queued", "downloading", "complete", "transferring"}:
-            add("Finished, waiting to be published", have)
+            label = "Finished, waiting to be published"
         elif status:
-            add("Finished and published, still seeding", have)
+            label = "Finished and published, still seeding"
         else:
-            add("Finished, not tracked by bankai", have)
+            label = "Finished, not tracked by bankai"
+        add(label, taken, have)
     return {
         "count": len(torrents),
         "groups": sorted(
-            ({"label": label, "bytes": size, "torrents": count} for label, (size, count) in groups.items()),
+            (
+                {"label": label, "bytes": size, "torrents": count, "downloaded": downloaded}
+                for label, (size, count, downloaded) in groups.items()
+            ),
             key=lambda group: -group["bytes"],
         ),
     }
+
+
+def _on_disk(content_path: str, root: Path, *, fallback: int) -> int:
+    """The bytes a torrent's files take, by its content path; ``fallback`` when it has none of its own."""
+    try:
+        path = Path(content_path).resolve() if content_path else None
+        # A torrent still fetching its metadata names the download folder itself.
+        if path is None or path == root or not path.exists():
+            return fallback
+        if path.is_file():
+            return path.stat().st_size
+        return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+    except OSError:
+        return fallback
 
 
 def _install_root() -> Path:
