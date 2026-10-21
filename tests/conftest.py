@@ -159,6 +159,15 @@ def _isolated_library_walk(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_startup_backfill(monkeypatch):
+    """The app's startup backfill probes every library file in a thread; with ffprobe
+    on PATH it lands in tests that patch subprocess.run and count their calls."""
+    from bankai.web import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_backfill_review_metadata", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_snapshot_warming(monkeypatch):
     """The web app's background warming would build every tab in each test's app."""
     monkeypatch.setenv("BANKAI_WARM_SNAPSHOTS", "0")

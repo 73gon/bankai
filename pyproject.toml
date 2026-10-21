@@ -111,4 +111,9 @@ minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # starlette 0.41's TestClient (pinned by fastapi 0.115) still imports the
+    # alias anyio 4.15 deprecated; it is upstream code, not ours.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
