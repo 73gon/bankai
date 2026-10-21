@@ -3066,6 +3066,20 @@ def create_app() -> Any:
         """Workers and what each is doing, what is due, and what arrived lately."""
         return snapshots_mod.response(await snaps["dashboard"].get(), request)
 
+    @app.get("/api/storage")
+    def storage_view() -> dict:
+        """Where the disk space goes: the last scan, and whether a new one runs."""
+        from bankai.web import storage as storage_mod
+
+        return storage_mod.snapshot()
+
+    @app.post("/api/storage/refresh")
+    def storage_refresh() -> dict:
+        """Walk every area again now."""
+        from bankai.web import storage as storage_mod
+
+        return {"started": storage_mod.refresh()}
+
     # Built from the others, so it can afford to be rebuilt often.
     snaps.add(
         "sidebar_counts",

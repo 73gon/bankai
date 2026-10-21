@@ -11,6 +11,7 @@ import { StatusTag } from '@/components/status-tag';
 import { cn } from '@/zon/lib/cn';
 import { Button } from '@/zon/ui/button';
 import { Card } from '@/zon/ui/card';
+import { Checkbox } from '@/zon/ui/checkbox';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/zon/ui/drawer';
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
@@ -1045,15 +1046,14 @@ export default function AnimeLibrary() {
                           const files = active.episodes.filter((entry) => entry.season_number === season && hasFile(entry)).map((entry) => entry.path);
                           const ticked = files.filter((path) => checkedPaths.has(path)).length;
                           return (
-                            <input
-                              type='checkbox'
-                              className='size-3.5 cursor-pointer accent-foreground align-middle disabled:cursor-not-allowed'
+                            <Checkbox
+                              className='align-middle'
                               aria-label='Select every file in this tab'
                               title='Select every file in this tab'
                               disabled={files.length === 0}
                               checked={files.length > 0 && ticked === files.length}
-                              ref={(element) => { if (element) element.indeterminate = ticked > 0 && ticked < files.length; }}
-                              onChange={(event) => toggleChecked(active, files, event.target.checked)}
+                              indeterminate={ticked > 0 && ticked < files.length}
+                              onCheckedChange={(on) => toggleChecked(active, files, on)}
                             />
                           );
                         })()}</TableHead><TableHead className='pr-3'>Ep</TableHead><TableHead>Episode / File</TableHead><TableHead>Encode</TableHead><TableHead numeric>Size</TableHead><TableHead numeric>State</TableHead></TableRow></TableHeader>
@@ -1098,12 +1098,11 @@ export default function AnimeLibrary() {
                           <TableRow data-selected={hasFile(entry) && checkedPaths.has(entry.path) ? '' : undefined}>
                             <TableCell className='w-7 pr-2'>
                               {hasFile(entry) && (
-                                <input
-                                  type='checkbox'
-                                  className='size-3.5 cursor-pointer accent-foreground align-middle'
+                                <Checkbox
+                                  className='align-middle'
                                   aria-label={'Select ' + entry.name}
                                   checked={checkedPaths.has(entry.path)}
-                                  onChange={(event) => toggleChecked(active, [entry.path], event.target.checked)}
+                                  onCheckedChange={(on) => toggleChecked(active, [entry.path], on)}
                                 />
                               )}
                             </TableCell>
@@ -1375,6 +1374,15 @@ export default function AnimeLibrary() {
         target={graphFor}
         onClose={() => setGraphFor(null)}
         onChanged={() => { void load(); if (selected) void openShow(selected); }}
+        onOpenCollection={(id) => {
+          const card = shows.find((show) => show.collection_id === id);
+          if (!card) {
+            toast.info('That collection has no card in the library: none of its entries is on disk');
+            return;
+          }
+          setGraphFor(null);
+          void openShow(card.key);
+        }}
       />
     </div>
   );

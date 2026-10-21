@@ -273,18 +273,28 @@ def _atomic_copy2(
     tmp = destination.with_name(f".{destination.name}.{os.getpid()}.part")
     try:
         tmp.unlink(missing_ok=True)
-        if progress is None:
-            shutil.copy2(source, tmp)
+        try:
+            # Downloads and staging share a volume: a second name for the same
+            # bytes is instant and needs no free space, where a copy needs the
+            # whole file again and fails outright on a full disk. The torrent
+            # goes on seeding the same bytes; removing it later leaves this name.
+            os.link(source, tmp)
+        except OSError:
+            if progress is None:
+                shutil.copy2(source, tmp)
+            else:
+                _copy2_with_progress(
+                    source,
+                    tmp,
+                    progress=progress,
+                    stage=stage,
+                    start_percent=start_percent,
+                    end_percent=end_percent,
+                    copier=shutil.copy2,
+                )
         else:
-            _copy2_with_progress(
-                source,
-                tmp,
-                progress=progress,
-                stage=stage,
-                start_percent=start_percent,
-                end_percent=end_percent,
-                copier=shutil.copy2,
-            )
+            if progress is not None:
+                progress(f"BANKAI_PROGRESS stage={stage} pct={end_percent:.1f} status=linked")
         tmp.replace(destination)
     finally:
         tmp.unlink(missing_ok=True)

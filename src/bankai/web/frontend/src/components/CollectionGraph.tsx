@@ -44,13 +44,16 @@ import { CSS } from '@dnd-kit/utilities';
 import {
   ArrowRightToLine,
   ChevronDown,
+  Download,
   ExternalLink,
   Info,
+  Layers,
   ListOrdered,
   Maximize,
   Merge,
   MoreHorizontal,
   Network,
+  PanelRightOpen,
   Plus,
   RotateCcw,
   Save,
@@ -64,7 +67,6 @@ import { toast } from '@/lib/toast';
 import { api, type CollectionGraph as Graph, type CollectionNode } from '@/lib/api';
 import { anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
-import { StatusTag } from '@/components/status-tag';
 import { cn } from '@/zon/lib/cn';
 import { Button } from '@/zon/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
@@ -396,6 +398,23 @@ const SIDES = [
   ['bottom', Position.Bottom],
 ] as const;
 
+/** What an entry is not, as its icon struck through: not downloaded, in no collection. */
+function Slashed({ icon: Icon, label }: { icon: typeof Star; label: string }) {
+  return (
+    <span
+      role='img'
+      aria-label={label}
+      title={label}
+      className='relative inline-flex size-6 items-center justify-center rounded-md border border-border/70 bg-background/60 text-muted-foreground'
+    >
+      <Icon className='size-3.5' />
+      <svg viewBox='0 0 24 24' className='absolute inset-0 size-full' aria-hidden='true'>
+        <line x1='5' y1='5' x2='19' y2='19' stroke='currentColor' strokeWidth='1.75' strokeLinecap='round' />
+      </svg>
+    </span>
+  );
+}
+
 function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
   const { node, selected } = data;
   const kind = typeOf(node);
@@ -440,9 +459,9 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
           <span className='truncate font-mono text-[0.64rem] text-muted-foreground'>{meta(node)}</span>
         </span>
         <span className='mt-auto flex flex-wrap gap-1'>
-          {!node.owned && <StatusTag variant='muted' className='text-[0.6rem]'>Not downloaded</StatusTag>}
+          {!node.owned && <Slashed icon={Download} label='Not downloaded' />}
           {!node.in_collection && node.collection_id === null && (
-            <StatusTag variant='muted' className='text-[0.6rem]'>{node.alone ? 'In no collection' : 'Not in a collection'}</StatusTag>
+            <Slashed icon={Layers} label={node.alone ? 'In no collection' : 'Not in a collection'} />
           )}
         </span>
       </div>
@@ -1154,10 +1173,13 @@ export function CollectionGraph({
   target,
   onClose,
   onChanged,
+  onOpenCollection,
 }: {
   target: GraphTarget;
   onClose: () => void;
   onChanged: () => void;
+  /** Open another collection's drawer in the library. */
+  onOpenCollection?: (collectionId: number) => void;
 }) {
   const [graph, setGraph] = useState<Graph | null>(null);
   const [version, setVersion] = useState(0);
@@ -1400,6 +1422,11 @@ export function CollectionGraph({
                   ))}
                 </ul>
                 {actions()}
+                {onOpenCollection && picked.length === 1 && !picked[0].in_collection && picked[0].collection_id !== null && picked[0].collection_id !== collectionId && (
+                  <Action icon={PanelRightOpen} variant='ghost' onClick={() => onOpenCollection(picked[0].collection_id!)}>
+                    Open {picked[0].collection_name ?? 'its collection'}
+                  </Action>
+                )}
               </div>
             )}
             {busy && (

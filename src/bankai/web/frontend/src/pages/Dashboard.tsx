@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Activity, Clock, Download, Film, Layers, ListVideo, Sparkles, Users } from 'lucide-react';
 
 import { AnimePoster } from '@/components/AnimePoster';
+import { DiskUsage } from '@/components/DiskUsage';
 import { StatusTag } from '@/components/status-tag';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
 import { Meter } from '@/zon/ui/meter';
@@ -317,6 +318,8 @@ export default function Dashboard() {
               />
             </div>
           </section>
+
+          <DiskUsage />
         </>
       )}
     </div>

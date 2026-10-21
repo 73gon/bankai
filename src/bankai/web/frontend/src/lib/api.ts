@@ -181,6 +181,48 @@ export function eraiPath(
   return `/api/anime/erai?${params}`;
 }
 
+// ---- Disk usage -------------------------------------------------------------
+
+/** One part of an area: a kind of file, or one of bankai's own folders. */
+export interface StoragePart {
+  label: string;
+  bytes: number;
+  files: number;
+}
+
+/** A folder bankai knows of: a library, staging, the downloads, bankai's data. */
+export interface StorageArea {
+  key: string;
+  label: string;
+  path: string;
+  /** The mount it is on; matches a volume's ``path``. */
+  volume: string;
+  bytes: number;
+  files: number;
+  /** Bytes of files counted in another area already: hard links, no space of their own. */
+  shared_bytes: number;
+  parts: StoragePart[];
+  /** The downloads only: qBittorrent's torrents by how far they got. */
+  torrents?: { count: number; groups: Array<{ label: string; bytes: number; torrents: number }> } | null;
+}
+
+export interface StorageVolume {
+  path: string;
+  total: number;
+  used: number;
+  free: number;
+  /** Used, but by nothing bankai knows of. */
+  other: number;
+}
+
+export interface StorageUsage {
+  scanned_at: number | null;
+  duration_seconds?: number;
+  scanning: boolean;
+  volumes: StorageVolume[];
+  areas: StorageArea[];
+}
+
 // ---- Dashboard ----------------------------------------------------------
 
 export interface DashboardTask {
@@ -1217,6 +1259,8 @@ export const api = {
     ),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
+  storage: () => request<StorageUsage>('/api/storage'),
+  refreshStorage: () => request<{ started: boolean }>('/api/storage/refresh', { method: 'POST' }),
   eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p', codec: EraiCodec = 'all') =>
     remembering<EraiPage>(eraiPath(page, q, german, res, codec)),
   refreshErai: () => request<{ refreshing: boolean }>('/api/anime/erai/refresh', { method: 'POST' }),

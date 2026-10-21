@@ -32,11 +32,38 @@ def test_atomic_anime_copy_hides_final_media_name_until_complete(
         assert not destination.exists()
         original_copy2(src, dst)
 
+    def no_link(src: Path, dst: Path) -> None:
+        raise OSError(18, "Invalid cross-device link")
+
+    # Another volume: no hard link, so it is copied.
+    monkeypatch.setattr("bankai.processor.anime.os.link", no_link)
     monkeypatch.setattr("bankai.processor.anime.shutil.copy2", observing_copy)
 
     _atomic_copy2(source, destination)
 
     assert destination.read_bytes() == b"episode"
+    assert list(destination.parent.glob("*.part")) == []
+
+
+def test_anime_publish_links_on_the_same_volume_instead_of_copying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "download" / "Bleach.mkv"
+    destination = tmp_path / "library" / "Bleach - S17E41.mkv"
+    source.parent.mkdir()
+    destination.parent.mkdir()
+    source.write_bytes(b"episode")
+
+    def no_copy(src: Path, dst: Path) -> None:
+        raise AssertionError("a full disk has no room for a copy")
+
+    monkeypatch.setattr("bankai.processor.anime.shutil.copy2", no_copy)
+
+    _atomic_copy2(source, destination)
+
+    assert destination.read_bytes() == b"episode"
+    assert destination.stat().st_ino == source.stat().st_ino
     assert list(destination.parent.glob("*.part")) == []
 
 
