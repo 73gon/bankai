@@ -287,15 +287,18 @@ export default function Dashboard() {
 
           <section className='flex flex-col gap-2'>
             <h2 className='font-heading text-lg font-light'>Up next &amp; recently added</h2>
-            <div className='grid gap-3 lg:grid-cols-2 xl:grid-cols-3'>
-              <Panel title='Up next' icon={Clock}>
+            {/* Up next is a table: half the row on a wide screen, the full row on a narrower one. */}
+            <div className='grid gap-3 lg:grid-cols-2 xl:grid-cols-4'>
+              <Panel title='Up next' icon={Clock} className='lg:col-span-2'>
                 <CardContent className='min-h-0 flex-1 overflow-y-auto'>
-                  <Table variant='plain' dense>
+                  {/* Fixed columns: the task takes what the lane and the time leave, and is cut there,
+                      so the table never scrolls sideways. */}
+                  <Table variant='plain' dense className='table-fixed'>
                     <TableHeader className='sticky top-0 z-10 bg-card'>
                       <TableRow>
-                        <TableHead>Lane</TableHead>
+                        <TableHead className='w-24'>Lane</TableHead>
                         <TableHead>Task</TableHead>
-                        <TableHead numeric>When</TableHead>
+                        <TableHead numeric className='w-28'>When</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -304,8 +307,8 @@ export default function Dashboard() {
                       )}
                       {dueRows.map(({ group, item, index }) => (
                         <TableRow key={group.lane + ':' + index + ':' + item.title}>
-                          <TableCell className='whitespace-nowrap py-1.5 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
-                          <TableCell className='w-full max-w-0 py-1.5'>
+                          <TableCell className='truncate py-1.5 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
+                          <TableCell className='py-1.5'>
                             {item.href ? (
                               <Link to={item.href} className={cn('block truncate hover:underline', index === -1 ? 'text-muted-foreground' : 'text-foreground')} title={item.title}>
                                 {item.position ? <span className='mr-2 font-mono text-xs text-muted-foreground'>#{item.position}</span> : null}
@@ -338,8 +341,9 @@ export default function Dashboard() {
                     value={[animeView]}
                     onValueChange={(values) => values[0] && chooseAnimeView(values[0])}
                   >
-                    <ToggleGroupItem<'episodes' | 'series'> value='episodes' icon={<ListVideo />}>Episodes</ToggleGroupItem>
-                    <ToggleGroupItem<'episodes' | 'series'> value='series' icon={<Layers />}>Series</ToggleGroupItem>
+                    {/* Words where the card is wide enough; icons alone beside a narrow card's title. */}
+                    <ToggleGroupItem<'episodes' | 'series'> value='episodes' icon={<ListVideo />} title='Episodes'><span className='sr-only 2xl:not-sr-only'>Episodes</span></ToggleGroupItem>
+                    <ToggleGroupItem<'episodes' | 'series'> value='series' icon={<Layers />} title='Series'><span className='sr-only 2xl:not-sr-only'>Series</span></ToggleGroupItem>
                   </ToggleGroup>
                 }
               />

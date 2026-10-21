@@ -43,8 +43,8 @@
 
   /* A plain table on a page runs the full width of the page, out to the
      sidebar and the window edge; its first and last cells keep the text in
-     line with the page's gutter. Tables in dialogs and drawers stay put. */
-  main [data-slot='table-container'][data-variant='plain'] {
+     line with the page's gutter. Tables in dialogs, drawers and cards stay put. */
+  main [data-slot='table-container'][data-variant='plain']:not([data-slot='card'] *) {
     margin-inline: calc(var(--page-gutter, 0px) * -1);
     width: calc(100% + 2 * var(--page-gutter, 0px));
     max-width: none;
