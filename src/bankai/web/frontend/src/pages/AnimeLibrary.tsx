@@ -978,8 +978,9 @@ export default function AnimeLibrary() {
                 <TabsList className='h-auto max-w-full flex-wrap'>
                   {seasons.map((season) => <TabsTab key={String(season)} value={String(season)}>{seasonLabel(season)}</TabsTab>)}
                 </TabsList>
+                {/* Floats over the drawer's bottom edge instead of sitting above the table, so ticking a file never moves the rows. */}
                 {activeChecked.length > 0 && (
-                  <div className='flex flex-wrap items-center gap-2 rounded-control surface-container px-3 py-2'>
+                  <div className='absolute inset-x-6 bottom-6 z-10 flex flex-wrap items-center gap-2 rounded-control surface-container px-3 py-2 shadow-overlay transition-[opacity,translate] duration-150 ease-out starting:translate-y-2 starting:opacity-0 sm:inset-x-8'>
                     <span className='text-xs text-muted-foreground'>
                       <span className='font-mono tabular-nums text-foreground'>{activeChecked.length}</span> file{activeChecked.length === 1 ? '' : 's'} selected
                     </span>
@@ -1008,7 +1009,7 @@ export default function AnimeLibrary() {
                   </div>
                 )}
                 {seasons.map((season) => (
-                  <TabsPanel key={String(season)} value={String(season)} className='flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto'>
+                  <TabsPanel key={String(season)} value={String(season)} className={'flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto' + (activeChecked.length > 0 ? ' pb-16' : '')}>
                     {season !== null && (active.season_anilist?.[String(season)]?.length ?? 0) > 0 && (
                       <p className='flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground'>
                         <span>AniList:</span>
