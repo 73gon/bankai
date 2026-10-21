@@ -277,7 +277,7 @@ def build(
         [
             {
                 "id": "pass:" + str(row.get("name") or row["label"]),
-                "name": _interval(float(row["every_seconds"])) if row.get("every_seconds") else "",
+                "name": "Every " + _interval(float(row["every_seconds"])) if row.get("every_seconds") else "",
                 "busy": bool(row.get("running")),
                 "task": pass_task(row),
             }
