@@ -296,6 +296,11 @@ def _atomic_copy2(
             if progress is not None:
                 progress(f"BANKAI_PROGRESS stage={stage} pct={end_percent:.1f} status=linked")
         tmp.replace(destination)
+        # Dated when it joined the library, not when it was downloaded (a link
+        # or copy keeps that): "recently added" goes by this, and a download
+        # that waited weeks to be published is still new to the library.
+        with suppress(OSError):
+            os.utime(destination)
     finally:
         tmp.unlink(missing_ok=True)
 

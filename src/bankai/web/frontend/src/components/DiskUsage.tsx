@@ -61,7 +61,7 @@ function VolumeCard({ volume, areas }: { volume: StorageVolume; areas: StorageAr
   const full = volume.free / volume.total < 0.02;
 
   return (
-    <Card>
+    <Card className='[--card-padding:14px]'>
       <CardHeader>
         <CardTitle className='flex items-center gap-2'><HardDrive className='size-4' /> {volumeName(volume)}</CardTitle>
         <CardDescription>
@@ -117,7 +117,7 @@ function VolumeCard({ volume, areas }: { volume: StorageVolume; areas: StorageAr
                   onMouseEnter={() => setHovered(area.key)}
                   onMouseLeave={() => setHovered(null)}
                   aria-expanded={expandable ? isOpen : undefined}
-                  className='grid grid-cols-[1rem_0.75rem_1fr_auto_3.5rem] items-center gap-2 rounded-item px-1 py-1.5 text-left text-sm focus-ring enabled:cursor-pointer enabled:hover:bg-control-surface/60'
+                  className='grid grid-cols-[1rem_0.75rem_1fr_auto_3.5rem] items-center gap-2 rounded-item px-1 py-1 text-left text-sm focus-ring enabled:cursor-pointer enabled:hover:bg-control-surface/60'
                 >
                   <ChevronRight className={cn('size-3.5 text-muted-foreground transition-transform', isOpen && 'rotate-90', !expandable && 'invisible')} />
                   <span className='size-2.5 rounded-[3px]' style={{ background: swatchOf(area) }} aria-hidden='true' />
@@ -169,7 +169,7 @@ function VolumeCard({ volume, areas }: { volume: StorageVolume; areas: StorageAr
           })}
           {volume.other > 0 && (
             <div
-              className='grid grid-cols-[1rem_0.75rem_1fr_auto_3.5rem] items-center gap-2 px-1 py-1.5 text-sm'
+              className='grid grid-cols-[1rem_0.75rem_1fr_auto_3.5rem] items-center gap-2 px-1 py-1 text-sm'
               onMouseEnter={() => setHovered('other')}
               onMouseLeave={() => setHovered(null)}
             >
@@ -224,10 +224,10 @@ export function DiskUsage() {
   }
 
   return (
-    <section className='flex flex-col gap-3'>
+    <section className='flex flex-col gap-2'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div>
-          <h2 className='font-heading text-xl font-light'>Disk usage</h2>
+          <h2 className='font-heading text-lg font-light'>Disk usage</h2>
           <p className='text-xs text-muted-foreground'>
             {usage?.scanned_at
               ? `Scanned ${timeAgo(usage.scanned_at)}` + (usage.duration_seconds ? ` in ${Math.max(1, Math.round(usage.duration_seconds))} s` : '') + '. A file in two places (hard links) counts once.'

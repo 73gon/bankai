@@ -5,7 +5,7 @@ import { Activity, Clock, Download, Film, Layers, ListVideo, Sparkles, Users } f
 import { AnimePoster } from '@/components/AnimePoster';
 import { DiskUsage } from '@/components/DiskUsage';
 import { StatusTag } from '@/components/status-tag';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/zon/ui/card';
 import { Meter } from '@/zon/ui/meter';
 import { Skeleton } from '@/zon/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
@@ -44,29 +44,71 @@ function runningFor(ts: number | null | undefined): string | null {
 
 function Stat({ icon: Icon, label, value, hint, tone }: { icon: typeof Users; label: string; value: string; hint?: string; tone?: string }) {
   return (
-    <Card className='[--card-padding:16px]'>
-      <CardContent className='flex items-start gap-3'>
-        <Icon className={cn('mt-0.5 size-4 shrink-0 text-muted-foreground', tone)} />
-        <div className='min-w-0'>
-          <p className='eyebrow text-[11px]'>{label}</p>
-          <p className='mt-1 font-mono text-2xl text-foreground'>{value}</p>
-          {hint && <p className='mt-0.5 truncate text-xs text-muted-foreground'>{hint}</p>}
+    <Card className='[--card-padding:12px]'>
+      <CardContent className='flex items-center gap-3'>
+        <Icon className={cn('size-4 shrink-0 text-muted-foreground', tone)} />
+        <div className='min-w-0 flex-1'>
+          <p className='eyebrow text-[10px]'>{label}</p>
+          <p className='truncate text-xs text-muted-foreground' title={hint}>{hint}</p>
         </div>
+        <p className={cn('shrink-0 font-mono text-xl text-foreground', tone)}>{value}</p>
       </CardContent>
     </Card>
+  );
+}
+
+/** One worker, one line: what it does, how far, how long. */
+function WorkerRow({ worker }: { worker: DashboardLane['workers'][number] }) {
+  const task = worker.task;
+  const body = (
+    <div
+      className={cn(
+        'flex flex-col gap-1 rounded-item border px-2.5 py-1.5 transition-colors',
+        worker.busy ? 'border-border bg-secondary/25 hover:bg-secondary/45' : 'border-border/40 bg-transparent',
+      )}
+    >
+      <div className='flex items-center gap-2 text-[13px]'>
+        <span className={cn('size-1.5 shrink-0 rounded-full', worker.name === 'Failed' ? 'bg-destructive' : worker.extra && worker.busy ? 'bg-warning' : worker.busy ? 'bg-success' : 'bg-muted-foreground/40')} aria-hidden='true' />
+        <span className={cn('min-w-0 shrink truncate', worker.busy ? 'text-foreground' : 'text-muted-foreground')} title={task?.title}>
+          {task?.title ?? 'Idle'}
+        </span>
+        {task?.detail && !task.percent && (
+          <span className='min-w-0 flex-1 truncate text-xs text-muted-foreground' title={task.detail}>· {task.detail}</span>
+        )}
+        <span className='ml-auto shrink-0 font-mono text-[11px] text-muted-foreground' title={worker.name}>
+          {task?.started_at ? runningFor(task.started_at) : worker.name}
+        </span>
+      </div>
+      {task && task.percent !== null && (
+        <div className='flex items-center gap-2 pl-3.5'>
+          {task.detail && <span className='min-w-0 flex-1 truncate text-xs text-muted-foreground' title={task.detail}>{task.detail}</span>}
+          <Meter value={task.percent} max={100} aria-label={task.title ?? worker.name} className='w-24 shrink-0' title={`${Math.round(task.percent)}%`} />
+          <span className='w-8 text-right font-mono text-[11px] text-muted-foreground'>{Math.round(task.percent)}%</span>
+        </div>
+      )}
+    </div>
+  );
+  return task?.href ? (
+    <Link to={task.href} className='block rounded-item focus-ring'>{body}</Link>
+  ) : (
+    body
   );
 }
 
 function LaneCard({ lane }: { lane: DashboardLane }) {
   const down = lane.state === 'down';
   const capacity = lane.capacity ?? lane.workers.length;
+  // Empty slots say nothing one by one: one line for all of them. A worker with a task -- a
+  // scheduler pass with its last result -- keeps its row, busy or not.
+  const shown = lane.workers.filter((worker) => worker.busy || worker.task);
+  const idle = lane.workers.length - shown.length;
   return (
-    <Card className={cn('flex flex-col gap-3 [--card-padding:20px]', down && 'border-destructive/40')}>
-      <CardHeader className='flex flex-row items-start justify-between gap-3'>
+    // The scheduler's rows say what each pass did: they need the width of two cards.
+    <Card className={cn('flex flex-col gap-2 [--card-padding:14px]', lane.key === 'scheduler' && 'md:col-span-2', down && 'border-destructive/40')}>
+      <CardHeader className='flex flex-row items-center justify-between gap-3'>
         <div className='min-w-0'>
-          <CardTitle className='text-lg sm:text-lg'>{lane.label}</CardTitle>
-          <CardDescription className='mt-1'>{lane.description}</CardDescription>
-          {lane.note && <p className='mt-1 text-xs text-warning'>{lane.note}</p>}
+          <CardTitle className='truncate text-base sm:text-base' title={lane.description}>{lane.label}</CardTitle>
+          {lane.note && <p className='truncate text-xs text-warning' title={lane.note}>{lane.note}</p>}
         </div>
         {down ? (
           <StatusTag variant='destructive' className='shrink-0 whitespace-nowrap'>Not reporting</StatusTag>
@@ -77,47 +119,14 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
         )}
       </CardHeader>
       {/* Scrolls: qBittorrent alone can run twenty. */}
-      <CardContent className='flex max-h-80 flex-col gap-2 overflow-y-auto'>
-        {lane.workers.length === 0 && <p className='text-sm text-muted-foreground'>{down ? 'qBittorrent could not be reached.' : 'Nothing running.'}</p>}
-        {lane.workers.map((worker) => {
-          const task = worker.task;
-          const body = (
-            <div
-              className={cn(
-                'flex flex-col gap-1.5 rounded-item border px-3 py-2 transition-colors',
-                worker.busy ? 'border-border bg-secondary/25 hover:bg-secondary/45' : 'border-border/50 bg-transparent',
-              )}
-            >
-              <div className='flex items-center gap-2 text-sm'>
-                <span className={cn('size-1.5 shrink-0 rounded-full', worker.name === 'Failed' ? 'bg-destructive' : worker.extra && worker.busy ? 'bg-warning' : worker.busy ? 'bg-success' : 'bg-muted-foreground/40')} aria-hidden='true' />
-                <span className='shrink-0 text-xs text-muted-foreground'>{worker.name}</span>
-                <span className={cn('min-w-0 flex-1 truncate', worker.busy ? 'text-foreground' : 'text-muted-foreground')} title={task?.title}>
-                  {task?.title ?? 'Idle'}
-                </span>
-                {task?.started_at ? <span className='shrink-0 font-mono text-xs text-muted-foreground'>{runningFor(task.started_at)}</span> : null}
-              </div>
-              {task && (task.detail || task.percent !== null) && (
-                <div className='flex items-center gap-3 pl-3.5'>
-                  {task.detail && <span className='min-w-0 flex-1 truncate text-xs text-muted-foreground' title={task.detail}>{task.detail}</span>}
-                  {task.percent !== null && (
-                    <div className='flex w-32 shrink-0 items-center gap-2'>
-                      <Meter value={task.percent} max={100} aria-label={task.title ?? worker.name} className='flex-1' title={`${Math.round(task.percent)}%`} />
-                      <span className='w-9 text-right font-mono text-xs text-muted-foreground'>{Math.round(task.percent)}%</span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-          return task?.href ? (
-            <Link key={worker.id} to={task.href} className='block rounded-item focus-ring'>
-              {body}
-            </Link>
-          ) : (
-            <div key={worker.id}>{body}</div>
-          );
-        })}
-
+      <CardContent className='flex max-h-64 flex-col gap-1 overflow-y-auto'>
+        {lane.workers.length === 0 && <p className='text-xs text-muted-foreground'>{down ? 'qBittorrent could not be reached.' : 'Nothing running.'}</p>}
+        {shown.map((worker) => <WorkerRow key={worker.id} worker={worker} />)}
+        {idle > 0 && (
+          <p className='px-1 text-xs text-muted-foreground'>
+            {shown.length ? `${idle} more ${idle === 1 ? 'slot' : 'slots'} idle` : idle === 1 ? 'Idle' : `All ${idle} slots idle`}
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -132,21 +141,21 @@ function DueWhen({ item }: { item: DashboardDueItem }) {
 
 function RecentList({ title, icon: Icon, rows, empty, action }: { title: string; icon: typeof Film; rows: DashboardRecent[]; empty: string; action?: React.ReactNode }) {
   return (
-    <Card className='flex flex-col gap-3 [--card-padding:20px]'>
+    <Card className='flex min-h-0 flex-col gap-2 [--card-padding:14px]'>
       <CardHeader className='flex flex-row items-center gap-2'>
         <Icon className='size-4 text-muted-foreground' />
-        <CardTitle className='text-lg sm:text-lg'>{title}</CardTitle>
+        <CardTitle className='text-base sm:text-base'>{title}</CardTitle>
         {action && <div className='ml-auto'>{action}</div>}
       </CardHeader>
-      <CardContent className='flex max-h-[28rem] flex-col gap-1 overflow-y-auto'>
+      <CardContent className='flex max-h-[22rem] flex-col gap-0.5 overflow-y-auto'>
         {rows.length === 0 && <p className='text-sm text-muted-foreground'>{empty}</p>}
         {rows.map((row) => (
           <Link
             key={row.kind + ':' + row.key}
             to={row.href}
-            className='flex items-center gap-3 rounded-item material-row px-2 py-1.5 focus-ring'
+            className='flex items-center gap-2.5 rounded-item material-row px-1.5 py-1 focus-ring'
           >
-            <AnimePoster url={row.poster_url} title={row.title} className='w-9 shrink-0 rounded' />
+            <AnimePoster url={row.poster_url} title={row.title} className='w-7 shrink-0 rounded' />
             <div className='min-w-0 flex-1'>
               <p className='truncate text-sm text-foreground' title={row.title}>{row.title}</p>
               <p className='truncate text-xs text-muted-foreground'>
@@ -220,18 +229,18 @@ export default function Dashboard() {
   ]);
 
   return (
-    <div className='flex flex-col gap-6'>
+    <div className='flex flex-col gap-4'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div>
-          <h1 className='font-heading text-3xl font-light'>Dashboard</h1>
-          <p className='text-sm text-muted-foreground'>What every worker is doing, what comes next, and what arrived lately.</p>
+          <h1 className='font-heading text-2xl font-light'>Dashboard</h1>
+          <p className='text-xs text-muted-foreground'>What every worker is doing, what comes next, and what arrived lately.</p>
         </div>
         {data && <p className='text-xs text-muted-foreground'>Updated {timeAgo(data.generated_at)}</p>}
       </div>
 
       {!data ? (
         <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
-          {Array.from({ length: 4 }, (_, index) => <Skeleton key={index} shape='card' className='h-24' />)}
+          {Array.from({ length: 4 }, (_, index) => <Skeleton key={index} shape='card' className='h-14' />)}
         </div>
       ) : (
         <>
@@ -253,52 +262,56 @@ export default function Dashboard() {
             />
           </div>
 
-          <section className='flex flex-col gap-3'>
-            <h2 className='font-heading text-xl font-light'>Workers</h2>
-            <div className='grid gap-3 lg:grid-cols-2 2xl:grid-cols-3'>
+          <section className='flex flex-col gap-2'>
+            <h2 className='font-heading text-lg font-light'>Workers</h2>
+            <div className='grid items-start gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4'>
               {data.lanes.map((lane) => <LaneCard key={lane.key} lane={lane} />)}
             </div>
           </section>
 
-          <section className='flex flex-col gap-3'>
-            <h2 className='font-heading text-xl font-light'>Up next</h2>
-              <Table dense className='min-w-[720px]' containerProps={{ className: 'max-h-[28rem] overflow-auto' }}>
+          {/* What comes next beside what arrived: three columns on a wide screen. */}
+          <div className='grid items-start gap-3 xl:grid-cols-3'>
+          <section className='flex min-w-0 flex-col gap-2'>
+            <h2 className='font-heading text-lg font-light'>Up next</h2>
+              <Table dense containerProps={{ className: 'max-h-[24rem] overflow-auto' }}>
                 <TableHeader className='sticky top-0 z-10 bg-card'>
                   <TableRow>
                     <TableHead>Lane</TableHead>
                     <TableHead>Task</TableHead>
-                    <TableHead>Detail</TableHead>
                     <TableHead numeric>When</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {dueRows.length === 0 && (
-                    <TableRow><TableCell colSpan={4} className='py-6 text-center text-muted-foreground'>Nothing due.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={3} className='py-6 text-center text-muted-foreground'>Nothing due.</TableCell></TableRow>
                   )}
                   {dueRows.map(({ group, item, index }) => (
                     <TableRow key={group.lane + ':' + index + ':' + item.title}>
-                      <TableCell className='whitespace-nowrap py-2 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
-                      <TableCell className='max-w-[28rem] py-2'>
+                      <TableCell className='whitespace-nowrap py-1.5 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
+                      <TableCell className='max-w-[22rem] py-1.5'>
                         {item.href ? (
                           <Link to={item.href} className={cn('block truncate hover:underline', index === -1 ? 'text-muted-foreground' : 'text-foreground')} title={item.title}>
                             {item.position ? <span className='mr-2 font-mono text-xs text-muted-foreground'>#{item.position}</span> : null}
                             {item.title}
+                            {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
                           </Link>
                         ) : (
-                          <span className='block truncate text-foreground' title={item.title}>{item.title}</span>
+                          <span className='block truncate text-foreground' title={item.title}>
+                            {item.title}
+                            {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
+                          </span>
                         )}
                       </TableCell>
-                      <TableCell className='max-w-[20rem] truncate py-2 text-xs text-muted-foreground' title={item.detail ?? undefined}>{item.detail ?? ''}</TableCell>
-                      <TableCell className='whitespace-nowrap py-2 text-right'>{index === -1 ? null : <DueWhen item={item} />}</TableCell>
+                      <TableCell className='whitespace-nowrap py-1.5 text-right'>{index === -1 ? null : <DueWhen item={item} />}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
           </section>
 
-          <section className='flex flex-col gap-3'>
-            <h2 className='font-heading text-xl font-light'>Recently added</h2>
-            <div className='grid gap-3 lg:grid-cols-2'>
+          <section className='flex min-w-0 flex-col gap-2 xl:col-span-2'>
+            <h2 className='font-heading text-lg font-light'>Recently added</h2>
+            <div className='grid items-start gap-3 lg:grid-cols-2'>
               <RecentList title='Movies & Shows' icon={Film} rows={data.recent.mas} empty='Nothing new in the Movies & Shows library.' />
               <RecentList
                 title='Anime'
@@ -318,6 +331,7 @@ export default function Dashboard() {
               />
             </div>
           </section>
+          </div>
 
           <DiskUsage />
         </>

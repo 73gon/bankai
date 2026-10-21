@@ -67,6 +67,24 @@ def test_anime_publish_links_on_the_same_volume_instead_of_copying(
     assert list(destination.parent.glob("*.part")) == []
 
 
+def test_a_published_episode_is_dated_when_it_joined_the_library(tmp_path: Path) -> None:
+    """Downloaded weeks ago, published now: new to the library, so "recently added" shows it."""
+    import os
+    import time
+
+    source = tmp_path / "download" / "Bleach.mkv"
+    destination = tmp_path / "library" / "Bleach - S17E41.mkv"
+    source.parent.mkdir()
+    destination.parent.mkdir()
+    source.write_bytes(b"episode")
+    weeks_ago = time.time() - 30 * 86400
+    os.utime(source, (weeks_ago, weeks_ago))
+
+    _atomic_copy2(source, destination)
+
+    assert destination.stat().st_mtime > time.time() - 60
+
+
 def test_nyaa_rss_parser_preserves_direct_sources_and_metadata() -> None:
     payload = """<?xml version="1.0" encoding="UTF-8" ?>
     <rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa" version="2.0"><channel><item>
