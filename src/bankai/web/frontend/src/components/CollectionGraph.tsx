@@ -3,18 +3,19 @@ import {
   Background,
   BackgroundVariant,
   ConnectionMode,
-  Controls,
   Handle,
   MarkerType,
+  Panel,
   Position,
   ReactFlow,
   useNodesState,
+  useReactFlow,
+  useStore,
   type Edge,
   type Node,
   type NodeChange,
   type NodeProps,
 } from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
 import {
   closestCenter,
   DndContext,
@@ -44,7 +45,9 @@ import {
   ArrowRightToLine,
   ChevronDown,
   ExternalLink,
+  Info,
   ListOrdered,
+  Maximize,
   Merge,
   MoreHorizontal,
   Network,
@@ -54,6 +57,8 @@ import {
   Scissors,
   SplitSquareHorizontal,
   Star,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type CollectionGraph as Graph, type CollectionNode } from '@/lib/api';
@@ -71,10 +76,10 @@ import { Spinner } from '@/zon/ui/spinner';
 // One entry's card: a poster with its title under it.
 const CARD_W = 208;
 const CARD_H = 400;
-const GAP_X = 96;
-const GAP_Y = 72;
-// Extra room between the main line and the side entries, for their arrows.
-const SIDE_GAP = 120;
+const GAP_X = 80;
+const GAP_Y = 64;
+// Extra room between the main line and the rows above and below it, for their arrows.
+const SIDE_GAP = 48;
 const FRAME_PAD = 22;
 const FRAME_HEAD = 32;
 
@@ -96,7 +101,7 @@ function typeOf(node: CollectionNode) {
 }
 
 type EntryData = { node: CollectionNode; selected: boolean; /** Where the unsaved arrangement files it, when that differs. */ draft?: string | null };
-type FrameData = { name: string; width: number; height: number };
+type FrameData = { name: string; width: number; height: number; tone: string; own: boolean };
 type FlowNode = Node<EntryData, 'entry'> | Node<FrameData, 'frame'>;
 type Point = { x: number; y: number };
 
@@ -193,19 +198,19 @@ function sequelOrder(ids: number[], sequels: Map<number, number[]>, byId: Map<nu
   return { order: done, layer };
 }
 
-type Layout = { positions: Map<number, Point>; spine: Set<number>; frames: { id: number; name: string }[] };
+type Layout = { positions: Map<number, Point>; spine: Set<number>; frames: { id: number; name: string; own: boolean }[] };
 
 /**
  * Where each entry goes.
  *
  * The collection's main line -- the sequel chain its title entry is on --
- * runs top to bottom. A collection that continues it, a sequel kept as a
- * collection of its own, continues the line below it in a frame; one that
- * comes before it, above. Side stories, recaps and movies sit beside the
- * entry they belong to, one column each side, staggered by half a row so
- * their arrows do not run into each other; what hangs off them goes a column
- * further out. A collection related in any other way stands in a frame to
- * the right.
+ * runs left to right, a timeline. A collection that continues it, a sequel
+ * kept as a collection of its own, carries the line on to the right in a
+ * frame; one that comes before it, to the left. Side stories, recaps and
+ * movies stand above and below the entry they belong to: those in the
+ * collection on the rows next to the line, those in none on the rows past
+ * them, so the collection's frame holds its entries and nothing else. A
+ * collection related in any other way stands in a frame under it all.
  */
 function layout(graph: Graph): Layout {
   const byId = new Map(graph.nodes.map((node) => [node.anilist_id, node]));
@@ -241,19 +246,45 @@ function layout(graph: Graph): Layout {
   }
   const step = CARD_H + GAP_Y;
   const lane = CARD_W + GAP_X;
+  // Row 0 is the main line; rows above are negative.
+  const yOf = (row: number) => row * step + Math.sign(row) * SIDE_GAP;
   const positions = new Map<number, Point>();
-  const column = new Map<number, number>();
+  const rowOf = new Map<number, number>();
+
+  // Rows as lists of the widths taken in them, so cards never overlap.
+  const taken = new Map<number, [number, number][]>();
+  const free = (row: number, x: number) => (taken.get(row) ?? []).every(([left, right]) => x + CARD_W + GAP_X / 2 <= left || x >= right + GAP_X / 2);
+  const place = (id: number, row: number, x: number) => {
+    taken.set(row, [...(taken.get(row) ?? []), [x, x + CARD_W]]);
+    rowOf.set(id, row);
+    positions.set(id, { x, y: yOf(row) });
+  };
+  /**
+   * The free spot nearest ``x`` from ``row`` outwards (``sign``): along the row, by half a
+   * column, up to four columns either way before a row further out (the canvas is wide);
+   * three rows full, wider rows.
+   */
+  const spot = (row: number, sign: number, x: number) => {
+    for (let width = 8; ; width += 8) {
+      for (let out = 0; out < (3 * width) / 8; out += 1) {
+        for (let shift = 0; shift <= width; shift += 1) {
+          for (const offset of shift ? [(shift * lane) / 2, (-shift * lane) / 2] : [0]) {
+            if (free(row + sign * out, x + offset)) return { row: row + sign * out, x: x + offset };
+          }
+        }
+      }
+    }
+  };
+
+  // Entries the sequel links put level -- two sequels of one entry -- stack under each other.
   const { order: spineOrder, layer } = sequelOrder([...spine], sequels, byId);
-  const across = new Map<number, number>();
+  const stacked = new Map<number, number>();
   for (const id of spineOrder) {
-    const row = layer.get(id)!;
-    const k = across.get(row) ?? 0;
-    across.set(row, k + 1);
-    column.set(id, k);
-    positions.set(id, { x: k * lane, y: row * step });
+    const column = layer.get(id)!;
+    const k = stacked.get(column) ?? 0;
+    stacked.set(column, k + 1);
+    place(id, k, column * lane);
   }
-  const spineWidth = Math.max(1, ...across.values());
-  const xOf = (col: number) => col * lane + (col >= spineWidth ? SIDE_GAP : col < 0 ? -SIDE_GAP : 0);
 
   // What hangs off what: each entry's nearest laid-out neighbour, outwards from the main line.
   const parent = new Map<number, number>();
@@ -269,98 +300,90 @@ function layout(graph: Graph): Layout {
     }
   }
 
-  // Columns as lists of the heights taken in them, so cards never overlap.
-  const taken = new Map<number, [number, number][]>();
-  const take = (col: number, y: number) => taken.set(col, [...(taken.get(col) ?? []), [y, y + CARD_H]]);
-  const free = (col: number, y: number) => (taken.get(col) ?? []).every(([top, bottom]) => y + CARD_H + GAP_Y / 2 <= top || y >= bottom + GAP_Y / 2);
-  for (const id of spineOrder) take(column.get(id)!, positions.get(id)!.y);
+  // Off the main line, below and above in turn; what hangs off a side entry goes on its side, a row further out.
   const sideOf = new Map<number, number>();
-  const counts = new Map<number, { right: number; left: number }>();
-  const side = [...depth.keys()].filter((id) => !spine.has(id)).sort((a, b) => depth.get(a)! - depth.get(b)! || byDate(a, b));
-  for (const id of side) {
-    const from = parent.get(id)!;
-    const origin = positions.get(from)!;
-    let choices: { col: number; sign: number }[];
+  const counts = new Map<number, { above: number; below: number }>();
+  const hang = (id: number, past: Record<number, number>) => {
+    let from = parent.get(id)!;
+    while (!positions.has(from)) from = parent.get(from)!;
+    let sign: number;
     if (spine.has(from)) {
-      const count = counts.get(from) ?? { right: 0, left: 0 };
-      const right = { col: spineWidth, sign: 1 };
-      const left = { col: -1, sign: -1 };
-      choices = count.right <= count.left ? [right, left] : [left, right];
-    } else {
-      const sign = sideOf.get(from)!;
-      choices = [{ col: column.get(from)! + sign, sign }];
-    }
-    let spot: { col: number; sign: number; y: number } | null = null;
-    for (let half = 0; spot === null; half += 1) {
-      for (const choice of choices) {
-        const y = origin.y + (half * step) / 2;
-        if (free(choice.col, y)) {
-          spot = { ...choice, y };
-          break;
-        }
-      }
-    }
-    take(spot.col, spot.y);
-    column.set(id, spot.col);
-    sideOf.set(id, spot.sign);
-    positions.set(id, { x: xOf(spot.col), y: spot.y });
-    if (spine.has(from)) {
-      const count = counts.get(from) ?? { right: 0, left: 0 };
-      if (spot.sign > 0) count.right += 1;
-      else count.left += 1;
+      const count = counts.get(from) ?? { above: 0, below: 0 };
+      sign = count.below <= count.above ? 1 : -1;
+      if (sign > 0) count.below += 1;
+      else count.above += 1;
       counts.set(from, count);
+    } else {
+      sign = sideOf.get(from)!;
     }
+    const first = Math.max(spine.has(from) ? 1 : Math.abs(rowOf.get(from)!) + 1, past[sign] + 1);
+    const at = spot(sign * first, sign, positions.get(from)!.x);
+    place(id, at.row, at.x);
+    sideOf.set(id, sign);
+  };
+  const side = [...depth.keys()].filter((id) => !spine.has(id)).sort((a, b) => depth.get(a)! - depth.get(b)! || byDate(a, b));
+  // The collection's own entries first, on the rows next to the line ...
+  for (const id of side) if (ownSet.has(id)) hang(id, { 1: 0, [-1]: 0 });
+  // ... with any related to nothing laid out after them ...
+  const loose = graph.nodes.filter((node) => !depth.has(node.anilist_id) && !elsewhere(node)).map((node) => node.anilist_id).sort(byDate);
+  for (const id of loose) {
+    if (!ownSet.has(id)) continue;
+    const at = spot(1, 1, 0);
+    place(id, at.row, at.x);
+    sideOf.set(id, 1);
   }
+  // ... and the rest on the rows past them, outside the collection's frame.
+  const reach = (sign: number) => Math.max(0, ...[...rowOf.values()].map((row) => row * sign));
+  const past = { 1: reach(1), [-1]: reach(-1) };
+  for (const id of side) if (!ownSet.has(id)) hang(id, past);
+  const lastRow = () => Math.max(0, ...rowOf.values());
+  const looseRow = lastRow() + 1;
+  loose.filter((id) => !ownSet.has(id)).forEach((id, index) => place(id, looseRow, index * lane));
 
-  // Entries related to nothing laid out: a row under everything.
-  const lowest = () => Math.max(0, ...[...positions.values()].map((point) => point.y + CARD_H));
-  const loose = graph.nodes.filter((node) => !positions.has(node.anilist_id) && !elsewhere(node)).map((node) => node.anilist_id).sort(byDate);
-  const looseTop = lowest() + GAP_Y;
-  loose.forEach((id, index) => positions.set(id, { x: xOf(index), y: looseTop }));
-
-  // Other collections, each laid out down its own sequels.
+  // Other collections, each laid out along its own sequels.
   const groups = new Map<number, number[]>();
   for (const node of graph.nodes) {
     if (elsewhere(node)) groups.set(node.collection_id!, [...(groups.get(node.collection_id!) ?? []), node.anilist_id]);
   }
-  const frames: Layout['frames'] = [];
-  let below = lowest() + GAP_Y + FRAME_HEAD + FRAME_PAD;
-  let above = -GAP_Y - FRAME_PAD;
-  let right = Math.max(0, ...[...positions.values()].map((point) => point.x + CARD_W)) + GAP_X + SIDE_GAP + FRAME_PAD;
+  const frames: Layout['frames'] = own.length && graph.collection_id !== null ? [{ id: graph.collection_id, name: graph.name, own: true }] : [];
+  const xs = [...positions.values()].map((point) => point.x);
+  let after = Math.max(0, ...xs) + CARD_W + GAP_X + FRAME_PAD * 2;
+  let before = Math.min(0, ...xs) - GAP_X - FRAME_PAD * 2;
+  const under = yOf(lastRow()) + CARD_H + GAP_Y + FRAME_HEAD + FRAME_PAD * 2;
+  let underX = -Infinity;
   for (const [collection, ids] of [...groups.entries()].sort((a, b) => a[0] - b[0])) {
     const inside = new Set(ids);
-    const { order, layer: rows } = sequelOrder(ids, sequels, byId);
-    const width = new Map<number, number>();
+    const { order, layer: columns } = sequelOrder(ids, sequels, byId);
+    const height = new Map<number, number>();
     const local = new Map<number, Point>();
     for (const id of order) {
-      const row = rows.get(id)!;
-      const k = width.get(row) ?? 0;
-      width.set(row, k + 1);
-      local.set(id, { x: k * lane, y: row * step });
+      const column = columns.get(id)!;
+      const k = height.get(column) ?? 0;
+      height.set(column, k + 1);
+      local.set(id, { x: column * lane, y: k * step });
     }
-    const height = (Math.max(...order.map((id) => rows.get(id)!)) + 1) * step - GAP_Y;
-    const span = Math.max(1, ...width.values()) * lane - GAP_X;
+    const span = (Math.max(...order.map((id) => columns.get(id)!)) + 1) * lane - GAP_X;
     const continues = graph.edges.some((edge) => edge.label === 'sequel' && spine.has(edge.from) && inside.has(edge.to));
     const precedes = graph.edges.some((edge) => edge.label === 'sequel' && inside.has(edge.from) && spine.has(edge.to));
     let origin: Point;
     if (continues) {
-      // A sequel of the main line: the line goes on below, in its frame.
-      origin = { x: 0, y: below };
-      below += height + GAP_Y + FRAME_HEAD + FRAME_PAD * 2;
+      // A sequel of the main line: the line goes on to the right, in its frame.
+      origin = { x: after, y: 0 };
+      after += span + GAP_X + FRAME_PAD * 2;
     } else if (precedes) {
-      origin = { x: 0, y: above - height - FRAME_HEAD - FRAME_PAD };
-      above = origin.y - FRAME_HEAD - FRAME_PAD - GAP_Y;
+      origin = { x: before - span, y: 0 };
+      before = origin.x - GAP_X - FRAME_PAD * 2;
     } else {
       const neighbours = ids.flatMap((id) => linked.get(id)!).filter((other) => positions.has(other) && !inside.has(other));
-      const top = neighbours.length ? Math.min(...neighbours.map((other) => positions.get(other)!.y)) : 0;
-      origin = { x: right, y: top };
-      right += span + GAP_X + FRAME_PAD * 2;
+      const left = neighbours.length ? Math.min(...neighbours.map((other) => positions.get(other)!.x)) : 0;
+      origin = { x: Math.max(left, underX), y: under };
+      underX = origin.x + span + GAP_X + FRAME_PAD * 2;
     }
     for (const id of order) {
       const point = local.get(id)!;
       positions.set(id, { x: origin.x + point.x, y: origin.y + point.y });
     }
-    frames.push({ id: collection, name: byId.get(ids[0])!.collection_name ?? 'Another collection' });
+    frames.push({ id: collection, name: byId.get(ids[0])!.collection_name ?? 'Another collection', own: false });
   }
   return { positions, spine, frames };
 }
@@ -427,20 +450,52 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
   );
 }
 
+/** A collection's shade behind its cards: this one's in the accent, each other one in a colour of its own. */
+const OWN_TONE = 'var(--info)';
+const TONES = ['#22d3ee', '#c084fc', '#34d399', '#f472b6', '#fb923c', '#a3e635'];
+
 function CollectionFrame({ data }: NodeProps<Node<FrameData, 'frame'>>) {
   return (
-    <div className='pointer-events-none rounded-2xl border-2 border-dashed border-cyan-400/40 bg-cyan-400/[0.04]' style={{ width: data.width, height: data.height }}>
-      <span className='block truncate px-4 pt-2 text-xs font-medium text-cyan-300'>Collection: {data.name}</span>
+    <div
+      className='pointer-events-none rounded-2xl border'
+      style={{
+        width: data.width,
+        height: data.height,
+        borderColor: `color-mix(in oklab, ${data.tone} 40%, transparent)`,
+        background: `color-mix(in oklab, ${data.tone} 12%, transparent)`,
+      }}
+    >
+      <span className='block truncate px-4 pt-2 text-xs font-medium' style={{ color: data.tone }}>
+        {data.own ? 'This collection' : 'Collection'}: {data.name}
+      </span>
     </div>
   );
 }
 
 const nodeTypes = { entry: EntryCard, frame: CollectionFrame };
 
-/** Which sides of two cards a link joins: top and bottom down a column, else the facing sides. */
+/** Which sides of two cards a link joins: the facing sides along a row, else bottom to top between rows. */
 function joins(from: Point, to: Point) {
-  if (Math.abs(from.x - to.x) < CARD_W / 2) return from.y < to.y ? ['bottom', 'top'] : ['top', 'bottom'];
-  return from.x < to.x ? ['right', 'left'] : ['left', 'right'];
+  if (Math.abs(from.y - to.y) < CARD_H / 2) return from.x < to.x ? ['right', 'left'] : ['left', 'right'];
+  return from.y < to.y ? ['bottom', 'top'] : ['top', 'bottom'];
+}
+
+/** Zoom and fit, as zon buttons rather than React Flow's own. */
+function GraphControls() {
+  const flow = useReactFlow();
+  // The canvas settles its size after the first fit (the dialog opening, the Seasons panel folding): fit it again.
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
+  useEffect(() => {
+    if (width && height) void flow.fitView({ padding: 0.08, maxZoom: 1 });
+  }, [width, height]);
+  return (
+    <Panel position='bottom-left' className='!m-3 flex gap-1 rounded-button material-menu p-1'>
+      <Button size='icon-sm' variant='ghost' aria-label='Zoom in' title='Zoom in' onClick={() => void flow.zoomIn({ duration: 160 })}><ZoomIn /></Button>
+      <Button size='icon-sm' variant='ghost' aria-label='Zoom out' title='Zoom out' onClick={() => void flow.zoomOut({ duration: 160 })}><ZoomOut /></Button>
+      <Button size='icon-sm' variant='ghost' aria-label='Fit the graph' title='Fit the graph' onClick={() => void flow.fitView({ padding: 0.08, duration: 200 })}><Maximize /></Button>
+    </Panel>
+  );
 }
 
 /** The graph itself: laid out once per loaded graph, then free to pan, zoom and drag. */
@@ -469,8 +524,8 @@ function Canvas({
   );
   // Each frame drawn round wherever its cards are now, so it follows them when dragged.
   const shown = useMemo<FlowNode[]>(() => {
-    const boxes = frames.flatMap((frame) => {
-      const members = nodes.filter((item) => !item.data.node.in_collection && item.data.node.collection_id === frame.id);
+    const boxes = frames.flatMap((frame, index) => {
+      const members = nodes.filter((item) => (frame.own ? item.data.node.in_collection : !item.data.node.in_collection && item.data.node.collection_id === frame.id));
       if (!members.length) return [];
       const left = Math.min(...members.map((item) => item.position.x)) - FRAME_PAD;
       const top = Math.min(...members.map((item) => item.position.y)) - FRAME_PAD - FRAME_HEAD;
@@ -480,7 +535,16 @@ function Canvas({
         id: 'frame-' + frame.id,
         type: 'frame' as const,
         position: { x: left, y: top },
-        data: { name: frame.name, width: right - left, height: bottom - top },
+        // Sized here: React Flow keeps a node hidden until it knows its size, and frames are never measured.
+        width: right - left,
+        height: bottom - top,
+        data: {
+          name: frame.name,
+          width: right - left,
+          height: bottom - top,
+          own: frame.own,
+          tone: frame.own ? OWN_TONE : TONES[(index - (frames[0]?.own ? 1 : 0)) % TONES.length],
+        },
         draggable: false,
         selectable: false,
         zIndex: -1,
@@ -504,7 +568,8 @@ function Canvas({
       target: String(item.to),
       sourceHandle,
       targetHandle,
-      type: sourceHandle === 'bottom' || sourceHandle === 'top' ? 'straight' : 'smoothstep',
+      // Straight when the cards line up, along a row or down a column; round the corner otherwise.
+      type: Math.abs(from.y - to.y) < 1 || Math.abs(from.x - to.x) < 1 ? 'straight' : 'smoothstep',
       label: main ? undefined : item.label,
       markerEnd: sequel || item.label === 'side story' || item.label === 'summary'
         ? { type: MarkerType.ArrowClosed, width: 18, height: 18, color }
@@ -540,48 +605,18 @@ function Canvas({
       multiSelectionKeyCode={null}
       colorMode='dark'
       fitView
-      fitViewOptions={{ padding: 0.12, maxZoom: 1 }}
+      fitViewOptions={{ padding: 0.08, maxZoom: 1 }}
       minZoom={0.1}
       maxZoom={1.6}
       proOptions={{ hideAttribution: true }}
-      style={{ background: 'transparent' }}
     >
-      <Background variant={BackgroundVariant.Dots} gap={22} size={1} color='var(--muted-foreground)' style={{ opacity: 0.25 }} />
-      <Controls showInteractive={false} position='bottom-left' />
+      <Background variant={BackgroundVariant.Dots} gap={22} size={1} />
+      <GraphControls />
     </ReactFlow>
   );
 }
 
-function Legend() {
-  return (
-    <div className='flex flex-col gap-3 text-xs text-muted-foreground'>
-      <p className='text-sm text-foreground'>Click an entry to change the collection; Shift+click to pick more; click empty space to clear.</p>
-      <div className='flex flex-col gap-1.5'>
-        <span className='eyebrow text-[0.65rem]'>AniList format — the stripe on top</span>
-        <span className='flex flex-wrap gap-1.5'>
-          {[...Object.values(TYPES), OTHER_TYPE].map((kind) => (
-            <span key={kind.label} className={cn('rounded border px-1.5 py-px text-[0.62rem] font-medium uppercase', kind.chip)}>{kind.label}</span>
-          ))}
-        </span>
-      </div>
-      <div className='flex flex-col gap-1.5'>
-        <span className='eyebrow text-[0.65rem]'>Links</span>
-        <span className='flex items-center gap-2'><span className='h-1 w-8 rounded bg-foreground' /> main line, top to bottom</span>
-        <span className='flex items-center gap-2'><span className='h-0.5 w-8 rounded bg-foreground/60' /> sequels in another collection</span>
-        <span className='flex items-center gap-2'><span className='w-8 border-t-2 border-dashed border-muted-foreground' /> side story, recap, other</span>
-      </div>
-      <div className='flex flex-col gap-1.5'>
-        <span className='eyebrow text-[0.65rem]'>Cards</span>
-        <span className='flex items-center gap-2'><span className='h-3 w-5 rounded border border-amber-300 bg-amber-400/30' /> golden: names and pictures the collection</span>
-        <span>Solid: in this collection, its season chip saying where it is filed. Dashed: in no collection.</span>
-        <span className='text-cyan-300'>Inside a cyan frame: another collection; one that continues the main line sits above or below it.</span>
-      </div>
-      <p>Drag to move around, scroll or pinch to zoom, drag cards to untangle. Entries not downloaded yet keep the collection you put them in, and are filed into it once they are on disk.</p>
-    </div>
-  );
-}
-
-/** A side-panel action: the button wraps a long collection name rather than spill out of itself. */
+/** An action in the floating panel: the button wraps a long collection name rather than spill out of itself. */
 function Action({ icon: Icon, children, ...props }: React.ComponentProps<typeof Button> & { icon: typeof Star }) {
   return (
     <Button size='sm' variant='secondary' className='justify-start whitespace-normal py-1.5 text-left leading-snug' {...props}>
@@ -686,7 +721,7 @@ function ChipFace({ id, node, floating, menu }: { id: number; node: CollectionNo
     <span
       title={title + ' · ' + kind.label}
       className={cn(
-        'inline-flex max-w-full select-none items-center gap-1 rounded-md border py-1 pl-2 pr-1 text-xs',
+        'inline-flex max-w-full select-none items-center gap-1 rounded-md border py-0.5 pl-1.5 pr-0.5 text-xs',
         kind.chip,
         node && !node.owned && !floating && 'opacity-70',
         floating ? 'cursor-grabbing bg-control-menu shadow-overlay ring-1 ring-info/60' : 'cursor-grab',
@@ -694,7 +729,7 @@ function ChipFace({ id, node, floating, menu }: { id: number; node: CollectionNo
     >
       <span className='min-w-0 truncate text-foreground'>{title}</span>
       <span className='shrink-0 font-mono text-[0.62rem] opacity-80'>{node?.episodes ? node.episodes + ' eps' : '? eps'}</span>
-      {menu ?? <span className='size-6 shrink-0' />}
+      {menu ?? <span className='size-5 shrink-0' />}
     </span>
   );
 }
@@ -734,7 +769,7 @@ function SortableChip({ id, node, disabled, children }: { id: number; node: Coll
                 <Button
                   size='icon-sm'
                   variant='ghost'
-                  className='size-6 shrink-0'
+                  className='size-5 shrink-0'
                   aria-label={'More for ' + title}
                   onPointerDown={(event) => event.stopPropagation()}
                 />
@@ -757,7 +792,7 @@ function SortableChip({ id, node, disabled, children }: { id: number; node: Coll
 function EntryArea({ id, children, className }: { id: string; children: React.ReactNode; className?: string }) {
   const { setNodeRef, isOver } = useDroppable({ id, data: { type: 'container', container: id } });
   return (
-    <div ref={setNodeRef} className={cn('flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-1.5 rounded-md p-1', isOver && 'bg-info/10', className)}>
+    <div ref={setNodeRef} className={cn('flex min-h-7 min-w-0 flex-1 flex-wrap items-center gap-1 rounded-md p-0.5', isOver && 'bg-info/10', className)}>
       {children}
     </div>
   );
@@ -805,14 +840,14 @@ function SeasonBox({
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition }}
       className={cn(
-        'relative flex touch-none flex-col gap-1.5 rounded-md border border-border/60 bg-background/60 p-2 sm:flex-row sm:items-center',
+        'relative flex touch-none flex-col gap-1 rounded-md border border-border/60 bg-background/60 px-1.5 py-1 sm:flex-row sm:items-center',
         disabled ? 'cursor-default' : 'cursor-grab active:cursor-grabbing',
         isDragging && 'opacity-30',
       )}
       {...attributes}
       {...listeners}
     >
-      <span className='shrink-0 select-none text-xs font-medium text-foreground sm:w-20'>Season {number}</span>
+      <span className='shrink-0 select-none text-xs font-medium text-foreground sm:w-16'>Season {number}</span>
       {children}
       {seasonDragged && seasonDragged !== season.key && <MergeZone seasonKey={season.key} number={number} />}
     </div>
@@ -822,8 +857,8 @@ function SeasonBox({
 /** A dragged season floating under the cursor. */
 function SeasonFace({ number, ids, byId }: { number: number; ids: number[]; byId: Map<number, CollectionNode> }) {
   return (
-    <div className='flex cursor-grabbing flex-wrap items-center gap-1.5 rounded-button border border-info/60 bg-control-menu p-2 shadow-overlay'>
-      <span className='text-xs font-medium text-foreground sm:w-20'>Season {number}</span>
+    <div className='flex cursor-grabbing flex-wrap items-center gap-1 rounded-button border border-info/60 bg-control-menu px-1.5 py-1 shadow-overlay'>
+      <span className='text-xs font-medium text-foreground sm:w-16'>Season {number}</span>
       {ids.map((id) => (
         <ChipFace key={id} id={id} node={byId.get(id)} />
       ))}
@@ -838,7 +873,7 @@ function NewSeasonZone({ number, active }: { number: number; active: boolean }) 
     <div
       ref={setNodeRef}
       className={cn(
-        'flex min-h-9 items-center justify-center rounded-md border border-dashed text-xs transition-colors',
+        'flex min-h-7 items-center justify-center rounded-md border border-dashed text-xs transition-colors',
         isOver ? 'border-info bg-info/10 text-info' : active ? 'border-border text-muted-foreground' : 'border-border/40 text-muted-foreground/50',
       )}
     >
@@ -1010,8 +1045,8 @@ function SeasonsPanel({
     );
 
   return (
-    <section className='flex max-h-[45%] shrink-0 flex-col rounded-control surface-container'>
-      <header className='flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2'>
+    <section className='flex max-h-[40%] shrink-0 flex-col rounded-control surface-container'>
+      <header className='flex flex-wrap items-center gap-x-3 gap-y-1 px-2.5 py-1.5'>
         <button
           type='button'
           onClick={onToggle}
@@ -1024,6 +1059,14 @@ function SeasonsPanel({
         <span className='text-xs text-muted-foreground'>
           {custom ? 'Arranged by hand' : 'Automatic: the sequel chain by air date'}
           {dirty && <span className='text-info'> · unsaved changes</span>}
+        </span>
+        {/* The how-to, on hover rather than taking a line of the panel. */}
+        <span
+          className='inline-flex text-muted-foreground'
+          aria-label='How to arrange'
+          title={'Drag an entry to any place in a season, onto Specials or onto "New season". Drag a season to another place in the order, or onto another season\'s "Merge" zone. Saving renames the files on disk into their new seasons and episode numbers; the moves are journaled and can be undone.'}
+        >
+          <Info className='size-3.5' />
         </span>
         <div className='ml-auto flex flex-wrap gap-2'>
           {dirty && <Button size='sm' variant='ghost' disabled={busy} onClick={onDiscard}>Discard</Button>}
@@ -1042,12 +1085,7 @@ function SeasonsPanel({
         </div>
       </header>
       {open && (
-        <div className='flex min-h-0 flex-col gap-2 overflow-y-auto border-t border-border px-3 py-2'>
-          <p className='text-xs text-muted-foreground'>
-            Drag an entry to any place in a season, onto Specials or onto "New season". Drag a season to another place in the
-            order, or onto another season's "Merge" zone. Saving renames the files on disk into their new seasons and episode
-            numbers; the moves are journaled and can be undone.
-          </p>
+        <div className='flex min-h-0 flex-col gap-1 overflow-y-auto border-t border-border px-2 py-1.5'>
           <DndContext
             sensors={sensors}
             collisionDetection={collide}
@@ -1059,7 +1097,7 @@ function SeasonsPanel({
             onDragCancel={() => finish(null)}
           >
             <SortableContext items={board.seasons.map((season) => season.key)} strategy={verticalListSortingStrategy}>
-              <div className='flex flex-col gap-2'>
+              <div className='flex flex-col gap-1'>
                 {board.seasons.map((season, index) => (
                   <SeasonBox key={season.key} season={season} number={index + 1} disabled={busy} seasonDragged={active?.type === 'season' ? active.key : null}>
                     <SortableContext items={season.ids.map(entryId)} strategy={rectSortingStrategy}>
@@ -1076,8 +1114,8 @@ function SeasonsPanel({
               </div>
             </SortableContext>
             <NewSeasonZone number={board.seasons.filter((season) => season.ids.length).length + 1} active={active?.type === 'entry'} />
-            <div className='flex flex-col gap-1.5 rounded-md border border-border/40 p-2 sm:flex-row sm:items-center'>
-              <span className='shrink-0 text-xs font-medium text-foreground sm:w-20'>Specials</span>
+            <div className='flex flex-col gap-1 rounded-md border border-border/40 px-1.5 py-1 sm:flex-row sm:items-center'>
+              <span className='shrink-0 text-xs font-medium text-foreground sm:w-16'>Specials</span>
               <SortableContext items={board.specials.map(entryId)} strategy={rectSortingStrategy}>
                 <EntryArea id={SPECIALS}>
                   {board.specials.length === 0 && <span className='text-xs text-muted-foreground'>None — drop entries here</span>}
@@ -1323,51 +1361,30 @@ export function CollectionGraph({
           <DialogDescription>
             {rootAid !== null
               ? 'This entry is in no collection. Its related entries are around it; move it into one of their collections.'
-              : 'The main line runs top to bottom, sequel collections continuing it; side stories, recaps and movies sit beside the entry they belong to.'}
+              : 'The main line runs left to right, sequel collections continuing it; side stories, recaps and movies stand above and below the entry they belong to. Each collection is shaded.'}
           </DialogDescription>
         </DialogHeader>
-        <div className='flex min-h-0 flex-1 flex-col gap-3 md:flex-row'>
-          <div className='flex min-h-0 min-w-0 flex-1 flex-col gap-3'>
-            <div className='relative min-h-0 flex-1 overflow-hidden rounded-control border border-field-edge bg-black/30'>
-              {loading && !graph ? (
-                <div className='flex h-full items-center justify-center'><Spinner label='Loading the graph' /></div>
-              ) : !graph ? (
-                <Empty>
-                  <EmptyMedia><Network /></EmptyMedia>
-                  <EmptyTitle>No graph</EmptyTitle>
-                  <EmptyDescription>The relations of this collection could not be read.</EmptyDescription>
-                </Empty>
-              ) : (
-                <Canvas key={version} graph={graph} selected={selected} drafts={drafts} onPick={pick} onClear={clear} />
-              )}
-              {busy && (
-                <div className='absolute right-3 top-3 flex items-center gap-2 rounded-button material-menu px-3 py-1.5 text-xs text-muted-foreground'>
-                  <Spinner label='Saving' /> Saving…
-                </div>
-              )}
-            </div>
-            {collectionId !== null && draft && (
-              <SeasonsPanel
-                arrangement={draft}
-                byId={byId}
-                open={seasonsOpen}
-                onToggle={() => setSeasonsOpen((value) => !value)}
-                dirty={dirty}
-                custom={Boolean(graph?.arrangement?.custom)}
-                busy={busy}
-                onChange={setDraft}
-                onDiscard={() => setDraft(saved)}
-                onSave={() => void saveArrangement(false)}
-                onReset={() => void saveArrangement(true)}
-                onDragging={setSeasonDrag}
-              />
-            )}
-          </div>
-          <aside className='flex max-h-[35%] w-full shrink-0 flex-col gap-3 overflow-y-auto rounded-control surface-container p-3 text-sm md:max-h-none md:w-80'>
-            {picked.length === 0 ? (
-              <Legend />
+        <div className='flex min-h-0 flex-1 flex-col gap-3'>
+          <div data-slot='graph' className='relative min-h-0 flex-1 overflow-hidden rounded-control border border-field-edge bg-black/30'>
+            {loading && !graph ? (
+              <div className='flex h-full items-center justify-center'><Spinner label='Loading the graph' /></div>
+            ) : !graph ? (
+              <Empty>
+                <EmptyMedia><Network /></EmptyMedia>
+                <EmptyTitle>No graph</EmptyTitle>
+                <EmptyDescription>The relations of this collection could not be read.</EmptyDescription>
+              </Empty>
             ) : (
-              <>
+              <Canvas key={version} graph={graph} selected={selected} drafts={drafts} onPick={pick} onClear={clear} />
+            )}
+            {graph && picked.length === 0 && (
+              <p className='pointer-events-none absolute left-3 top-3 rounded-button material-menu px-2.5 py-1 text-xs text-muted-foreground'>
+                Click an entry to change the collection · Shift+click to pick more
+              </p>
+            )}
+            {/* What can be done with the picked entries, over the graph rather than beside it. */}
+            {picked.length > 0 && (
+              <div className='absolute right-3 top-3 z-10 flex max-h-[calc(100%-1.5rem)] w-72 flex-col gap-3 overflow-y-auto rounded-control material-menu p-3 text-sm shadow-overlay'>
                 <ul className='flex flex-col gap-1.5'>
                   {picked.map((node) => (
                     <li key={node.anilist_id} className='flex items-start justify-between gap-2'>
@@ -1383,9 +1400,30 @@ export function CollectionGraph({
                   ))}
                 </ul>
                 {actions()}
-              </>
+              </div>
             )}
-          </aside>
+            {busy && (
+              <div className='absolute bottom-3 right-3 flex items-center gap-2 rounded-button material-menu px-3 py-1.5 text-xs text-muted-foreground'>
+                <Spinner label='Saving' /> Saving…
+              </div>
+            )}
+          </div>
+          {collectionId !== null && draft && (
+            <SeasonsPanel
+              arrangement={draft}
+              byId={byId}
+              open={seasonsOpen}
+              onToggle={() => setSeasonsOpen((value) => !value)}
+              dirty={dirty}
+              custom={Boolean(graph?.arrangement?.custom)}
+              busy={busy}
+              onChange={setDraft}
+              onDiscard={() => setDraft(saved)}
+              onSave={() => void saveArrangement(false)}
+              onReset={() => void saveArrangement(true)}
+              onDragging={setSeasonDrag}
+            />
+          )}
         </div>
       </DialogContent>
     </Dialog>

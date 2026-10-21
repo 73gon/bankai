@@ -835,7 +835,7 @@ export default function AnimeLibrary() {
       )}
 
       <Drawer side='right' open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(null); setSelectedShow(null); setTab(null); clearChecked(); } }}>
-        <DrawerContent className='w-full md:w-3/4'>
+        <DrawerContent className='w-full md:w-[85%]'>
           {detailLoading && <div className='flex min-h-64 flex-1 items-center justify-center'><Spinner label='Loading the show' /></div>}
           {active && (
             <>
