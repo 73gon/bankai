@@ -469,9 +469,13 @@ function EntryCard({ data }: NodeProps<Node<EntryData, 'entry'>>) {
   );
 }
 
-/** A collection's shade behind its cards: this one's in the accent, each other one in a colour of its own. */
-const OWN_TONE = 'var(--info)';
-const TONES = ['#22d3ee', '#c084fc', '#34d399', '#f472b6', '#fb923c', '#a3e635'];
+/**
+ * A collection's shade behind its cards: the open one neutral white, each other one a hue of
+ * its own, from the categorical order validated against the dark surface (blue, orange, aqua,
+ * yellow, magenta, violet), so neighbouring frames never read as two blues.
+ */
+const OWN_TONE = 'var(--foreground)';
+const TONES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#9085e9'];
 
 function CollectionFrame({ data }: NodeProps<Node<FrameData, 'frame'>>) {
   return (
@@ -480,11 +484,12 @@ function CollectionFrame({ data }: NodeProps<Node<FrameData, 'frame'>>) {
       style={{
         width: data.width,
         height: data.height,
-        borderColor: `color-mix(in oklab, ${data.tone} 40%, transparent)`,
-        background: `color-mix(in oklab, ${data.tone} 12%, transparent)`,
+        borderColor: `color-mix(in oklab, ${data.tone} ${data.own ? 30 : 50}%, transparent)`,
+        background: `color-mix(in oklab, ${data.tone} ${data.own ? 6 : 12}%, transparent)`,
       }}
     >
-      <span className='block truncate px-4 pt-2 text-xs font-medium' style={{ color: data.tone }}>
+      <span className='flex items-center gap-1.5 truncate px-4 pt-2 text-xs font-medium text-foreground'>
+        <span className='size-2 shrink-0 rounded-[3px]' style={{ background: data.tone }} aria-hidden='true' />
         {data.own ? 'This collection' : 'Collection'}: {data.name}
       </span>
     </div>

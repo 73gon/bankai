@@ -381,6 +381,15 @@ def _own_numbers(numbered: dict, count: int) -> dict[int, str]:
     return {}
 
 
+# What streaming sites call an episode they have no name for -- Crunchyroll lists
+# all of Bleach as "Untitled". No title, not a title.
+_PLACEHOLDER_TITLES = frozenset({"untitled", "tba", "tbd", "to be announced"})
+
+
+def _placeholder(title: object) -> bool:
+    return not isinstance(title, str) or title.strip().casefold() in _PLACEHOLDER_TITLES
+
+
 def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
     """(number, title, air date) of each of its episodes, as far as known.
 
@@ -390,7 +399,11 @@ def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
     kept = media(anilist_id)
     count = episode_count(anilist_id) or 0
     airing = _own_numbers(kept.get("airing") or {}, count)
-    streaming = _own_numbers(kept.get("streaming") or {}, count)
+    streaming = {
+        number: title
+        for number, title in _own_numbers(kept.get("streaming") or {}, count).items()
+        if not _placeholder(title)
+    }
     last = count or max([*airing, *streaming], default=0)
     return [(n, streaming.get(n), airing.get(n)) for n in range(1, last + 1)]
 

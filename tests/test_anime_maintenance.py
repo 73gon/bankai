@@ -268,3 +268,13 @@ def test_the_dashboard_sees_how_far_the_poster_download_is(monkeypatch) -> None:
 
     assert rows["anime_metadata"]["progress"] == {"step": "Downloading posters and artwork", "done": 3, "total": 40}
     assert rows["library_walk"]["progress"] is None
+
+
+def test_a_streaming_placeholder_is_no_episode_title(titan) -> None:
+    """Crunchyroll lists all of Bleach as "Untitled": shown and written as no title instead."""
+    from bankai.metadata import anilist
+
+    titan.add(S1, "Shingeki no Kyojin", english=AOT, episodes=3, start="2013-04-07",
+              streaming={1: "Untitled", 2: "TBA", 3: "The Fall of Shiganshina"})
+
+    assert [title for _number, title, _aired in anilist.episodes(S1)] == [None, None, "The Fall of Shiganshina"]

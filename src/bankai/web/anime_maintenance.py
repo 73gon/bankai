@@ -33,6 +33,8 @@ from bankai.web import anime_collections, anime_files, anime_layout
 log = get_logger(__name__)
 
 _LOCK = asyncio.Lock()
+# 2: placeholder episode titles ("Untitled") are no longer written into NFO files.
+_LAYOUT_VERSION = 2
 
 
 def _fingerprints_path() -> Path:
@@ -62,6 +64,8 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
     had none got no posters, so once there is room again it is laid out anew.
     """
     pictures = anime_layout.pictures_allowed()
+    # Raised when what the layout writes changes, so every collection is written anew once.
+    version = _LAYOUT_VERSION
     by_collection: dict[int, list[str]] = {}
     for rel, pairs in layout.rows.items():
         cid = layout.of.get(pairs[0][0])
@@ -76,7 +80,7 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
         }
         files = sorted((rel, rel in published) for rel in by_collection.get(cid, []))
         material = json.dumps(
-            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures],
+            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version],
             sort_keys=True,
             default=str,
         )
@@ -151,6 +155,11 @@ async def run(*, max_batches: int = 4, layout: bool = True) -> dict[str, Any]:
             )
             if outcome["moved"]:
                 log.info("anime layout: %d files moved into place", outcome["moved"])
+            if outcome["moved"] or outcome["pictures"]:
+                # The dashboard's disk breakdown would show the library as it was until its next scan.
+                from bankai.web import storage
+
+                storage.refresh()
             # Taken again: the layout itself moved files and wrote what they are.
             store = await asyncio.to_thread(anime_collections.load)
             rows = await asyncio.to_thread(anime_files.load)

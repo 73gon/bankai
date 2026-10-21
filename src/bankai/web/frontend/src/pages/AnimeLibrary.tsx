@@ -1078,6 +1078,10 @@ export default function AnimeLibrary() {
                           const ticked = files.filter((path) => checkedPaths.has(path)).length;
                           return (
                             <Checkbox
+                              // A real button: the drawer's swipe-to-close leaves buttons alone, but takes
+                              // the pointer from Base UI's span checkbox, so its click never lands.
+                              nativeButton
+                              render={<button type='button' />}
                               className='align-middle'
                               aria-label='Select every file in this tab'
                               title='Select every file in this tab'
@@ -1130,6 +1134,8 @@ export default function AnimeLibrary() {
                             <TableCell className='w-7 pr-2'>
                               {hasFile(entry) && (
                                 <Checkbox
+                                  nativeButton
+                                  render={<button type='button' />}
                                   className='align-middle'
                                   aria-label={'Select ' + entry.name}
                                   checked={checkedPaths.has(entry.path)}

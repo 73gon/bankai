@@ -168,6 +168,14 @@ def _no_startup_backfill(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_disk_scan(monkeypatch):
+    """A layout pass that moves files starts a disk scan in a thread: it would walk the real disk."""
+    from bankai.web import storage
+
+    monkeypatch.setattr(storage, "refresh", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _no_snapshot_warming(monkeypatch):
     """The web app's background warming would build every tab in each test's app."""
     monkeypatch.setenv("BANKAI_WARM_SNAPSHOTS", "0")
