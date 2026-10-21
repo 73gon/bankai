@@ -27,7 +27,7 @@ from typing import Any
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata import anilist, offline
+from bankai.metadata import anilist, jikan, offline
 from bankai.web import anime_collections, anime_files, anime_layout
 
 log = get_logger(__name__)
@@ -75,7 +75,11 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
     for cid, row in layout.store.collections.items():
         plan = layout.plans[cid]
         media = {
-            str(aid): {key: value for key, value in anilist.media(aid).items() if key != "fetched_at"}
+            str(aid): {
+                **{key: value for key, value in anilist.media(aid).items() if key != "fetched_at"},
+                # MyAnimeList's episode titles go into the NFO files too.
+                "mal_titles": jikan.titles(anilist.media(aid).get("mal_id")),
+            }
             for aid in row.members
         }
         files = sorted((rel, rel in published) for rel in by_collection.get(cid, []))
@@ -122,6 +126,13 @@ async def run(*, max_batches: int = 4, layout: bool = True) -> dict[str, Any]:
         fetched = await anilist.ensure(wanted, max_batches=max_batches)
         near = {other for aid in wanted for other, _kind, _form in anilist.relations(aid)} - wanted
         fetched += await anilist.ensure(near, refresh=False, max_batches=2)
+        # Episodes on disk the streaming sites name none of: MyAnimeList's titles, a few pages a pass.
+        untitled = [
+            (int(mal), anilist.finished(aid))
+            for aid in sorted(on_disk)
+            if (mal := anilist.media(aid).get("mal_id")) and anilist.untitled(aid)
+        ]
+        titled = await jikan.ensure(untitled, max_requests=8)
 
         def regroup() -> set[int]:
             with anime_collections.editing() as current:
@@ -137,6 +148,7 @@ async def run(*, max_batches: int = 4, layout: bool = True) -> dict[str, Any]:
             "offline_renewed": renewed,
             "fetched": fetched,
             "collections_grown": len(grown),
+            "episode_titles": titled,
         }
         if not layout:
             return result

@@ -30,7 +30,7 @@ import httpx
 
 from bankai.cli import bgjobs
 from bankai.logging import get_logger
-from bankai.metadata import offline
+from bankai.metadata import jikan, offline
 
 log = get_logger(__name__)
 
@@ -87,7 +87,7 @@ _QUERY = """
 query ($ids: [Int]) {
   Page(perPage: 50) {
     media(id_in: $ids, type: ANIME) {
-      id format status episodes duration season seasonYear
+      id idMal format status episodes duration season seasonYear
       startDate { year month day }
       title { romaji english native }
       synonyms description(asHtml: false) genres
@@ -184,6 +184,8 @@ def parse(item: dict) -> dict:
         "romaji": title.get("romaji"),
         "english": title.get("english"),
         "native": title.get("native"),
+        # MyAnimeList's id: episode titles where AniList has none (see jikan).
+        "mal_id": item.get("idMal"),
         "synonyms": item.get("synonyms") or [],
         "format": item.get("format"),
         "status": item.get("status"),
@@ -226,7 +228,10 @@ async def ensure(anilist_ids: set[int] | list[int], *, max_batches: int = 6, ref
         now = time.time()
         wanted = [
             int(aid) for aid in dict.fromkeys(anilist_ids)
-            if int(aid) not in rows or (refresh and now - float(rows[int(aid)].get("fetched_at", 0)) >= _KEEP)
+            if int(aid) not in rows
+            or (refresh and now - float(rows[int(aid)].get("fetched_at", 0)) >= _KEEP)
+            # Kept by a build that did not ask for the MyAnimeList id: taken again.
+            or (refresh and "mal_id" not in rows[int(aid)] and not rows[int(aid)].get("missing"))
         ][: _BATCH * max_batches]
         if not wanted:
             return 0
@@ -404,8 +409,15 @@ def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
         for number, title in _own_numbers(kept.get("streaming") or {}, count).items()
         if not _placeholder(title)
     }
+    # Where the streaming sites name none, MyAnimeList's titles, as far as they are kept.
+    mal = _own_numbers(jikan.titles(kept["mal_id"]), count) if kept.get("mal_id") else {}
     last = count or max([*airing, *streaming], default=0)
-    return [(n, streaming.get(n), airing.get(n)) for n in range(1, last + 1)]
+    return [(n, streaming.get(n) or mal.get(n), airing.get(n)) for n in range(1, last + 1)]
+
+
+def untitled(anilist_id: object) -> bool:
+    """Has it episodes the streaming sites name none of? Then MyAnimeList is asked (see jikan)."""
+    return any(title is None for _number, title, _aired in episodes(anilist_id))
 
 
 def finished(anilist_id: object) -> bool:

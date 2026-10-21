@@ -44,6 +44,7 @@ class AniListData:
         description: str | None = None,
         anidb: list[int] | tuple = (),
         fetched: bool = True,
+        mal_id: int | None = None,
     ) -> None:
         year = int(start[:4]) if start else None
         offline_type = {"TV_SHORT": "TV"}.get(format, format)
@@ -85,6 +86,7 @@ class AniListData:
                 "airing": {str(k): v for k, v in (airing or {}).items()},
                 "streaming": {str(k): v for k, v in (streaming or {}).items()},
                 "relations": rows,
+                "mal_id": mal_id,
                 "fetched_at": time.time(),
             }
         self.save()

@@ -513,6 +513,7 @@ def _pass_summary(name: str, result: object) -> str | None:
                 (number("moved"), _plural(number("moved"), "file") + " moved into place"),
                 (number("nfo_written"), _plural(number("nfo_written"), "NFO file") + " written"),
                 (number("fetched"), _plural(number("fetched"), "AniList record") + " refreshed"),
+                (number("episode_titles"), _plural(number("episode_titles"), "show") + " given MyAnimeList episode titles"),
                 (number("collections_grown"), _plural(number("collections_grown"), "collection") + " grown"),
             )
             if count
