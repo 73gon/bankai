@@ -1235,7 +1235,9 @@ def _release(info_hash, status="queued", **extra):
     return row
 
 
-def _run_reconcile(monkeypatch, tmp_path, releases, torrents, jobs=None, limit=2, **qbit_kwargs):
+def _run_reconcile(
+    monkeypatch, tmp_path, releases, torrents, jobs=None, limit=2, enabled=True, **qbit_kwargs
+):
     """Drive one reconciliation pass over an isolated state file."""
     state = erai._default_state()
     state["releases"] = releases
@@ -1245,9 +1247,17 @@ def _run_reconcile(monkeypatch, tmp_path, releases, torrents, jobs=None, limit=2
     monkeypatch.setattr(
         erai,
         "get_settings",
-        lambda: Settings(anime={"enabled": True, "max_concurrent_transfers": limit}),
+        lambda: Settings(anime={"enabled": enabled, "max_concurrent_transfers": limit}),
     )
     monkeypatch.setattr(erai.updates, "maintenance_active", lambda: False)
+    # Pausing the unfinished downloads is hold_downloads' own business.
+    held: list[bool] = []
+
+    async def hold(*, hold):
+        held.append(hold)
+        return 0
+
+    monkeypatch.setattr(erai, "hold_downloads", hold)
 
     qbit = _RecordingQbit(torrents, **qbit_kwargs)
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: qbit)
@@ -1320,6 +1330,59 @@ def test_missing_torrent_is_re_added_rather_than_stranded(monkeypatch, tmp_path)
     assert state["releases"][info_hash]["status"] == "queued"
     assert counts.get("readded") == 1
     assert spawned == []
+
+
+def test_automation_off_still_publishes_finished_downloads(monkeypatch, tmp_path):
+    """Publishing needs no space and frees the torrent's, so it never waits for automation."""
+    finished, failed, unfinished = "1" * 40, "2" * 40, "3" * 40
+    releases = {
+        finished: _release(finished),
+        failed: _release(failed, status="failed", reason="Publishing job failed", publish_attempts=0),
+        unfinished: _release(unfinished),
+    }
+    torrents = [
+        _Torrent(finished, progress=1.0, state="stalledUP"),
+        _Torrent(failed, progress=1.0, state="queuedUP"),
+        _Torrent(unfinished, progress=0.3, state="stoppedDL"),
+    ]
+    state, _counts, qbit, spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, torrents, enabled=False
+    )
+    assert {row["args"][2] for row in spawned} == {finished, failed}
+    assert state["releases"][finished]["status"] == "transferring"
+    assert state["releases"][failed]["status"] == "transferring"
+    # Paused, it waits; nothing resumes it.
+    assert state["releases"][unfinished]["status"] == "queued"
+    assert qbit.added == []
+
+
+def test_automation_off_removes_a_published_torrent(monkeypatch, tmp_path):
+    info_hash = "4" * 40
+    releases = {info_hash: _release(info_hash, status="transferring", job_id="job1")}
+    torrents = [_Torrent(info_hash, progress=1.0, state="queuedUP")]
+    jobs = {"job1": SimpleNamespace(id="job1", status="done")}
+    state, _counts, qbit, _spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, torrents, jobs=jobs, enabled=False
+    )
+    assert qbit.removed == [(info_hash, True)]
+    assert state["releases"][info_hash]["status"] == "done"
+
+
+def test_automation_off_never_re_adds_a_missing_torrent(monkeypatch, tmp_path):
+    """Re-adding is downloading again."""
+    missing, stale = "5" * 40, "6" * 40
+    releases = {
+        missing: _release(missing),
+        stale: _release(stale, status="held", reason=erai._STALE_READD_REASON + " to qBittorrent"),
+    }
+    state, counts, qbit, spawned = _run_reconcile(
+        monkeypatch, tmp_path, releases, [], enabled=False
+    )
+    assert qbit.added == []
+    assert spawned == []
+    assert state["releases"][missing]["status"] == "queued"
+    assert state["releases"][stale]["status"] == "held"
+    assert counts.get("waiting_for_automation") == 1
 
 
 def test_release_is_held_when_it_cannot_be_re_added(monkeypatch, tmp_path):

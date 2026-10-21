@@ -3780,7 +3780,11 @@ async def _readd_torrent(qbit: Any, info_hash: str, release: dict[str, Any]) -> 
 
 
 async def reconcile_releases() -> dict[str, int]:
-    """Advance every tracked release one step. Safe to call on a timer."""
+    """Advance every tracked release one step. Safe to call on a timer.
+
+    With automation off it still publishes finished downloads and removes
+    their torrents, but starts, resumes or re-adds none.
+    """
     try:
         await hold_downloads(hold=not get_settings().anime.enabled)
     except Exception as exc:
@@ -3852,8 +3856,13 @@ async def _reconcile_releases() -> dict[str, int]:
     from bankai.torrent.qbittorrent import QBittorrentClient
 
     settings = get_settings()
-    if not settings.anime.enabled or updates.maintenance_active():
+    if updates.maintenance_active():
         return {}
+    # Off, the pass still finishes what is already downloaded: publishing is a
+    # hard link that needs no space, and removing the torrent afterwards frees
+    # what it held. It only stops bringing bytes in: no torrent is re-added,
+    # and hold_downloads keeps the unfinished ones paused.
+    downloading = settings.anime.enabled
 
     qbit = QBittorrentClient()
     counts: dict[str, int] = {}
@@ -3897,8 +3906,10 @@ async def _reconcile_releases() -> dict[str, int]:
                     status = "queued"
                     release["status"] = status
                     release.pop("reason", None)
-                elif status == "held" and str(release.get("reason") or "").startswith(
-                    _STALE_READD_REASON
+                elif (
+                    downloading
+                    and status == "held"
+                    and str(release.get("reason") or "").startswith(_STALE_READD_REASON)
                 ):
                     # Held by an earlier bug that refused to re-add a release
                     # unless its record stored the magnet. Nothing was ever
@@ -3964,6 +3975,10 @@ async def _reconcile_releases() -> dict[str, int]:
                         release["status"] = "done"
                         release["updated_at"] = time.time()
                         tally("already_published")
+                        continue
+                    if not downloading:
+                        # Re-adding is downloading again; it waits for automation.
+                        tally("waiting_for_automation")
                         continue
                     if await _readd_torrent(qbit, info_hash, release):
                         release["status"] = "queued"
