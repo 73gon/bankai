@@ -261,7 +261,9 @@ def build(
             last = row.get("last_run")
             when = None if row.get("running") or not last else _ago(now - float(last))
             summary = row.get("summary")
-            detail = ": ".join(text for text in (when, summary) if text) or None
+            error = row.get("error")
+            said = " — ".join(text for text in (summary, error) if text)
+            detail = ": ".join(text for text in (when, said) if text) or None
             percent = None
         return _task(
             str(row["label"]),
@@ -270,6 +272,8 @@ def build(
             started_at=row.get("last_run") if row.get("running") else None,
         )
 
+    # What went wrong behind a pass -- a service that refused it, a pass that failed -- on the card itself.
+    failures = [f"{row['label']}: {row['error']}" for row in passes if row.get("error")]
     scheduler = _lane(
         "scheduler",
         "Scheduler",
@@ -284,6 +288,7 @@ def build(
             for row in sorted(passes, key=lambda row: not row.get("running"))
         ],
         capacity=1,
+        note=" · ".join(failures) or None,
     )
 
     # -- qBittorrent ---------------------------------------------------------

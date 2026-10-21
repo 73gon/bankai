@@ -9,6 +9,10 @@ import respx
 from bankai.metadata import anilist, jikan
 
 BLEACH, BLEACH_MAL = 269, 269
+# An entry no other test keeps, so AniList is really asked about it.
+UNKNOWN = 990_001
+# The real one: every test's AniList is stubbed out of the network (conftest); this one fakes the network instead.
+REAL_ENSURE = anilist.ensure
 
 
 @pytest.fixture
@@ -74,3 +78,23 @@ def test_myanimelist_names_the_episodes_the_streaming_sites_call_untitled(state,
     # The streaming site's own title stays first; MyAnimeList fills the rest.
     assert titles == ["Episode title 1", "Episode title 2", "A Real Streaming Title"]
     assert not anilist.untitled(BLEACH)
+
+
+@respx.mock
+def test_anilist_saying_why_it_refuses_is_kept_for_the_dashboard(state, monkeypatch) -> None:
+    """"Temporarily disabled" read as "nothing to do" for an hour: it is kept, and cleared by the next answer."""
+    monkeypatch.setattr(anilist, "last_error", {})
+    route = respx.post(anilist._API)
+    route.mock(return_value=httpx.Response(403, json={
+        "errors": [{"message": "The AniList API has been temporarily disabled due to severe stability issues.", "status": 403}],
+        "data": None,
+    }))
+    assert asyncio.run(REAL_ENSURE([UNKNOWN], max_batches=1)) == 0
+    assert anilist.last_error["message"] == "403: The AniList API has been temporarily disabled due to severe stability issues."
+    since = anilist.last_error["since"]
+    asyncio.run(REAL_ENSURE([UNKNOWN], max_batches=1))
+    assert anilist.last_error["since"] == since  # when it began, not the latest try
+
+    route.mock(return_value=httpx.Response(200, json={"data": {"Page": {"media": []}}}))
+    asyncio.run(REAL_ENSURE([UNKNOWN], max_batches=1))
+    assert anilist.last_error == {}

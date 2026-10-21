@@ -227,3 +227,45 @@ def test_a_running_layout_pass_shows_how_far_the_posters_are():
     task = _lane(board, "scheduler")["workers"][0]["task"]
     assert task["detail"] == "Downloading posters and artwork — 105 of 420"
     assert task["percent"] == 25.0
+
+
+def test_a_service_that_refuses_the_metadata_pass_is_said_not_hidden():
+    from bankai.web import jobs
+
+    result = {"laid_out": 0, "fetched": 0, "anilist_error": {"message": "403: temporarily disabled", "since": NOW - 3600}}
+    assert jobs._pass_summary("anime_metadata", result) is None
+    error = jobs._service_error("anime_metadata", result)
+    assert error.startswith("AniList unreachable since ") and error.endswith("403: temporarily disabled")
+
+    board = _build(
+        passes=[
+            {
+                "name": "anime_metadata",
+                "label": "Keep anime metadata and layout current",
+                "every_seconds": 300,
+                "last_run": NOW - 120,
+                "running": False,
+                "summary": None,
+                "error": error,
+            },
+        ],
+    )
+    lane = _lane(board, "scheduler")
+    assert lane["note"] == "Keep anime metadata and layout current: " + error
+    assert lane["workers"][0]["task"]["detail"] == "2 min ago: " + error
+
+
+def test_a_failing_pass_keeps_its_error(monkeypatch):
+    from bankai.web import jobs
+
+    monkeypatch.setattr(jobs, "_PASSES", {})
+    try:
+        with jobs._pass_running("release_reconcile"):
+            raise RuntimeError("qBittorrent unreachable")
+    except RuntimeError:
+        pass
+    rows = {row["name"]: row for row in jobs.scheduled_passes()}
+    assert rows["release_reconcile"]["error"] == "RuntimeError: qBittorrent unreachable"
+    with jobs._pass_running("release_reconcile"):
+        pass
+    assert {row["name"]: row for row in jobs.scheduled_passes()}["release_reconcile"]["error"] is None

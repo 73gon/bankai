@@ -108,7 +108,8 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
       <CardHeader className='flex flex-row items-center justify-between gap-3'>
         <div className='min-w-0'>
           <CardTitle className='truncate text-base sm:text-base' title={lane.description}>{lane.label}</CardTitle>
-          {lane.note && <p className='truncate text-xs text-warning' title={lane.note}>{lane.note}</p>}
+          {/* What went wrong behind the lane: two lines, the rest on hover. */}
+          {lane.note && <p className='line-clamp-2 text-xs text-warning' title={lane.note}>{lane.note}</p>}
         </div>
         {down ? (
           <StatusTag variant='destructive' className='shrink-0 whitespace-nowrap'>Not reporting</StatusTag>

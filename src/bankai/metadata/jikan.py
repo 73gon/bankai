@@ -31,6 +31,8 @@ _KEEP_FINISHED = 90 * 86400
 
 _STORE: tuple[float, dict[int, dict]] | None = None
 _LOCK = asyncio.Lock()
+# The last time Jikan could not be asked and why, for the dashboard; cleared by the next answer.
+last_error: dict[str, object] = {}
 
 
 def _store_path() -> Path:
@@ -126,8 +128,11 @@ async def ensure(wanted: list[tuple[int, bool]], *, max_requests: int = 8) -> in
                         answer = await _page(client, mal, page)
                     except Exception as exc:
                         log.warning("Jikan could not be asked about MyAnimeList %s: %s", mal, exc)
+                        since = last_error.get("since") if last_error else None
+                        last_error.update(message=str(exc), at=time.time(), since=since or time.time())
                         _save(rows)
                         return done
+                    last_error.clear()
                     if answer is None:
                         complete = True
                         break

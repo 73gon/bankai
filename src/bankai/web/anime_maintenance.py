@@ -149,6 +149,9 @@ async def run(*, max_batches: int = 4, layout: bool = True) -> dict[str, Any]:
             "fetched": fetched,
             "collections_grown": len(grown),
             "episode_titles": titled,
+            # Who could not be asked this pass, and what they said: the dashboard shows it.
+            "anilist_error": dict(anilist.last_error) or None,
+            "jikan_error": dict(jikan.last_error) or None,
         }
         if not layout:
             return result

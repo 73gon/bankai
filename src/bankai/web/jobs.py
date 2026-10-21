@@ -478,6 +478,11 @@ def _pass_running(name: str) -> Iterator[None]:
     row["last_run"] = time.time()
     try:
         yield
+        row["error"] = None
+    except Exception as exc:
+        # Kept for the dashboard; the caller logs it and carries on.
+        row["error"] = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
         row["running"] = False
 
@@ -495,6 +500,19 @@ def _pass_result(name: str, result: object) -> None:
 
 def _plural(count: int, one: str, many: str | None = None) -> str:
     return f"{count} {one if count == 1 else (many or one + 's')}"
+
+
+def _service_error(name: str, result: object) -> str | None:
+    """A service a pass depends on that refused it -- AniList, Jikan -- in words, since when."""
+    if name != "anime_metadata" or not isinstance(result, dict):
+        return None
+    out = []
+    for service, key in (("AniList", "anilist_error"), ("MyAnimeList (Jikan)", "jikan_error")):
+        error = result.get(key)
+        if isinstance(error, dict) and error.get("message"):
+            since = time.strftime("%H:%M", time.localtime(float(error.get("since") or error.get("at") or 0)))
+            out.append(f"{service} unreachable since {since}: {error['message']}")
+    return " · ".join(out) or None
 
 
 def _pass_summary(name: str, result: object) -> str | None:
@@ -518,7 +536,9 @@ def _pass_summary(name: str, result: object) -> str | None:
             )
             if count
         ]
-        return ", ".join(bits) or "Everything already current"
+        if bits:
+            return ", ".join(bits)
+        return None if _service_error(name, result) else "Everything already current"
     if name == "release_reconcile":
         words = {
             "transferring": "publishing",
@@ -545,8 +565,12 @@ def scheduled_passes() -> list[dict]:
         row = _PASSES.get(name, {})
         task = row.get("task")
         running = bool(row.get("running") or (task is not None and not task.done()))
-        if task is not None and task.done() and not task.cancelled() and task.exception() is None:
-            row["result"] = task.result()
+        if task is not None and task.done() and not task.cancelled():
+            failure = task.exception()
+            if failure is None:
+                row["result"], row["error"] = task.result(), None
+            else:
+                row["error"] = f"{type(failure).__name__}: {failure}"
         out.append(
             {
                 "name": name,
@@ -558,6 +582,7 @@ def scheduled_passes() -> list[dict]:
                 # The layout says what it is at: laying out, downloading posters (n of m).
                 "progress": dict(anime_layout.progress) if running and name == "anime_metadata" else None,
                 "summary": _pass_summary(name, row.get("result")),
+                "error": row.get("error") or _service_error(name, row.get("result")),
             }
         )
     return out

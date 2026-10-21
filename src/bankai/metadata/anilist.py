@@ -115,6 +115,9 @@ _STREAMING = re.compile(r"^Episode\s+(\d+)\s*[-–:]\s*(.+)$", re.IGNORECASE)
 
 _MEDIA: tuple[float, dict[int, dict]] | None = None
 _LOCK = asyncio.Lock()
+# The last time AniList could not be asked and what it said, for the dashboard;
+# cleared by the next answer. Without it a refused pass reads as "nothing to do".
+last_error: dict[str, object] = {}
 
 
 def _media_store() -> Path:
@@ -213,9 +216,29 @@ async def _ask(client: httpx.AsyncClient, query: str, variables: dict) -> dict:
             # Too many: AniList says how long to wait.
             await asyncio.sleep(float(response.headers.get("Retry-After") or 30) + 1)
             continue
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # AniList says why in its answer ("temporarily disabled ..."): that, not the status line.
+            raise RuntimeError(f"{response.status_code}: {_refusal(response)}")
         return response.json() or {}
-    raise RuntimeError("AniList kept refusing: rate limited")
+    raise RuntimeError("429: rate limited three times running")
+
+
+def _refusal(response: httpx.Response) -> str:
+    try:
+        errors = (response.json() or {}).get("errors") or []
+        message = next((str(error["message"]) for error in errors if error.get("message")), "")
+    except (ValueError, AttributeError, TypeError):
+        message = ""
+    return message or response.reason_phrase or "refused"
+
+
+def _note(error: Exception | None) -> None:
+    """Remember the last refusal (with when it began), or forget it once AniList answers."""
+    if error is None:
+        last_error.clear()
+        return
+    since = last_error.get("since") if last_error else None
+    last_error.update(message=str(error), at=time.time(), since=since or time.time())
 
 
 async def ensure(anilist_ids: set[int] | list[int], *, max_batches: int = 6, refresh: bool = True) -> int:
@@ -243,7 +266,9 @@ async def ensure(anilist_ids: set[int] | list[int], *, max_batches: int = 6, ref
                     answer = await _ask(client, _QUERY, {"ids": ids})
                 except Exception as exc:
                     log.warning("AniList could not be asked: %s", exc)
+                    _note(exc)
                     break
+                _note(None)
                 found = ((answer.get("data") or {}).get("Page") or {}).get("media") or []
                 seen = set()
                 for item in found:
