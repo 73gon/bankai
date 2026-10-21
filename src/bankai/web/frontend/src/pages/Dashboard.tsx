@@ -104,7 +104,7 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
   const idle = lane.workers.length - shown.length;
   return (
     // The scheduler's rows say what each pass did: they need the width of two cards.
-    <Card className={cn('flex flex-col gap-2 [--card-padding:14px]', lane.key === 'scheduler' && 'md:col-span-2', down && 'border-destructive/40')}>
+    <Card className={cn('flex h-full flex-col gap-2 [--card-padding:14px]', lane.key === 'scheduler' && 'md:col-span-2', down && 'border-destructive/40')}>
       <CardHeader className='flex flex-row items-center justify-between gap-3'>
         <div className='min-w-0'>
           <CardTitle className='truncate text-base sm:text-base' title={lane.description}>{lane.label}</CardTitle>
@@ -119,7 +119,7 @@ function LaneCard({ lane }: { lane: DashboardLane }) {
         )}
       </CardHeader>
       {/* Scrolls: qBittorrent alone can run twenty. */}
-      <CardContent className='flex max-h-64 flex-col gap-1 overflow-y-auto'>
+      <CardContent className='flex max-h-56 min-h-0 flex-1 flex-col gap-1 overflow-y-auto'>
         {lane.workers.length === 0 && <p className='text-xs text-muted-foreground'>{down ? 'qBittorrent could not be reached.' : 'Nothing running.'}</p>}
         {shown.map((worker) => <WorkerRow key={worker.id} worker={worker} />)}
         {idle > 0 && (
@@ -139,15 +139,27 @@ function DueWhen({ item }: { item: DashboardDueItem }) {
   return <span className='text-xs text-muted-foreground'>—</span>;
 }
 
-function RecentList({ title, icon: Icon, rows, empty, action }: { title: string; icon: typeof Film; rows: DashboardRecent[]; empty: string; action?: React.ReactNode }) {
+/**
+ * The middle row's card: Up next and both Recently added lists side by side, one height and one
+ * header each (room for the anime toggle in every header), the list scrolling inside.
+ */
+function Panel({ title, icon: Icon, action, children, className }: { title: string; icon: typeof Film; action?: React.ReactNode; children: React.ReactNode; className?: string }) {
   return (
-    <Card className='flex min-h-0 flex-col gap-2 [--card-padding:14px]'>
-      <CardHeader className='flex flex-row items-center gap-2'>
-        <Icon className='size-4 text-muted-foreground' />
-        <CardTitle className='text-base sm:text-base'>{title}</CardTitle>
+    <Card className={cn('flex h-[26rem] min-w-0 flex-col gap-2 [--card-padding:14px]', className)}>
+      <CardHeader className='flex min-h-8 flex-row items-center gap-2'>
+        <Icon className='size-4 shrink-0 text-muted-foreground' />
+        <CardTitle className='truncate text-base sm:text-base'>{title}</CardTitle>
         {action && <div className='ml-auto'>{action}</div>}
       </CardHeader>
-      <CardContent className='flex max-h-[22rem] flex-col gap-0.5 overflow-y-auto'>
+      {children}
+    </Card>
+  );
+}
+
+function RecentList({ title, icon, rows, empty, action }: { title: string; icon: typeof Film; rows: DashboardRecent[]; empty: string; action?: React.ReactNode }) {
+  return (
+    <Panel title={title} icon={icon} action={action}>
+      <CardContent className='flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto'>
         {rows.length === 0 && <p className='text-sm text-muted-foreground'>{empty}</p>}
         {rows.map((row) => (
           <Link
@@ -172,7 +184,7 @@ function RecentList({ title, icon: Icon, rows, empty, action }: { title: string;
           </Link>
         ))}
       </CardContent>
-    </Card>
+    </Panel>
   );
 }
 
@@ -264,54 +276,56 @@ export default function Dashboard() {
 
           <section className='flex flex-col gap-2'>
             <h2 className='font-heading text-lg font-light'>Workers</h2>
-            <div className='grid items-start gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4'>
-              {data.lanes.map((lane) => <LaneCard key={lane.key} lane={lane} />)}
+            {/* Two even rows on a wide screen: the four small lanes, then automation, qBittorrent
+                and the scheduler (two wide, for its passes). Each row's cards share its height. */}
+            <div className='grid gap-3 md:grid-cols-2 lg:grid-cols-4'>
+              {[...data.lanes]
+                .sort((a, b) => Number(a.key === 'scheduler') - Number(b.key === 'scheduler'))
+                .map((lane) => <LaneCard key={lane.key} lane={lane} />)}
             </div>
           </section>
 
-          {/* What comes next beside what arrived: three columns on a wide screen. */}
-          <div className='grid items-start gap-3 xl:grid-cols-3'>
-          <section className='flex min-w-0 flex-col gap-2'>
-            <h2 className='font-heading text-lg font-light'>Up next</h2>
-              <Table dense containerProps={{ className: 'max-h-[24rem] overflow-auto' }}>
-                <TableHeader className='sticky top-0 z-10 bg-card'>
-                  <TableRow>
-                    <TableHead>Lane</TableHead>
-                    <TableHead>Task</TableHead>
-                    <TableHead numeric>When</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {dueRows.length === 0 && (
-                    <TableRow><TableCell colSpan={3} className='py-6 text-center text-muted-foreground'>Nothing due.</TableCell></TableRow>
-                  )}
-                  {dueRows.map(({ group, item, index }) => (
-                    <TableRow key={group.lane + ':' + index + ':' + item.title}>
-                      <TableCell className='whitespace-nowrap py-1.5 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
-                      <TableCell className='max-w-[22rem] py-1.5'>
-                        {item.href ? (
-                          <Link to={item.href} className={cn('block truncate hover:underline', index === -1 ? 'text-muted-foreground' : 'text-foreground')} title={item.title}>
-                            {item.position ? <span className='mr-2 font-mono text-xs text-muted-foreground'>#{item.position}</span> : null}
-                            {item.title}
-                            {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
-                          </Link>
-                        ) : (
-                          <span className='block truncate text-foreground' title={item.title}>
-                            {item.title}
-                            {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
-                          </span>
-                        )}
-                      </TableCell>
-                      <TableCell className='whitespace-nowrap py-1.5 text-right'>{index === -1 ? null : <DueWhen item={item} />}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-          </section>
-
-          <section className='flex min-w-0 flex-col gap-2 xl:col-span-2'>
-            <h2 className='font-heading text-lg font-light'>Recently added</h2>
-            <div className='grid items-start gap-3 lg:grid-cols-2'>
+          <section className='flex flex-col gap-2'>
+            <h2 className='font-heading text-lg font-light'>Up next &amp; recently added</h2>
+            <div className='grid gap-3 lg:grid-cols-2 xl:grid-cols-3'>
+              <Panel title='Up next' icon={Clock}>
+                <CardContent className='min-h-0 flex-1 overflow-y-auto'>
+                  <Table variant='plain' dense>
+                    <TableHeader className='sticky top-0 z-10 bg-card'>
+                      <TableRow>
+                        <TableHead>Lane</TableHead>
+                        <TableHead>Task</TableHead>
+                        <TableHead numeric>When</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {dueRows.length === 0 && (
+                        <TableRow><TableCell colSpan={3} className='py-6 text-center text-muted-foreground'>Nothing due.</TableCell></TableRow>
+                      )}
+                      {dueRows.map(({ group, item, index }) => (
+                        <TableRow key={group.lane + ':' + index + ':' + item.title}>
+                          <TableCell className='whitespace-nowrap py-1.5 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
+                          <TableCell className='w-full max-w-0 py-1.5'>
+                            {item.href ? (
+                              <Link to={item.href} className={cn('block truncate hover:underline', index === -1 ? 'text-muted-foreground' : 'text-foreground')} title={item.title}>
+                                {item.position ? <span className='mr-2 font-mono text-xs text-muted-foreground'>#{item.position}</span> : null}
+                                {item.title}
+                                {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
+                              </Link>
+                            ) : (
+                              <span className='block truncate text-foreground' title={item.title}>
+                                {item.title}
+                                {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className='whitespace-nowrap py-1.5 text-right'>{index === -1 ? null : <DueWhen item={item} />}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Panel>
               <RecentList title='Movies & Shows' icon={Film} rows={data.recent.mas} empty='Nothing new in the Movies & Shows library.' />
               <RecentList
                 title='Anime'
@@ -331,7 +345,6 @@ export default function Dashboard() {
               />
             </div>
           </section>
-          </div>
 
           <DiskUsage />
         </>

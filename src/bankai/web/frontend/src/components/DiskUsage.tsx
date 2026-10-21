@@ -61,9 +61,9 @@ function VolumeCard({ volume, areas }: { volume: StorageVolume; areas: StorageAr
   const full = volume.free / volume.total < 0.02;
 
   return (
-    <Card className='[--card-padding:14px]'>
+    <Card className='h-full [--card-padding:14px]'>
       <CardHeader>
-        <CardTitle className='flex items-center gap-2'><HardDrive className='size-4' /> {volumeName(volume)}</CardTitle>
+        <CardTitle className='flex items-center gap-2 text-base sm:text-base'><HardDrive className='size-4 text-muted-foreground' /> {volumeName(volume)}</CardTitle>
         <CardDescription>
           <span className='font-mono tabular-nums text-foreground'>{formatBytes(volume.used)}</span> of {formatBytes(volume.total)} used ·{' '}
           <span className={cn('font-mono tabular-nums', full ? 'text-destructive' : 'text-foreground')}>{formatBytes(volume.free)}</span> free
@@ -245,7 +245,7 @@ export function DiskUsage() {
       ) : usage.volumes.length === 0 ? (
         <p className='text-sm text-muted-foreground'>No scan yet.</p>
       ) : (
-        <div className='grid items-start gap-3 xl:grid-cols-2'>
+        <div className='grid gap-3 xl:grid-cols-2'>
           {usage.volumes.map((volume) => (
             <VolumeCard key={volume.path} volume={volume} areas={usage.areas.filter((area) => area.volume === volume.path)} />
           ))}
