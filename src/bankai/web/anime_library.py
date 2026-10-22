@@ -855,8 +855,8 @@ async def group_shows(
 
     index = await asyncio.to_thread(anime_files.load)
     store = await asyncio.to_thread(anime_collections.load)
-    # One read of the release state for the whole page: it is a large file.
-    state = await asyncio.to_thread(erai._load_state)
+    # One read of the release state for the whole page, and only when it changed: it is a large file.
+    state = await asyncio.to_thread(erai.state_for_reading)
     blocked = erai._policy_anilist_ids(await asyncio.to_thread(erai._load_policies))
     folder_of = anime_layout.folder_names(store)
     of = store.of()

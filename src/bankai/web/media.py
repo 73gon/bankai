@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import subprocess
-from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -310,8 +309,9 @@ def scan_library(library: Path | None = None, *, held: bool = False) -> list[Lib
                 path = Path(row["path"])
                 if not _is_library_name(path):
                     continue
-                with suppress(OSError):
-                    entries.append(entry(root, path) if entry else _episode_entry(root, shows_dir, path))
+                # Size and time as the tree has them: no stat per file over 9p.
+                known = (int(row["size"]), float(row["mtime"]))
+                entries.append(entry(root, path, known) if entry else _episode_entry(root, shows_dir, path, known))
         return entries
     if movies_dir.is_dir():
         for f in sorted(movies_dir.rglob("*")):
@@ -334,21 +334,30 @@ def _is_library_name(path: Path) -> bool:
     return path.suffix.casefold() in _VIDEO_EXTS and not any(marker in name for marker in _WORKING_MEDIA_MARKERS)
 
 
-def _movie_entry(root: Path, f: Path) -> LibraryEntry:
-    st = f.stat()
+def _movie_entry(root: Path, f: Path, known: tuple[int, float] | None = None) -> LibraryEntry:
+    size, created, mtime = _times(f, known)
     return LibraryEntry(
         kind="movie",
         path=str(f),
         rel_path=str(f.relative_to(root)),
         name=f.stem,
-        size=st.st_size,
-        created_at=float(getattr(st, "st_birthtime", st.st_ctime)),
-        mtime=st.st_mtime,
+        size=size,
+        created_at=created,
+        mtime=mtime,
     )
 
 
-def _episode_entry(root: Path, shows_dir: Path, f: Path) -> LibraryEntry:
+def _times(f: Path, known: tuple[int, float] | None) -> tuple[int, float, float]:
+    """Size, creation and modification time: as given (the held tree's), or read from the file."""
+    if known is not None:
+        size, mtime = known
+        return size, mtime, mtime
     st = f.stat()
+    return st.st_size, float(getattr(st, "st_birthtime", st.st_ctime)), st.st_mtime
+
+
+def _episode_entry(root: Path, shows_dir: Path, f: Path, known: tuple[int, float] | None = None) -> LibraryEntry:
+    size, created, mtime = _times(f, known)
     rel = f.relative_to(shows_dir)
     series = rel.parts[0] if len(rel.parts) >= 1 else None
     season = None
@@ -362,9 +371,9 @@ def _episode_entry(root: Path, shows_dir: Path, f: Path) -> LibraryEntry:
         path=str(f),
         rel_path=str(f.relative_to(root)),
         name=f.stem,
-        size=st.st_size,
-        created_at=float(getattr(st, "st_birthtime", st.st_ctime)),
-        mtime=st.st_mtime,
+        size=size,
+        created_at=created,
+        mtime=mtime,
         series=series,
         season=season,
     )

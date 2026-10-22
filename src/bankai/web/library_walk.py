@@ -224,38 +224,54 @@ def directories(root: str | Path, *, rescan: bool = False) -> dict[str, dict]:
     return _tree(str(root), rescan=rescan)["dirs"]
 
 
+# The rows built from each held tree, by root, with the tree they came from:
+# building them for 4,700 files took 0.23 s of every anime drawer.
+_ROWS: dict[str, tuple[dict[str, Any], list[dict]]] = {}
+
+
 def files(roots: list[str | Path], *, rescan: bool = False) -> list[dict]:
     """Every video file under ``roots``, from the held tree.
 
     The first call for a root walks it; later calls answer from memory and
     the scheduler keeps the tree current. ``rescan`` checks it against the
     disk before answering, which is what the pages' Rescan buttons ask for.
+    Each call gets rows of its own, which it may change.
     """
     out: list[dict] = []
     for raw in roots:
         root = str(raw)
         tree = _tree(root, rescan=rescan)
-        base = Path(root)
-        for directory, node in tree["dirs"].items():
-            for name, size, mtime in node["files"]:
-                path = Path(directory) / name
-                try:
-                    relative = path.relative_to(base)
-                except ValueError:
-                    continue
-                parts = relative.parts
-                out.append(
-                    {
-                        "path": str(path),
-                        "rel_path": str(relative),
-                        "name": name,
-                        "series": parts[0] if len(parts) > 1 else path.stem,
-                        "season": parts[1] if len(parts) > 2 else None,
-                        "size": size,
-                        "mtime": mtime,
-                        "root": root,
-                    }
-                )
+        kept = _ROWS.get(root)
+        if kept is None or kept[0] is not tree:
+            kept = (tree, _rows(root, tree))
+            _ROWS[root] = kept
+        out.extend(dict(row) for row in kept[1])
+    return out
+
+
+def _rows(root: str, tree: dict[str, Any]) -> list[dict]:
+    out: list[dict] = []
+    base = Path(root)
+    for directory, node in tree["dirs"].items():
+        for name, size, mtime in node["files"]:
+            path = Path(directory) / name
+            try:
+                relative = path.relative_to(base)
+            except ValueError:
+                continue
+            parts = relative.parts
+            out.append(
+                {
+                    "path": str(path),
+                    "rel_path": str(relative),
+                    "name": name,
+                    "series": parts[0] if len(parts) > 1 else path.stem,
+                    "season": parts[1] if len(parts) > 2 else None,
+                    "size": size,
+                    "mtime": mtime,
+                    "root": root,
+                }
+            )
     return out
 
 

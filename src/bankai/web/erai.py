@@ -1396,6 +1396,27 @@ def _load_state() -> dict[str, Any]:
         return state
 
 
+# The release state as last read, by the file's (path, mtime, size), for
+# pages that only read it: parsing it took 0.24 s of every anime drawer.
+_STATE_READ: tuple[tuple[str, int, int], dict[str, Any]] | None = None
+
+
+def state_for_reading() -> dict[str, Any]:
+    """The release state, shared between readers: never to be changed or saved."""
+    global _STATE_READ
+    path = _state_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        return _load_state()
+    stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+    kept = _STATE_READ
+    if kept is None or kept[0] != stamp:
+        kept = (stamp, _load_state())
+        _STATE_READ = kept
+    return kept[1]
+
+
 # The sections of the release state that are merged when a cycle saves.
 _MERGED_SECTIONS = ("releases", "canonical", "anime")
 # The state a running cycle loaded, as it was: {"id": id(state), "sections": {...}}.
