@@ -444,6 +444,8 @@ _CODEC_SWEEP_BATCH = 40
 # same kind of one-off crawl, a frame each, a slice a minute.
 _THUMB_SWEEP_SECONDS = 60.0
 _THUMB_SWEEP_BATCH = 20
+# Telling Jellyfin which episodes, seasons and shows bankai changed (see jellyfin).
+_JELLYFIN_SECONDS = 60.0
 # How often the held library tree is checked against the disk: the delay
 # before a newly published episode shows in the libraries.
 _LIBRARY_WALK_SECONDS = 60.0
@@ -464,6 +466,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "library_walk": ("Check the libraries for changes", _LIBRARY_WALK_SECONDS),
     "codec_sweep": ("Identify episode encodes", _CODEC_SWEEP_SECONDS),
     "thumb_sweep": ("Episode pictures from mid-episode", _THUMB_SWEEP_SECONDS),
+    "jellyfin_refresh": ("Tell Jellyfin what changed", _JELLYFIN_SECONDS),
     "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
@@ -558,6 +561,12 @@ def _pass_summary(name: str, result: object) -> str | None:
         return " · ".join(bits) or "No releases in flight"
     if name == "codec_sweep":
         return f"{_plural(number('probed'), 'encode')} identified, {number('remaining')} to go"
+    if name == "jellyfin_refresh":
+        if number("failed"):
+            from bankai.web import jellyfin
+
+            return "Jellyfin could not be asked: " + str(jellyfin.last_error.get("message") or "no answer")
+        return f"{_plural(number('refreshed'), 'item')} refreshed in Jellyfin, {number('remaining')} to go"
     if name == "thumb_sweep":
         if number("held_for_space"):
             return "Held: the library disk is short on room"
@@ -634,6 +643,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_release_pass = 0.0
     next_codec_pass = 0.0
     next_thumb_pass = 0.0
+    next_jellyfin_pass = 0.0
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
     next_archive_pass = 0.0
@@ -752,6 +762,26 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("thumbnail sweep failed: %s", exc)
+        if time.monotonic() >= next_jellyfin_pass:
+            next_jellyfin_pass = time.monotonic() + _JELLYFIN_SECONDS
+            from bankai.web import jellyfin
+
+            if jellyfin.configured():
+                _pass_due("jellyfin_refresh", next_jellyfin_pass)
+                try:
+                    with _pass_running("jellyfin_refresh"):
+                        result = await jellyfin.flush()
+                    _pass_result("jellyfin_refresh", result)
+                    if result.get("refreshed"):
+                        log.info(
+                            "Jellyfin refreshes %d item(s); %d still queued",
+                            result["refreshed"],
+                            result["remaining"],
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning("Jellyfin pass failed: %s", exc)
         await asyncio.sleep(poll_seconds)
 
 

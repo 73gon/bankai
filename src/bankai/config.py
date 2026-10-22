@@ -233,6 +233,20 @@ class VpnSettings(BaseModel):
     api_key: str = ""
 
 
+class JellyfinSettings(BaseModel):
+    """The Jellyfin server showing the anime library, told what bankai changes in it.
+
+    Jellyfin notices new and removed videos itself, but never reads a changed
+    NFO file or a new episode picture again. With ``url`` and ``api_key`` set,
+    bankai asks it to refresh the episodes it changed. ``library`` names the
+    anime library; left empty, it is the one whose folder is the anime root's.
+    """
+
+    url: str = ""
+    api_key: str = ""
+    library: str = ""
+
+
 class WebSettings(BaseModel):
     """Settings for the bankai web UI / HTTP API server."""
 
@@ -281,6 +295,7 @@ class Settings(BaseSettings):
     notifications: NotificationsSettings = Field(default_factory=NotificationsSettings)
     web: WebSettings = Field(default_factory=WebSettings)
     vpn: VpnSettings = Field(default_factory=VpnSettings)
+    jellyfin: JellyfinSettings = Field(default_factory=JellyfinSettings)
 
     @classmethod
     def settings_customise_sources(

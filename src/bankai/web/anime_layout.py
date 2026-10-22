@@ -510,8 +510,12 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
     for ``fetch_pictures``. Staged files get theirs once Transfer has moved
     them, from the next pass.
     """
+    from bankai.web import jellyfin
+
     written = 0
     pictures: list[Picture] = []
+    # What Jellyfin has to read again: it never looks at a changed NFO file itself.
+    changed: list[Path] = []
     root = anime_files.anime_root()
     held = anime_files.by_entry(layout.rows)
     by_folder: dict[int, list[str]] = {}
@@ -527,7 +531,9 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
         if not folder.is_dir():
             continue
         show = collections.name(row)
-        written += _write_text(folder / "tvshow.nfo", tvshow_nfo(row, show))
+        if _write_text(folder / "tvshow.nfo", tvshow_nfo(row, show)):
+            written += 1
+            changed.append(folder)
         main = row.title if row.title is not None else row.members[0]
         if anilist.cover(main):
             pictures.append(Picture(folder / "poster.jpg", anilist.cover(main)))
@@ -546,7 +552,9 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
                 continue
             number = int(match[1])
             aid = by_season.get(number)
-            written += _write_text(season_dir / "season.nfo", season_nfo(number, aid, show))
+            if _write_text(season_dir / "season.nfo", season_nfo(number, aid, show)):
+                written += 1
+                changed.append(season_dir)
             if aid is not None and anilist.cover(aid):
                 pictures.append(Picture(season_dir / "poster.jpg", anilist.cover(aid)))
         for rel in by_folder.get(cid, []):
@@ -558,9 +566,12 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
             if place is None:
                 continue
             on_disk = len(held.get(pairs[0][0], {}))
-            written += _write_text(
+            if _write_text(
                 video.with_suffix(".nfo"), episode_nfo(show, place[0], place[1], pairs, on_disk=on_disk)
-            )
+            ):
+                written += 1
+                changed.append(video)
+    jellyfin.queue(changed)
     return written, pictures
 
 
@@ -612,6 +623,7 @@ async def fetch_pictures(pictures: list[Picture]) -> int:
         sources = {}
     due = [p for p in pictures if not p.path.exists() or sources.get(str(p.path)) != p.url]
     fetched = 0
+    fresh: list[Path] = []
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         for index, picture in enumerate(due):
             progress.update(step="Downloading posters and artwork", done=index, total=len(due))
@@ -631,6 +643,11 @@ async def fetch_pictures(pictures: list[Picture]) -> int:
                 continue
             sources[str(picture.path)] = picture.url
             fetched += 1
+            fresh.append(picture.path.parent)
+    # The show or season the poster belongs to.
+    from bankai.web import jellyfin
+
+    jellyfin.queue(fresh)
     if fetched:
         path = _pictures_path()
         tmp = path.with_suffix(f".{os.getpid()}.tmp")

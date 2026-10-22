@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 from bankai.logging import get_logger
-from bankai.web import anime_layout, library_walk
+from bankai.web import anime_layout, jellyfin, library_walk
 
 log = get_logger(__name__)
 
@@ -104,6 +104,7 @@ def sweep(root: Path, *, limit: int) -> dict[str, int]:
     if not anime_layout.pictures_allowed():
         return {"made": 0, "remaining": 0, "held_for_space": 1}
     made = remaining = failed = 0
+    written: list[Path] = []
     for row in library_walk.files([root]):
         key, mtime, size = row["path"], float(row["mtime"]), int(row["size"])
         if _DONE.get(key) == mtime or _FAILED.get(key) == (size, mtime):
@@ -123,10 +124,13 @@ def sweep(root: Path, *, limit: int) -> dict[str, int]:
         if make_thumb(video):
             _DONE[key] = mtime
             made += 1
+            written.append(video)
         else:
             _FAILED[key] = (size, mtime)
             failed += 1
             log.warning("No thumbnail could be taken from %s", video.name)
+    # Jellyfin never looks at a new picture of an episode it already has.
+    jellyfin.queue(written)
     return {"made": made, "remaining": remaining, "failed": failed}
 
 
