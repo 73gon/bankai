@@ -6,13 +6,19 @@ Jikan serves it without a key, three requests a second and sixty a minute, a
 hundred episodes a page. Asked only for entries in the library that have
 untitled episodes, a few pages a maintenance pass; kept a week while an entry
 airs, three months once it has finished.
+
+Jikan only reads MyAnimeList's pages, and its API can be unreachable for days
+(it never once answered after this shipped). Then the same episode list is
+read from MyAnimeList itself -- the same MyAnimeList id, AniList's link.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -24,6 +30,12 @@ from bankai.logging import get_logger
 log = get_logger(__name__)
 
 _API = "https://api.jikan.moe/v4"
+_MAL = "https://myanimelist.net/anime/{mal_id}/_/episode"
+# MyAnimeList's episode list, like Jikan's, is a hundred episodes a page.
+_MAL_PAGE = 100
+_MAL_ROW = re.compile(r'<tr class="episode-list-data">(.*?)</tr>', re.S)
+_MAL_NUMBER = re.compile(r'class="episode-number[^"]*"[^>]*data-raw="(\d+)"')
+_MAL_TITLE = re.compile(r'class="episode-title[^"]*">\s*<a [^>]*>(.*?)</a>', re.S)
 # One request a second: well under Jikan's three a second and sixty a minute.
 _PAUSE = 1.1
 _KEEP_AIRING = 7 * 86400
@@ -99,6 +111,27 @@ async def _page(client: httpx.AsyncClient, mal_id: int, page: int) -> dict | Non
     raise RuntimeError("Jikan kept refusing: rate limited")
 
 
+async def _mal_page(client: httpx.AsyncClient, mal_id: int, page: int) -> dict | None:
+    """The same page read from MyAnimeList itself, in the shape Jikan answers with."""
+    response = await client.get(
+        _MAL.format(mal_id=mal_id),
+        params={"offset": (page - 1) * _MAL_PAGE},
+        headers={"Accept": "text/html", "User-Agent": "Mozilla/5.0 (bankai)"},
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    rows = _MAL_ROW.findall(response.text)
+    data = []
+    for row in rows:
+        number, title = _MAL_NUMBER.search(row), _MAL_TITLE.search(row)
+        if number and title:
+            text = html.unescape(re.sub(r"<[^>]+>", "", title.group(1))).strip()
+            data.append({"mal_id": int(number.group(1)), "title": text})
+    # By rows, not titles: a row MyAnimeList has no title for still fills the page.
+    return {"data": data, "pagination": {"has_next_page": len(rows) >= _MAL_PAGE}}
+
+
 async def ensure(wanted: list[tuple[int, bool]], *, max_requests: int = 8) -> int:
     """Fetch the titles of these (MyAnimeList id, finished) entries that are due.
 
@@ -112,6 +145,7 @@ async def ensure(wanted: list[tuple[int, bool]], *, max_requests: int = 8) -> in
         if not queue:
             return 0
         done = requests = 0
+        ask = _page
         async with httpx.AsyncClient(timeout=30, headers={"Accept": "application/json"}) as client:
             for mal in queue:
                 # A long show takes several passes: it goes on from the page it got to.
@@ -125,11 +159,21 @@ async def ensure(wanted: list[tuple[int, bool]], *, max_requests: int = 8) -> in
                         await asyncio.sleep(_PAUSE)
                     requests += 1
                     try:
-                        answer = await _page(client, mal, page)
+                        try:
+                            answer = await ask(client, mal, page)
+                        except httpx.TransportError as exc:
+                            if ask is _mal_page:
+                                raise
+                            # Jikan unreachable: MyAnimeList itself, for the rest of the pass.
+                            log.info("Jikan unreachable (%s); reading MyAnimeList directly", type(exc).__name__)
+                            ask = _mal_page
+                            answer = await ask(client, mal, page)
                     except Exception as exc:
-                        log.warning("Jikan could not be asked about MyAnimeList %s: %s", mal, exc)
+                        # A timeout's message is empty: name it, or the dashboard says nothing.
+                        message = str(exc) or type(exc).__name__
+                        log.warning("Episode titles could not be read for MyAnimeList %s: %s", mal, message)
                         since = last_error.get("since") if last_error else None
-                        last_error.update(message=str(exc), at=time.time(), since=since or time.time())
+                        last_error.update(message=message, at=time.time(), since=since or time.time())
                         _save(rows)
                         return done
                     last_error.clear()

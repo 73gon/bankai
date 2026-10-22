@@ -98,3 +98,45 @@ def test_anilist_saying_why_it_refuses_is_kept_for_the_dashboard(state, monkeypa
     route.mock(return_value=httpx.Response(200, json={"data": {"Page": {"media": []}}}))
     asyncio.run(REAL_ENSURE([UNKNOWN], max_batches=1))
     assert anilist.last_error == {}
+
+
+def _mal_html(numbers: range) -> str:
+    """MyAnimeList's episode list, as its rows are written."""
+    rows = "".join(
+        f'<tr class="episode-list-data">\n'
+        f'  <td class="episode-number nowrap" data-raw="{n}">{n}</td>\n'
+        f'  <td class="episode-video nowrap"></td>\n'
+        f'  <td class="episode-title fs12"><a href="https://myanimelist.net/anime/{BLEACH_MAL}/x/episode/{n}" '
+        f'class="fl-l fw-b ">Title {n} &amp; more</a>\n    <br><span class="di-ib"></span>\n  </td>\n'
+        f'  <td class="episode-aired nowrap">Oct 11, 2022</td></tr>'
+        for n in numbers
+    )
+    return f"<table><tbody>{rows}</tbody></table>"
+
+
+@respx.mock
+def test_with_jikan_unreachable_the_titles_come_from_myanimelist_itself(state) -> None:
+    """Jikan's API timed out on every pass, so no title was ever kept."""
+    respx.get(f"{jikan._API}/anime/{BLEACH_MAL}/episodes").mock(side_effect=httpx.ConnectTimeout(""))
+    mal = respx.get(jikan._MAL.format(mal_id=BLEACH_MAL))
+    mal.side_effect = lambda request: httpx.Response(
+        200,
+        text={"0": _mal_html(range(1, 101)), "100": _mal_html(range(101, 131))}[request.url.params["offset"]],
+    )
+
+    assert asyncio.run(jikan.ensure([(BLEACH_MAL, True)])) == 1
+
+    titles = jikan.titles(BLEACH_MAL)
+    assert len(titles) == 130
+    assert titles[1] == "Title 1 & more" and titles[130] == "Title 130 & more"
+    assert not jikan.last_error
+
+
+@respx.mock
+def test_a_timeout_is_named_for_the_dashboard(state) -> None:
+    respx.get(f"{jikan._API}/anime/{BLEACH_MAL}/episodes").mock(side_effect=httpx.ConnectTimeout(""))
+    respx.get(jikan._MAL.format(mal_id=BLEACH_MAL)).mock(side_effect=httpx.ConnectTimeout(""))
+
+    assert asyncio.run(jikan.ensure([(BLEACH_MAL, True)])) == 0
+    assert jikan.last_error["message"] == "ConnectTimeout"
+    jikan.last_error.clear()
