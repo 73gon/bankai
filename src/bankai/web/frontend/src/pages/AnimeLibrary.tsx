@@ -188,20 +188,19 @@ function Progress({ show }: { show: AnimeLibraryShow }) {
   );
 }
 
-/** Whether a show has an HEVC upgrade: found (with German subtitles), being
- *  downloaded, or searched for and not found. Nothing until bankai has looked
- *  -- how many episodes are AVC is the encode bar's to say, not an upgrade. */
+/** Whether a show has an HEVC upgrade: found (with German subtitles) or being
+ *  downloaded. Nothing otherwise -- not looked at yet, or none found: the
+ *  search runs by itself in the background (the dashboard shows it), and how
+ *  many episodes are AVC is the encode bar's to say. */
 function UpgradeTag({ show }: { show: AnimeLibraryShow }) {
   const upgrading = show.upgrading_count ?? 0;
   const available = show.upgrade_available_count ?? 0;
-  const none = show.no_hevc_count ?? 0;
   const checked = show.hevc_checked_at ? new Date(show.hevc_checked_at * 1000).toLocaleDateString() : null;
   const when = checked ? ' (looked ' + checked + ')' : '';
   return (
     <>
       {upgrading > 0 && <StatusTag variant='transfer' title='HEVC versions of these episodes are downloading; the AVC files go once they land'>Upgrading {upgrading}</StatusTag>}
       {available > 0 && <StatusTag variant='info' title={'An Erai-raws HEVC release with German subtitles exists for ' + available + ' AVC episode(s)' + when + '. Open the show and choose Upgrade to HEVC.'}>Upgrade for {available}</StatusTag>}
-      {none > 0 && !available && !upgrading && <StatusTag variant='muted' title={'No Erai-raws HEVC release with German subtitles was found' + when}>No upgrade</StatusTag>}
     </>
   );
 }
@@ -744,7 +743,6 @@ export default function AnimeLibrary() {
     <div className='flex min-h-0 flex-1 flex-col gap-5'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='eyebrow'>Anime</p>
           <h1 className='font-heading text-3xl font-light'>Library</h1>
           <p className='break-all font-mono text-xs text-muted-foreground'>{root || 'Dedicated anime destination'}</p>
         </div>
@@ -987,21 +985,18 @@ export default function AnimeLibrary() {
                           <Link2 data-icon='inline-start' /> Match on AniList
                         </Button>
                       )}
-                      {Boolean(active.avc_count) && (
+                      {/* Only once the background search found one: the search itself
+                          is not a button but a pass on the dashboard. */}
+                      {(active.upgrade_available_count ?? 0) > 0 && (
                         <Button
                           size='sm'
                           variant='secondary'
                           disabled={!active.anilist_ids?.length || upgrading === active.key}
                           onClick={() => void upgradeToHevc(active)}
-                          title={(active.upgrade_available_count ?? 0) > 0
-                            ? 'Download the HEVC versions found and replace the AVC files'
-                            : 'Search Erai-raws for HEVC versions of the AVC episodes, and download and replace any found'}
+                          title='Download the HEVC versions found (Erai-raws, with German subtitles) and replace the AVC files'
                         >
                           <FileVideo data-icon='inline-start' />
-                          {upgrading === active.key ? 'Queueing…'
-                            // Say what is known: an upgrade found, or only that there are AVC episodes to look for one for.
-                            : (active.upgrade_available_count ?? 0) > 0 ? `Upgrade ${active.upgrade_available_count} to HEVC`
-                            : `Look for HEVC (${active.avc_count} AVC)`}
+                          {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.upgrade_available_count} to HEVC`}
                         </Button>
                       )}
                       {/* Straight on the header, not in a menu: a dialog opened from a

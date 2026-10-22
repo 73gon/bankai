@@ -227,7 +227,6 @@ export default function AnimeQueue() {
     <div className='flex flex-col gap-6'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='eyebrow'>Anime</p>
           <h1 className='font-heading text-3xl font-light'>Queue</h1>
           <p className='text-sm text-muted-foreground'>Only Erai-raws and manually selected Anime downloads appear here.</p>
         </div>

@@ -264,7 +264,6 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
     <div className='flex flex-col gap-6'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='eyebrow'>Anime</p>
           <h1 className='font-heading text-3xl font-light'>{blacklist ? 'Blacklist' : 'Held for review'}</h1>
           <p className='text-sm text-muted-foreground'>{blacklist
             ? 'Shows here are ignored permanently until you restore them.'

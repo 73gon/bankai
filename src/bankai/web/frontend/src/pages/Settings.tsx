@@ -244,7 +244,6 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
     <div className='mx-auto max-w-5xl pb-16'>
       <header className='flex flex-wrap items-end justify-between gap-4 pb-2'>
         <div className='flex flex-col gap-1'>
-          <p className='eyebrow'>{scope === 'mas' ? 'Movies & Shows' : 'System'}</p>
           <h1 className='font-heading text-3xl font-light'>Settings</h1>
           <p className='text-sm text-muted-foreground'>Edit safe configuration keys, then save them all at once.</p>
         </div>

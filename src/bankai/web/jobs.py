@@ -586,10 +586,21 @@ def _pass_summary(name: str, result: object) -> str | None:
     return None
 
 
+def _pass_progress(name: str) -> dict | None:
+    """What a running pass is at, for the passes that say: the layout, the HEVC search."""
+    if name == "anime_metadata":
+        from bankai.web import anime_layout
+
+        return dict(anime_layout.progress)
+    if name == "hevc_check":
+        from bankai.web import erai as erai_mod
+
+        return dict(erai_mod.hevc_progress) or None
+    return None
+
+
 def scheduled_passes() -> list[dict]:
     """Every periodic pass: its label, interval, next due time and whether it runs now."""
-    from bankai.web import anime_layout
-
     out = []
     for name, (label, every) in _PASS_LABELS.items():
         row = _PASSES.get(name, {})
@@ -610,7 +621,7 @@ def scheduled_passes() -> list[dict]:
                 "last_run": row.get("last_run"),
                 "running": running,
                 # The layout says what it is at: laying out, downloading posters (n of m).
-                "progress": dict(anime_layout.progress) if running and name == "anime_metadata" else None,
+                "progress": _pass_progress(name) if running else None,
                 "summary": _pass_summary(name, row.get("result")),
                 "error": row.get("error") or _service_error(name, row.get("result")),
             }

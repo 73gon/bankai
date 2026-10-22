@@ -195,7 +195,6 @@ export default function MasLibrary() {
     <div className='flex flex-col gap-4'>
       <div className='flex flex-wrap items-end justify-between gap-3'>
         <div className='flex flex-col gap-1'>
-          <p className='eyebrow'>Movies &amp; Shows</p>
           <h1 className='font-heading text-3xl font-light'>Library</h1>
         </div>
         <div className='flex items-center gap-2'>

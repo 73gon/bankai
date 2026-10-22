@@ -2523,6 +2523,8 @@ def test_the_background_check_takes_entries_never_looked_at_first(monkeypatch, t
 
     async def look(ids, *, queue=True):
         assert queue is False
+        # The dashboard's scheduler card says which show it is looking at.
+        assert erai.hevc_progress["step"].startswith("Looking for HEVC: ")
         looked.append(ids)
         erai._record_hevc_checks([(555, 2)], [])
         return {"available": 0}
@@ -2530,5 +2532,6 @@ def test_the_background_check_takes_entries_never_looked_at_first(monkeypatch, t
     monkeypatch.setattr(erai, "upgrade_show_to_hevc", look)
     assert asyncio.run(erai.check_hevc_upgrades())["checked"] == 1
     assert looked == [[555]]
+    assert erai.hevc_progress == {}
     # Looked at a moment ago: not again until a week has passed.
     assert asyncio.run(erai.check_hevc_upgrades())["checked"] == 0

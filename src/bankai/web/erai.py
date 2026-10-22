@@ -2685,6 +2685,8 @@ _HEVC_CHECK_MAX_AGE = 7 * 86400
 # Entries whose check failed (AniList refusing, Nyaa down), by when: tried again
 # a day later, so they do not take the front of every pass.
 _HEVC_CHECK_FAILED: dict[int, float] = {}
+# What the check is at, for the dashboard's scheduler card while it runs.
+hevc_progress: dict[str, Any] = {}
 
 
 async def check_hevc_upgrades(*, entries: int = 3) -> dict[str, int]:
@@ -2720,7 +2722,10 @@ async def check_hevc_upgrades(*, entries: int = 3) -> dict[str, int]:
                 oldest[aid] = min(oldest.get(aid, at), at)
     due = sorted(oldest, key=oldest.__getitem__)[:entries]
     found = done = 0
-    for aid in due:
+    for index, aid in enumerate(due):
+        media = anilist.media(aid)
+        name = media.get("name") or media.get("romaji") or f"AniList {aid}"
+        hevc_progress.update(step=f"Looking for HEVC: {name}", done=index, total=len(due))
         try:
             result = await upgrade_show_to_hevc([aid], queue=False)
         except Exception as exc:
@@ -2729,6 +2734,7 @@ async def check_hevc_upgrades(*, entries: int = 3) -> dict[str, int]:
             continue
         done += 1
         found += int(result.get("available") or 0)
+    hevc_progress.clear()
     return {"checked": done, "upgrades_found": found, "remaining": max(0, len(oldest) - done)}
 
 
