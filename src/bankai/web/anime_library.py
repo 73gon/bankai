@@ -327,11 +327,13 @@ def _save_codec_cache(cache: dict[str, dict]) -> None:
 
 
 def probe_streams(path: Path) -> dict | None:
-    """Video encode and audio languages of one file, in a single probe.
+    """Video encode, audio and subtitle languages of one file, in a single probe.
 
     The audio languages matter as much as the codec: an episode carrying a
     German dub is irreplaceable, because Erai-raws only ever ships Japanese
-    audio. Reading both here means the upgrade never has to guess.
+    audio. Reading both here means the upgrade never has to guess. The
+    subtitle languages say whether the episode can be watched in German at
+    all -- a show let in without German subtitles has episodes that cannot.
     """
     from bankai.web.media import ffprobe_bin
 
@@ -362,6 +364,7 @@ def probe_streams(path: Path) -> dict | None:
         return None
     codec = None
     audio: list[str] = []
+    subs: list[str] = []
     for stream in streams:
         kind = str(stream.get("codec_type") or "").casefold()
         tags = stream.get("tags") or {}
@@ -376,18 +379,36 @@ def probe_streams(path: Path) -> dict | None:
             # Not every muxer sets the language tag; a named track still counts.
             if not language and title:
                 audio.append(title)
+        elif kind == "subtitle":
+            # Both: a track tagged "eng" may still be titled "German (forced)".
+            subs.extend(
+                str(value).casefold()
+                for value in (tags.get("language"), tags.get("title"))
+                if value
+            )
     if codec is None and not audio:
         return None
-    return {"codec": codec, "audio": audio}
+    return {"codec": codec, "audio": audio, "subs": subs}
+
+
+def _names_german(names: list[str] | None) -> bool:
+    """Whole words only: "Audio Description" is not "de" (see AGENTS.md, 11)."""
+    for name in names or []:
+        if set(re.findall(r"[a-z]+", str(name).casefold())) & _GERMAN_AUDIO:
+            return True
+    return False
 
 
 def has_german_audio(entry: dict | None) -> bool:
     """Does this file carry a German audio track?"""
-    for name in (entry or {}).get("audio") or []:
-        words = set(re.findall(r"[a-z]+", str(name).casefold()))
-        if words & _GERMAN_AUDIO:
-            return True
-    return False
+    return _names_german((entry or {}).get("audio"))
+
+
+def has_german_subtitles(entry: dict | None) -> bool | None:
+    """Does this file carry German subtitles? None until it is probed for them."""
+    if not entry or entry.get("subs") is None:
+        return None
+    return _names_german(entry["subs"])
 
 
 def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
@@ -413,7 +434,13 @@ def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
         identity = (int(row["size"]), int(row["mtime"]))
         key = str(path)
         cached = cache.get(key)
-        if cached and cached.get("size") == identity[0] and cached.get("mtime") == identity[1]:
+        if (
+            cached
+            and cached.get("size") == identity[0]
+            and cached.get("mtime") == identity[1]
+            # Probed before subtitles were read: once more for them.
+            and "subs" in cached
+        ):
             continue
         if probed >= limit:
             remaining += 1
@@ -424,6 +451,8 @@ def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
             "mtime": identity[1],
             "codec": streams.get("codec"),
             "audio": streams.get("audio") or [],
+            # None when the probe failed: unknown, never "no German".
+            "subs": streams.get("subs") if streams else None,
         }
         probed += 1
     if probed:
@@ -449,6 +478,20 @@ def probed_codecs(files: list[dict]) -> dict[tuple[int, int], str]:
     return found
 
 
+def german_subtitled_episodes(files: list[dict]) -> dict[tuple[int, int], bool]:
+    """Whether each probed episode's file carries German subtitles."""
+    cache = _load_codec_cache()
+    found: dict[tuple[int, int], bool] = {}
+    for row in files:
+        season, episode = row.get("season_number"), row.get("episode")
+        if season is None or episode is None:
+            continue
+        german = has_german_subtitles(cache.get(str(row.get("path") or "")))
+        if german is not None:
+            found[(season, episode)] = german
+    return found
+
+
 def german_dubbed_episodes(files: list[dict]) -> set[tuple[int, int]]:
     """Episodes whose file carries a German dub, which must never be replaced."""
     cache = _load_codec_cache()
@@ -469,6 +512,7 @@ def merge_episodes(
     ended: bool,
     codecs: dict[tuple[int, int], str] | None = None,
     german_dubbed: set[tuple[int, int]] | None = None,
+    german_subbed: dict[tuple[int, int], bool] | None = None,
 ) -> dict:
     """Count unique regular episodes, using final files as downloaded evidence."""
     by_number = {}
@@ -516,6 +560,8 @@ def merge_episodes(
     for key, row in by_number.items():
         row["codec"] = (codecs or {}).get(key) if not row.get("missing") else None
         row["german_dub"] = bool(german_dubbed and key in german_dubbed)
+        # None: no file, or not probed for subtitles yet.
+        row["german_subs"] = (german_subbed or {}).get(key) if not row.get("missing") else None
     regular = [row for (season, _), row in by_number.items() if season > 0]
     downloaded = sum(not row.get("missing", False) and not row["staged"] for row in regular)
     outstanding = [row for row in regular if row.get("missing", False) or row["staged"]]
@@ -674,6 +720,7 @@ def merge_season_episodes(
     *,
     codecs_of: Callable[[list[dict]], dict[tuple[int, int], str]] = lambda rows: {},
     dubbed_of: Callable[[list[dict]], set[tuple[int, int]]] = lambda rows: set(),
+    subbed_of: Callable[[list[dict]], dict[tuple[int, int], bool]] = lambda rows: {},
 ) -> dict:
     """Episodes of a card made of AniList entries, a tab per season as it is on disk.
 
@@ -714,6 +761,7 @@ def merge_season_episodes(
         ended=all(ended(listed, done) for spec in tabs for _aid, _offset, listed, done in spec["parts"]),
         codecs=codecs_of(rows),
         german_dubbed=dubbed_of(rows),
+        german_subbed=subbed_of(rows),
     )
     for row in merged["episodes"]:
         tab = row.get("season_number")
@@ -876,6 +924,11 @@ async def group_shows(
             # The top tier, whatever its codec: each episode is counted in one
             # of the three, so together they never exceed the episodes on disk.
             "german_dub_count": sum(1 for row in episodes if row.get("german_dub")),
+            # Episodes on disk that cannot be watched in German: neither German
+            # subtitles nor a German dub.
+            "no_german_count": sum(
+                1 for row in episodes if row.get("german_subs") is False and not row.get("german_dub")
+            ),
         }
 
     def build(slot: dict) -> dict:
@@ -890,7 +943,12 @@ async def group_shows(
         }
         if slot.get("unmatched"):
             merged = merge_episodes(
-                files, [], ended=False, codecs=probed_codecs(files), german_dubbed=german_dubbed_episodes(files)
+                files,
+                [],
+                ended=False,
+                codecs=probed_codecs(files),
+                german_dubbed=german_dubbed_episodes(files),
+                german_subbed=german_subtitled_episodes(files),
             )
             result = {
                 **base,
@@ -946,7 +1004,11 @@ async def group_shows(
             else:
                 tabs = [{"label": labels[aid], "parts": [part(aid, 0)]} for aid in order]
             merged = merge_season_episodes(
-                files, tabs, codecs_of=probed_codecs, dubbed_of=german_dubbed_episodes
+                files,
+                tabs,
+                codecs_of=probed_codecs,
+                dubbed_of=german_dubbed_episodes,
+                subbed_of=german_subtitled_episodes,
             )
             romaji = anilist.media(main).get("romaji")
             result = {

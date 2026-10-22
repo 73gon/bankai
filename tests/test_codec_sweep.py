@@ -172,7 +172,7 @@ def test_probe_reads_codec_and_audio_from_one_call(monkeypatch):
     monkeypatch.setattr(anime_library.subprocess, "run", lambda *a, **k: Result())
 
     probed = anime_library.probe_streams(Path("x.mkv"))
-    assert probed == {"codec": "avc", "audio": ["jpn", "ger"]}
+    assert probed == {"codec": "avc", "audio": ["jpn", "ger"], "subs": []}
     assert anime_library.has_german_audio(probed) is True
 
 
@@ -198,3 +198,86 @@ def test_an_untagged_audio_track_falls_back_to_its_title(monkeypatch):
     probed = anime_library.probe_streams(Path("x.mkv"))
     assert probed["codec"] == "hevc"
     assert anime_library.has_german_audio(probed) is True
+
+
+# --- German subtitles ------------------------------------------------------
+# A show let in without German subtitles has episodes that cannot be watched in
+# German; the library says which.
+
+
+@pytest.mark.parametrize(
+    "subs,expected",
+    [
+        (["eng", "ger"], True),
+        (["eng", "german (forced)"], True),
+        (["eng", "spa", "por"], False),
+        # "Audio Description" holds the letters, not the word.
+        (["eng", "audio description"], False),
+        ([], False),
+        (None, None),
+    ],
+)
+def test_german_subtitles_are_recognised(subs, expected):
+    assert anime_library.has_german_subtitles({"subs": subs}) is expected
+
+
+def test_probe_reads_subtitle_languages_and_titles(monkeypatch):
+    import json
+
+    payload = json.dumps(
+        {
+            "streams": [
+                {"codec_type": "video", "codec_name": "hevc"},
+                {"codec_type": "audio", "tags": {"language": "jpn"}},
+                {"codec_type": "subtitle", "tags": {"language": "eng", "title": "English"}},
+                {"codec_type": "subtitle", "tags": {"language": "ger", "title": "Deutsch"}},
+            ]
+        }
+    )
+
+    class Result:
+        returncode = 0
+        stdout = payload
+
+    monkeypatch.setattr("bankai.web.media.ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(anime_library.subprocess, "run", lambda *a, **k: Result())
+
+    probed = anime_library.probe_streams(Path("x.mkv"))
+    assert probed["subs"] == ["eng", "english", "ger", "deutsch"]
+    assert anime_library.has_german_subtitles(probed) is True
+
+
+def test_an_episode_probed_before_subtitles_were_read_is_probed_again(tmp_path, monkeypatch):
+    root = _library(tmp_path, count=2)
+    monkeypatch.setattr(
+        anime_library, "probe_streams", lambda path: {"codec": "hevc", "audio": ["jpn"], "subs": ["eng"]}
+    )
+    anime_library.sweep_codecs(root, limit=10)
+    cache = anime_library._load_codec_cache()
+    for entry in cache.values():
+        del entry["subs"]  # as an older build wrote it
+
+    assert anime_library.sweep_codecs(root, limit=10)["probed"] == 2
+    rows = [_row(_episode(root, 1), episode=1), _row(_episode(root, 2), episode=2)]
+    assert anime_library.german_subtitled_episodes(rows) == {(1, 1): False, (1, 2): False}
+
+
+def test_a_failed_probe_says_nothing_about_german(tmp_path, monkeypatch):
+    root = _library(tmp_path, count=1)
+    monkeypatch.setattr("bankai.web.media.ffprobe_bin", lambda: None)
+
+    anime_library.sweep_codecs(root, limit=10)
+    assert anime_library.german_subtitled_episodes([_row(_episode(root))]) == {}
+
+
+def test_merged_episodes_carry_their_german_subtitles():
+    files = [
+        {"path": "a.mkv", "name": "a.mkv", "season_number": 1, "episode": 1, "staged": False, "size": 1},
+        {"path": "b.mkv", "name": "b.mkv", "season_number": 1, "episode": 2, "staged": False, "size": 1},
+        {"path": "c.mkv", "name": "c.mkv", "season_number": 1, "episode": 3, "staged": False, "size": 1},
+    ]
+    merged = anime_library.merge_episodes(
+        files, [], ended=True, german_subbed={(1, 1): True, (1, 2): False}
+    )
+    by_episode = {row["episode"]: row["german_subs"] for row in merged["episodes"]}
+    assert by_episode == {1: True, 2: False, 3: None}

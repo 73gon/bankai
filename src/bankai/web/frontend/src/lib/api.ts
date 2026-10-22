@@ -579,6 +579,8 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
   codec?: 'hevc' | 'avc' | null;
   /** Carries a German dub, which Erai-raws never ships — never replaced. */
   german_dub?: boolean;
+  /** Carries German subtitles; null while the file is not probed for them yet. */
+  german_subs?: boolean | null;
   missing?: boolean;
   tba?: boolean;
   aired?: string | null;
@@ -609,6 +611,8 @@ export interface AnimeLibraryShow {
   avc_count?: number;
   hevc_count?: number;
   german_dub_count?: number;
+  /** Episodes on disk with neither German subtitles nor a German dub. */
+  no_german_count?: number;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
   /** Each tab's AniList entries. */
