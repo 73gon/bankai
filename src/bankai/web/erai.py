@@ -2476,6 +2476,60 @@ async def _hevc_releases(
     return {key: (item, first, last) for key, (item, first, last, _score) in best.items()}
 
 
+def _hevc_checks_path() -> Path:
+    return _state_path().with_name("anime_hevc_checks.json")
+
+
+def hevc_checked() -> dict[tuple[int, int], float]:
+    """AVC episodes an upgrade search found no HEVC release with German for, and when."""
+    try:
+        raw = json.loads(_hevc_checks_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    found: dict[tuple[int, int], float] = {}
+    for aid, episodes in (raw or {}).items():
+        for episode, at in (episodes or {}).items():
+            if str(aid).isdigit() and str(episode).isdigit():
+                found[(int(aid), int(episode))] = float(at)
+    return found
+
+
+def _record_hevc_checks(missing: list[tuple[int, int]], queued: list[tuple[int, int]]) -> None:
+    """Remember what a search found no HEVC for; forget what it queued an upgrade of."""
+    rows = hevc_checked()
+    now = time.time()
+    rows.update({key: now for key in missing})
+    for key in queued:
+        rows.pop(key, None)
+    out: dict[str, dict[str, float]] = {}
+    for (aid, episode), at in rows.items():
+        out.setdefault(str(aid), {})[str(episode)] = at
+    path = _hevc_checks_path()
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(out), encoding="utf-8")
+    tmp.replace(path)
+
+
+def upgrading_episodes(state: dict[str, Any] | None = None) -> set[tuple[int, int]]:
+    """(AniList entry, episode) of each episode an HEVC upgrade is on its way for."""
+    state = state or _load_state()
+    releases = state.get("releases") or {}
+    found: set[tuple[int, int]] = set()
+    for key, slot in (state.get("canonical") or {}).items():
+        release = releases.get(str((slot or {}).get("info_hash") or ""))
+        if (
+            release is None
+            or release.get("replace_files") is None
+            or release.get("status") not in _ACTIVE_RELEASE_STATES
+        ):
+            continue
+        head, _, episode = str(key).partition("|")
+        aid = head.removeprefix("anilist:")
+        if aid.isdigit() and episode.isdigit():
+            found.add((int(aid), int(episode)))
+    return found
+
+
 async def upgrade_show_to_hevc(anilist_ids: list[int]) -> dict[str, Any]:
     """Queue HEVC replacements for the AVC episodes on disk of a card's AniList entries.
 
@@ -2511,12 +2565,16 @@ async def upgrade_show_to_hevc(anilist_ids: list[int]) -> dict[str, Any]:
 
     headers = {"User-Agent": settings.scraper.user_agent}
     releases = await _hevc_releases(entries, {(aid, ep) for aid, ep, _rows in targets}, headers)
+    # The library tags each show by this: what a search found nothing for, what it queued.
+    missing: list[tuple[int, int]] = []
+    queued: list[tuple[int, int]] = []
     # One download per release: a batch takes every episode it was picked for.
     plans: dict[str, dict[str, Any]] = {}
     for aid, episode, rows in targets:
         picked = releases.get((aid, episode))
         if picked is None:
             result["no_replacement"] += 1
+            missing.append((aid, episode))
             continue
         item, first, last = picked
         plan = plans.setdefault(
@@ -2536,6 +2594,7 @@ async def upgrade_show_to_hevc(anilist_ids: list[int]) -> dict[str, Any]:
                 twin, aid, episodes = plan["item"], plan["aid"], sorted(plan["episodes"])
                 if not await _carries_german(twin, client):
                     result["no_replacement"] += len(episodes)
+                    missing.extend((aid, episode) for episode in episodes)
                     continue
                 anime = entries[aid]
                 # Publishing has to overwrite an episode filed where the new one
@@ -2584,9 +2643,11 @@ async def upgrade_show_to_hevc(anilist_ids: list[int]) -> dict[str, Any]:
                     _save_state(state)
                 result["queued"] += len(episodes)
                 result["downloads"] += 1
+                queued.extend((aid, episode) for episode in episodes)
                 await asyncio.sleep(settings.anime.backfill_request_delay_seconds)
     finally:
         await qbit.aclose()
+        _record_hevc_checks(missing, queued)
     return result
 
 

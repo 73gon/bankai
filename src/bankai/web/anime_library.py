@@ -910,9 +910,29 @@ async def group_shows(
         wanted = _name(only_key)
         slots = {identity: slot for identity, slot in slots.items() if _name(slot["key"]) == wanted}
 
+    # Where each show's AVC episodes stand: an HEVC upgrade on its way, or one
+    # searched for and not found. The library tags each show by it.
+    upgrading = erai.upgrading_episodes(state)
+    checked = erai.hevc_checked()
+
+    def upgrade_counts(episodes: list[dict]) -> dict:
+        avc = [
+            (row.get("anilist_id"), row.get("anilist_episode"))
+            for row in episodes
+            if row.get("codec") == "avc" and not row.get("german_dub") and not row.get("missing")
+        ]
+        on_way = sum(1 for key in avc if key in upgrading)
+        none_found = sum(1 for key in avc if key not in upgrading and key in checked)
+        return {
+            "upgrading_count": on_way,
+            "no_hevc_count": none_found,
+            "hevc_checked_at": max((checked[key] for key in avc if key in checked), default=None),
+        }
+
     def counts(rows: list[dict]) -> dict:
         episodes = rows
         return {
+            **upgrade_counts(episodes),
             "avc_count": sum(
                 1 for row in episodes
                 # A German dub is irreplaceable, so it is not on offer.

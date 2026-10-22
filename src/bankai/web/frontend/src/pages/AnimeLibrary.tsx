@@ -188,6 +188,26 @@ function Progress({ show }: { show: AnimeLibraryShow }) {
   );
 }
 
+/** Where a show stands on HEVC, as one tag: all HEVC, upgrading, AVC left to
+ *  upgrade, or AVC a search found no HEVC with German subtitles for. */
+function UpgradeTag({ show }: { show: AnimeLibraryShow }) {
+  const avc = show.avc_count ?? 0;
+  const upgrading = show.upgrading_count ?? 0;
+  const none = show.no_hevc_count ?? 0;
+  const open = Math.max(0, avc - upgrading - none);
+  const identified = avc + (show.hevc_count ?? 0) + (show.german_dub_count ?? 0);
+  if (!identified) return null;
+  if (!avc) return <StatusTag variant='success' title='Every episode is HEVC or carries a German dub'>HEVC</StatusTag>;
+  const checked = show.hevc_checked_at ? new Date(show.hevc_checked_at * 1000).toLocaleDateString() : null;
+  return (
+    <>
+      {upgrading > 0 && <StatusTag variant='transfer' title='HEVC versions of these episodes are downloading; the AVC files go once they land'>Upgrading {upgrading}</StatusTag>}
+      {open > 0 && <StatusTag variant='warning' title='AVC episodes not searched for an HEVC version yet: open the show and choose Upgrade to HEVC'>{open} AVC</StatusTag>}
+      {none > 0 && <StatusTag variant='muted' title={'No HEVC release with German subtitles was found' + (checked ? ' (searched ' + checked + ')' : '') + '. Upgrade to HEVC searches again.'}>No HEVC for {none}</StatusTag>}
+    </>
+  );
+}
+
 /** A card of files no AniList entry is known for: offered "Match on AniList". */
 function isUnmatched(show: AnimeLibraryShow) {
   return show.unmatched ?? !show.anilist_id;
@@ -852,6 +872,7 @@ export default function AnimeLibrary() {
                       <div className='flex flex-wrap items-center gap-1.5'>
                         <span className={cn('size-1.5 rounded-full', tone.className)} />
                         <span className='text-xs text-muted-foreground'>{tone.label}</span>
+                        <UpgradeTag show={show} />
                         {(show.no_german_count ?? 0) > 0 && <StatusTag variant='warning' title='Episodes on disk with neither German subtitles nor a German dub'>{show.no_german_count} without German</StatusTag>}
                         {show.staged_count > 0 && <StatusTag variant='warning'>{show.staged_count} staged</StatusTag>}
                         {show.blacklisted && <StatusTag variant='destructive'>Blacklisted</StatusTag>}

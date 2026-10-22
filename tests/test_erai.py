@@ -2212,6 +2212,8 @@ def _published_show(monkeypatch, tmp_path, anilist_data, *, twin_available=True)
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
+    # What a search found no HEVC for is kept beside the state: here, not in the real one.
+    monkeypatch.setattr(erai, "_hevc_checks_path", lambda: tmp_path / "anime_hevc_checks.json")
     monkeypatch.setattr(
         erai,
         "get_settings",
@@ -2473,3 +2475,28 @@ def test_show_allowed_without_german_publishes_without_the_german_check(monkeypa
     assert "--require-german-subtitles" in by_hash[checked]
     # The record keeps what discovery wrote; only the job runs without the check.
     assert "--require-german-subtitles" in state["releases"][allowed]["args"]
+
+
+def test_the_library_sees_which_episodes_are_upgrading(monkeypatch, tmp_path, anilist_data):
+    """A tag per show instead of opening each to look: the upgrade on its way counts."""
+    state, _avc_done, replacement, _qbit = _published_show(monkeypatch, tmp_path, anilist_data)
+    assert erai.upgrading_episodes(state) == set()
+
+    asyncio.run(erai.upgrade_show_to_hevc([555]))
+    assert erai.upgrading_episodes(state) == {(555, 2)}
+
+    # Published: no longer on its way.
+    state["releases"][replacement.info_hash]["status"] = "done"
+    assert erai.upgrading_episodes(state) == set()
+
+
+def test_a_search_that_finds_no_hevc_is_remembered_until_one_is_queued(monkeypatch, tmp_path, anilist_data):
+    state, _avc_done, replacement, _qbit = _published_show(monkeypatch, tmp_path, anilist_data, twin_available=False)
+
+    assert asyncio.run(erai.upgrade_show_to_hevc([555]))["no_replacement"] == 1
+    assert set(erai.hevc_checked()) == {(555, 2)}
+
+    # Later Erai-raws has one: queued, and no longer "no HEVC".
+    state["backfill"]["catalog_1080"][replacement.info_hash] = erai._entry_dict(replacement)
+    assert asyncio.run(erai.upgrade_show_to_hevc([555]))["queued"] == 1
+    assert erai.hevc_checked() == {}

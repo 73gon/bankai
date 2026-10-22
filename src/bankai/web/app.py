@@ -2593,6 +2593,7 @@ def create_app() -> Any:
         "anime_codecs.json",
         "anime_files.json",
         "anime_collections.json",
+        "anime_hevc_checks.json",
         "review.json",
     )
     snaps.add(

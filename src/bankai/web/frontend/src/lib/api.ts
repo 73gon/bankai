@@ -613,6 +613,12 @@ export interface AnimeLibraryShow {
   german_dub_count?: number;
   /** Episodes on disk with neither German subtitles nor a German dub. */
   no_german_count?: number;
+  /** AVC episodes an HEVC upgrade is on its way for. */
+  upgrading_count?: number;
+  /** AVC episodes an upgrade search found no HEVC release with German for. */
+  no_hevc_count?: number;
+  /** When that search last ran (seconds since the epoch). */
+  hevc_checked_at?: number | null;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
   /** Each tab's AniList entries. */
