@@ -160,3 +160,18 @@ def test_a_pass_never_drops_what_another_process_kept_meanwhile(state) -> None:
     assert asyncio.run(jikan.ensure([(BLEACH_MAL, True)])) == 1
     assert jikan.titles(other) == {1: "Kept elsewhere"}
     assert len(jikan.titles(BLEACH_MAL)) == 3
+
+
+@respx.mock
+def test_an_airing_show_myanimelist_counts_ahead_of_anilist_keeps_its_titles(state, anilist_data) -> None:
+    """One Piece: MyAnimeList listed 1180 episodes, AniList counted 1168, and every title was dropped."""
+    piece, piece_mal = 21, 21
+    anilist_data.add(piece, "One Piece", english="One Piece", episodes=4, mal_id=piece_mal)
+    respx.get(f"{jikan._API}/anime/{piece_mal}/episodes").mock(
+        return_value=httpx.Response(200, json=_page(range(1, 7), False))
+    )
+    asyncio.run(jikan.ensure([(piece_mal, False)]))
+
+    titles = [title for _number, title, _aired in anilist.episodes(piece)]
+    assert titles == [f"Episode title {n}" for n in range(1, 5)]
+    assert not anilist.untitled(piece)

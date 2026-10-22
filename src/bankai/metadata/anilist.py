@@ -435,7 +435,11 @@ def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
         if not _placeholder(title)
     }
     # Where the streaming sites name none, MyAnimeList's titles, as far as they are kept.
-    mal = _own_numbers(jikan.titles(kept["mal_id"]), count) if kept.get("mal_id") else {}
+    # Its list is this very entry's (AniList links it), numbered as its own, so
+    # it is taken as it is: an airing show's runs ahead of AniList's count (One
+    # Piece, 1180 against 1168), which _own_numbers would read as another
+    # entry's list and drop whole.
+    mal = jikan.titles(kept["mal_id"]) if kept.get("mal_id") else {}
     last = count or max([*airing, *streaming], default=0)
     return [(n, streaming.get(n) or mal.get(n), airing.get(n)) for n in range(1, last + 1)]
 
