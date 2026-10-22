@@ -79,6 +79,10 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
                 **{key: value for key, value in anilist.media(aid).items() if key != "fetched_at"},
                 # MyAnimeList's episode titles go into the NFO files too.
                 "mal_titles": jikan.titles(anilist.media(aid).get("mal_id")),
+                # And the titles as the NFO files get them: a change in how they
+                # are chosen (One Piece's count) changed no input above, so
+                # Fire Force kept "Episode 13" with its title known.
+                "episodes": anilist.episodes(aid),
             }
             for aid in row.members
         }

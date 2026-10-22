@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from bankai.config import reset_settings_cache
+from bankai.metadata import anilist
 from bankai.web import anime_collections as collections
 from bankai.web import anime_files, anime_layout, anime_maintenance, erai
 
@@ -222,6 +223,18 @@ def test_a_fingerprint_changes_with_what_the_layout_is_made_of_not_with_when_it_
     after = fingerprints()
     assert (after["1"], after["2"] != before["2"]) == (before["1"], True)
     assert fingerprints({"a/a - 01.mkv"})["1"] != after["1"]
+
+
+def test_titles_chosen_another_way_lay_the_collection_out_anew(titan, library, monkeypatch) -> None:
+    """Fire Force kept "Episode 13" in its NFO with its title known: no input of the fingerprint had changed."""
+    with collections.editing() as store:
+        collections.join([S1], store)
+    layout = anime_layout.Layout.build(collections.load(), {"a/a - 01.mkv": [(S1, 1)]})
+    before = anime_maintenance.fingerprints(layout, set())
+
+    chosen = anilist.episodes
+    monkeypatch.setattr(anilist, "episodes", lambda aid: [(1, "A title found later", None), *chosen(aid)[1:]])
+    assert anime_maintenance.fingerprints(layout, set()) != before
 
 
 def test_room_for_pictures_again_lays_every_collection_out_anew(titan, library, monkeypatch) -> None:
