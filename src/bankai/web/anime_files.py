@@ -47,13 +47,20 @@ def staging_root() -> Path:
 
 
 def key(path: str | Path) -> str | None:
-    """A file's key: its path below the anime root or staging, with forward slashes."""
-    raw = Path(path)
+    """A file's key: its path below the anime root or staging, with forward slashes.
+
+    With strings, not pathlib: it runs once per library file for every
+    drawer, and Path.relative_to took 0.8 s of each for 4,700 files.
+    """
+    text = os.path.normpath(os.fspath(path))
+    folded = os.path.normcase(text)
     for root in (anime_root(), staging_root()):
-        try:
-            return PurePosixPath(*raw.relative_to(root).parts).as_posix()
-        except ValueError:
-            continue
+        base = os.path.normpath(os.fspath(root))
+        if folded == os.path.normcase(base):
+            return "."
+        prefix = base.rstrip(os.sep) + os.sep
+        if folded.startswith(os.path.normcase(prefix)):
+            return text[len(prefix):].replace(os.sep, "/")
     return None
 
 

@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -287,12 +288,31 @@ class LibraryEntry:
     season: int | None = None
 
 
-def scan_library(library: Path | None = None) -> list[LibraryEntry]:
+def scan_library(library: Path | None = None, *, held: bool = False) -> list[LibraryEntry]:
+    """Every video in staging (``output.directory``): its movies and episodes.
+
+    ``held`` takes the list of files from library_walk's tree, kept current by
+    the scheduler, instead of walking the folders over 9p -- 1.2 s of every
+    anime drawer. Each entry is still read from its own file.
+    """
     settings = get_settings()
     root = Path(library or settings.output.directory)
     entries: list[LibraryEntry] = []
     movies_dir = root / "Movies"
     shows_dir = root / "Shows"
+    if held:
+        from bankai.web import library_walk
+
+        for folder, entry in ((movies_dir, _movie_entry), (shows_dir, None)):
+            if not folder.is_dir():
+                continue
+            for row in sorted(library_walk.files([folder]), key=lambda item: item["path"]):
+                path = Path(row["path"])
+                if not _is_library_name(path):
+                    continue
+                with suppress(OSError):
+                    entries.append(entry(root, path) if entry else _episode_entry(root, shows_dir, path))
+        return entries
     if movies_dir.is_dir():
         for f in sorted(movies_dir.rglob("*")):
             if _is_library_media(f):
@@ -306,12 +326,12 @@ def scan_library(library: Path | None = None) -> list[LibraryEntry]:
 
 def _is_library_media(path: Path) -> bool:
     """Exclude atomic repack/replacement work files from the visible library."""
+    return path.is_file() and _is_library_name(path)
+
+
+def _is_library_name(path: Path) -> bool:
     name = path.name.casefold()
-    return (
-        path.is_file()
-        and path.suffix.casefold() in _VIDEO_EXTS
-        and not any(marker in name for marker in _WORKING_MEDIA_MARKERS)
-    )
+    return path.suffix.casefold() in _VIDEO_EXTS and not any(marker in name for marker in _WORKING_MEDIA_MARKERS)
 
 
 def _movie_entry(root: Path, f: Path) -> LibraryEntry:

@@ -8,6 +8,7 @@ the *transfer* stage \u2014 nothing is sent to the media server without it.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import tempfile
@@ -100,6 +101,28 @@ def _load() -> dict[str, dict]:
         return {}
 
 
+# The store as last read, by the file's (path, mtime, size), for reads only: the
+# anime library asked for one state per staged file, and parsed the whole
+# file each time -- 1.6 s of every drawer.
+_READ: tuple[tuple[str, int, int], dict[str, dict]] | None = None
+_READ_LOCK = threading.Lock()
+
+
+def _load_for_reading() -> dict[str, dict]:
+    """The store, shared between readers: never to be changed (copy an entry first)."""
+    global _READ
+    p = _store_path()
+    try:
+        stat = p.stat()
+    except OSError:
+        return {}
+    stamp = (str(p), stat.st_mtime_ns, stat.st_size)
+    with _READ_LOCK:
+        if _READ is None or _READ[0] != stamp:
+            _READ = (stamp, _load())
+        return _READ[1]
+
+
 def _save(data: dict[str, dict]) -> None:
     p = _store_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -165,8 +188,14 @@ def _store_lock():
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _key(path: str | Path) -> str:
+@functools.lru_cache(maxsize=65536)
+def _resolved(path: str) -> str:
+    # One lstat per folder of the path, over 9p: 1.2 s of every drawer.
     return str(Path(path).resolve())
+
+
+def _key(path: str | Path) -> str:
+    return _resolved(str(path))
 
 
 def _update(path: str | Path, change: Callable[[dict], None]) -> ReviewState:
@@ -183,10 +212,10 @@ def _update(path: str | Path, change: Callable[[dict], None]) -> ReviewState:
 
 
 def get_state(path: str | Path) -> ReviewState:
-    data = _load()
-    raw = data.get(_key(path))
+    raw = _load_for_reading().get(_key(path))
     if raw is None:
         return ReviewState(path=str(path))
+    raw = dict(raw)  # the shared copy stays as read
     raw.setdefault("path", str(path))
     # Older pipeline versions stored the container's nominal rate here.
     # Hoster files are commonly 24fps content padded with duplicate frames to

@@ -2532,7 +2532,8 @@ def create_app() -> Any:
                     entries.append(
                         {**entry, "staged": False, "stage": "transferred", "transfer_status": "done"}
                     )
-            for entry in media_mod.scan_library():
+            # Staging from the held tree too, unless the page asked for a rescan.
+            for entry in media_mod.scan_library(held=not rescan):
                 state = review_mod.get_state(entry.path)
                 if state.stage == "deleted" or not anime_mod.is_nyaa_url(
                     state.torrent_source_url or ""
