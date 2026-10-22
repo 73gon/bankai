@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X, Radio, CircleDashed, CircleCheck, CircleOff, CircleHelp, Layers, ListVideo, Film, Tags } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph';
-import { type SortState } from '@/components/sort-header';
+import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { StatusTag } from '@/components/status-tag';
 import { cn } from '@/zon/lib/cn';
 import { Button } from '@/zon/ui/button';
@@ -15,7 +15,6 @@ import { Checkbox } from '@/zon/ui/checkbox';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/zon/ui/drawer';
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { GroupedTable, type GroupedTableColumn, type GroupedTableGroup } from '@/zon/ui/grouped-table';
 import { Input } from '@/zon/ui/input';
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
@@ -102,67 +101,17 @@ const LIBRARY_SORTERS: Record<LibrarySortKey, (show: AnimeLibraryShow) => number
   state: (show) => show.completion_state,
 };
 
-/** The orders the library offers; the table's groups already sort by state. */
-const LIBRARY_SORTS: Array<{ value: string; label: string; sort: SortState<LibrarySortKey> | null }> = [
-  { value: 'library', label: 'Library order', sort: null },
-  { value: 'title', label: 'Title A–Z', sort: { key: 'title', dir: 'asc' } },
-  { value: 'episodes', label: 'Most episodes', sort: { key: 'episodes', dir: 'desc' } },
-  { value: 'size', label: 'Largest first', sort: { key: 'size', dir: 'desc' } },
-  { value: 'encode', label: 'Best encode first', sort: { key: 'encode', dir: 'desc' } },
-  { value: 'avc', label: 'Most AVC first', sort: { key: 'encode', dir: 'asc' } },
-  { value: 'seasons', label: 'Most seasons', sort: { key: 'seasons', dir: 'desc' } },
-];
-
-/** The table's groups, in order: what still needs work first. */
-const LIBRARY_GROUPS: Array<{ id: string; label: string; icon: React.ReactNode }> = [
-  { id: 'upcoming', label: 'Airing', icon: <Radio /> },
-  { id: 'partial', label: 'Partial', icon: <CircleDashed /> },
-  { id: 'complete', label: 'Complete', icon: <CircleCheck className='text-success' /> },
-  { id: 'empty', label: 'Empty', icon: <CircleOff /> },
-  { id: 'unknown', label: 'Unknown', icon: <CircleHelp /> },
-];
-
-function groupShows(shows: AnimeLibraryShow[]): GroupedTableGroup<AnimeLibraryShow>[] {
-  return LIBRARY_GROUPS.map((group) => ({
-    ...group,
-    items: shows.filter((show) => (COMPLETION[show.completion_state] ? show.completion_state : 'unknown') === group.id),
-  })).filter((group) => group.items.length > 0);
-}
-
-/** What a row needs a second look for: staged files, a blacklist, no AniList
- *  match, episodes that cannot be watched in German. */
-function ShowNotes({ show }: { show: AnimeLibraryShow }) {
-  const noGerman = show.no_german_count ?? 0;
-  if (!show.staged_count && !show.blacklisted && !isUnmatched(show) && !noGerman) return null;
-  return (
-    <span className='inline-flex items-center gap-1.5'>
-      {noGerman > 0 && <StatusTag variant='warning' title='Episodes on disk with neither German subtitles nor a German dub'>{noGerman} without German</StatusTag>}
-      {show.staged_count > 0 && <StatusTag variant='warning'>{show.staged_count} staged</StatusTag>}
-      {show.blacklisted && <StatusTag variant='destructive'>Blacklisted</StatusTag>}
-      {isUnmatched(show) && <StatusTag variant='warning' title='No AniList entry is known for these files: match it from its details'>Unmatched</StatusTag>}
-    </span>
-  );
-}
-
-/** Columns as the table draws them: the ones that can ride along after the
- *  title come first (notes, then size), the episode count last. As the table
- *  narrows, seasons step out first, then the encode bar; then notes and size
- *  move in after the title. The episode count always keeps its column. */
-const SHOW_COLUMNS: GroupedTableColumn<AnimeLibraryShow>[] = [
-  { id: 'notes', label: 'Notes', header: <Tags />, priority: 3, inline: true, cell: (show) => <ShowNotes show={show} /> },
-  {
-    id: 'size', label: 'Size', header: <HardDrive />, priority: 4, inline: true, align: 'end',
-    cell: (show) => <span className='font-mono text-xs tabular-nums text-foreground-soft'>{formatSize(show.size)}</span>,
-  },
-  {
-    id: 'seasons', label: 'Seasons', header: <Layers />, priority: 1, align: 'end',
-    cell: (show) => <span className='font-mono text-xs tabular-nums text-muted-foreground'>{show.season_count}</span>,
-  },
-  { id: 'encode', label: 'Encode', header: <Film />, priority: 2, cell: (show) => <CodecMix show={show} /> },
-  { id: 'episodes', label: 'Episodes', header: <ListVideo />, cell: (show) => <Progress show={show} /> },
-];
+const LIBRARY_FIRST_DIRECTION: Record<LibrarySortKey, SortDir> = {
+  title: 'asc', seasons: 'desc', episodes: 'desc', encode: 'desc', size: 'desc', state: 'asc',
+};
 
 type View = 'grid' | 'table';
+
+// The library table's lesser columns, by the table's own width (not the window's).
+const COLUMN_SEASONS = 'hidden @5xl:table-cell';
+const COLUMN_ENCODE = 'hidden @3xl:table-cell';
+const COLUMN_SIZE = 'hidden @xl:table-cell';
+const COLUMN_STATE = 'hidden @lg:table-cell';
 const VIEW_KEY = 'bankai.anime.library.view';
 
 function storedView(): View {
@@ -750,6 +699,9 @@ export default function AnimeLibrary() {
     avc: acc.avc + (show.avc_count ?? 0),
     dubbed: acc.dubbed + (show.german_dub_count ?? 0),
   }), { size: 0, episodes: 0, hevc: 0, avc: 0, dubbed: 0 }), [visible]);
+  function toggleSort(key: LibrarySortKey) {
+    setSort((current) => nextSort(current, key, LIBRARY_FIRST_DIRECTION));
+  }
 
   const active = selectedShow;
   const seasons = active ? Array.from(new Set(active.episodes.map((episode) => episode.season_number))).sort((a, b) => (a ?? -1) - (b ?? -1)) : [];
@@ -857,47 +809,60 @@ export default function AnimeLibrary() {
         </div>
         </div>
       ) : (
-        <GroupedTable
-          variant='plain'
-          aria-label='Anime library'
-          className='min-h-0 flex-1'
-          titleLabel='Series'
-          groups={groupShows(visible)}
-          columns={SHOW_COLUMNS}
-          getKey={(show) => show.key}
-          title={(show) => (
-            // Capped and cut short: a single 80-character title would otherwise
-            // push every other column out of the table. The flex box lets it
-            // shrink further to whatever its cell has, on a phone.
-            <span className='flex min-w-0'>
-              <button
-                type='button'
-                title={show.title}
-                onClick={() => void openShow(show.key)}
-                className='inline-flex min-w-0 max-w-[22rem] items-baseline gap-2 text-left font-medium text-foreground hover:underline focus-visible:underline focus-visible:outline-none'
-              >
-                <span className='min-w-0 truncate'>{show.title}</span>
-                {show.year ? <span className='shrink-0 font-mono text-[0.68rem] font-normal tabular-nums text-muted-foreground'>{show.year}</span> : null}
-              </button>
-            </span>
-          )}
-          toolbar={
-            <Select<string>
-              value={LIBRARY_SORTS.find((option) => option.sort?.key === sort?.key && option.sort?.dir === sort?.dir)?.value ?? 'library'}
-              onValueChange={(value) => setSort(LIBRARY_SORTS.find((option) => option.value === value)?.sort ?? null)}
-              items={LIBRARY_SORTS.map(({ value, label }) => ({ value, label }))}
-            >
-              <SelectTrigger size='sm' className='w-48' aria-label='Order of the series in each group'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {LIBRARY_SORTS.map(({ value, label }) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          }
-        />
+        <Table variant='plain' containerProps={{ className: '@container min-h-0 flex-1 overflow-auto' }}>
+            <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
+              <TableRow>
+                {/* The series takes what the other columns leave and truncates its
+                    title there, and as the table narrows the lesser columns go --
+                    seasons, then the encode bar, then size and state: it never
+                    runs wider than the page. */}
+                <SortHeader label='Series' column='title' sort={sort} onSort={toggleSort} className='w-full' />
+                <SortHeader label='Seasons' column='seasons' sort={sort} onSort={toggleSort} className={COLUMN_SEASONS} />
+                <SortHeader label='Episodes' column='episodes' sort={sort} onSort={toggleSort} />
+                <SortHeader label='Encode' column='encode' sort={sort} onSort={toggleSort} className={COLUMN_ENCODE} />
+                <SortHeader label='Size' column='size' sort={sort} onSort={toggleSort} align='right' className={COLUMN_SIZE} />
+                <SortHeader label='State' column='state' sort={sort} onSort={toggleSort} className={COLUMN_STATE} />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {visible.map((show) => {
+                const tone = COMPLETION[show.completion_state] ?? COMPLETION.unknown;
+                return (
+                  <TableRow
+                    key={show.key}
+                    tabIndex={0}
+                    onClick={() => void openShow(show.key)}
+                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openShow(show.key); } }}
+                    className='data-row cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-control-focus'
+                  >
+                    <TableCell className='max-w-0'>
+                      <div className='flex items-center gap-2.5'>
+                        <AnimePoster url={show.poster_url} title={show.title} className='w-8 shrink-0 rounded' />
+                        <div className='min-w-0'>
+                          <p className='truncate font-medium text-foreground' title={show.title}>{show.title}</p>
+                          {show.year ? <p className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{show.year}</p> : null}
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell className={cn(COLUMN_SEASONS, 'font-mono text-xs tabular-nums text-muted-foreground')}>{show.season_count}</TableCell>
+                    <TableCell><Progress show={show} /></TableCell>
+                    <TableCell className={COLUMN_ENCODE}><CodecMix show={show} /></TableCell>
+                    <TableCell numeric className={cn(COLUMN_SIZE, 'text-xs text-foreground')}>{formatSize(show.size)}</TableCell>
+                    <TableCell className={COLUMN_STATE}>
+                      <div className='flex flex-wrap items-center gap-1.5'>
+                        <span className={cn('size-1.5 rounded-full', tone.className)} />
+                        <span className='text-xs text-muted-foreground'>{tone.label}</span>
+                        {(show.no_german_count ?? 0) > 0 && <StatusTag variant='warning' title='Episodes on disk with neither German subtitles nor a German dub'>{show.no_german_count} without German</StatusTag>}
+                        {show.staged_count > 0 && <StatusTag variant='warning'>{show.staged_count} staged</StatusTag>}
+                        {show.blacklisted && <StatusTag variant='destructive'>Blacklisted</StatusTag>}
+                        {isUnmatched(show) && <StatusTag variant='warning' title='No AniList entry is known for these files: match it from its details'>Unmatched</StatusTag>}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+        </Table>
       )}
 
       {!loading && visible.length > 0 && (
