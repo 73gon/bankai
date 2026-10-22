@@ -446,6 +446,11 @@ _THUMB_SWEEP_SECONDS = 60.0
 _THUMB_SWEEP_BATCH = 20
 # Telling Jellyfin which episodes, seasons and shows bankai changed (see jellyfin).
 _JELLYFIN_SECONDS = 60.0
+# Looking, without downloading, whether HEVC upgrades exist, for the library's
+# tags (see erai.check_hevc_upgrades): a few AniList entries a pass, each a
+# handful of Nyaa searches.
+_HEVC_CHECK_SECONDS = 600.0
+_HEVC_CHECK_ENTRIES = 3
 # How often the held library tree is checked against the disk: the delay
 # before a newly published episode shows in the libraries.
 _LIBRARY_WALK_SECONDS = 60.0
@@ -467,6 +472,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "codec_sweep": ("Identify episode encodes", _CODEC_SWEEP_SECONDS),
     "thumb_sweep": ("Episode pictures from mid-episode", _THUMB_SWEEP_SECONDS),
     "jellyfin_refresh": ("Tell Jellyfin what changed", _JELLYFIN_SECONDS),
+    "hevc_check": ("Look for HEVC upgrades", _HEVC_CHECK_SECONDS),
     "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
@@ -561,6 +567,11 @@ def _pass_summary(name: str, result: object) -> str | None:
         return " · ".join(bits) or "No releases in flight"
     if name == "codec_sweep":
         return f"{_plural(number('probed'), 'encode')} identified, {number('remaining')} to go"
+    if name == "hevc_check":
+        return (
+            f"{_plural(number('checked'), 'entry', 'entries')} checked, "
+            f"{_plural(number('upgrades_found'), 'upgrade')} found, {number('remaining')} to go"
+        )
     if name == "jellyfin_refresh":
         if number("failed"):
             from bankai.web import jellyfin
@@ -644,6 +655,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_codec_pass = 0.0
     next_thumb_pass = 0.0
     next_jellyfin_pass = 0.0
+    next_hevc_check = 0.0
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
     next_archive_pass = 0.0
@@ -782,6 +794,19 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                     raise
                 except Exception as exc:
                     log.warning("Jellyfin pass failed: %s", exc)
+        if time.monotonic() >= next_hevc_check:
+            next_hevc_check = time.monotonic() + _HEVC_CHECK_SECONDS
+            _pass_due("hevc_check", next_hevc_check)
+            try:
+                from bankai.web import erai as erai_mod
+
+                with _pass_running("hevc_check"):
+                    result = await erai_mod.check_hevc_upgrades(entries=_HEVC_CHECK_ENTRIES)
+                _pass_result("hevc_check", result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("HEVC upgrade check failed: %s", exc)
         await asyncio.sleep(poll_seconds)
 
 

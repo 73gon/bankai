@@ -2500,3 +2500,35 @@ def test_a_search_that_finds_no_hevc_is_remembered_until_one_is_queued(monkeypat
     state["backfill"]["catalog_1080"][replacement.info_hash] = erai._entry_dict(replacement)
     assert asyncio.run(erai.upgrade_show_to_hevc([555]))["queued"] == 1
     assert erai.hevc_checked() == {}
+
+
+def test_looking_for_upgrades_downloads_nothing_and_remembers_what_it_found(monkeypatch, tmp_path, anilist_data):
+    """The library says "Upgrade for N" without anyone opening the show."""
+    state, _avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path, anilist_data)
+
+    async def german(_entry, _client):
+        return True
+
+    monkeypatch.setattr(erai, "_carries_german", german)
+    result = asyncio.run(erai.upgrade_show_to_hevc([555], queue=False))
+
+    assert result["available"] == 1 and result["queued"] == 0
+    assert qbit.added == [] and replacement.info_hash not in state["releases"]
+    assert erai.hevc_checked()[(555, 2)][1] is True
+
+
+def test_the_background_check_takes_entries_never_looked_at_first(monkeypatch, tmp_path, anilist_data):
+    _published_show(monkeypatch, tmp_path, anilist_data, twin_available=False)
+    looked: list[list[int]] = []
+
+    async def look(ids, *, queue=True):
+        assert queue is False
+        looked.append(ids)
+        erai._record_hevc_checks([(555, 2)], [])
+        return {"available": 0}
+
+    monkeypatch.setattr(erai, "upgrade_show_to_hevc", look)
+    assert asyncio.run(erai.check_hevc_upgrades())["checked"] == 1
+    assert looked == [[555]]
+    # Looked at a moment ago: not again until a week has passed.
+    assert asyncio.run(erai.check_hevc_upgrades())["checked"] == 0

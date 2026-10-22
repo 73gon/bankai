@@ -921,12 +921,14 @@ async def group_shows(
             for row in episodes
             if row.get("codec") == "avc" and not row.get("german_dub") and not row.get("missing")
         ]
-        on_way = sum(1 for key in avc if key in upgrading)
-        none_found = sum(1 for key in avc if key not in upgrading and key in checked)
+        looked = [key for key in avc if key not in upgrading and key in checked]
         return {
-            "upgrading_count": on_way,
-            "no_hevc_count": none_found,
-            "hevc_checked_at": max((checked[key] for key in avc if key in checked), default=None),
+            "upgrading_count": sum(1 for key in avc if key in upgrading),
+            # An HEVC release with German subtitles exists for these: "Upgrade for N".
+            "upgrade_available_count": sum(1 for key in looked if checked[key][1]),
+            # Searched, none found: "No upgrade".
+            "no_hevc_count": sum(1 for key in looked if not checked[key][1]),
+            "hevc_checked_at": max((checked[key][0] for key in looked), default=None),
         }
 
     def counts(rows: list[dict]) -> dict:

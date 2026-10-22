@@ -615,6 +615,8 @@ export interface AnimeLibraryShow {
   no_german_count?: number;
   /** AVC episodes an HEVC upgrade is on its way for. */
   upgrading_count?: number;
+  /** AVC episodes a search found an HEVC release with German subtitles for. */
+  upgrade_available_count?: number;
   /** AVC episodes an upgrade search found no HEVC release with German for. */
   no_hevc_count?: number;
   /** When that search last ran (seconds since the epoch). */

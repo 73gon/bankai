@@ -2480,30 +2480,42 @@ def _hevc_checks_path() -> Path:
     return _state_path().with_name("anime_hevc_checks.json")
 
 
-def hevc_checked() -> dict[tuple[int, int], float]:
-    """AVC episodes an upgrade search found no HEVC release with German for, and when."""
+def hevc_checked() -> dict[tuple[int, int], tuple[float, bool]]:
+    """Each AVC episode an HEVC search looked at: when, and whether it found an upgrade.
+
+    "Found" is an Erai-raws HEVC release that carries German subtitles. The
+    library tags each show by it; see check_hevc_upgrades.
+    """
     try:
         raw = json.loads(_hevc_checks_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    found: dict[tuple[int, int], float] = {}
+    found: dict[tuple[int, int], tuple[float, bool]] = {}
     for aid, episodes in (raw or {}).items():
-        for episode, at in (episodes or {}).items():
-            if str(aid).isdigit() and str(episode).isdigit():
-                found[(int(aid), int(episode))] = float(at)
+        for episode, value in (episodes or {}).items():
+            if not (str(aid).isdigit() and str(episode).isdigit()):
+                continue
+            # The first build kept only when nothing was found, as a bare time.
+            at, hit = (value, False) if isinstance(value, int | float) else (value[0], value[1])
+            found[(int(aid), int(episode))] = (float(at), bool(hit))
     return found
 
 
-def _record_hevc_checks(missing: list[tuple[int, int]], queued: list[tuple[int, int]]) -> None:
-    """Remember what a search found no HEVC for; forget what it queued an upgrade of."""
+def _record_hevc_checks(
+    missing: list[tuple[int, int]],
+    queued: list[tuple[int, int]],
+    available: list[tuple[int, int]] = (),  # type: ignore[assignment]
+) -> None:
+    """Remember what a search found an upgrade for or not; forget what it queued one of."""
     rows = hevc_checked()
     now = time.time()
-    rows.update({key: now for key in missing})
+    rows.update({key: (now, False) for key in missing})
+    rows.update({key: (now, True) for key in available})
     for key in queued:
         rows.pop(key, None)
-    out: dict[str, dict[str, float]] = {}
-    for (aid, episode), at in rows.items():
-        out.setdefault(str(aid), {})[str(episode)] = at
+    out: dict[str, dict[str, list]] = {}
+    for (aid, episode), (at, hit) in rows.items():
+        out.setdefault(str(aid), {})[str(episode)] = [at, hit]
     path = _hevc_checks_path()
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(out), encoding="utf-8")
@@ -2530,8 +2542,11 @@ def upgrading_episodes(state: dict[str, Any] | None = None) -> set[tuple[int, in
     return found
 
 
-async def upgrade_show_to_hevc(anilist_ids: list[int]) -> dict[str, Any]:
+async def upgrade_show_to_hevc(anilist_ids: list[int], *, queue: bool = True) -> dict[str, Any]:
     """Queue HEVC replacements for the AVC episodes on disk of a card's AniList entries.
+
+    With ``queue=False`` it only looks: what an upgrade would find is
+    recorded for the library's tags, and nothing is downloaded.
 
     Unlike the backlog upgrade, these episodes are on disk and watchable. The
     replacement is downloaded first; once it is published the AVC files it
@@ -2582,6 +2597,19 @@ async def upgrade_show_to_hevc(anilist_ids: list[int]) -> dict[str, Any]:
         )
         plan["episodes"].append(episode)
         plan["rows"].extend(rows)
+    if not queue:
+        available: list[tuple[int, int]] = []
+        async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
+            for plan in plans.values():
+                keys = [(plan["aid"], episode) for episode in plan["episodes"]]
+                if await _carries_german(plan["item"], client):
+                    available.extend(keys)
+                else:
+                    missing.extend(keys)
+        _record_hevc_checks(missing, [], available)
+        result["available"] = len(available)
+        result["no_replacement"] = len(missing)
+        return result
     qbit = QBittorrentClient()
     try:
         await qbit.login()
@@ -2649,6 +2677,59 @@ async def upgrade_show_to_hevc(anilist_ids: list[int]) -> dict[str, Any]:
         await qbit.aclose()
         _record_hevc_checks(missing, queued)
     return result
+
+
+# How long what a background check found is trusted: a new HEVC release with
+# German turns up within days of its AVC one, or not for months.
+_HEVC_CHECK_MAX_AGE = 7 * 86400
+# Entries whose check failed (AniList refusing, Nyaa down), by when: tried again
+# a day later, so they do not take the front of every pass.
+_HEVC_CHECK_FAILED: dict[int, float] = {}
+
+
+async def check_hevc_upgrades(*, entries: int = 3) -> dict[str, int]:
+    """Look, without downloading, whether HEVC upgrades exist for a few entries' AVC episodes.
+
+    The library tags each show "Upgrade for N", "No upgrade" or "Upgrading N"
+    from what this finds, so nobody has to open each show to know. The
+    entries whose AVC episodes were looked at longest ago -- or never -- go
+    first, a few a pass, each costing a handful of Nyaa searches.
+    """
+    from bankai.web import anime_files
+    from bankai.web.anime_library import _load_codec_cache
+
+    probes = await asyncio.to_thread(_load_codec_cache)
+    checked = await asyncio.to_thread(hevc_checked)
+    upgrading = upgrading_episodes()
+    rows = await asyncio.to_thread(anime_files.load)
+    now = time.time()
+    oldest: dict[int, float] = {}
+    for aid in sorted({aid for pairs in rows.values() for aid, _episode in pairs}):
+        if now - _HEVC_CHECK_FAILED.get(aid, 0.0) < 86400:
+            continue
+        for episode, paths in _entry_episode_files(aid).items():
+            if (aid, episode) in upgrading:
+                continue
+            if "avc" not in {(probes.get(str(path)) or {}).get("codec") for path in paths}:
+                continue
+            # A German dub is never upgraded, so never looked for.
+            if any(_is_german_dub(path) for path in paths):
+                continue
+            at = checked.get((aid, episode), (0.0, False))[0]
+            if now - at >= _HEVC_CHECK_MAX_AGE:
+                oldest[aid] = min(oldest.get(aid, at), at)
+    due = sorted(oldest, key=oldest.__getitem__)[:entries]
+    found = done = 0
+    for aid in due:
+        try:
+            result = await upgrade_show_to_hevc([aid], queue=False)
+        except Exception as exc:
+            log.warning("HEVC check for AniList %s failed: %s", aid, exc)
+            _HEVC_CHECK_FAILED[aid] = time.time()
+            continue
+        done += 1
+        found += int(result.get("available") or 0)
+    return {"checked": done, "upgrades_found": found, "remaining": max(0, len(oldest) - done)}
 
 
 # --- Replacing a card's releases with one picked on Erai-raws --------------
