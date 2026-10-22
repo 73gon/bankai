@@ -182,25 +182,28 @@ def test_a_no_german_hold_with_a_german_sibling_is_retried(store, monkeypatch):
     assert set(erai._load_retry_requests()) == {"a" * 40}
 
 
-def test_a_show_emptied_on_the_site_is_told_from_a_wrong_address(store, monkeypatch):
-    """Both feeds answer with nothing; only the show's page says it exists."""
+def test_no_request_ever_goes_to_a_guessed_address(store, monkeypatch):
+    """A wrong guess is a 404, and WP Defender locks out an address that asks for missing pages."""
     import httpx
 
     asked = []
 
     def answer(request):
         asked.append(request.url.path)
-        exists = request.url.path == "/anime-list/hige-o-soru-soshite-joshikousei-o-hirou/"
-        return httpx.Response(200 if exists else 404, text="", request=request)
+        return httpx.Response(200, text=FEED, request=request)
 
     monkeypatch.setattr(erai_site, "_client", lambda: httpx.AsyncClient(base_url=erai_site.BASE_URL, transport=httpx.MockTransport(answer)))
 
+    asyncio.run(erai_site.fill_show("Hige o Soru. Soshite Joshikousei o Hirou."))
+    assert asyncio.run(erai_site.empty_show("Hige o Soru. Soshite Joshikousei o Hirou.")) is None
+    # Only the search feed, an address that exists whatever the name.
+    assert asked == ["/"]
+
+
+def test_a_show_page_found_earlier_is_still_offered(store):
+    erai_site._merge([], pages={"hige-o-soru-soshite-joshikousei-o-hirou": {"checked": 1.0, "exists": True}})
     found = asyncio.run(erai_site.empty_show("Hige o Soru. Soshite Joshikousei o Hirou."))
     assert found == erai_site.BASE_URL + "/anime-list/hige-o-soru-soshite-joshikousei-o-hirou/"
-    assert asyncio.run(erai_site.empty_show("No Such Show")) is None
-    # Remembered for a day: asked once each.
-    asyncio.run(erai_site.empty_show("Hige o Soru. Soshite Joshikousei o Hirou."))
-    assert len(asked) == 2
 
 
 def test_the_bot_protection_pauses_every_request_and_nothing_is_remembered_as_empty(store, monkeypatch):
@@ -239,3 +242,19 @@ def test_a_page_that_is_not_a_feed_is_the_bot_protection_not_an_empty_show(store
     assert asyncio.run(erai_site.fill_show("Kaguya-sama wa Kokurasetai: Ultra Romantic")) == 0
     assert erai_site.blocked()
     assert not (erai_site.load().get("shows") or {})
+
+
+def test_a_history_page_past_the_end_ends_the_backfill_instead_of_being_asked_again(store, monkeypatch):
+    import httpx
+
+    def answer(request):
+        if request.url.params.get("paged") == "3":
+            return httpx.Response(404, text="", request=request)
+        return httpx.Response(200, text=FEED, request=request)
+
+    monkeypatch.setattr(erai_site, "_client", lambda: httpx.AsyncClient(base_url=erai_site.BASE_URL, transport=httpx.MockTransport(answer)))
+    monkeypatch.setattr(erai_site, "_PAGE_DELAY_SECONDS", 0)
+    erai_site._merge([], backfill_next=3, complete=False)
+
+    asyncio.run(erai_site.refresh())
+    assert erai_site.load()["complete"] is True

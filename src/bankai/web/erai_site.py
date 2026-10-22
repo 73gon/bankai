@@ -265,6 +265,8 @@ async def _page(client: httpx.AsyncClient, path: str, **params: Any) -> list[dic
     if _guarded(response) or _not_a_feed(response):
         _block()
         raise FeedError(BLOCKED_MESSAGE)
+    if response.status_code == 404:
+        raise FeedMissing(f"Erai-raws has no page {path}")
     if response.status_code >= 400:
         # Not raise_for_status: its message is the URL, token and all, and
         # that ends up in the service log.
@@ -278,6 +280,10 @@ async def _page(client: httpx.AsyncClient, path: str, **params: Any) -> list[dic
 
 class FeedError(RuntimeError):
     """A feed that could not be read; the message never carries the token."""
+
+
+class FeedMissing(FeedError):
+    """A 404. Never asked again: WP Defender locks out an address that asks for missing pages."""
 
 
 def _client() -> httpx.AsyncClient:
@@ -317,7 +323,10 @@ async def _refresh() -> dict[str, Any]:
             page, complete = int(state.get("backfill_next") or 2), bool(state.get("complete"))
             for _ in range(0 if complete else _BACKFILL_PAGES):
                 await asyncio.sleep(_PAGE_DELAY_SECONDS)
-                rows = await _page(client, "/feed/", paged=page)
+                try:
+                    rows = await _page(client, "/feed/", paged=page)
+                except FeedMissing:
+                    rows = []  # past the last page: the history is read
                 if not rows:
                     complete = True
                     break
@@ -350,33 +359,16 @@ def show_slugs(name: str) -> list[str]:
 
 
 async def fill_show(name: str) -> int:
-    """Read one show's own feed -- its whole history -- into the index."""
+    """Bring one show's releases into the index, by the site's search for its name.
+
+    It used to read the show's own feed under addresses guessed from the
+    name, up to three per show. A wrong guess is a 404, and Erai-raws' WP
+    Defender locks out an address that asks for missing pages: seireitei was
+    locked out again and again. The search feed is an address that always
+    exists, whatever the name.
+    """
     if not configured() or not name.strip():
         return 0
-    read = load().get("shows") or {}
-    tried: dict[str, float] = {}
-    async with _client() as client:
-        for slug in show_slugs(name):
-            if time.time() - float(read.get(slug) or 0) < _SHOW_FEED_SECONDS:
-                return 0  # read lately, under this address
-            tried[slug] = time.time()
-            try:
-                rows = await _page(client, f"/anime-list/{slug}/feed/")
-            except (FeedError, httpx.HTTPError) as exc:
-                # Not read is not empty: only an answer is remembered.
-                log.debug("Erai-raws feed for %s unavailable: %s", slug, type(exc).__name__)
-                tried.pop(slug, None)
-                if blocked():
-                    break
-                continue
-            if rows:
-                return _merge(rows, shows=tried)
-            await asyncio.sleep(_PAGE_DELAY_SECONDS)
-    if tried:
-        _merge([], shows=tried)
-    if blocked():
-        return 0
-    # Under none of the addresses tried: the site's search finds it by name.
     return await search(name)
 
 
@@ -407,44 +399,19 @@ async def search(term: str) -> int:
 
 
 async def empty_show(name: str) -> str | None:
-    """The show's page, when Erai-raws has one for it but lists no release there.
+    """The show's page, when it is known that Erai-raws has one but lists no release there.
 
-    Older shows are emptied on the site -- "No episodes have been added yet"
-    -- and their feeds then answer with nothing, just as they do for an
-    address that is no show at all. The page itself tells the two apart: a
-    show's page is there, a wrong address is a 404. Without a login the page
-    does not list releases either way, so only its existence is asked.
+    Only from what an earlier check found: asking the site whether a guessed
+    address exists is what got seireitei locked out (a wrong guess is a 404,
+    see fill_show), so no request is made here any more.
     """
-    if not configured() or not name.strip() or blocked():
+    if not name.strip():
         return None
     pages = load().get("pages") or {}
-    checked: dict[str, dict[str, Any]] = {}
-    found = None
-    try:
-        async with _client() as client:
-            for slug in show_slugs(name):
-                seen = pages.get(slug)
-                if seen and time.time() - float(seen.get("checked") or 0) < _PAGE_SECONDS:
-                    exists = bool(seen.get("exists"))
-                else:
-                    try:
-                        response = await client.get(f"/anime-list/{slug}/")
-                    except httpx.HTTPError:
-                        continue
-                    if _guarded(response):
-                        _block()
-                        break
-                    if response.status_code not in {200, 404}:
-                        continue  # refused or failing: no answer either way
-                    exists = response.status_code == 200
-                    checked[slug] = {"checked": time.time(), "exists": exists}
-                if exists:
-                    found = f"{BASE_URL}/anime-list/{slug}/"
-                    break
-    finally:
-        if checked:
-            _merge([], pages=checked)
-    return found
+    for slug in show_slugs(name):
+        if (pages.get(slug) or {}).get("exists"):
+            return f"{BASE_URL}/anime-list/{slug}/"
+    return None
 
 
 def summary() -> dict[str, Any]:
