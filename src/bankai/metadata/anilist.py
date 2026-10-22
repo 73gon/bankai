@@ -441,6 +441,10 @@ def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
     # entry's list and drop whole.
     mal = jikan.titles(kept["mal_id"]) if kept.get("mal_id") else {}
     last = count or max([*airing, *streaming], default=0)
+    if not finished(anilist_id):
+        # While it airs the count lags: AniList gives none for One Piece, and
+        # the offline database's 1168 left episodes 1169-1178 on disk untitled.
+        last = max([last, *airing, *streaming, *mal])
     return [(n, streaming.get(n) or mal.get(n), airing.get(n)) for n in range(1, last + 1)]
 
 
