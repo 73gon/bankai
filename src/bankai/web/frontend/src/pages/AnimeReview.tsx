@@ -11,6 +11,7 @@ import { Button } from '@/zon/ui/button';
 import { Card } from '@/zon/ui/card';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
 import { Spinner } from '@/zon/ui/spinner';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
 import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
@@ -47,6 +48,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   const [batchFor, setBatchFor] = useState<{ item: AnimeReviewItem; candidate: ReplaceCandidate } | null>(null);
   // Blacklist only: every card, those tied to an AniList entry, or those not yet.
   const [linkFilter, setLinkFilter] = useState<'all' | 'linked' | 'unlinked'>('all');
+  const [query, setQuery] = useState('');
   const listPath = blacklist ? pagePaths.animeBlacklist : pagePaths.animeReview;
   // Started from the last answer this browser saw, refreshed straight after.
   const [items, setItems] = useState<AnimeReviewItem[]>(() => recall<{ items: AnimeReviewItem[] }>(listPath)?.items ?? []);
@@ -82,9 +84,13 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   const [releases, setReleases] = useState<HeldRelease[]>([]);
   const [loadingReleases, setLoadingReleases] = useState(false);
 
-  const visible = !blacklist || linkFilter === 'all'
-    ? items
-    : items.filter((item) => Boolean(item.linked ?? item.anilist_id) === (linkFilter === 'linked'));
+  const needle = query.trim().toLocaleLowerCase();
+  const visible = items.filter((item) =>
+    (!blacklist || linkFilter === 'all' || Boolean(item.linked ?? item.anilist_id) === (linkFilter === 'linked'))
+    // The show as AniList and as Erai-raws name it: a blacklisted show is often
+    // remembered by either.
+    && (!needle || [item.title, item.source_title, item.anilist_title, item.release_title]
+      .some((name) => name?.toLocaleLowerCase().includes(needle))));
 
   async function openReleases(item: AnimeReviewItem) {
     setReleasesFor(item);
@@ -269,6 +275,10 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         </Button>}
         {blacklist && (
           <div className='flex flex-wrap items-center gap-2'>
+            <InputGroup className='w-60'>
+              <InputGroupAddon align='inline-start'><Search /></InputGroupAddon>
+              <InputGroupInput aria-label='Search the blacklist' placeholder='Search the blacklist…' value={query} onChange={(event) => setQuery(event.target.value)} />
+            </InputGroup>
             <ToggleGroup
               aria-label='Show blacklist entries'
               value={[linkFilter]}
@@ -296,6 +306,12 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
           <EmptyMedia>{blacklist ? <Ban /> : <ShieldCheck />}</EmptyMedia>
           <EmptyTitle>{blacklist ? 'No blacklisted Anime' : 'Nothing needs review'}</EmptyTitle>
           <EmptyDescription>{blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}</EmptyDescription>
+        </Empty>
+      ) : visible.length === 0 ? (
+        <Empty>
+          <EmptyMedia><Search /></EmptyMedia>
+          <EmptyTitle>No matching shows</EmptyTitle>
+          <EmptyDescription>{needle ? `Nothing here is called “${query.trim()}”.` : 'No shows match this filter.'}</EmptyDescription>
         </Empty>
       ) : blacklist && view === 'table' ? (
         <Table variant='plain' className='min-w-[720px]' containerProps={{ className: 'overflow-auto' }}>
