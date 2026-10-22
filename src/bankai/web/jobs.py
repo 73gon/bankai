@@ -440,6 +440,10 @@ _RELEASE_RECONCILE_SECONDS = 20.0
 # the held library tree, so a pass with nothing left to probe costs nothing.
 _CODEC_SWEEP_SECONDS = 60.0
 _CODEC_SWEEP_BATCH = 40
+# Each episode's picture for Jellyfin, from mid-episode (see anime_thumbs): the
+# same kind of one-off crawl, a frame each, a slice a minute.
+_THUMB_SWEEP_SECONDS = 60.0
+_THUMB_SWEEP_BATCH = 20
 # How often the held library tree is checked against the disk: the delay
 # before a newly published episode shows in the libraries.
 _LIBRARY_WALK_SECONDS = 60.0
@@ -459,6 +463,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "release_reconcile": ("Publish finished downloads", _RELEASE_RECONCILE_SECONDS),
     "library_walk": ("Check the libraries for changes", _LIBRARY_WALK_SECONDS),
     "codec_sweep": ("Identify episode encodes", _CODEC_SWEEP_SECONDS),
+    "thumb_sweep": ("Episode pictures from mid-episode", _THUMB_SWEEP_SECONDS),
     "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
@@ -553,6 +558,11 @@ def _pass_summary(name: str, result: object) -> str | None:
         return " · ".join(bits) or "No releases in flight"
     if name == "codec_sweep":
         return f"{_plural(number('probed'), 'encode')} identified, {number('remaining')} to go"
+    if name == "thumb_sweep":
+        if number("held_for_space"):
+            return "Held: the library disk is short on room"
+        failed = f", {number('failed')} failed" if number("failed") else ""
+        return f"{_plural(number('made'), 'picture')} written{failed}, {number('remaining')} to go"
     return None
 
 
@@ -623,6 +633,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
 
     next_release_pass = 0.0
     next_codec_pass = 0.0
+    next_thumb_pass = 0.0
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
     next_archive_pass = 0.0
@@ -718,6 +729,29 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("codec sweep failed: %s", exc)
+        if time.monotonic() >= next_thumb_pass:
+            next_thumb_pass = time.monotonic() + _THUMB_SWEEP_SECONDS
+            _pass_due("thumb_sweep", next_thumb_pass)
+            try:
+                from pathlib import Path
+
+                from bankai.web import anime_thumbs
+
+                with _pass_running("thumb_sweep"):
+                    result = await asyncio.to_thread(
+                        anime_thumbs.sweep,
+                        Path(get_settings().transfer.anime_shows_dir),
+                        limit=_THUMB_SWEEP_BATCH,
+                    )
+                _pass_result("thumb_sweep", result)
+                if result["made"]:
+                    log.info(
+                        "Wrote %d episode picture(s); %d still to go", result["made"], result["remaining"]
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("thumbnail sweep failed: %s", exc)
         await asyncio.sleep(poll_seconds)
 
 
