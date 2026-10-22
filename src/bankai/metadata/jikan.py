@@ -67,8 +67,17 @@ def _load() -> dict[int, dict]:
     return _STORE[1]
 
 
-def _save(rows: dict[int, dict]) -> None:
+def _save(rows: dict[int, dict], touched: set[int] | None = None) -> None:
+    """Write the kept titles; with ``touched``, only those entries, merged into the file as it is now.
+
+    A pass that took minutes would otherwise write back the file as it read it,
+    dropping what another process kept meanwhile -- the scheduler's pass did
+    exactly that to a catch-up run's 205 entries.
+    """
     global _STORE
+    if touched is not None:
+        _STORE = None
+        rows = {**_load(), **{key: rows[key] for key in touched if key in rows}}
     path = _store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
@@ -145,6 +154,7 @@ async def ensure(wanted: list[tuple[int, bool]], *, max_requests: int = 8) -> in
         if not queue:
             return 0
         done = requests = 0
+        touched: set[int] = set()
         ask = _page
         async with httpx.AsyncClient(timeout=30, headers={"Accept": "application/json"}) as client:
             for mal in queue:
@@ -174,7 +184,7 @@ async def ensure(wanted: list[tuple[int, bool]], *, max_requests: int = 8) -> in
                         log.warning("Episode titles could not be read for MyAnimeList %s: %s", mal, message)
                         since = last_error.get("since") if last_error else None
                         last_error.update(message=message, at=time.time(), since=since or time.time())
-                        _save(rows)
+                        _save(rows, touched)
                         return done
                     last_error.clear()
                     if answer is None:
@@ -188,12 +198,13 @@ async def ensure(wanted: list[tuple[int, bool]], *, max_requests: int = 8) -> in
                     if not (answer.get("pagination") or {}).get("has_next_page"):
                         complete = True
                         break
+                touched.add(mal)
                 if not complete:
                     rows[mal] = {"titles": found, "fetched_at": 0, "next_page": page}
                     break
                 rows[mal] = {"titles": found, "fetched_at": time.time()}
                 done += 1
-        _save(rows)
+        _save(rows, touched)
         return done
 
 

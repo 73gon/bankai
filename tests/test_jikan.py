@@ -140,3 +140,20 @@ def test_a_timeout_is_named_for_the_dashboard(state) -> None:
     assert asyncio.run(jikan.ensure([(BLEACH_MAL, True)])) == 0
     assert jikan.last_error["message"] == "ConnectTimeout"
     jikan.last_error.clear()
+
+
+@respx.mock
+def test_a_pass_never_drops_what_another_process_kept_meanwhile(state) -> None:
+    """The scheduler's pass wrote back the file as it had read it, over a catch-up's 205 entries."""
+    other = 4242
+
+    def answer(request):
+        # While this pass is asking, another process keeps an entry of its own.
+        jikan._save({other: {"titles": {"1": "Kept elsewhere"}, "fetched_at": 1e12}})
+        return httpx.Response(200, json=_page(range(1, 4), False))
+
+    respx.get(f"{jikan._API}/anime/{BLEACH_MAL}/episodes").mock(side_effect=answer)
+
+    assert asyncio.run(jikan.ensure([(BLEACH_MAL, True)])) == 1
+    assert jikan.titles(other) == {1: "Kept elsewhere"}
+    assert len(jikan.titles(BLEACH_MAL)) == 3
