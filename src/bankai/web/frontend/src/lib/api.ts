@@ -1111,8 +1111,9 @@ export const api = {
     request<{ description: string; magnet_uri: string | null; publisher: string | null }>(
       `/api/anime/detail?url=${encodeURIComponent(url)}`,
     ),
-  /** Download a Nyaa release as one AniList entry; ``episode`` null for a batch or a movie. */
-  animeDownload: (entry: AnimeEntry, anilistId: number, kind: 'show' | 'movie', episode: number | null = null) =>
+  /** Download a Nyaa release as one AniList entry; ``episode`` null for a batch or a movie.
+   *  ``publish``: straight into the library, not left staged for Transfer. */
+  animeDownload: (entry: AnimeEntry, anilistId: number, kind: 'show' | 'movie', episode: number | null = null, publish = false) =>
     request<Job>('/api/anime/download', {
       method: 'POST',
       body: JSON.stringify({
@@ -1123,6 +1124,7 @@ export const api = {
         info_hash: entry.info_hash,
         anilist_id: anilistId,
         kind,
+        publish,
         episode,
       }),
     }),

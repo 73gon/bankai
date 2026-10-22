@@ -679,7 +679,8 @@ export default function AnimeLibrary() {
     if (!searchTarget || anilistId == null) return;
     setDownloading(entry.info_hash);
     try {
-      await api.animeDownload(entry, anilistId, 'show', searchTarget.episode.episode);
+      // A missing episode of a show in the library: straight into it, as the automation's go.
+      await api.animeDownload(entry, anilistId, 'show', searchTarget.episode.episode, true);
       toast.success('Episode added to the Anime queue');
       setSearchTarget(null);
     } catch (error: any) {

@@ -79,11 +79,19 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     # Later releases under this name are this entry too.
     assert saved == [("[Group] Sousou no Frieren - 01 [1080p]", 154587)]
 
+    # From the Anime search page it waits in staging for Transfer.
+    assert "--publish" not in args
+
     body["episode"] = 13
     overridden = client.post("/api/anime/download", json=body)
     assert overridden.status_code == 200
     assert queued[1]["title"] == "Frieren: Beyond Journey's End - 13"
     assert queued[1]["args"][queued[1]["args"].index("--episode") + 1] == "13"
+
+    # A missing episode picked in the library's drawer goes straight into the library.
+    published = client.post("/api/anime/download", json={**body, "publish": True})
+    assert published.status_code == 200
+    assert "--publish" in queued[2]["args"]
 
     unknown = client.post("/api/anime/download", json={**body, "anilist_id": 999999})
     assert unknown.status_code == 422

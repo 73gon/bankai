@@ -350,6 +350,7 @@ async def download_anime(
     cleanup_torrent: bool = False,
     replace_existing: bool = False,
     keep_episodes: frozenset[int] = frozenset(),
+    publish: bool = False,
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -461,7 +462,10 @@ async def download_anime(
             )
         log.info('BANKAI_PROGRESS stage=organize pct=100 status="ready"')
 
-        if require_german_subtitles:
+        # The automation's downloads go on into the library, and so does an
+        # episode picked by hand in the library's drawer (``publish``); one
+        # from the Anime search page waits in staging for Transfer.
+        if require_german_subtitles or publish:
             from bankai.backend.transfer import plan_transfer, transfer_with_rsync
 
             log.info('BANKAI_STAGE step=3 total=3 key=transfer label="Transfer to Anime library"')

@@ -2352,6 +2352,7 @@ def anime_download(
     require_german_subtitles: bool = typer.Option(False, "--require-german-subtitles"),
     replace_existing: bool = typer.Option(False, "--replace-existing"),
     cleanup_torrent: bool = typer.Option(False, "--cleanup-torrent"),
+    publish: bool = typer.Option(False, "--publish", help="Transfer to the library, not leave it staged"),
     keep_episode: list[int] = typer.Option([], "--keep-episode", help="AniList episode not to publish"),
 ) -> None:
     """Download a selected Nyaa release and organize it without syncing."""
@@ -2383,6 +2384,7 @@ def anime_download(
                 cleanup_torrent=cleanup_torrent,
                 replace_existing=replace_existing,
                 keep_episodes=frozenset(keep_episode),
+                publish=publish,
             )
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"

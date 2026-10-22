@@ -597,6 +597,9 @@ class AnimeDownloadRequest(BaseModel):
     kind: str
     # The AniList episode, when the release is one; a batch numbers each file by its name.
     episode: int | None = None
+    # Straight into the library, as the automation's downloads go: a missing
+    # episode picked in the library's drawer. The Anime search page stages.
+    publish: bool = False
 
 
 class QueuePriorityRequest(BaseModel):
@@ -2732,6 +2735,8 @@ def create_app() -> Any:
             args.extend(["--year", str(year)])
         if episode is not None:
             args.extend(["--episode", str(episode)])
+        if req.publish and req.kind == "show":
+            args.append("--publish")
         return await asyncio.to_thread(
             webjobs.enqueue,
             kind=req.kind,
