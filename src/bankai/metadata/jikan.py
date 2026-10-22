@@ -35,7 +35,8 @@ _MAL = "https://myanimelist.net/anime/{mal_id}/_/episode"
 _MAL_PAGE = 100
 _MAL_ROW = re.compile(r'<tr class="episode-list-data">(.*?)</tr>', re.S)
 _MAL_NUMBER = re.compile(r'class="episode-number[^"]*"[^>]*data-raw="(\d+)"')
-_MAL_TITLE = re.compile(r'class="episode-title[^"]*">\s*<a [^>]*>(.*?)</a>', re.S)
+# A filler or recap episode's title cell opens with that label, before the link.
+_MAL_TITLE = re.compile(r'class="episode-title[^"]*">(?:(?!</td>).)*?<a [^>]*>(.*?)</a>', re.S)
 # One request a second: well under Jikan's three a second and sixty a minute.
 _PAUSE = 1.1
 _KEEP_AIRING = 7 * 86400

@@ -106,7 +106,10 @@ def _mal_html(numbers: range) -> str:
         f'<tr class="episode-list-data">\n'
         f'  <td class="episode-number nowrap" data-raw="{n}">{n}</td>\n'
         f'  <td class="episode-video nowrap"></td>\n'
-        f'  <td class="episode-title fs12"><a href="https://myanimelist.net/anime/{BLEACH_MAL}/x/episode/{n}" '
+        f'  <td class="episode-title fs12">'
+        # Filler episodes carry that label before the link.
+        + ('<span class="fl-r di-ib pr4 icon-episode-type-bg">Filler</span>' if n % 3 == 0 else '')
+        + f'<a href="https://myanimelist.net/anime/{BLEACH_MAL}/x/episode/{n}" '
         f'class="fl-l fw-b ">Title {n} &amp; more</a>\n    <br><span class="di-ib"></span>\n  </td>\n'
         f'  <td class="episode-aired nowrap">Oct 11, 2022</td></tr>'
         for n in numbers
