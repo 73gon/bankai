@@ -3817,18 +3817,44 @@ def _held_path() -> Path:
     return _state_path().with_name("erai_downloads_held.json")
 
 
-def _asked_for_hashes() -> set[str]:
-    """Unfinished releases started by hand rather than by the automation.
+def _asked_for_hashes() -> dict[str, int]:
+    """Unfinished releases started by hand rather than by the automation, with their size.
 
     Both an HEVC upgrade and a replacement picked on Erai-raws record the files
     they will replace, until they are published.
     """
     return {
-        info_hash.casefold()
+        info_hash.casefold(): int(release.get("size_bytes") or 0)
         for info_hash, release in _load_state()["releases"].items()
         if release.get("replace_files") is not None
         and release.get("status") in _ACTIVE_RELEASE_STATES
     }
+
+
+def _hand_downloads_that_fit(
+    candidates: list[Any], sizes: dict[str, int], free_bytes: int | None
+) -> set[str]:
+    """Which of the downloads asked for by hand may run on the space there is.
+
+    If all of them fit above the floor, all run. Otherwise space is tight and
+    they go one at a time: the one furthest along (it is closest to being
+    published, which frees its AVC files), else the smallest -- and only if
+    it fits by itself. The rest wait their turn.
+    """
+    if free_bytes is None:
+        return {t.hash for t in candidates}
+
+    def remaining(t: Any) -> int:
+        size = max(int(getattr(t, "size_bytes", 0) or 0), sizes.get(str(t.hash).casefold(), 0))
+        return int(size * (1.0 - max(0.0, min(1.0, float(t.progress)))))
+
+    budget = free_bytes - int(get_settings().anime.hand_download_min_free_gib * _GIB)
+    if sum(remaining(t) for t in candidates) <= budget:
+        return {t.hash for t in candidates}
+    running = lambda t: not t.state.startswith(("paused", "stopped"))  # noqa: E731
+    order = sorted(candidates, key=lambda t: (not running(t), -float(t.progress), remaining(t)))
+    first = next((t for t in order if remaining(t) <= budget), None)
+    return {first.hash} if first is not None else set()
 
 
 async def hold_downloads(*, hold: bool) -> int:
@@ -3838,10 +3864,13 @@ async def hold_downloads(*, hold: bool) -> int:
     handed to qBittorrent would go on downloading into whatever space is
     freed. So while it is off, every unfinished torrent of bankai's category
     is paused, and which ones is written down; once it is on again, exactly
-    those are resumed -- never one paused by hand. A download asked for by
-    hand -- an HEVC upgrade, a replacement picked on Erai-raws -- is not
-    backlog and goes on: pausing it made the button look broken. Returns how
-    many changed.
+    those are resumed -- never one paused by hand.
+
+    A download asked for by hand -- an HEVC upgrade, a replacement picked on
+    Erai-raws -- is not backlog, on or off. It runs while there is room for
+    it, and on a tight disk they go one at a time (``_hand_downloads_that_fit``):
+    resuming them all at once was 99 GiB onto 55 GiB free. One paused by hand
+    in qBittorrent is left alone. Returns how many changed.
     """
     from bankai.torrent.qbittorrent import QBittorrentClient
 
@@ -3850,40 +3879,54 @@ async def hold_downloads(*, hold: bool) -> int:
         held = set(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError):
         held = set()
-    if not hold and not held:
+    asked = _asked_for_hashes()
+    if not hold and not held and not asked:
         return 0
     qbit = QBittorrentClient()
     try:
         await qbit.login()
+        torrents = await qbit.list_torrents(category=get_settings().qbittorrent.category)
+        unfinished = [
+            t for t in torrents if t.progress < 1.0 and t.state not in {"error", "missingFiles"}
+        ]
+        pause: list[str] = []
+        resume: list[str] = []
         if hold:
-            asked = _asked_for_hashes()
-            torrents = await qbit.list_torrents(category=get_settings().qbittorrent.category)
-            due = [
+            pause = [
                 t.hash
-                for t in torrents
-                if t.progress < 1.0
-                and t.hash not in held
+                for t in unfinished
+                if t.hash not in held
                 and str(t.hash).casefold() not in asked
                 and not t.state.startswith(("paused", "stopped"))
-                and t.state not in {"error", "missingFiles"}
             ]
-            # Paused before they were told apart from the backlog.
-            freed = sorted(h for h in held if h.casefold() in asked)
-            if not due and not freed:
-                return 0
-            if due:
-                await qbit.pause("|".join(due))
-                held.update(due)
-                log.info("Automatic downloads are off: paused %d waiting anime downloads", len(due))
-            if freed:
-                await qbit.resume("|".join(freed))
-                held.difference_update(freed)
-                log.info("Resumed %d downloads asked for by hand", len(freed))
-            changed = len(due) + len(freed)
         else:
-            await qbit.resume("|".join(sorted(held)))
-            log.info("Automatic downloads are on: resumed %d anime downloads", len(held))
-            changed, held = len(held), set()
+            resume = sorted(h for h in held if h.casefold() not in asked)
+        # Asked for by hand: running, or paused by bankai -- not by the user.
+        candidates = [
+            t
+            for t in unfinished
+            if str(t.hash).casefold() in asked
+            and (t.hash in held or not t.state.startswith(("paused", "stopped")))
+        ]
+        if candidates:
+            fits = _hand_downloads_that_fit(candidates, asked, await qbit.free_space_bytes())
+            for t in candidates:
+                paused = t.state.startswith(("paused", "stopped"))
+                if t.hash in fits and paused:
+                    resume.append(t.hash)
+                elif t.hash not in fits and not paused:
+                    pause.append(t.hash)
+        if not pause and not resume:
+            return 0
+        if pause:
+            await qbit.pause("|".join(pause))
+            held.update(pause)
+            log.info("Paused %d anime downloads (automation off, or no room yet)", len(pause))
+        if resume:
+            await qbit.resume("|".join(resume))
+            held.difference_update(resume)
+            log.info("Resumed %d anime downloads", len(resume))
+        changed = len(pause) + len(resume)
     finally:
         await qbit.aclose()
     path.parent.mkdir(parents=True, exist_ok=True)

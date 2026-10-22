@@ -67,6 +67,10 @@ settle_minutes = 30
 # Stop adding automatic downloads once the anime destination has this much
 # free space left. Existing downloads are not interrupted.
 min_free_space_gib = 100
+# Downloads asked for by hand (HEVC upgrades, Erai-raws replacements) run while
+# their remaining bytes leave this much free; on a tighter disk they download
+# one at a time, each published (freeing its old files) before the next starts.
+hand_download_min_free_gib = 10
 # Verified torrents enter qBittorrent immediately; its queue controls download concurrency.
 # Large backlogs reserve their eventual library size above min_free_space_gib.
 max_enqueues_per_cycle = 500

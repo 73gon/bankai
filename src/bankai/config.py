@@ -111,6 +111,10 @@ class AnimeAutomationSettings(BaseModel):
     poll_interval_seconds: int = Field(default=900, ge=60)
     settle_minutes: int = Field(default=30, ge=0)
     min_free_space_gib: float = Field(default=100.0, ge=0)
+    # Downloads asked for by hand (HEVC upgrades, replacements) run while
+    # their remaining bytes leave this much free; on a tighter disk they go
+    # one at a time.
+    hand_download_min_free_gib: float = Field(default=10.0, ge=0)
     max_enqueues_per_cycle: int = Field(default=500, ge=1, le=10000)
     # Downloading is qBittorrent's job and costs bankai nothing, so it is not
     # capped here. Publishing is different: both ends of a transfer live on the
