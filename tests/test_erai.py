@@ -2450,3 +2450,26 @@ def test_a_batch_is_held_with_its_own_reason():
     pack = entry("[Erai-raws] Fairy Tail - 100 Years Quest - S01 [1080p][HEVC][Multiple Subtitle]")
     _, _, reason = asyncio.run(erai._resolve_entry(pack))
     assert reason == erai.BATCH_REASON
+
+
+def test_show_allowed_without_german_publishes_without_the_german_check(monkeypatch, tmp_path):
+    """Downloaded on the user's word, then refused at publish: it seeded for good."""
+    allowed, checked = "d" * 40, "e" * 40
+    releases = {
+        allowed: _release(allowed, status="complete"),
+        checked: _release(checked, status="complete", title="[Erai-raws] Other Show - 01 [1080p][HEVC]"),
+    }
+    for info_hash, release in releases.items():
+        release["args"].append("--require-german-subtitles")
+    key = erai._mapping_key(releases[allowed]["title"])
+    monkeypatch.setattr(
+        erai, "_load_policies", lambda: {key: {"mode": "german_allowed", "source_title": "Test Show"}}
+    )
+    torrents = [_Torrent(h, progress=1.0, state="stalledUP") for h in releases]
+    state, _counts, _qbit, spawned = _run_reconcile(monkeypatch, tmp_path, releases, torrents)
+
+    by_hash = {row["args"][row["args"].index("--info-hash") + 1]: row["args"] for row in spawned}
+    assert "--require-german-subtitles" not in by_hash[allowed]
+    assert "--require-german-subtitles" in by_hash[checked]
+    # The record keeps what discovery wrote; only the job runs without the check.
+    assert "--require-german-subtitles" in state["releases"][allowed]["args"]

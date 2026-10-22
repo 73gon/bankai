@@ -3737,6 +3737,21 @@ def _rebuilt_args(
     ]
 
 
+def _publish_args(release: dict[str, Any], args: list[str]) -> list[str]:
+    """The arguments a publishing job runs with, as the show's policy stands now.
+
+    A show let in without German subtitles was downloaded on that word, but its
+    stored arguments still asked the publish step to verify German -- which
+    rejected every file, so each finished download sat seeding for good. The
+    policy is read at publish time, so a decision made after the download
+    counts too.
+    """
+    policy = _series_policy(str(release.get("title") or ""))
+    if policy and policy.get("mode") == "german_allowed":
+        return [arg for arg in args if arg != "--require-german-subtitles"]
+    return list(args)
+
+
 def _episode_already_published(
     state: dict[str, Any],
     release: dict[str, Any],
@@ -4045,7 +4060,7 @@ async def _reconcile_releases() -> dict[str, int]:
                 job = bgjobs.spawn(
                     kind="show",
                     title=str(release.get("display_title") or release.get("title") or info_hash),
-                    args=list(args),
+                    args=_publish_args(release, args),
                 )
                 release["status"] = "transferring"
                 release["job_id"] = job.id
