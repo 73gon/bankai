@@ -71,3 +71,34 @@ def test_with_nothing_held_and_downloads_on_qbittorrent_is_not_asked(qbit, monke
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", None)
 
     assert asyncio.run(erai.hold_downloads(hold=False)) == 0
+
+
+def _asked_for(monkeypatch, *hashes: str) -> None:
+    """Releases an HEVC upgrade queued: they carry the files they replace."""
+    state = erai._default_state()
+    for info_hash in hashes:
+        state["releases"][info_hash] = {"status": "queued", "replace_files": [["x.mkv", 1, 1]]}
+    monkeypatch.setattr(erai, "_load_state", lambda: state)
+
+
+def test_a_download_asked_for_by_hand_is_not_paused(qbit, monkeypatch) -> None:
+    """The HEVC upgrade button queued downloads that the next pass paused again."""
+    _asked_for(monkeypatch, "stalled")
+
+    assert asyncio.run(erai.hold_downloads(hold=True)) == 1
+
+    assert qbit.paused == ["waiting"]
+
+
+def test_one_paused_before_the_exemption_is_resumed(qbit, monkeypatch) -> None:
+    asyncio.run(erai.hold_downloads(hold=True))
+    _asked_for(monkeypatch, "stalled")
+    qbit.paused = []
+
+    assert asyncio.run(erai.hold_downloads(hold=True)) == 1
+
+    assert qbit.resumed == ["stalled"]
+    # No longer held: turning downloads on resumes only the backlog one.
+    qbit.resumed = []
+    asyncio.run(erai.hold_downloads(hold=False))
+    assert qbit.resumed == ["waiting"]

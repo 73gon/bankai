@@ -3817,6 +3817,20 @@ def _held_path() -> Path:
     return _state_path().with_name("erai_downloads_held.json")
 
 
+def _asked_for_hashes() -> set[str]:
+    """Unfinished releases started by hand rather than by the automation.
+
+    Both an HEVC upgrade and a replacement picked on Erai-raws record the files
+    they will replace, until they are published.
+    """
+    return {
+        info_hash.casefold()
+        for info_hash, release in _load_state()["releases"].items()
+        if release.get("replace_files") is not None
+        and release.get("status") in _ACTIVE_RELEASE_STATES
+    }
+
+
 async def hold_downloads(*, hold: bool) -> int:
     """Keep bankai's unfinished torrents paused while automatic downloads are off.
 
@@ -3824,7 +3838,10 @@ async def hold_downloads(*, hold: bool) -> int:
     handed to qBittorrent would go on downloading into whatever space is
     freed. So while it is off, every unfinished torrent of bankai's category
     is paused, and which ones is written down; once it is on again, exactly
-    those are resumed -- never one paused by hand. Returns how many changed.
+    those are resumed -- never one paused by hand. A download asked for by
+    hand -- an HEVC upgrade, a replacement picked on Erai-raws -- is not
+    backlog and goes on: pausing it made the button look broken. Returns how
+    many changed.
     """
     from bankai.torrent.qbittorrent import QBittorrentClient
 
@@ -3839,21 +3856,30 @@ async def hold_downloads(*, hold: bool) -> int:
     try:
         await qbit.login()
         if hold:
+            asked = _asked_for_hashes()
             torrents = await qbit.list_torrents(category=get_settings().qbittorrent.category)
             due = [
                 t.hash
                 for t in torrents
                 if t.progress < 1.0
                 and t.hash not in held
+                and str(t.hash).casefold() not in asked
                 and not t.state.startswith(("paused", "stopped"))
                 and t.state not in {"error", "missingFiles"}
             ]
-            if not due:
+            # Paused before they were told apart from the backlog.
+            freed = sorted(h for h in held if h.casefold() in asked)
+            if not due and not freed:
                 return 0
-            await qbit.pause("|".join(due))
-            held.update(due)
-            log.info("Automatic downloads are off: paused %d waiting anime downloads", len(due))
-            changed = len(due)
+            if due:
+                await qbit.pause("|".join(due))
+                held.update(due)
+                log.info("Automatic downloads are off: paused %d waiting anime downloads", len(due))
+            if freed:
+                await qbit.resume("|".join(freed))
+                held.difference_update(freed)
+                log.info("Resumed %d downloads asked for by hand", len(freed))
+            changed = len(due) + len(freed)
         else:
             await qbit.resume("|".join(sorted(held)))
             log.info("Automatic downloads are on: resumed %d anime downloads", len(held))
