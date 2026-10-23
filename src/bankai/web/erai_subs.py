@@ -498,25 +498,35 @@ async def _find(session: _Session, release: dict[str, Any], name: str, info_hash
     if not directory:
         return None
     folders, _files = await _listing(session, directory)
-    # An encode's subtitles are in the season's HEVC folder, spelled either way.
-    bases = [f"{directory}/{folder}" for folder in folders if folder.casefold() == "hevc"] if release["hevc"] else [directory]
+    # A long show keeps its episodes in a "TV" folder, beside its movies,
+    # specials and batches (One Piece: "Sub/1999/Fall/One Piece/TV/1164").
+    roots = [directory] + [f"{directory}/{folder}" for folder in folders if folder.casefold() == "tv"]
+    # (folder, whether it is the airing release's folder read for an encode)
+    bases: list[tuple[str, bool]] = []
     if release["hevc"]:
+        # An encode's subtitles are in its HEVC folder, spelled either way.
+        for root in roots:
+            inside = folders if root == directory else (await _listing(session, root))[0]
+            bases += [(f"{root}/{folder}", False) for folder in inside if folder.casefold() == "hevc"]
         # Then the airing release's: a German file uploaded later is often
         # only there (Blue Lock vs U-20 Japan 02 has it in "02", not in
-        # "hevc/02"). The encode is of that same file, so its timing fits;
-        # with a checksum of its own, only the file named by episode and
-        # resolution alone can be taken there, never another encode's.
-        bases.append(directory)
-    for base in bases:
-        if base != directory:
-            folders, _files = await _listing(session, base)
+        # "hevc/02"). The encode is of that same file, so its timing fits.
+        bases += [(root, True) for root in roots]
+    else:
+        bases = [(root, False) for root in roots]
+    for base, airing in bases:
+        inside = folders if base == directory else (await _listing(session, base))[0]
         episode = next(
-            (folder for folder in folders if folder.isdigit() and int(folder) == int(release["episode"])), None
+            (folder for folder in inside if folder.isdigit() and int(folder) == int(release["episode"])), None
         )
         if episode is None:
             continue
         _folders, files = await _listing(session, f"{base}/{episode}")
-        picked = pick_german(files, release, name)
+        # Read for an encode, the airing release's checksum is not the
+        # encode's: the file named by episode and resolution alone, else the
+        # single German file at its resolution -- the release it was made
+        # from (One Piece 1133) -- and none when there are several.
+        picked = pick_german(files, {**release, "crc": None} if airing else release, name)
         if picked:
             return file_url(f"{base}/{episode}", picked)
     return None

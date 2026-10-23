@@ -299,6 +299,8 @@ async def _fetch_roster(tvdb_id: int) -> list:
 # identity and the sweep is bounded per pass.
 _CODEC_CACHE_LOCK = threading.Lock()
 _CODEC_CACHE: dict[str, dict] | None = None
+# The file's (mtime, size) when it was last read or written here.
+_CODEC_CACHE_STAMP: tuple[int, int] | None = None
 _HEVC_NAMES = {"hevc", "h265", "x265"}
 _AVC_NAMES = {"h264", "avc", "x264"}
 _GERMAN_AUDIO = {"ger", "deu", "de", "german", "deutsch"}
@@ -308,14 +310,30 @@ def _codec_cache_path() -> Path:
     return erai._state_path().with_name("anime_codecs.json")
 
 
+def _codec_cache_stamp() -> tuple[int, int] | None:
+    try:
+        stat = _codec_cache_path().stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
 def _load_codec_cache() -> dict[str, dict]:
-    global _CODEC_CACHE
+    """The probe cache, read again whenever another process wrote it.
+
+    Held once for good, the web process never saw what another process noted
+    -- a German subtitle file put beside Blue Lock's episode 02 still read as
+    "without German" -- and its next save wrote the note away again.
+    """
+    global _CODEC_CACHE, _CODEC_CACHE_STAMP
     with _CODEC_CACHE_LOCK:
-        if _CODEC_CACHE is None:
+        stamp = _codec_cache_stamp()
+        if _CODEC_CACHE is None or stamp != _CODEC_CACHE_STAMP:
             try:
                 _CODEC_CACHE = json.loads(_codec_cache_path().read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                _CODEC_CACHE = {}
+                _CODEC_CACHE = _CODEC_CACHE if _CODEC_CACHE is not None else {}
+            _CODEC_CACHE_STAMP = stamp
         return _CODEC_CACHE
 
 
@@ -325,6 +343,8 @@ def _save_codec_cache(cache: dict[str, dict]) -> None:
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(cache), encoding="utf-8")
     tmp.replace(path)
+    global _CODEC_CACHE_STAMP
+    _CODEC_CACHE_STAMP = _codec_cache_stamp()  # our own write needs no reading back
 
 
 def probe_streams(path: Path) -> dict | None:

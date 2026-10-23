@@ -281,3 +281,17 @@ def test_merged_episodes_carry_their_german_subtitles():
     )
     by_episode = {row["episode"]: row["german_subs"] for row in merged["episodes"]}
     assert by_episode == {1: True, 2: False, 3: None}
+
+def test_the_cache_is_read_again_when_another_process_wrote_it(tmp_path):
+    # The web process held it once for good, so a German subtitle another
+    # process noted beside an episode never showed in the library.
+    path = str(tmp_path / "a.mkv")
+    anime_library._save_codec_cache({path: {"codec": "hevc", "subs": ["eng"]}})
+    assert anime_library._load_codec_cache()[path]["subs"] == ["eng"]
+
+    written = '{"%s": {"codec": "hevc", "subs": ["eng", ".de.ass"]}}' % path.replace("\\", "\\\\")
+    (tmp_path / "anime_codecs.json").write_text(written, encoding="utf-8")
+    later = time.time() + 5
+    os.utime(tmp_path / "anime_codecs.json", (later, later))
+
+    assert anime_library._load_codec_cache()[path]["subs"] == ["eng", ".de.ass"]

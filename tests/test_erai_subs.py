@@ -253,12 +253,38 @@ def test_an_encode_without_german_of_its_own_takes_the_airing_releases_file(site
     url = asyncio.run(erai_subs.german_sub_file(hevc_02, "d" * 40))
     assert url == erai_subs.file_url(f"{SEASON}/02", GERMAN_02)
 
-    # There only the file named by episode and resolution: another encode's own is none of it.
+    # Read for an encode, the airing folder is read without the encode's checksum:
+    # the single German file at its resolution is the release it was made from...
     airing = erai_subs.parse_listing(LISTINGS[f"{SEASON}/02"], f"{SEASON}/02")[1]
-    others = [name for name in airing if name != GERMAN_02] + [
-        "[Erai-raws] Blue Lock vs U-20 Japan - 02 [1080p][Multiple Subtitle][56827752].9.ger.ass"
-    ]
-    assert erai_subs.pick_german(others, erai_subs.parse_release(hevc_02), hevc_02) is None
+    own = "[Erai-raws] Blue Lock vs U-20 Japan - 02 [1080p][Multiple Subtitle][56827752].9.ger.ass"
+    others = [name for name in airing if name != GERMAN_02] + [own]
+    unchecked = {**erai_subs.parse_release(hevc_02), "crc": None}
+    assert erai_subs.pick_german(others, unchecked, hevc_02) == own
+    # ...and with several at that resolution, none.
+    several = [*others, own.replace("56827752", "0BADF00D")]
+    assert erai_subs.pick_german(several, unchecked, hevc_02) is None
+
+
+def test_a_long_shows_episodes_are_found_in_its_tv_folder(site):
+    # One Piece: "Sub/1999/Fall/One Piece/TV/1133", the German file only the airing release's.
+    one_piece = "Sub/1999/Fall/One Piece"
+    german = "[Erai-raws] One Piece - 1133 [1080p CR WEB-DL AVC EAC3][MultiSub][810B8AAC].9.ger.ass"
+    LISTINGS[one_piece] = listing(["Batch", "Movies", "TV"], [], one_piece)
+    LISTINGS[f"{one_piece}/TV"] = listing(["1132", "1133"], ["1133.7z"], f"{one_piece}/TV")
+    LISTINGS[f"{one_piece}/TV/1133"] = listing(
+        [],
+        [german, "[Erai-raws] One Piece - 1133 [1080p CR WEB-DL AVC EAC3][MultiSub][810B8AAC].3.eng.ass"],
+        f"{one_piece}/TV/1133",
+    )
+    erai_subs._update(lambda data: data.setdefault("dirs", {}).update(
+        {"one piece": {"dir": one_piece, "page": "x", "checked_at": time.time()}}
+    ))
+    hevc = "[Erai-raws] One Piece - 1133 [1080p CR WEBRip HEVC EAC3][MultiSub][F674A9D2].mkv"
+    try:
+        assert asyncio.run(erai_subs.german_sub_file(hevc, "e" * 40)) == erai_subs.file_url(f"{one_piece}/TV/1133", german)
+    finally:
+        for key in [one_piece, f"{one_piece}/TV", f"{one_piece}/TV/1133"]:
+            LISTINGS.pop(key, None)
 
 
 def test_a_miss_is_asked_again_after_a_day(site):

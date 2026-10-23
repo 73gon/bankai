@@ -564,7 +564,11 @@ async def download_anime(
                 log.warning("[anime] could not lay out the collection: %s", exc)
             outputs = _current_paths(episodes)
 
-        owned_by_bankai = cleanup_torrent or require_german_subtitles or not existed_before
+        # A download published into the library -- picked in its drawer or its
+        # missing-episodes dialog -- is bankai's too, even when its torrent was
+        # already in qBittorrent: two Liar Game episodes, queued again over
+        # their own unfinished torrents, were left seeding after publishing.
+        owned_by_bankai = cleanup_torrent or require_german_subtitles or publish or not existed_before
         if settings.paths.cleanup_after_success and torrent_hash and owned_by_bankai:
             # Autonomous Erai releases are deliberately prefilled, so they
             # already exist when their worker starts. Delete their qBittorrent
