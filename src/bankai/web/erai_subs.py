@@ -631,6 +631,59 @@ def _library_releases(rows: dict[str, list[tuple[int, int]]]) -> dict[tuple[int,
     return out
 
 
+def _feed_releases(wanted: dict[tuple[int, int], bool]) -> dict[tuple[int, int], tuple[str, str]]:
+    """Erai-raws' own release of each episode bankai knows no release for: (name, info hash).
+
+    A file that came in a batch, or whose notes a re-layout left behind, no
+    longer says which release it is -- 33 library episodes without German had
+    nothing to look up by. Erai-raws' feed index lists every release it put
+    out, and any of them of the same episode, encode and resolution names the
+    same German file. ``wanted`` is (AniList id, episode) -> whether the file
+    is HEVC. Episodes are matched by the number in the release's own name, as
+    Erai numbers per AniList entry, settled into a sequel past an entry's end.
+    """
+    from bankai.metadata import anilist
+    from bankai.web import erai
+
+    if not wanted:
+        return {}
+    index = anilist.cached_index()
+    if index is None:
+        return {}
+    mappings = erai._load_mappings()
+    numbers = {episode for _aid, episode in wanted}
+    resolved: dict[str, Any] = {}
+    best: dict[tuple[int, int], tuple[tuple[bool, bool], str, str]] = {}
+    for info_hash, row in (erai_site.load().get("releases") or {}).items():
+        name = str((row or {}).get("name") or "")
+        parsed = parse_release(name)
+        if parsed is None or not parsed["episode"].isdigit():
+            continue
+        identity = erai._erai_identity_name(name)
+        if identity is None:
+            continue
+        show = identity[0]
+        if show not in resolved:
+            saved = mappings.get(erai._mapping_key(name)) or {}
+            # The user's choice for this Erai name first, as the automation reads it.
+            if str(saved.get("anilist_id") or "").isdigit():
+                resolved[show] = index.anime.get(int(saved["anilist_id"]))
+            if resolved.get(show) is None:
+                resolved[show] = anilist.resolve_in(index, show).anime
+        entry = resolved[show]
+        if entry is None:
+            continue
+        settled, number = anilist.settle_in(entry, int(parsed["episode"]))
+        key = (settled.id, number)
+        if key not in wanted or number not in numbers:
+            continue
+        # The file's own encode first, then 1080p.
+        rank = (parsed["hevc"] == wanted[key], parsed["resolution"] == "1080p")
+        if key not in best or rank > best[key][0]:
+            best[key] = (rank, name, str(info_hash).casefold())
+    return {key: (name, info_hash) for key, (_rank, name, info_hash) in best.items()}
+
+
 async def add_library_subtitles(*, episodes: int = 5) -> dict[str, Any]:
     """Give library episodes without German the German file Erai-raws uploaded later.
 
@@ -654,12 +707,26 @@ async def add_library_subtitles(*, episodes: int = 5) -> dict[str, Any]:
     now = time.time()
     root = anime_files.anime_root()
     due: list[tuple[float, str, Path, tuple[str, str | None]]] = []
-    unidentified = 0
+    without: list[tuple[str, list[tuple[int, int]], Path, dict]] = []
     for rel, pairs in rows.items():
         path = root.joinpath(*PurePosixPath(rel).parts)
         probe = probes.get(str(path))
         if not probe or anime_library.has_german_audio(probe) or anime_library.has_german_subtitles(probe) is not False:
             continue
+        without.append((rel, pairs, path, probe))
+    # Episodes bankai kept no release for: Erai-raws' own release of each.
+    unknown = {
+        pairs[0]: probe.get("codec") == "hevc"
+        for _rel, pairs, _path, probe in without
+        if len(pairs) == 1 and pairs[0] not in releases
+    }
+    if unknown:
+        from bankai.metadata import anilist
+
+        await anilist.index()  # the title index the feed's show names are read against
+        releases = {**await asyncio.to_thread(_feed_releases, unknown), **releases}
+    unidentified = 0
+    for rel, pairs, path, _probe in without:
         release = releases.get(pairs[0]) if len(pairs) == 1 else None
         if release is None:
             unidentified += 1

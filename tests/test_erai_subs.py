@@ -326,15 +326,47 @@ def test_the_pass_puts_german_beside_a_library_episode_and_it_counts_as_german(l
     assert len(site.requests) == before
 
 
-def test_the_pass_skips_an_episode_whose_release_is_unknown(library, site):
+def _forget_releases(monkeypatch, *, entry=None):
+    """The automation kept no release for the episode; AniList answers the feed's names with ``entry``."""
+    from types import SimpleNamespace
+
+    from bankai.metadata import anilist
+
     state = erai._load_state()
     state["releases"] = {}
     erai._save_state(state)
+
+    async def no_network():
+        return None
+
+    monkeypatch.setattr(anilist, "index", no_network)
+    index = SimpleNamespace(anime={}) if entry is not None else None
+    monkeypatch.setattr(anilist, "cached_index", lambda: index)
+    monkeypatch.setattr(anilist, "resolve_in", lambda _index, show: SimpleNamespace(anime=entry if "blue lock" in show.casefold() else None))
+    monkeypatch.setattr(anilist, "settle_in", lambda found, episode: (found, episode))
+
+
+def test_the_pass_skips_an_episode_whose_release_is_unknown(library, site, monkeypatch):
+    _forget_releases(monkeypatch)
 
     result = asyncio.run(erai_subs.add_library_subtitles())
 
     assert result["unidentified"] == 1 and result["checked"] == 0
     assert site.requests == []
+
+
+def test_an_episode_without_a_known_release_is_looked_up_by_erai_raws_own_release(library, site, monkeypatch):
+    # A batch or a re-layout left no note of the release; the feed index has
+    # Erai-raws' own release of the same episode, and that names the file.
+    from types import SimpleNamespace
+
+    _forget_releases(monkeypatch, entry=SimpleNamespace(id=500))
+
+    result = asyncio.run(erai_subs.add_library_subtitles(episodes=5))
+
+    assert result == {"checked": 1, "added": 1, "remaining": 0, "unidentified": 0}
+    assert library["video"].with_name("Blue Lock - S02E02.de.ass").exists()
+    assert erai_subs.load()["library"]["Blue Lock/Season 02/Blue Lock - S02E02.mkv"]["release"] == AVC_NAME
 
 
 def test_a_sidecar_already_beside_the_episode_counts_without_asking(library, site):
