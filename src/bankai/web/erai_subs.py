@@ -500,6 +500,13 @@ async def _find(session: _Session, release: dict[str, Any], name: str, info_hash
     folders, _files = await _listing(session, directory)
     # An encode's subtitles are in the season's HEVC folder, spelled either way.
     bases = [f"{directory}/{folder}" for folder in folders if folder.casefold() == "hevc"] if release["hevc"] else [directory]
+    if release["hevc"]:
+        # Then the airing release's: a German file uploaded later is often
+        # only there (Blue Lock vs U-20 Japan 02 has it in "02", not in
+        # "hevc/02"). The encode is of that same file, so its timing fits;
+        # with a checksum of its own, only the file named by episode and
+        # resolution alone can be taken there, never another encode's.
+        bases.append(directory)
     for base in bases:
         if base != directory:
             folders, _files = await _listing(session, base)

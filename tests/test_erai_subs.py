@@ -53,7 +53,13 @@ LISTINGS = {
         f"{SEASON}/02",
     ),
     f"{SEASON}/HEVC": listing(["08"], [], f"{SEASON}/HEVC"),
-    f"{SEASON}/hevc": listing([], [], f"{SEASON}/hevc"),
+    # As on the site: the encode's own folder of episode 02 has no German.
+    f"{SEASON}/hevc": listing(["02"], [], f"{SEASON}/hevc"),
+    f"{SEASON}/hevc/02": listing(
+        [],
+        ["[Erai-raws] Blue Lock vs U-20 Japan - 02 [1080p][HEVC][Multiple Subtitle][CA68FFAE].3.eng.ass"],
+        f"{SEASON}/hevc/02",
+    ),
     f"{SEASON}/HEVC/08": listing(
         [],
         [
@@ -239,6 +245,20 @@ def test_a_refused_login_pauses_and_is_reported_without_the_password(site):
     erai_subs.reset()
     site.password = "hunter2"
     assert asyncio.run(erai_subs.german_sub_file(AVC_NAME, AVC_HASH))
+
+
+def test_an_encode_without_german_of_its_own_takes_the_airing_releases_file(site):
+    # Blue Lock vs U-20 Japan 02: German only in "02", uploaded later, none in "hevc/02".
+    hevc_02 = "[Erai-raws] Blue Lock vs U-20 Japan - 02 [1080p][HEVC][Multiple Subtitle][CA68FFAE].mkv"
+    url = asyncio.run(erai_subs.german_sub_file(hevc_02, "d" * 40))
+    assert url == erai_subs.file_url(f"{SEASON}/02", GERMAN_02)
+
+    # There only the file named by episode and resolution: another encode's own is none of it.
+    airing = erai_subs.parse_listing(LISTINGS[f"{SEASON}/02"], f"{SEASON}/02")[1]
+    others = [name for name in airing if name != GERMAN_02] + [
+        "[Erai-raws] Blue Lock vs U-20 Japan - 02 [1080p][Multiple Subtitle][56827752].9.ger.ass"
+    ]
+    assert erai_subs.pick_german(others, erai_subs.parse_release(hevc_02), hevc_02) is None
 
 
 def test_a_miss_is_asked_again_after_a_day(site):
