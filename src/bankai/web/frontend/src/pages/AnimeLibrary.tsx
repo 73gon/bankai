@@ -22,6 +22,7 @@ import { Skeleton } from '@/zon/ui/skeleton';
 import { Spinner } from '@/zon/ui/spinner';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
+import { Toggle } from '@/zon/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 
 function formatSize(bytes: number) {
@@ -108,6 +109,17 @@ const LIBRARY_FIRST_DIRECTION: Record<LibrarySortKey, SortDir> = {
 type View = 'grid' | 'table';
 
 // The library table's lesser columns, by the table's own width (not the window's).
+/** The day a release came out, from Nyaa's RFC date ("Thu, 05 Sep 2024 12:00:00 -0000"). */
+function publishedDay(value: string | null): string {
+  const day = value ? new Date(value) : null;
+  return day && !Number.isNaN(day.getTime()) ? day.toISOString().slice(0, 10) : '—';
+}
+
+/** A release's encode, as its name gives it. */
+function isHevc(title: string): boolean {
+  return /\b(?:HEVC|x265|H\.?265)\b/i.test(title);
+}
+
 // A drawer is asked for once the pointer has rested this long on its show,
 // and a click takes that answer while it is younger than PREFETCH_MS.
 const PREFETCH_DELAY_MS = 90;
@@ -309,6 +321,13 @@ export default function AnimeLibrary() {
   const [searchTarget, setSearchTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
   const [results, setResults] = useState<AnimeEntry[]>([]);
   const [searching, setSearching] = useState(false);
+  // What the episode search keeps: both on unless switched off, as the automation takes them.
+  const [only1080, setOnly1080] = useState(true);
+  const [onlyHevc, setOnlyHevc] = useState(true);
+  const shownResults = useMemo(
+    () => results.filter((entry) => (!only1080 || entry.quality === '1080p') && (!onlyHevc || isHevc(entry.title))),
+    [results, only1080, onlyHevc],
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [downloading, setDownloading] = useState<string | null>(null);
   // The show to remove, and whether it is blacklisted too.
@@ -901,7 +920,9 @@ export default function AnimeLibrary() {
                     <TableCell className={COLUMN_ENCODE}><CodecMix show={show} /></TableCell>
                     <TableCell numeric className={cn(COLUMN_SIZE, 'text-xs text-foreground')}>{formatSize(show.size)}</TableCell>
                     <TableCell className={COLUMN_STATE}>
-                      <div className='flex flex-wrap items-center gap-1.5'>
+                      {/* One line wherever the table has the room; it only wraps
+                          once the series column would otherwise be squeezed. */}
+                      <div className='flex flex-wrap items-center gap-1.5 @5xl:flex-nowrap @5xl:whitespace-nowrap'>
                         <span className={cn('size-1.5 rounded-full', tone.className)} />
                         <span className='text-xs text-muted-foreground'>{tone.label}</span>
                         <UpgradeTag show={show} />
@@ -1301,18 +1322,56 @@ export default function AnimeLibrary() {
             <Input aria-label='Episode release search' value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className='flex-1' />
             <Button type='submit' disabled={searching}><Search data-icon='inline-start' /> Search</Button>
           </form>
+          <div className='flex flex-wrap items-center gap-2'>
+            <Toggle size='sm' pressed={only1080} onPressedChange={setOnly1080}>1080p</Toggle>
+            <Toggle size='sm' pressed={onlyHevc} onPressedChange={setOnlyHevc}>HEVC</Toggle>
+            {!searching && shownResults.length > 0 && results.length > shownResults.length && (
+              <span className='text-xs text-muted-foreground'>
+                {results.length - shownResults.length} of {results.length} hidden by these filters
+              </span>
+            )}
+          </div>
           <DialogBody>
-            {searching ? <div className='flex h-40 items-center justify-center'><Spinner label='Searching' /></div> : results.length ? <div className='flex flex-col gap-2'>
-              {results.map((entry) => <Card key={entry.info_hash} className='flex-row flex-wrap items-center justify-between gap-3 rounded-button [--card-padding:12px]'>
-                <div className='flex min-w-0 flex-1 flex-col gap-1'><p className='break-words font-mono text-xs'>{entry.title}</p><p className='text-xs text-muted-foreground'>{entry.quality} · {entry.size} · {entry.seeders} seeds · {entry.publisher}</p></div>
-                <Button size='sm' variant='secondary' nativeButton={false} render={<a href={entry.detail_url} target='_blank' rel='noreferrer' />}><ExternalLink data-icon='inline-start' /> Description</Button>
-                <Button size='sm' variant='secondary' disabled={Boolean(downloading)} onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> {downloading === entry.info_hash ? 'Queuing…' : 'Download'}</Button>
-              </Card>)}
-            </div> : (
+            {searching ? <div className='flex h-40 items-center justify-center'><Spinner label='Searching' /></div> : shownResults.length ? (
+              <Table dense>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className='w-full'>Release</TableHead>
+                    <TableHead>Quality</TableHead>
+                    <TableHead>Encode</TableHead>
+                    <TableHead numeric>Size</TableHead>
+                    <TableHead numeric>Seeds</TableHead>
+                    <TableHead>Published</TableHead>
+                    <TableHead />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {shownResults.map((entry) => (
+                    <TableRow key={entry.info_hash}>
+                      <TableCell>
+                        <p className='min-w-64 font-mono text-xs break-words text-foreground'>{entry.title}</p>
+                        {entry.publisher && <p className='text-[0.68rem] text-muted-foreground'>{entry.publisher}</p>}
+                      </TableCell>
+                      <TableCell className='font-mono text-xs whitespace-nowrap'>{entry.quality ?? '—'}</TableCell>
+                      <TableCell>{isHevc(entry.title) ? <StatusTag variant='success'>HEVC</StatusTag> : <StatusTag variant='warning'>AVC</StatusTag>}</TableCell>
+                      <TableCell numeric>{entry.size}</TableCell>
+                      <TableCell numeric>{entry.seeders}</TableCell>
+                      <TableCell className='font-mono text-xs whitespace-nowrap text-muted-foreground'>{publishedDay(entry.published_at)}</TableCell>
+                      <TableCell>
+                        <div className='flex items-center justify-end gap-1.5'>
+                          <Button size='icon-sm' variant='ghost' aria-label={'Description of ' + entry.title} nativeButton={false} render={<a href={entry.detail_url} target='_blank' rel='noreferrer' />}><ExternalLink /></Button>
+                          <Button size='sm' variant='secondary' disabled={Boolean(downloading)} onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> {downloading === entry.info_hash ? 'Queuing…' : 'Download'}</Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
               <Empty>
                 <EmptyMedia><Search /></EmptyMedia>
-                <EmptyTitle>No matching releases found</EmptyTitle>
-                <EmptyDescription>Try another title above, the way Erai-raws names the show.</EmptyDescription>
+                <EmptyTitle>{results.length ? 'Nothing passes these filters' : 'No matching releases found'}</EmptyTitle>
+                <EmptyDescription>{results.length ? 'Switch off 1080p or HEVC above to see the other ' + results.length + ' release' + (results.length === 1 ? '' : 's') + '.' : 'Try another title above, the way Erai-raws names the show.'}</EmptyDescription>
               </Empty>
             )}
           </DialogBody>
