@@ -56,6 +56,8 @@ class FakeQbit:
 def qbit(tmp_path, monkeypatch):
     monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai_automation.json")
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", FakeQbit)
+    # No download jobs running unless a test says so.
+    monkeypatch.setattr("bankai.cli.bgjobs.list_jobs", lambda: [])
     FakeQbit.torrents = [
         _torrent("waiting", "queuedDL"),
         _torrent("stalled", "stalledDL"),
@@ -107,6 +109,19 @@ def _upgrades(qbit, monkeypatch, *rows: tuple[str, str, float, int]) -> None:
 def test_a_download_asked_for_by_hand_is_not_paused(qbit, monkeypatch) -> None:
     """The HEVC upgrade button queued downloads that the next pass paused again."""
     _asked_for(monkeypatch, "stalled")
+
+    assert asyncio.run(erai.hold_downloads(hold=True)) == 1
+
+    assert qbit.paused == ["waiting"]
+
+
+def test_a_download_from_the_library_drawer_is_not_paused(qbit, monkeypatch) -> None:
+    """Started from the drawer, it is a job waiting on its torrent: held as backlog, it sat at 0 B/s."""
+    from types import SimpleNamespace
+
+    job = SimpleNamespace(status="running", args=["anime-download", "--info-hash", "STALLED", "--publish"])
+    done = SimpleNamespace(status="done", args=["anime-download", "--info-hash", "waiting"])
+    monkeypatch.setattr("bankai.cli.bgjobs.list_jobs", lambda: [job, done])
 
     assert asyncio.run(erai.hold_downloads(hold=True)) == 1
 

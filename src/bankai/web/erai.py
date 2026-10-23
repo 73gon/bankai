@@ -4027,14 +4027,27 @@ def _asked_for_hashes() -> dict[str, int]:
     """Unfinished releases started by hand rather than by the automation, with their size.
 
     Both an HEVC upgrade and a replacement picked on Erai-raws record the files
-    they will replace, until they are published.
+    they will replace, until they are published. A download started from the
+    library's drawer -- one episode, or its remaining episodes -- is a job of
+    its own waiting on its torrent: held as backlog while the automation was
+    off, every one of them sat paused at 0 B/s.
     """
-    return {
+    from bankai.cli import bgjobs
+
+    asked = {
         info_hash.casefold(): int(release.get("size_bytes") or 0)
         for info_hash, release in _load_state()["releases"].items()
         if release.get("replace_files") is not None
         and release.get("status") in _ACTIVE_RELEASE_STATES
     }
+    for job in bgjobs.list_jobs():
+        args = list(job.args or [])
+        if job.status != "running" or not args or args[0] != "anime-download":
+            continue
+        info_hash = (bgjobs.argument_value(args, "--info-hash") or "").casefold()
+        if info_hash:
+            asked.setdefault(info_hash, 0)
+    return asked
 
 
 def _hand_downloads_that_fit(
