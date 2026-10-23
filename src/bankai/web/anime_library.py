@@ -914,6 +914,11 @@ async def group_shows(
     # searched for and not found. The library tags each show by it.
     upgrading = erai.upgrading_episodes(state)
     checked = erai.hevc_checked()
+    # Missing episodes a release with German was found for, not queued yet:
+    # "N available". See anime_missing.
+    from bankai.web import anime_missing
+
+    findable = anime_missing.available(state)
 
     def upgrade_counts(episodes: list[dict]) -> dict:
         avc = [
@@ -935,6 +940,12 @@ async def group_shows(
         episodes = rows
         return {
             **upgrade_counts(episodes),
+            "missing_available_count": sum(
+                1 for row in episodes
+                if row.get("missing") and not row.get("tba")
+                and row.get("anilist_id") not in blocked
+                and (row.get("anilist_id"), row.get("anilist_episode")) in findable
+            ),
             "avc_count": sum(
                 1 for row in episodes
                 # A German dub is irreplaceable, so it is not on offer.

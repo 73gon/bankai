@@ -621,6 +621,8 @@ export interface AnimeLibraryShow {
   no_hevc_count?: number;
   /** When that search last ran (seconds since the epoch). */
   hevc_checked_at?: number | null;
+  /** Missing episodes the background search found a release with German subtitles for, not queued yet. */
+  missing_available_count?: number;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
   /** Each tab's AniList entries. */
@@ -649,6 +651,23 @@ export interface AnimeLibraryShow {
   size: number;
   staged_count: number;
   episodes: AnimeLibraryEpisode[];
+}
+
+/** A release the background search found for missing episodes of a show; a batch once. */
+export interface MissingRelease {
+  info_hash: string;
+  title: string;
+  size_bytes: number;
+  seeders: number;
+  quality: string | null;
+  hevc: boolean;
+  batch: boolean;
+  first: number;
+  last: number;
+  anilist_id: number;
+  detail_url: string;
+  /** The show's missing episodes it covers, by the drawer's own tabs and numbers. */
+  episodes: Array<{ anilist_id: number; anilist_episode: number; season: string | null; season_number: number | null; episode: number | null }>;
 }
 
 /** One AniList entry in a collection's relation graph. */
@@ -1272,6 +1291,14 @@ export const api = {
       '/api/anime/library/upgrade-hevc',
       { method: 'POST', body: JSON.stringify({ anilist_ids: anilistIds }) },
     ),
+  /** What the background search found for a show's missing episodes. */
+  missingReleases: (key: string) =>
+    request<{ key: string; items: MissingRelease[] }>('/api/anime/library/missing?' + new URLSearchParams({ key })),
+  /** Queue the picked ones of those releases, straight into the library. */
+  downloadMissingReleases: (key: string, infoHashes: string[]) =>
+    request<{ ok: boolean; queued: number; duplicates: number; episodes: number }>('/api/anime/library/missing/download', {
+      method: 'POST', body: JSON.stringify({ key, info_hashes: infoHashes }),
+    }),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
   storage: () => request<StorageUsage>('/api/storage'),

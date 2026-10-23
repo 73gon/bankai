@@ -2141,6 +2141,76 @@ def create_app() -> Any:
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    async def _missing_releases(key: str) -> tuple[dict, list[dict]]:
+        """A show, and what the background search found for its missing episodes."""
+        from bankai.web import anime_missing
+
+        listing = await _anime_library_payload(show=key)
+        show = next(iter(listing.get("shows") or []), None)
+        if show is None:
+            raise HTTPException(status_code=404, detail="show not found in the library")
+        state = await asyncio.to_thread(erai_mod.state_for_reading)
+        items = await asyncio.to_thread(anime_missing.releases_for, show.get("episodes") or [], state)
+        # A blacklisted entry is never downloaded again, whatever was found for it.
+        blocked = erai_mod._policy_anilist_ids(await asyncio.to_thread(erai_mod._load_policies))
+        return show, [item for item in items if item["anilist_id"] not in blocked]
+
+    @app.get("/api/anime/library/missing")
+    async def anime_library_missing(key: str = Query(..., min_length=1)) -> dict:
+        """The releases found for one show's missing episodes; a batch once, with the episodes it covers."""
+        show, items = await _missing_releases(key)
+        return {"key": show["key"], "items": items}
+
+    @app.post("/api/anime/library/missing/download")
+    async def anime_library_missing_download(req: dict) -> dict:
+        """Queue the picked releases of a show's missing episodes, straight into the library.
+
+        The hashes only pick among what the search found for this show's
+        missing episodes; one it did not find is refused rather than queued.
+        Each goes as the drawer's own download of a missing episode does.
+        """
+        from bankai.metadata import anilist
+        from bankai.web import anime_missing
+
+        key = str(req.get("key") or "").strip()
+        wanted = {str(raw).strip().casefold() for raw in req.get("info_hashes") or [] if str(raw).strip()}
+        if not key or not wanted:
+            raise HTTPException(status_code=422, detail="key and info_hashes are required")
+        _show, items = await _missing_releases(key)
+        by_hash = {item["info_hash"]: item for item in items}
+        unknown = sorted(wanted - set(by_hash))
+        if unknown:
+            raise HTTPException(status_code=404, detail="not a release found for this show: " + unknown[0])
+        queued = duplicates = 0
+        taken: list[tuple[int, int]] = []
+        for item in [by_hash[info_hash] for info_hash in by_hash if info_hash in wanted]:
+            entry = await anilist.anime(int(item["anilist_id"]))
+            if entry is None:
+                raise HTTPException(status_code=422, detail="AniList has no such anime")
+            first, last = int(item["first"]), int(item["last"])
+            span = f"{first:02d}-{last:02d}" if last < erai_mod.SEASON_PACK_LAST else "season pack"
+            job = await _enqueue_anime_download(
+                entry,
+                title=item["title"],
+                torrent_url=item["torrent_url"],
+                detail_url=item["detail_url"],
+                magnet_uri=item["magnet_uri"],
+                info_hash=item["info_hash"],
+                kind="show",
+                # A batch numbers each file by its name.
+                episode=None if item["batch"] else first,
+                publish=True,
+                job_title=f"{entry.name} - {span}" if item["batch"] else None,
+            )
+            # Already queued under that name: on its way all the same.
+            if job.get("status") == "duplicate":
+                duplicates += 1
+            else:
+                queued += 1
+            taken.extend((int(row["anilist_id"]), int(row["anilist_episode"])) for row in item["episodes"])
+        await asyncio.to_thread(anime_missing.mark_queued, taken)
+        return {"ok": True, "queued": queued, "duplicates": duplicates, "episodes": len(taken)}
+
     def _episodes_on_disk() -> Callable[[int], int]:
         """How far each entry's files go, for the graph's counts and the Season 00 blocks."""
         from bankai.web import anime_files
@@ -2630,6 +2700,7 @@ def create_app() -> Any:
         "anime_files.json",
         "anime_collections.json",
         "anime_hevc_checks.json",
+        "anime_missing_checks.json",
         "review.json",
     )
     snaps.add(
@@ -2729,7 +2800,6 @@ def create_app() -> Any:
         entry = await anilist.anime(req.anilist_id)
         if entry is None:
             raise HTTPException(status_code=422, detail="AniList has no such anime")
-        english = entry.name
         episode = req.episode
         if req.kind == "show" and episode is None:
             # The release's own number, as the automation reads it, when it is
@@ -2739,7 +2809,36 @@ def create_app() -> Any:
             )
             if match and match["anilist_id"] == entry.id:
                 episode = match["episode"]
-        if req.kind == "show":
+        return await _enqueue_anime_download(
+            entry,
+            title=title,
+            torrent_url=req.torrent_url.strip(),
+            detail_url=req.detail_url.strip(),
+            magnet_uri=req.magnet_uri.strip(),
+            info_hash=req.info_hash.casefold(),
+            kind=req.kind,
+            episode=episode,
+            publish=req.publish,
+        )
+
+    async def _enqueue_anime_download(
+        entry: Any,
+        *,
+        title: str,
+        torrent_url: str,
+        detail_url: str,
+        magnet_uri: str,
+        info_hash: str,
+        kind: str,
+        episode: int | None,
+        publish: bool,
+        job_title: str | None = None,
+    ) -> dict:
+        """Queue one Nyaa release as this AniList entry: the drawer's download and the dialog's."""
+        from bankai.metadata import anilist
+
+        english = entry.name
+        if kind == "show":
             # Further releases under this name are this entry too.
             await asyncio.to_thread(erai_mod.save_anilist_mapping, title, _anime_choice(entry))
         args = [
@@ -2747,15 +2846,15 @@ def create_app() -> Any:
             "--release-title",
             title,
             "--torrent-url",
-            req.torrent_url.strip(),
+            torrent_url,
             "--detail-url",
-            req.detail_url.strip(),
+            detail_url,
             "--magnet-uri",
-            req.magnet_uri.strip(),
+            magnet_uri,
             "--info-hash",
-            req.info_hash.casefold(),
+            info_hash,
             "--kind",
-            req.kind,
+            kind,
             "--anilist-id",
             str(entry.id),
             "--anilist-title",
@@ -2764,16 +2863,16 @@ def create_app() -> Any:
             english,
         ]
         year = anilist.year(entry.id)
-        if req.kind == "movie" and year:
+        if kind == "movie" and year:
             args.extend(["--year", str(year)])
         if episode is not None:
             args.extend(["--episode", str(episode)])
-        if req.publish and req.kind == "show":
+        if publish and kind == "show":
             args.append("--publish")
         return await asyncio.to_thread(
             webjobs.enqueue,
-            kind=req.kind,
-            title=f"{english} - {episode:02d}" if episode is not None else english,
+            kind=kind,
+            title=job_title or (f"{english} - {episode:02d}" if episode is not None else english),
             args=args,
         )
 

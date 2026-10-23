@@ -451,6 +451,10 @@ _JELLYFIN_SECONDS = 60.0
 # handful of Nyaa searches.
 _HEVC_CHECK_SECONDS = 600.0
 _HEVC_CHECK_ENTRIES = 3
+# The same for the library's missing episodes (see anime_missing): releases
+# with German looked for, a few AniList entries a pass, none downloaded.
+_MISSING_CHECK_SECONDS = 600.0
+_MISSING_CHECK_ENTRIES = 3
 # How often the held library tree is checked against the disk: the delay
 # before a newly published episode shows in the libraries.
 _LIBRARY_WALK_SECONDS = 60.0
@@ -473,6 +477,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "thumb_sweep": ("Episode pictures from mid-episode", _THUMB_SWEEP_SECONDS),
     "jellyfin_refresh": ("Tell Jellyfin what changed", _JELLYFIN_SECONDS),
     "hevc_check": ("Look for HEVC upgrades", _HEVC_CHECK_SECONDS),
+    "missing_check": ("Look for missing episodes", _MISSING_CHECK_SECONDS),
     "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
@@ -572,6 +577,11 @@ def _pass_summary(name: str, result: object) -> str | None:
             f"{_plural(number('checked'), 'entry', 'entries')} checked, "
             f"{_plural(number('upgrades_found'), 'upgrade')} found, {number('remaining')} to go"
         )
+    if name == "missing_check":
+        return (
+            f"{_plural(number('checked'), 'entry', 'entries')} checked, "
+            f"{_plural(number('episodes_found'), 'episode')} found, {number('remaining')} to go"
+        )
     if name == "jellyfin_refresh":
         if number("failed"):
             from bankai.web import jellyfin
@@ -596,6 +606,10 @@ def _pass_progress(name: str) -> dict | None:
         from bankai.web import erai as erai_mod
 
         return dict(erai_mod.hevc_progress) or None
+    if name == "missing_check":
+        from bankai.web import anime_missing
+
+        return dict(anime_missing.progress) or None
     return None
 
 
@@ -667,6 +681,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_thumb_pass = 0.0
     next_jellyfin_pass = 0.0
     next_hevc_check = 0.0
+    next_missing_check = time.monotonic() + 60.0
+    missing_task: asyncio.Future | None = None
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
     next_archive_pass = 0.0
@@ -677,6 +693,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     _pass_due("library_walk", next_walk_pass)
     _pass_due("anime_metadata", next_metadata_pass)
     _pass_due("erai_site", next_erai_pass)
+    _pass_due("missing_check", next_missing_check)
     while True:
         # Off to the side: AniList is asked a few times a pass, and laying
         # out a collection is renames over 9p.
@@ -818,6 +835,19 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("HEVC upgrade check failed: %s", exc)
+        # Off to the side: its Nyaa searches are spaced seconds apart, minutes
+        # for a long show, and dispatching queued work must not wait for them.
+        if time.monotonic() >= next_missing_check and (missing_task is None or missing_task.done()):
+            next_missing_check = time.monotonic() + _MISSING_CHECK_SECONDS
+            _pass_due("missing_check", next_missing_check)
+            if missing_task is not None and missing_task.exception() is not None:
+                log.warning("Missing-episode check failed: %r", missing_task.exception())
+            from bankai.web import anime_missing
+
+            missing_task = asyncio.ensure_future(
+                anime_missing.check_missing_episodes(entries=_MISSING_CHECK_ENTRIES)
+            )
+            _pass_task("missing_check", missing_task)
         await asyncio.sleep(poll_seconds)
 
 

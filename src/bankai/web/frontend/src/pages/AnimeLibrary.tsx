@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
 import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
-import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry } from '@/lib/api';
+import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type MissingRelease } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
@@ -222,6 +222,33 @@ function UpgradeTag({ show }: { show: AnimeLibraryShow }) {
   );
 }
 
+/** Whole numbers as runs: [5, 6, 7, 10] -> "5–7, 10". */
+function numberRuns(numbers: number[]): string {
+  const sorted = [...new Set(numbers)].sort((a, b) => a - b);
+  const runs: string[] = [];
+  let start = sorted[0];
+  let previous = start;
+  for (const value of [...sorted.slice(1), Number.NaN]) {
+    if (value === previous + 1) {
+      previous = value;
+      continue;
+    }
+    runs.push(start === previous ? String(start) : start + '–' + previous);
+    start = previous = value;
+  }
+  return sorted.length ? runs.join(', ') : '';
+}
+
+/** The missing episodes a found release covers, a line per tab of the drawer: [tab, "5–7, 10"]. */
+function coveredEpisodes(release: MissingRelease): Array<[string, string]> {
+  const byTab = new Map<string, number[]>();
+  for (const row of release.episodes) {
+    const tab = row.season ?? 'Episodes';
+    byTab.set(tab, [...(byTab.get(tab) ?? []), row.episode ?? row.anilist_episode]);
+  }
+  return [...byTab].map(([tab, numbers]) => [tab, numberRuns(numbers)]);
+}
+
 /** A card of files no AniList entry is known for: offered "Match on AniList". */
 function isUnmatched(show: AnimeLibraryShow) {
   return show.unmatched ?? !show.anilist_id;
@@ -347,6 +374,12 @@ export default function AnimeLibrary() {
   const [graphFor, setGraphFor] = useState<GraphTarget>(null);
   // Shows being removed in the background: kept off the page until done.
   const removing = useRef<Set<string>>(new Set());
+  // "Download N remaining episodes": the show, what the background search found
+  // for it, and the releases ticked (all of them to begin with).
+  const [missingFor, setMissingFor] = useState<AnimeLibraryShow | null>(null);
+  const [missingReleases, setMissingReleases] = useState<MissingRelease[] | null>(null);
+  const [missingPicked, setMissingPicked] = useState<Set<string>>(new Set());
+  const [missingQueuing, setMissingQueuing] = useState(false);
 
   useEffect(() => {
     try {
@@ -741,6 +774,44 @@ export default function AnimeLibrary() {
     }
   }
 
+  async function openMissing(show: AnimeLibraryShow) {
+    setMissingFor(show);
+    setMissingReleases(null);
+    setMissingPicked(new Set());
+    try {
+      const result = await api.missingReleases(show.key);
+      setMissingReleases(result.items);
+      setMissingPicked(new Set(result.items.map((item) => item.info_hash)));
+    } catch (error: any) {
+      toast.error(error.message);
+      setMissingFor(null);
+    }
+  }
+
+  /** Only now is anything downloaded: the ticked releases, straight into the library. */
+  async function downloadMissingReleases() {
+    const show = missingFor;
+    if (!show || !missingReleases) return;
+    const hashes = missingReleases.map((item) => item.info_hash).filter((hash) => missingPicked.has(hash));
+    if (!hashes.length) return;
+    setMissingQueuing(true);
+    try {
+      const result = await api.downloadMissingReleases(show.key, hashes);
+      toast.success(
+        'Queued ' + result.queued + ' download' + (result.queued === 1 ? '' : 's')
+        + ' for ' + result.episodes + ' episode' + (result.episodes === 1 ? '' : 's')
+        + (result.duplicates ? ' · ' + result.duplicates + ' already queued' : ''),
+      );
+      setMissingFor(null);
+      await openShow(show.key);
+      void load();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setMissingQueuing(false);
+    }
+  }
+
   useEffect(() => { void load(); }, []);
   const visible = useMemo(() => {
     const matched = shows.filter((show) =>
@@ -926,6 +997,7 @@ export default function AnimeLibrary() {
                         <span className={cn('size-1.5 rounded-full', tone.className)} />
                         <span className='text-xs text-muted-foreground'>{tone.label}</span>
                         <UpgradeTag show={show} />
+                        {(show.missing_available_count ?? 0) > 0 && <StatusTag variant='info' title='Missing episodes with a German-subtitled release found. Open the show and choose Download remaining episodes.'>{show.missing_available_count} available</StatusTag>}
                         {(show.no_german_count ?? 0) > 0 && <StatusTag variant='warning' title='Episodes on disk with neither German subtitles nor a German dub'>{show.no_german_count} without German</StatusTag>}
                         {show.staged_count > 0 && <StatusTag variant='warning'>{show.staged_count} staged</StatusTag>}
                         {show.blacklisted && <StatusTag variant='destructive'>Blacklisted</StatusTag>}
@@ -1054,6 +1126,18 @@ export default function AnimeLibrary() {
                         >
                           <FileVideo data-icon='inline-start' />
                           {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.upgrade_available_count} to HEVC`}
+                        </Button>
+                      )}
+                      {/* Likewise only once found; it opens the list, it downloads nothing. */}
+                      {(active.missing_available_count ?? 0) > 0 && (
+                        <Button
+                          size='sm'
+                          variant='secondary'
+                          onClick={() => void openMissing(active)}
+                          title='Releases with German subtitles were found for missing episodes: choose which to download'
+                        >
+                          <Download data-icon='inline-start' />
+                          Download {active.missing_available_count} remaining episode{active.missing_available_count === 1 ? '' : 's'}
                         </Button>
                       )}
                       {/* Straight on the header, not in a menu: a dialog opened from a
@@ -1375,6 +1459,92 @@ export default function AnimeLibrary() {
               </Empty>
             )}
           </DialogBody>
+        </DialogContent>
+      </Dialog>
+      {/* What the background search found for the open show's missing episodes;
+          nothing is downloaded until "Download N" is clicked. */}
+      <Dialog open={Boolean(missingFor)} onOpenChange={(open) => { if (!open && !missingQueuing) setMissingFor(null); }}>
+        <DialogContent size='xl' className='max-h-[90dvh]'>
+          <DialogHeader>
+            <DialogTitle>Download remaining episodes of {missingFor?.title}</DialogTitle>
+            <DialogDescription>
+              Releases with German subtitles found for episodes that have aired and are not on disk. Each is checked to be
+              this show&apos;s AniList episode; a batch is one download for every episode it covers. They go straight into the library.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            {missingReleases === null ? <div className='flex h-40 items-center justify-center'><Spinner label='Loading the releases' /></div> : missingReleases.length ? (
+              <Table dense>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className='w-7 pr-2'>
+                      <Checkbox
+                        nativeButton
+                        render={<button type='button' />}
+                        className='align-middle'
+                        aria-label='Select every release'
+                        checked={missingPicked.size === missingReleases.length}
+                        indeterminate={missingPicked.size > 0 && missingPicked.size < missingReleases.length}
+                        onCheckedChange={(on) => setMissingPicked(new Set(on ? missingReleases.map((item) => item.info_hash) : []))}
+                      />
+                    </TableHead>
+                    <TableHead className='w-full'>Release</TableHead>
+                    <TableHead>Episodes</TableHead>
+                    <TableHead>Quality</TableHead>
+                    <TableHead>Encode</TableHead>
+                    <TableHead numeric>Size</TableHead>
+                    <TableHead numeric>Seeds</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {missingReleases.map((item) => (
+                    <TableRow key={item.info_hash} data-selected={missingPicked.has(item.info_hash) ? '' : undefined}>
+                      <TableCell className='w-7 pr-2'>
+                        <Checkbox
+                          nativeButton
+                          render={<button type='button' />}
+                          className='align-middle'
+                          aria-label={'Download ' + item.title}
+                          checked={missingPicked.has(item.info_hash)}
+                          onCheckedChange={(on) => setMissingPicked((current) => {
+                            const next = new Set(current);
+                            if (on) next.add(item.info_hash);
+                            else next.delete(item.info_hash);
+                            return next;
+                          })}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <a href={item.detail_url} target='_blank' rel='noreferrer' className='block min-w-64 font-mono text-xs break-words text-foreground underline-offset-4 hover:underline' title='Its page on Nyaa'>{item.title}</a>
+                      </TableCell>
+                      <TableCell className='text-xs whitespace-nowrap'>
+                        {coveredEpisodes(item).map(([tab, numbers]) => (
+                          <p key={tab}><span className='text-muted-foreground'>{tab}</span> <span className='font-mono tabular-nums text-foreground'>{numbers}</span></p>
+                        ))}
+                        {item.batch && <p className='text-[0.68rem] text-muted-foreground'>Batch</p>}
+                      </TableCell>
+                      <TableCell className='font-mono text-xs whitespace-nowrap'>{item.quality ?? '—'}</TableCell>
+                      <TableCell>{item.hevc ? <StatusTag variant='success'>HEVC</StatusTag> : <StatusTag variant='warning'>AVC</StatusTag>}</TableCell>
+                      <TableCell numeric className='text-xs whitespace-nowrap'>{item.size_bytes ? formatSize(item.size_bytes) : '—'}</TableCell>
+                      <TableCell numeric className='text-xs'>{item.seeders}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <Empty>
+                <EmptyMedia><Download /></EmptyMedia>
+                <EmptyTitle>Nothing left to download</EmptyTitle>
+                <EmptyDescription>The episodes found are already on their way or in the library.</EmptyDescription>
+              </Empty>
+            )}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setMissingFor(null)} disabled={missingQueuing}>Cancel</Button>
+            <Button onClick={() => void downloadMissingReleases()} disabled={missingQueuing || missingPicked.size === 0}>
+              <Download data-icon='inline-start' /> {missingQueuing ? 'Queuing…' : 'Download ' + missingPicked.size}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog open={assignFor !== null} onOpenChange={(open) => { if (!open && !assigning) setAssignFor(null); }}>
