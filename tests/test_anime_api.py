@@ -282,6 +282,41 @@ def test_library_groups_episodes_into_one_show_with_sorted_seasons(
     ]
 
 
+def test_a_drawer_comes_ready_from_the_grids_build(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bankai.web import anime_library
+
+    for season, episode in [(1, 1), (1, 2), (2, 1)]:
+        path = tmp_path / "shows_anime" / "Example Anime" / f"Season {season:02d}" / f"Example - S{season:02d}E{episode:02d}.mkv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    client.get("/api/anime/library", params={"rescan": True})
+    grid = client.get("/api/anime/library").json()
+    assert grid["shows"][0]["episodes"] == []
+
+    calls: list[str | None] = []
+    real = anime_library.group_shows
+
+    async def counted(*args, **kwargs):
+        calls.append(kwargs.get("only_key"))
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(anime_library, "group_shows", counted)
+    ready = client.get("/api/anime/library", params={"show": "example anime"})
+    assert calls == []  # a lookup, nothing worked out
+    assert ready.headers.get("etag")
+    # The same answer the drawer is given when it is worked out on the spot.
+    live = client.get("/api/anime/library", params={"show": "Example Anime", "rescan": True}).json()
+    assert calls == ["Example Anime"]
+    assert ready.json() == live
+    assert [(row["season_number"], row["episode"]) for row in ready.json()["shows"][0]["episodes"]] == [
+        (1, 1),
+        (1, 2),
+        (2, 1),
+    ]
+
+
 def test_deleting_an_episode_takes_its_subtitles_and_nothing_else(
     client: TestClient, tmp_path: Path
 ) -> None:

@@ -108,6 +108,11 @@ const LIBRARY_FIRST_DIRECTION: Record<LibrarySortKey, SortDir> = {
 type View = 'grid' | 'table';
 
 // The library table's lesser columns, by the table's own width (not the window's).
+// A drawer is asked for once the pointer has rested this long on its show,
+// and a click takes that answer while it is younger than PREFETCH_MS.
+const PREFETCH_DELAY_MS = 90;
+const PREFETCH_MS = 15_000;
+
 const COLUMN_SEASONS = 'hidden @5xl:table-cell';
 const COLUMN_ENCODE = 'hidden @3xl:table-cell';
 const COLUMN_SIZE = 'hidden @xl:table-cell';
@@ -420,7 +425,34 @@ export default function AnimeLibrary() {
     }
   }
 
-  async function openShow(key: string) {
+  // A show the pointer rests on has its drawer asked for then, so a click finds
+  // it in or on its way. Only a click takes it, and only while it is young:
+  // after a change the drawer is always asked for afresh.
+  const prefetched = useRef(new Map<string, { at: number; answer: Promise<AnimeLibraryShow | null> }>());
+  const prefetchTimer = useRef<number | undefined>(undefined);
+
+  function prefetchShow(key: string) {
+    window.clearTimeout(prefetchTimer.current);
+    prefetchTimer.current = window.setTimeout(() => {
+      const held = prefetched.current.get(key);
+      if (held && Date.now() - held.at < PREFETCH_MS) return;
+      const answer = api.animeLibraryShow(key).then((result) => result.shows[0] ?? null);
+      answer.catch(() => prefetched.current.delete(key));
+      prefetched.current.set(key, { at: Date.now(), answer });
+    }, PREFETCH_DELAY_MS);
+  }
+
+  function stopPrefetch() {
+    window.clearTimeout(prefetchTimer.current);
+  }
+
+  function takePrefetched(key: string): Promise<AnimeLibraryShow | null> | null {
+    const held = prefetched.current.get(key);
+    prefetched.current.delete(key);
+    return held && Date.now() - held.at < PREFETCH_MS ? held.answer : null;
+  }
+
+  async function openShow(key: string, clicked = false) {
     // Another show: the one open goes at once, so it neither lingers nor moves while the next loads.
     if (selectedShow?.key !== key) {
       setSelectedShow(null);
@@ -430,8 +462,8 @@ export default function AnimeLibrary() {
     setSelected(key);
     setDetailLoading(true);
     try {
-      const result = await api.animeLibraryShow(key);
-      setSelectedShow(result.shows[0] ?? null);
+      const ready = clicked ? takePrefetched(key) : null;
+      setSelectedShow(ready ? await ready : (await api.animeLibraryShow(key)).shows[0] ?? null);
     } catch (error: any) {
       toast.error(error.message);
       setSelectedShow(null);
@@ -797,7 +829,7 @@ export default function AnimeLibrary() {
           {visible.map((show) => {
             const tone = COMPLETION[show.completion_state] ?? COMPLETION.unknown;
             return (
-              <button key={show.key} type='button' onClick={() => void openShow(show.key)} aria-label={'View ' + show.title} className='block w-full cursor-pointer rounded-card text-left focus-ring'>
+              <button key={show.key} type='button' onClick={() => void openShow(show.key, true)} onPointerEnter={() => prefetchShow(show.key)} onPointerLeave={stopPrefetch} onFocus={() => prefetchShow(show.key)} aria-label={'View ' + show.title} className='block w-full cursor-pointer rounded-card text-left focus-ring'>
                 <Card className='poster-card h-full gap-0 overflow-hidden [--card-padding:0]'>
                   <div className='relative block w-full'>
                     <AnimePoster url={show.poster_url} title={show.title} />
@@ -848,8 +880,11 @@ export default function AnimeLibrary() {
                   <TableRow
                     key={show.key}
                     tabIndex={0}
-                    onClick={() => void openShow(show.key)}
-                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openShow(show.key); } }}
+                    onClick={() => void openShow(show.key, true)}
+                    onPointerEnter={() => prefetchShow(show.key)}
+                    onPointerLeave={stopPrefetch}
+                    onFocus={() => prefetchShow(show.key)}
+                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openShow(show.key, true); } }}
                     className='data-row cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-control-focus'
                   >
                     <TableCell className='max-w-0'>

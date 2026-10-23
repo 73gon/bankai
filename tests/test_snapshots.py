@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+from pathlib import PurePosixPath
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -181,3 +182,28 @@ def test_gzip_bodies_decode_to_the_original():
     encoded = snapshots._encode({"items": list(range(500))})
     assert encoded[0] == body.replace(b" ", b"")
     assert gzip.decompress(encoded[1]) == encoded[0]
+
+
+def test_peek_says_whether_the_answer_is_current_without_waiting():
+    async def run() -> None:
+        build = _Counter()
+        snap = snapshots.Snapshot("t", build, max_age=60)
+        # Nothing yet: not current, and a build is started rather than awaited.
+        assert snap.peek() is False
+        await snap._task
+        assert snap.peek() is True
+        # A change through the API: not current until the new answer is in.
+        snap.invalidate()
+        assert snap.peek() is False
+        await snap._task
+        assert snap.peek() is True and build.calls == 2
+
+    asyncio.run(run())
+
+
+def test_plain_encoding_matches_the_full_encoder_for_plain_values():
+    value = {"shows": [{"key": "A", "folders": ["A"], "episodes": [{"n": 1, "path": "/x"}]}]}
+    assert snapshots.encode_plain(value) == snapshots._encode(value)
+    # The odd set or path still encodes.
+    body = snapshots.encode_plain({"folders": {"b", "a"}, "root": PurePosixPath("/r")})[0]
+    assert json.loads(body) == {"folders": ["a", "b"], "root": "/r"}

@@ -45,9 +45,27 @@ _GZIP_MIN_BYTES = 1024
 def _encode(value: Any) -> tuple[bytes, bytes | None, str]:
     from fastapi.encoders import jsonable_encoder
 
-    body = json.dumps(
-        jsonable_encoder(value), ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
+    return _encoded(json.dumps(jsonable_encoder(value), ensure_ascii=False, separators=(",", ":")))
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=str)
+    return str(value)  # a Path, say
+
+
+def encode_plain(value: Any) -> tuple[bytes, bytes | None, str]:
+    """``_encode`` for a value already made of JSON's own types, near enough.
+
+    FastAPI's encoder walks every value to convert it, which is most of the
+    time it takes to encode thousands of episode rows; ``json`` does the same
+    rows in a fraction of it, turning the odd set or path into a list or text.
+    """
+    return _encoded(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=_plain))
+
+
+def _encoded(text: str) -> tuple[bytes, bytes | None, str]:
+    body = text.encode("utf-8")
     gzipped = (
         gzip.compress(body, compresslevel=5, mtime=0) if len(body) >= _GZIP_MIN_BYTES else None
     )
@@ -108,6 +126,19 @@ class Snapshot:
         if age >= self.max_age:
             return True
         return age >= self.min_interval and self._signature() != self.signature
+
+    def peek(self) -> bool:
+        """Whether the answer held reflects every change made through the API, without waiting.
+
+        For what is made alongside the answer (each anime drawer, beside the
+        grid): served while this holds, worked out on the spot when not. Counts
+        as being looked at, and starts the rebuild a stale answer is due.
+        """
+        self.asked_at = time.monotonic()
+        current = self.value is not None and self._built >= self._wanted
+        if self.stale():
+            self._start()
+        return current
 
     def invalidate(self) -> None:
         """Make the next request wait for an answer built after this moment."""
@@ -235,18 +266,24 @@ def file_stamps(paths: Callable[[], Iterable[str | Path]]) -> Callable[[], tuple
 
 def response(snapshot: Snapshot, request: Any) -> Any:
     """The snapshot as an HTTP response: 304 when the page has it, gzip when it can."""
+    return encoded_response((snapshot.body, snapshot.gzipped, snapshot.etag), request)
+
+
+def encoded_response(encoded: tuple[bytes | None, bytes | None, str], request: Any) -> Any:
+    """An answer encoded ahead (``encode_plain``) as an HTTP response, as ``response`` does."""
     from fastapi.responses import Response
 
-    headers = {"ETag": snapshot.etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
-    if snapshot.etag and request.headers.get("if-none-match") == snapshot.etag:
+    body, gzipped, etag = encoded
+    headers = {"ETag": etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+    if etag and request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
-    if snapshot.gzipped is not None and "gzip" in request.headers.get("accept-encoding", ""):
+    if gzipped is not None and "gzip" in request.headers.get("accept-encoding", ""):
         return Response(
-            snapshot.gzipped,
+            gzipped,
             media_type="application/json",
             headers={**headers, "Content-Encoding": "gzip"},
         )
-    return Response(snapshot.body or b"null", media_type="application/json", headers=headers)
+    return Response(body or b"null", media_type="application/json", headers=headers)
 
 
 # -- invalidation ----------------------------------------------------------

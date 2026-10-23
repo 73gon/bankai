@@ -8,6 +8,7 @@ the prebuilt React frontend from :data:`STATIC_DIR`.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import math
@@ -2505,10 +2506,18 @@ def create_app() -> Any:
         include_entries: bool = False,
         rescan: bool = False,
     ):
-        # The grid everyone opens is the ready answer; one show's drawer, the
-        # raw entries and a Rescan are worked out on the spot.
+        # The grid everyone opens is the ready answer, and so is each show's
+        # drawer, made with it. The raw entries and a Rescan are worked out on
+        # the spot, and so is a drawer while the grid waits on a change made
+        # through the page, so that change shows in it at once.
         if show is None and not include_entries and not rescan:
             return snapshots_mod.response(await snaps["anime_library"].get(), request)
+        if show is not None and not include_entries and not rescan:
+            from bankai.web.anime_library import _name
+
+            drawer = _drawers["by_name"].get(_name(show)) if snaps["anime_library"].peek() else None
+            if drawer is not None:
+                return snapshots_mod.encoded_response(drawer, request)
         result = await _anime_library_payload(
             show=show, include_entries=include_entries, rescan=rescan
         )
@@ -2516,8 +2525,16 @@ def create_app() -> Any:
             snaps["anime_library"].invalidate()
         return result
 
+    # Each show's drawer from the last build of the grid, encoded, by its name
+    # (``anime_library._name`` of its key). Replaced whole by each build.
+    _drawers: dict[str, dict[str, tuple[bytes, bytes | None, str]]] = {"by_name": {}}
+
     async def _anime_library_payload(
-        *, show: str | None = None, include_entries: bool = False, rescan: bool = False
+        *,
+        show: str | None = None,
+        include_entries: bool = False,
+        rescan: bool = False,
+        drawers: bool = False,
     ) -> dict:
         def scan() -> tuple[Path, list[dict]]:
             root = Path(get_settings().transfer.anime_shows_dir)
@@ -2564,7 +2581,7 @@ def create_app() -> Any:
         shows = await group_shows(
             entries,
             root,
-            include_episodes=show is not None,
+            include_episodes=show is not None or drawers,
             only_key=show,
         )
         erai_mod.mark_blacklisted_shows(shows)
@@ -2575,6 +2592,21 @@ def create_app() -> Any:
             for row in shows
             if not row.get("blacklisted") or row.get("downloaded_count") or row.get("staged_count")
         ]
+        if drawers:
+            # Every episode is worked out for the grid anyway, so each drawer
+            # costs only its encoding here, and opening one becomes a lookup.
+            from bankai.web.anime_library import _name
+
+            def encode() -> dict[str, tuple[bytes, bytes | None, str]]:
+                return {
+                    _name(row["key"]): snapshots_mod.encode_plain(
+                        {"root": str(root), "entries": [], "shows": [row]}
+                    )
+                    for row in shows
+                }
+
+            _drawers["by_name"] = await asyncio.to_thread(encode)
+            shows = [{**row, "episodes": []} for row in shows]
         # One show can span several folders, so its entries are the ones
         # belonging to any folder behind the card rather than to its name.
         folders = {name for row in shows for name in row.get("folders", [])}
@@ -2602,7 +2634,7 @@ def create_app() -> Any:
     )
     snaps.add(
         "anime_library",
-        _anime_library_payload,
+        functools.partial(_anime_library_payload, drawers=True),
         inputs=_anime_library_inputs,
         tags={"anime"},
         # The worker rewrites the release state every few seconds while it
