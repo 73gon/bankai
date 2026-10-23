@@ -7,6 +7,7 @@ Also the TVDB metadata cache and episode lists of the Movies & Shows library
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import os
 import re
@@ -405,10 +406,53 @@ def has_german_audio(entry: dict | None) -> bool:
 
 
 def has_german_subtitles(entry: dict | None) -> bool | None:
-    """Does this file carry German subtitles? None until it is probed for them."""
+    """Does this file carry German subtitles? None until it is probed for them.
+
+    A German subtitle file beside the video counts too: the probe notes its
+    qualifier (".de.ass") among the subtitle languages.
+    """
     if not entry or entry.get("subs") is None:
         return None
     return _names_german(entry["subs"])
+
+
+_SIDECAR_SUFFIXES = {".ass", ".ssa", ".srt", ".sub", ".vtt"}
+
+
+def german_sidecar(path: Path) -> str | None:
+    """The qualifier of a German subtitle file beside this video (".de.ass"), if there is one.
+
+    Whole-word language tokens of the qualifier only, as for tracks.
+    """
+    try:
+        for sidecar in path.parent.glob(f"{glob.escape(path.stem)}.*"):
+            if sidecar.suffix.casefold() not in _SIDECAR_SUFFIXES:
+                continue
+            qualifier = sidecar.name[len(path.stem):]
+            if _names_german([qualifier]):
+                return qualifier
+    except OSError:
+        return None
+    return None
+
+
+def note_german_sidecar(path: Path, qualifier: str) -> bool:
+    """Count a German subtitle file written beside an already probed video; False if not probed.
+
+    The video is not probed again -- it did not change -- so its cached
+    subtitle languages take the sidecar's qualifier.
+    """
+    cache = dict(_load_codec_cache())
+    entry = cache.get(str(path))
+    if not entry or entry.get("subs") is None:
+        return False
+    if qualifier not in entry["subs"]:
+        cache[str(path)] = {**entry, "subs": [*entry["subs"], qualifier]}
+        with _CODEC_CACHE_LOCK:
+            global _CODEC_CACHE
+            _CODEC_CACHE = cache
+        _save_codec_cache(cache)
+    return True
 
 
 def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
@@ -446,13 +490,16 @@ def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
             remaining += 1
             continue
         streams = probe_streams(path) or {}
+        subs = streams.get("subs") if streams else None
+        if subs is not None and (sidecar := german_sidecar(path)):
+            subs = [*subs, sidecar]
         cache[key] = {
             "size": identity[0],
             "mtime": identity[1],
             "codec": streams.get("codec"),
             "audio": streams.get("audio") or [],
             # None when the probe failed: unknown, never "no German".
-            "subs": streams.get("subs") if streams else None,
+            "subs": subs,
         }
         probed += 1
     if probed:

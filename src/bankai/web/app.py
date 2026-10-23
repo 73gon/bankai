@@ -713,6 +713,8 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.backfill_enabled",
     "anime.backfill_request_delay_seconds",
     "anime.erai_feed_token",
+    "anime.erai_username",
+    "anime.erai_password",
     "anime.german_avc_fallback",
     "scraper.interactive_pick",
     "selector.max_size_gib",
@@ -780,6 +782,8 @@ def _validate_setting_value(key: str, value: Any) -> Any:
         if token and not re.fullmatch(r"[0-9A-Za-z]{16,128}", token):
             raise ValueError("paste a feed link from erai-raws.info, or the token= part of one")
         return token
+    if key == "anime.erai_username":
+        return str(value or "").strip()
     if key.startswith("anime."):
         field = key.removeprefix("anime.")
         data = get_settings().anime.model_dump()
@@ -2201,6 +2205,7 @@ def create_app() -> Any:
                 episode=None if item["batch"] else first,
                 publish=True,
                 job_title=f"{entry.name} - {span}" if item["batch"] else None,
+                german_sub_url=None if item["batch"] else item.get("german_sub_url"),
             )
             # Already queued under that name: on its way all the same.
             if job.get("status") == "duplicate":
@@ -2833,8 +2838,13 @@ def create_app() -> Any:
         episode: int | None,
         publish: bool,
         job_title: str | None = None,
+        german_sub_url: str | None = None,
     ) -> dict:
-        """Queue one Nyaa release as this AniList entry: the drawer's download and the dialog's."""
+        """Queue one Nyaa release as this AniList entry: the drawer's download and the dialog's.
+
+        ``german_sub_url``: German Erai-raws uploaded beside the release, put
+        beside the episode when it is published.
+        """
         from bankai.metadata import anilist
 
         english = entry.name
@@ -2869,6 +2879,8 @@ def create_app() -> Any:
             args.extend(["--episode", str(episode)])
         if publish and kind == "show":
             args.append("--publish")
+        if german_sub_url and kind == "show" and episode is not None:
+            args.extend(["--german-sub-url", german_sub_url])
         return await asyncio.to_thread(
             webjobs.enqueue,
             kind=kind,
@@ -3085,7 +3097,14 @@ def create_app() -> Any:
         task = _erai_refresh["task"]
         if erai_site.configured() and (task is None or task.done()):
             _erai_refresh["task"] = asyncio.create_task(erai_site.refresh())
-        return {**erai_site.summary(), "refreshing": erai_site.configured()}
+        from bankai.web import erai_subs
+
+        return {
+            **erai_site.summary(),
+            "refreshing": erai_site.configured(),
+            # The member login's German subtitle lookups: a refused login says so here.
+            "member_subtitles": erai_subs.summary(),
+        }
 
     # -- Dashboard ---------------------------------------------------------
 
@@ -5060,6 +5079,11 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         path, _written = _set_config_value(req.key, value)
         reset_settings_cache()
+        if req.key in {"anime.erai_username", "anime.erai_password"}:
+            from bankai.web import erai_subs
+
+            # New credentials are tried at once, not after a failed login's pause.
+            erai_subs.reset()
         return {"key": req.key, "saved": True, "path": str(path)}
 
     # ------------------------------------------------------------------

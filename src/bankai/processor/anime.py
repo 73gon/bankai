@@ -9,6 +9,7 @@ episode of its AniList entry, where the library layout puts that episode
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import os
 import re
@@ -74,6 +75,7 @@ async def _organize_show(
     require_german_subtitles: bool,
     replace_existing: bool,
     keep_episodes: frozenset[int] = frozenset(),
+    german_sub_url: str | None = None,
 ) -> list[tuple[Path, int, int]]:
     """Stage each video where the layout puts its episode, and say so in the file index.
 
@@ -82,7 +84,9 @@ async def _organize_show(
     called "13" -- has each file past its entry's end settled into the
     sequel, as the automation settles a single release. ``keep_episodes``
     are left out: a replacement taken over a whole season must not publish
-    over the episodes whose file carries a German dub.
+    over the episodes whose file carries a German dub. ``german_sub_url`` is
+    the German file Erai-raws uploaded beside a single-episode release: it is
+    staged next to the video as "<stem>.de.ass" before German is checked.
     """
     if episode_override is not None and len(sources) != 1:
         raise RuntimeError(
@@ -117,9 +121,11 @@ async def _organize_show(
         key = targets[aid].get(number)
         if not key:
             raise RuntimeError(f"the library layout has no place for AniList {aid} episode {number}")
-        if require_german_subtitles:
-            _require_german_subtitles(source)
         destination = _staged_path(key, source.suffix)
+        if german_sub_url and len(placed) == 1:
+            await _stage_german_sub(german_sub_url, destination)
+        if require_german_subtitles:
+            _require_german_subtitles(source, staged=destination)
         _copy_with_sidecars(
             source,
             destination,
@@ -205,16 +211,39 @@ def _copy_with_sidecars(
             _atomic_copy2(sidecar, sidecar_target)
 
 
-def _has_german_subtitles(source: Path) -> bool:
-    """Verify an embedded or adjacent German subtitle track after download."""
-
-    for sidecar in source.parent.glob(f"{source.stem}.*"):
+def _german_sidecar(video: Path) -> bool:
+    """Is a German subtitle file beside this video? Whole-word language tokens of its qualifier."""
+    # Escaped: an Erai name's "[1080p]" is a pattern of its own to glob.
+    for sidecar in video.parent.glob(f"{glob.escape(video.stem)}.*"):
         if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
             continue
-        qualifier = sidecar.name[len(source.stem) :]
+        qualifier = sidecar.name[len(video.stem) :]
         words = set(re.findall(r"[a-z]+", qualifier.casefold()))
         if words & {"de", "deu", "ger", "german", "deutsch"}:
             return True
+    return False
+
+
+async def _stage_german_sub(url: str, destination: Path) -> None:
+    """Fetch German subtitles Erai-raws uploaded for the release next to its staged video.
+
+    Published with it from there like any sidecar. A file not to be had is
+    only logged: the German check, where the release needs one, says the rest.
+    """
+    from bankai.web import erai_subs
+
+    target = erai_subs.sidecar_path(destination)
+    if await erai_subs.download(url, target):
+        log.info("[anime] German subtitles from Erai-raws staged as %s", target.name)
+    else:
+        log.warning("[anime] the German subtitles Erai-raws uploaded could not be fetched")
+
+
+def _has_german_subtitles(source: Path) -> bool:
+    """Verify an embedded or adjacent German subtitle track after download."""
+
+    if _german_sidecar(source):
+        return True
     from bankai.web.media import ffprobe_bin
 
     binary = ffprobe_bin()
@@ -246,7 +275,10 @@ def _has_german_subtitles(source: Path) -> bool:
     return False
 
 
-def _require_german_subtitles(source: Path) -> None:
+def _require_german_subtitles(source: Path, *, staged: Path | None = None) -> None:
+    """``staged``: where the video is staged, beside which German may have been put already."""
+    if staged is not None and _german_sidecar(staged):
+        return
     if not _has_german_subtitles(source):
         raise RuntimeError(
             f"German subtitle verification failed for {source.name}; file was not added to the library"
@@ -351,6 +383,7 @@ async def download_anime(
     replace_existing: bool = False,
     keep_episodes: frozenset[int] = frozenset(),
     publish: bool = False,
+    german_sub_url: str | None = None,
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -444,6 +477,7 @@ async def download_anime(
                 require_german_subtitles=require_german_subtitles,
                 replace_existing=replace_existing,
                 keep_episodes=keep_episodes,
+                german_sub_url=german_sub_url,
             )
             outputs.extend(path for path, _aid, _episode in episodes)
         if not outputs:

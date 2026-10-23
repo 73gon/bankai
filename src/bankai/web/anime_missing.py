@@ -3,7 +3,8 @@
 The drawer lists each episode that has aired and is not on disk, with a
 search button beside it. This pass does that search by itself, a few AniList
 entries a pass, and keeps what it found: only a release carrying German
-subtitles, by the rule the automation takes releases by. The library tags a
+subtitles, by the rule the automation takes releases by -- or one Erai-raws
+uploaded a German file for later, which is downloaded with it. The library tags a
 show "N available" from it, and the drawer offers them in one dialog. Nothing
 is downloaded until they are picked there.
 """
@@ -25,7 +26,7 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.metadata import anilist
 from bankai.web import anime as anime_mod
-from bankai.web import anime_files, erai
+from bankai.web import anime_files, erai, erai_subs
 
 log = get_logger(__name__)
 
@@ -170,6 +171,9 @@ def _release_row(item: anime_mod.NyaaEntry, first: int, last: int) -> dict[str, 
         "magnet_uri": item.magnet_uri or f"magnet:?xt=urn:btih:{item.info_hash.casefold()}",
         "torrent_url": item.download_url,
         "detail_url": item.detail_url,
+        # German Erai-raws uploaded beside a release that carries none, found
+        # when it was checked: downloaded with it (see _carries_german).
+        "german_sub_url": erai_subs.cached(item.title, item.info_hash) if first == last else None,
     }
 
 

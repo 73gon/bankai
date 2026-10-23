@@ -413,3 +413,121 @@ def test_without_the_subtitle_step_the_episode_waits_in_staging(world, monkeypat
     staged = world["staging"] / show / "Season 01"
     assert result["paths"] == [str(staged / f"{show} - S01E05.mkv"), str(staged / f"{show} - S01E06.mkv")]
     assert sorted(anime_files.on_disk(FRIEREN)) == [5, 6]
+
+
+# -- German subtitles Erai-raws uploaded later (see erai_subs) ------------------
+
+SUB_URL = "https://www.erai-raws.info/subs/Sub/2023/Fall/Frieren/05/%5BErai-raws%5D%20Sousou%20no%20Frieren%20-%2005%20%5B1080p%5D.ger.ass"
+
+
+@pytest.fixture()
+def uploaded_german(monkeypatch):
+    """The member login set, and Erai-raws having uploaded a German file for each release asked about."""
+    from bankai.web import erai_subs
+
+    found: dict[str, str] = {}
+
+    async def lookup(name, info_hash=None):
+        found[info_hash] = SUB_URL
+        return SUB_URL
+
+    monkeypatch.setattr(erai_subs, "configured", lambda: True)
+    monkeypatch.setattr(erai_subs, "german_sub_file", lookup)
+    monkeypatch.setattr(erai_subs, "cached", lambda name, info_hash=None: found.get(info_hash))
+    return found
+
+
+def _no_german_on_nyaa(monkeypatch):
+    async def detail(_client, _url):
+        return ("Subtitles Info:\nEnglish | ASS\nPortuguese | ASS", None, "Erai-raws")
+
+    monkeypatch.setattr(erai.anime_mod, "_detail_url", detail)
+
+
+def test_a_release_without_german_is_taken_with_the_german_file_erai_raws_uploaded(world, monkeypatch, uploaded_german):
+    _no_german_on_nyaa(monkeypatch)
+    item = release("[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC][MultiSub]")
+
+    assert consider(world, item) is True
+
+    args = world["state"]["releases"][item.info_hash]["args"]
+    assert args[args.index("--german-sub-url") + 1] == SUB_URL
+    # Still checked for German when published: the file is staged beside it first.
+    assert "--require-german-subtitles" in args
+
+
+def test_without_that_file_or_the_login_such_a_release_is_held(world, monkeypatch):
+    _no_german_on_nyaa(monkeypatch)
+    item = release("[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC][MultiSub]")
+
+    assert consider(world, item) is False
+
+    record = world["state"]["releases"][item.info_hash]
+    assert record["status"] == "held" and "German" in record["reason"]
+
+
+def test_an_upgrade_or_missing_episode_counts_the_uploaded_german(world, monkeypatch, uploaded_german):
+    from bankai.web import anime_missing
+
+    async def erai_says_none(_entry):
+        return False
+
+    monkeypatch.setattr(erai, "_erai_german", erai_says_none)
+    item = release("[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC][MultiSub]")
+
+    assert asyncio.run(erai._carries_german(item, object())) is True
+    assert anime_missing._release_row(item, 5, 5)["german_sub_url"] == SUB_URL
+    # A batch is no one episode's file.
+    assert anime_missing._release_row(item, 1, 12)["german_sub_url"] is None
+
+
+def test_the_uploaded_german_is_staged_beside_the_video_and_passes_the_check(world, copies, tmp_path, monkeypatch):
+    from bankai.web import erai_subs
+
+    # Nothing German in the torrent itself.
+    monkeypatch.setattr(processor, "_has_german_subtitles", lambda _path: False)
+    fetched = []
+
+    async def fetch(url, target):
+        fetched.append((url, target))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("[Script Info]\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(erai_subs, "download", fetch)
+
+    placed = organize(
+        sources(tmp_path, "Sousou no Frieren", [5]), FRIEREN, require_german_subtitles=True, german_sub_url=SUB_URL
+    )
+
+    staged = placed[0][0]
+    sidecar = staged.with_name(f"{staged.stem}.de.ass")
+    assert fetched == [(SUB_URL, sidecar)]
+    assert sidecar.exists() and staged.exists()
+
+
+def test_the_german_check_still_refuses_a_release_with_none(world, copies, tmp_path, monkeypatch):
+    monkeypatch.setattr(processor, "_has_german_subtitles", lambda _path: False)
+
+    with pytest.raises(RuntimeError, match="German subtitle verification failed"):
+        organize(sources(tmp_path, "Sousou no Frieren", [5]), FRIEREN, require_german_subtitles=True)
+
+
+def test_the_uploaded_german_is_published_beside_the_episode(world, monkeypatch, tmp_path):
+    from bankai.web import erai_subs
+
+    async def fetch(url, target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("[Script Info]\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(erai_subs, "download", fetch)
+    show = "Frieren Beyond Journey's End"
+    download(
+        monkeypatch, tmp_path, {"[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].mkv": b"video"},
+        episode_override=5, require_german_subtitles=True, german_sub_url=SUB_URL,
+    )
+
+    published = world["library"] / show / "Season 01" / f"{show} - S01E05.mkv"
+    assert published.exists()
+    assert published.with_name(f"{show} - S01E05.de.ass").read_text(encoding="utf-8") == "[Script Info]\n"

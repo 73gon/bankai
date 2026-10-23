@@ -36,7 +36,7 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.metadata import anilist
 from bankai.web import anime as anime_mod
-from bankai.web import anime_collections, anime_files, erai_site, updates
+from bankai.web import anime_collections, anime_files, erai_site, erai_subs, updates
 
 log = get_logger(__name__)
 _NYAA_BASE = "https://nyaa.si"
@@ -1831,6 +1831,11 @@ def _entry_args(
         "--require-german-subtitles",
         "--cleanup-torrent",
     ]
+    # German that Erai-raws uploaded beside the release, found when it was
+    # checked for German: fetched into staging before the publish check.
+    sub_url = erai_subs.cached(entry.title, entry.info_hash)
+    if sub_url:
+        args.extend(["--german-sub-url", sub_url])
     return args
 
 
@@ -2168,7 +2173,9 @@ async def _consider(
         has_german = erai_says
     else:
         has_german = has_explicit_german_subtitles(description)
-    if not has_german and not (policy and policy.get("mode") == "german_allowed"):
+    allowed = bool(policy and policy.get("mode") == "german_allowed")
+    sub_url = None
+    if not has_german and not allowed:
         alternative = await _german_alternative(state, entry, client)
         if alternative is not None:
             log.info(
@@ -2179,6 +2186,13 @@ async def _consider(
             # The alternative was only accepted after its own German evidence
             # was verified, so this cannot bounce back into this branch.
             return await _consider(state, alternative, client)
+        # Erai-raws often uploads the German file later, beside the release:
+        # this release with it, rather than another encode or a hold. The
+        # arguments carry it (see _entry_args) for the publish step.
+        sub_url = await _german_sub_url(entry)
+        if sub_url:
+            log.info("Taking %s with the German subtitles Erai-raws uploaded for it", entry.title)
+    if not has_german and not allowed and sub_url is None:
         listed = (
             erai_says is False
             and get_settings().anime.german_avc_fallback
@@ -2379,12 +2393,16 @@ async def _upgrade_to_hevc(
 
 
 async def _carries_german(entry: anime_mod.NyaaEntry, client: httpx.AsyncClient) -> bool:
-    """Confirm a replacement really does offer German before swapping to it."""
+    """Confirm a replacement really does offer German before swapping to it.
+
+    German Erai-raws uploaded beside the release counts too; its URL is then
+    remembered, and _entry_args passes it to the publish step.
+    """
     if title_lists_german_subtitles(entry.title):
         return True
     says = await _erai_german(entry)
     if says is not None:
-        return says
+        return says or await _german_sub_url(entry) is not None
     try:
         description, _magnet, uploader = await anime_mod._detail_url(client, entry.detail_url)
     except Exception as exc:
@@ -2392,7 +2410,22 @@ async def _carries_german(entry: anime_mod.NyaaEntry, client: httpx.AsyncClient)
         return False
     if (uploader or "").casefold() != "erai-raws":
         return False
-    return has_explicit_german_subtitles(description)
+    return has_explicit_german_subtitles(description) or await _german_sub_url(entry) is not None
+
+
+async def _german_sub_url(entry: anime_mod.NyaaEntry) -> str | None:
+    """The German subtitle file Erai-raws uploaded for this release later, if any.
+
+    Only with the member login set (see erai_subs); never an error, only a
+    file found or not.
+    """
+    if not erai_subs.configured():
+        return None
+    try:
+        return await erai_subs.german_sub_file(entry.title, entry.info_hash)
+    except Exception as exc:
+        log.warning("German subtitle lookup for %s failed: %s", entry.title, type(exc).__name__)
+        return None
 
 
 def _upgrade_targets(entries: dict[int, Any]) -> dict[str, Any]:
@@ -2953,6 +2986,10 @@ async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
     anime = await anilist.anime(plan["anilist_id"])
     if anime is None:
         raise ValueError("Choose the AniList entry for this card first")
+    if not plan["german"] and not plan["batch"]:
+        # Not checked for German, but German Erai-raws uploaded beside it is
+        # published with it (_entry_args finds it remembered).
+        await _german_sub_url(entry)
     # Chosen by hand, with what is listed for it in view: taken as it is,
     # without the automation's German check -- which, after the whole download,
     # would only refuse to publish what was knowingly picked.

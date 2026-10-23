@@ -455,6 +455,10 @@ _HEVC_CHECK_ENTRIES = 3
 # with German looked for, a few AniList entries a pass, none downloaded.
 _MISSING_CHECK_SECONDS = 600.0
 _MISSING_CHECK_ENTRIES = 3
+# German subtitles Erai-raws uploaded later, fetched for library episodes
+# without German (see erai_subs): a few lookups a pass, with the member login.
+_GERMAN_SUBS_SECONDS = 900.0
+_GERMAN_SUBS_EPISODES = 5
 # How often the held library tree is checked against the disk: the delay
 # before a newly published episode shows in the libraries.
 _LIBRARY_WALK_SECONDS = 60.0
@@ -478,6 +482,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "jellyfin_refresh": ("Tell Jellyfin what changed", _JELLYFIN_SECONDS),
     "hevc_check": ("Look for HEVC upgrades", _HEVC_CHECK_SECONDS),
     "missing_check": ("Look for missing episodes", _MISSING_CHECK_SECONDS),
+    "german_subs": ("Add German subtitles from Erai-raws", _GERMAN_SUBS_SECONDS),
     "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
@@ -523,6 +528,8 @@ def _plural(count: int, one: str, many: str | None = None) -> str:
 
 def _service_error(name: str, result: object) -> str | None:
     """A service a pass depends on that refused it -- AniList, Jikan -- in words, since when."""
+    if name == "german_subs" and isinstance(result, dict):
+        return result.get("error") or None  # Erai-raws refusing the login
     if name != "anime_metadata" or not isinstance(result, dict):
         return None
     out = []
@@ -582,6 +589,18 @@ def _pass_summary(name: str, result: object) -> str | None:
             f"{_plural(number('checked'), 'entry', 'entries')} checked, "
             f"{_plural(number('episodes_found'), 'episode')} found, {number('remaining')} to go"
         )
+    if name == "german_subs":
+        if result.get("skipped"):
+            return str(result["skipped"])
+        unknown = (
+            f", {_plural(number('unidentified'), 'episode')} without a known release"
+            if number("unidentified")
+            else ""
+        )
+        return (
+            f"{_plural(number('checked'), 'episode')} checked, "
+            f"{_plural(number('added'), 'German subtitle')} added, {number('remaining')} to go{unknown}"
+        )
     if name == "jellyfin_refresh":
         if number("failed"):
             from bankai.web import jellyfin
@@ -610,6 +629,10 @@ def _pass_progress(name: str) -> dict | None:
         from bankai.web import anime_missing
 
         return dict(anime_missing.progress) or None
+    if name == "german_subs":
+        from bankai.web import erai_subs
+
+        return dict(erai_subs.progress) or None
     return None
 
 
@@ -683,6 +706,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_hevc_check = 0.0
     next_missing_check = time.monotonic() + 60.0
     missing_task: asyncio.Future | None = None
+    next_german_subs = time.monotonic() + 90.0
+    german_subs_task: asyncio.Future | None = None
     next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
     walk_task: asyncio.Future | None = None
     next_archive_pass = 0.0
@@ -848,6 +873,20 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 anime_missing.check_missing_episodes(entries=_MISSING_CHECK_ENTRIES)
             )
             _pass_task("missing_check", missing_task)
+        # Off to the side as well: Erai-raws is asked seconds apart. Only with
+        # the member login set, as Jellyfin's pass only with Jellyfin.
+        if time.monotonic() >= next_german_subs and (german_subs_task is None or german_subs_task.done()):
+            next_german_subs = time.monotonic() + _GERMAN_SUBS_SECONDS
+            from bankai.web import erai_subs
+
+            if german_subs_task is not None and german_subs_task.exception() is not None:
+                log.warning("German subtitle pass failed: %r", german_subs_task.exception())
+            if erai_subs.configured():
+                _pass_due("german_subs", next_german_subs)
+                german_subs_task = asyncio.ensure_future(
+                    erai_subs.add_library_subtitles(episodes=_GERMAN_SUBS_EPISODES)
+                )
+                _pass_task("german_subs", german_subs_task)
         await asyncio.sleep(poll_seconds)
 
 

@@ -130,6 +130,11 @@ class AnimeAutomationSettings(BaseModel):
     # The token in the user's own erai-raws.info feed links (`?token=...`). With it,
     # bankai reads Erai-raws' subtitle list for each release from its RSS feeds.
     erai_feed_token: str = ""
+    # The user's erai-raws.info member login. Erai-raws often uploads an
+    # episode's German subtitles later, separately, into a members-only
+    # directory; with the login bankai fetches them. Off while either is empty.
+    erai_username: str = ""
+    erai_password: str = ""
     # When an episode's HEVC encode has no German subtitles but Erai-raws lists
     # them for another encode of it (AVC), take that one: German is required,
     # HEVC only preferred.

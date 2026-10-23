@@ -79,6 +79,14 @@ max_enqueues_per_cycle = 500
 # are split into complementary queries; incomplete indexing never permits 720p.
 backfill_enabled = true
 backfill_request_delay_seconds = 2
+# Your erai-raws.info member login (username or e-mail, and password). Erai-raws
+# often uploads an episode's German subtitles hours or days after the release,
+# into a members-only subtitle directory that neither the torrent nor its feeds
+# mention. With the login, a release without German is taken when that file
+# exists (it is published beside the video as <video>.de.ass), and library
+# episodes without German get it added. Leave either empty to turn this off.
+erai_username = ""
+erai_password = ""
 
 [queue]
 # Per-stage worker concurrency.

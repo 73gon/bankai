@@ -23,6 +23,8 @@ const LABELS: Record<string, { label: string; description: string; suffix?: stri
   'anime.backfill_request_delay_seconds': { label: 'Backfill request delay', description: 'Delay between historical Nyaa catalogue pages.', suffix: 'seconds' },
   'anime.german_avc_fallback': { label: 'AVC when HEVC lacks German', description: 'Erai-raws does not give every encode the same subtitles. When the HEVC encode of an episode has no German but Erai-raws lists it for another encode (AVC) of the same episode, download that one instead. German is required; HEVC is only preferred.' },
   'anime.erai_feed_token': { label: 'Erai-raws feed token', description: 'On any show page on erai-raws.info, right-click FHD under RSS Links and copy the link, then paste it here: bankai keeps only its token. With it, bankai reads which subtitles Erai-raws lists for each release, and trusts that over the Nyaa description.' },
+  'anime.erai_username': { label: 'Erai-raws username', description: 'Your erai-raws.info member login (username or e-mail). Erai-raws often uploads German subtitles days after a release, into a members-only folder: with the login, such a release is taken with that file beside it, and library episodes without German get it added.' },
+  'anime.erai_password': { label: 'Erai-raws password', description: 'The password of that login. Kept in config.toml; after a refused login bankai waits an hour before trying again, or until it is changed here.' },
 };
 
 function formatDate(value: number | null) {
