@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, CircleArrowUp, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
-import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type MissingRelease } from '@/lib/api';
+import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeBulkKind, type AnimeBulkShow, type MissingRelease } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
@@ -241,8 +241,13 @@ function numberRuns(numbers: number[]): string {
 
 /** The missing episodes a found release covers, a line per tab of the drawer: [tab, "5–7, 10"]. */
 function coveredEpisodes(release: MissingRelease): Array<[string, string]> {
+  return episodeRuns(release.episodes);
+}
+
+/** Episodes a line per tab of the drawer: [tab, "5–7, 10"]. */
+function episodeRuns(episodes: MissingRelease['episodes']): Array<[string, string]> {
   const byTab = new Map<string, number[]>();
-  for (const row of release.episodes) {
+  for (const row of episodes) {
     const tab = row.season ?? 'Episodes';
     byTab.set(tab, [...(byTab.get(tab) ?? []), row.episode ?? row.anilist_episode]);
   }
@@ -380,6 +385,12 @@ export default function AnimeLibrary() {
   const [missingReleases, setMissingReleases] = useState<MissingRelease[] | null>(null);
   const [missingPicked, setMissingPicked] = useState<Set<string>>(new Set());
   const [missingQueuing, setMissingQueuing] = useState(false);
+  // "Upgrade all" / "Download all available": which one the dialog is open for,
+  // the shows it would take (all ticked to begin with), and the one running.
+  const [bulkKind, setBulkKind] = useState<AnimeBulkKind | null>(null);
+  const [bulkShows, setBulkShows] = useState<AnimeBulkShow[] | null>(null);
+  const [bulkPicked, setBulkPicked] = useState<Set<string>>(new Set());
+  const [bulkRunning, setBulkRunning] = useState<AnimeBulkKind | null>(null);
 
   useEffect(() => {
     try {
@@ -812,6 +823,54 @@ export default function AnimeLibrary() {
     }
   }
 
+  async function openBulk(kind: AnimeBulkKind) {
+    setBulkKind(kind);
+    setBulkShows(null);
+    setBulkPicked(new Set());
+    try {
+      const result = await api.animeBulkPlan(kind);
+      setBulkShows(result.shows);
+      setBulkPicked(new Set(result.shows.map((row) => row.key)));
+    } catch (error: any) {
+      toast.error(error.message);
+      setBulkKind(null);
+    }
+  }
+
+  /** Only now is anything queued: every ticked show's, in the background; the Dashboard shows how far it is. */
+  async function runBulk() {
+    const kind = bulkKind;
+    if (!kind || !bulkShows) return;
+    const keys = bulkShows.filter((row) => bulkPicked.has(row.key)).map((row) => row.key);
+    if (!keys.length) return;
+    setBulkKind(null);
+    setBulkRunning(kind);
+    const shows = keys.length + ' show' + (keys.length === 1 ? '' : 's');
+    toast.info((kind === 'upgrade' ? 'Upgrading ' : 'Downloading the available episodes of ') + shows + ' in the background…');
+    try {
+      const result = await api.runAnimeBulk(kind, keys);
+      const failed = result.failed.length ? ' · failed for ' + result.failed.join(', ') : '';
+      if (kind === 'upgrade') {
+        const message = 'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')
+          + ' in ' + (result.downloads ?? 0) + ' download' + (result.downloads === 1 ? '' : 's')
+          + (result.no_replacement ? ' · ' + result.no_replacement + ' without a replacement now' : '') + failed;
+        if (result.queued) toast.success(message);
+        else toast.info(message);
+      } else {
+        toast.success(
+          'Queued ' + result.queued + ' download' + (result.queued === 1 ? '' : 's')
+          + ' for ' + (result.episodes ?? 0) + ' episode' + (result.episodes === 1 ? '' : 's')
+          + (result.duplicates ? ' · ' + result.duplicates + ' already queued' : '') + failed,
+        );
+      }
+      await load();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBulkRunning(null);
+    }
+  }
+
   useEffect(() => { void load(); }, []);
   const visible = useMemo(() => {
     const matched = shows.filter((show) =>
@@ -831,6 +890,12 @@ export default function AnimeLibrary() {
     });
   }, [shows, query, sort, showBlacklisted, onlyUnmatched]);
   const blacklistedCount = useMemo(() => shows.filter((show) => show.blacklisted).length, [shows]);
+  // What the bulk buttons offer: the shows' "Upgrade for N" and "N available", blacklisted ones left out.
+  const bulkCounts = useMemo(() => shows.reduce((acc, show) => (show.blacklisted || isUnmatched(show) ? acc : {
+    upgrade: acc.upgrade + (show.upgrade_available_count ?? 0),
+    missing: acc.missing + (show.missing_available_count ?? 0),
+  }), { upgrade: 0, missing: 0 }), [shows]);
+  const bulkTotal = (bulkShows ?? []).filter((row) => bulkPicked.has(row.key)).reduce((sum, row) => sum + row.episodes.length, 0);
   const unmatchedCount = useMemo(() => shows.filter((show) => isUnmatched(show) && (showBlacklisted || !show.blacklisted)).length, [shows, showBlacklisted]);
   const totals = useMemo(() => visible.reduce((acc, show) => ({
     size: acc.size + show.size,
@@ -882,6 +947,26 @@ export default function AnimeLibrary() {
               title='Files no AniList entry is known for; match them on AniList from their details'
             >
               <Link2 data-icon='inline-start' /> Unmatched ({unmatchedCount})
+            </Button>
+          )}
+          {(bulkCounts.upgrade > 0 || bulkRunning === 'upgrade') && (
+            <Button
+              variant='secondary'
+              onClick={() => void openBulk('upgrade')}
+              disabled={bulkRunning === 'upgrade'}
+              title='Replace every AVC episode an HEVC release with German subtitles was found for. Shows the list first.'
+            >
+              <CircleArrowUp data-icon='inline-start' /> {bulkRunning === 'upgrade' ? 'Upgrading…' : 'Upgrade all (' + bulkCounts.upgrade + ')'}
+            </Button>
+          )}
+          {(bulkCounts.missing > 0 || bulkRunning === 'missing') && (
+            <Button
+              variant='secondary'
+              onClick={() => void openBulk('missing')}
+              disabled={bulkRunning === 'missing'}
+              title='Download every missing episode a German-subtitled release was found for. Shows the list first.'
+            >
+              <Download data-icon='inline-start' /> {bulkRunning === 'missing' ? 'Queuing…' : 'Download available (' + bulkCounts.missing + ')'}
             </Button>
           )}
           {blacklistedCount > 0 && (
@@ -1543,6 +1628,98 @@ export default function AnimeLibrary() {
             <Button variant='secondary' onClick={() => setMissingFor(null)} disabled={missingQueuing}>Cancel</Button>
             <Button onClick={() => void downloadMissingReleases()} disabled={missingQueuing || missingPicked.size === 0}>
               <Download data-icon='inline-start' /> {missingQueuing ? 'Queuing…' : 'Download ' + missingPicked.size}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* Every show's upgrades or available episodes at once; nothing is queued until confirmed. */}
+      <Dialog open={bulkKind !== null} onOpenChange={(open) => { if (!open) setBulkKind(null); }}>
+        <DialogContent size='xl' className='max-h-[90dvh]'>
+          <DialogHeader>
+            <DialogTitle>{bulkKind === 'upgrade' ? 'Upgrade all to HEVC' : 'Download all available episodes'}</DialogTitle>
+            <DialogDescription>
+              {bulkKind === 'upgrade'
+                ? 'AVC episodes an Erai-raws HEVC release with German subtitles was found for. Each show is searched again as it is queued; the AVC files stay until their replacement lands. German dubs are never replaced.'
+                : 'Aired episodes not on disk that a release with German subtitles was found for. They go straight into the library; a batch is one download for every episode it covers.'}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            {bulkShows === null ? <div className='flex h-40 items-center justify-center'><Spinner label='Loading the shows' /></div> : bulkShows.length ? (
+              <Table dense>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className='w-7 pr-2'>
+                      <Checkbox
+                        nativeButton
+                        render={<button type='button' />}
+                        className='align-middle'
+                        aria-label='Select every show'
+                        checked={bulkPicked.size === bulkShows.length}
+                        indeterminate={bulkPicked.size > 0 && bulkPicked.size < bulkShows.length}
+                        onCheckedChange={(on) => setBulkPicked(new Set(on ? bulkShows.map((row) => row.key) : []))}
+                      />
+                    </TableHead>
+                    <TableHead className='w-full'>Show</TableHead>
+                    <TableHead>Episodes</TableHead>
+                    <TableHead numeric>Count</TableHead>
+                    {bulkKind === 'missing' && <TableHead numeric>Size</TableHead>}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {bulkShows.map((row) => (
+                    <TableRow key={row.key} data-selected={bulkPicked.has(row.key) ? '' : undefined}>
+                      <TableCell className='w-7 pr-2'>
+                        <Checkbox
+                          nativeButton
+                          render={<button type='button' />}
+                          className='align-middle'
+                          aria-label={'Include ' + row.title}
+                          checked={bulkPicked.has(row.key)}
+                          onCheckedChange={(on) => setBulkPicked((current) => {
+                            const next = new Set(current);
+                            if (on) next.add(row.key);
+                            else next.delete(row.key);
+                            return next;
+                          })}
+                        />
+                      </TableCell>
+                      <TableCell className='max-w-0'>
+                        <div className='flex items-center gap-2.5'>
+                          <AnimePoster url={row.poster_url} title={row.title} className='w-7 shrink-0 rounded' />
+                          <span className='truncate font-medium text-foreground' title={row.title}>{row.title}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className='text-xs whitespace-nowrap'>
+                        {/* The tab's short name: "S1 · <entry title>" repeats the show beside it. */}
+                        {episodeRuns(row.episodes).map(([tab, numbers]) => (
+                          <p key={tab}><span className='text-muted-foreground' title={tab}>{tab.split(' · ')[0]}</span> <span className='font-mono tabular-nums text-foreground'>{numbers}</span></p>
+                        ))}
+                      </TableCell>
+                      <TableCell numeric className='text-xs whitespace-nowrap'>
+                        {row.episodes.length}
+                        {bulkKind === 'missing' && row.downloads !== row.episodes.length && (
+                          <p className='text-[0.68rem] text-muted-foreground'>{row.downloads} download{row.downloads === 1 ? '' : 's'}</p>
+                        )}
+                      </TableCell>
+                      {bulkKind === 'missing' && <TableCell numeric className='text-xs whitespace-nowrap'>{row.size_bytes ? formatSize(row.size_bytes) : '—'}</TableCell>}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <Empty>
+                <EmptyMedia>{bulkKind === 'upgrade' ? <CircleArrowUp /> : <Download />}</EmptyMedia>
+                <EmptyTitle>Nothing to {bulkKind === 'upgrade' ? 'upgrade' : 'download'}</EmptyTitle>
+                <EmptyDescription>What was found is already on its way or in the library.</EmptyDescription>
+              </Empty>
+            )}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant='secondary' onClick={() => setBulkKind(null)}>Cancel</Button>
+            <Button onClick={() => void runBulk()} disabled={!bulkTotal}>
+              {bulkKind === 'upgrade' ? <CircleArrowUp data-icon='inline-start' /> : <Download data-icon='inline-start' />}
+              {(bulkKind === 'upgrade' ? 'Upgrade ' : 'Download ') + bulkTotal + ' episode' + (bulkTotal === 1 ? '' : 's')
+                + ' of ' + bulkPicked.size + ' show' + (bulkPicked.size === 1 ? '' : 's')}
             </Button>
           </DialogFooter>
         </DialogContent>

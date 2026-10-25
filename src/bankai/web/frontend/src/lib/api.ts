@@ -670,6 +670,36 @@ export interface MissingRelease {
   episodes: Array<{ anilist_id: number; anilist_episode: number; season: string | null; season_number: number | null; episode: number | null }>;
 }
 
+/** What the library's bulk buttons act on: HEVC upgrades found, or releases found for missing episodes. */
+export type AnimeBulkKind = 'upgrade' | 'missing';
+
+/** One show a bulk action would take, with the episodes it covers there. */
+export interface AnimeBulkShow {
+  key: string;
+  title: string;
+  poster_url: string | null;
+  anilist_ids: number[];
+  episodes: Array<{ anilist_id: number; anilist_episode: number; season: string | null; season_number: number | null; episode: number | null }>;
+  /** Releases to download; only for missing episodes. */
+  downloads: number;
+  size_bytes: number;
+}
+
+export interface AnimeBulkResult {
+  ok: boolean;
+  shows: number;
+  /** Episodes queued. */
+  queued: number;
+  /** Upgrade: downloads queued and episodes no replacement was found for on the second look. */
+  downloads?: number;
+  no_replacement?: number;
+  /** Missing: releases already in the queue, and the episodes the queued ones cover. */
+  duplicates?: number;
+  episodes?: number;
+  /** Shows whose queueing failed. */
+  failed: string[];
+}
+
 /** One AniList entry in a collection's relation graph. */
 export interface CollectionNode {
   anilist_id: number;
@@ -1299,6 +1329,12 @@ export const api = {
     request<{ ok: boolean; queued: number; duplicates: number; episodes: number }>('/api/anime/library/missing/download', {
       method: 'POST', body: JSON.stringify({ key, info_hashes: infoHashes }),
     }),
+  /** What "Upgrade all" or "Download all available" would take, show by show; nothing is queued. */
+  animeBulkPlan: (kind: AnimeBulkKind) =>
+    request<{ kind: AnimeBulkKind; shows: AnimeBulkShow[] }>('/api/anime/library/bulk?' + new URLSearchParams({ kind })),
+  /** Queue it for the confirmed shows, in the background. */
+  runAnimeBulk: (kind: AnimeBulkKind, keys: string[]) =>
+    runAction<AnimeBulkResult>('/api/anime/library/bulk', { kind, keys }),
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
   storage: () => request<StorageUsage>('/api/storage'),

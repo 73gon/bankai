@@ -152,3 +152,61 @@ def test_the_dialog_downloads_only_the_releases_picked(client, show, monkeypatch
     assert _grid(client)["missing_available_count"] == 1
     left = client.get("/api/anime/library/missing", params={"key": "Show"}).json()["items"]
     assert [item["info_hash"] for item in left] == [fourth.info_hash]
+
+
+def test_download_all_available_lists_then_queues_every_show(client, show, monkeypatch):
+    third = release("[Erai-raws] Show - 03 [1080p][HEVC][MultiSub][GER]", 3)
+    fourth = release("[Erai-raws] Show - 04 [1080p][HEVC][MultiSub][GER]", 4)
+    show.extend([third, fourth])
+    asyncio.run(anime_missing.check_missing_episodes())
+
+    plan = client.get("/api/anime/library/bulk", params={"kind": "missing"}).json()["shows"]
+    assert [row["key"] for row in plan] == ["Show"]
+    assert [row["episode"] for row in plan[0]["episodes"]] == [3, 4]
+    assert plan[0]["downloads"] == 2 and "items" not in plan[0]
+    # Nothing is queued by looking.
+    assert _grid(client)["missing_available_count"] == 2
+
+    queued: list[dict] = []
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue", lambda **kwargs: queued.append(kwargs) or {"status": "queued", "id": "x"}
+    )
+    assert client.post("/api/anime/library/bulk", json={"kind": "missing", "keys": []}).status_code == 422
+    # A key the plan does not list takes nothing.
+    other = client.post("/api/anime/library/bulk", json={"kind": "missing", "keys": ["Other"]})
+    assert other.json()["shows"] == 0 and queued == []
+
+    response = client.post("/api/anime/library/bulk", json={"kind": "missing", "keys": ["Show"]})
+
+    assert response.status_code == 200
+    assert response.json()["queued"] == 2 and response.json()["episodes"] == 2
+    assert sorted(job["args"][job["args"].index("--episode") + 1] for job in queued) == ["3", "4"]
+    assert _grid(client)["missing_available_count"] == 0
+    assert client.get("/api/anime/library/bulk", params={"kind": "missing"}).json()["shows"] == []
+
+
+def test_upgrade_all_lists_the_episodes_an_upgrade_was_found_for(client, show, tmp_path, monkeypatch):
+    folder = tmp_path / "shows_anime" / "Show" / "Season 01"
+    avc = {str(folder / f"Show - S01E{number:02d}.mkv"): {"codec": "avc"} for number in (1, 2)}
+    monkeypatch.setattr("bankai.web.anime_library._load_codec_cache", lambda: avc)
+    # Episode 1 has an HEVC release with German; episode 2 was looked for in vain.
+    erai._record_hevc_checks([(555, 2)], [], [(555, 1)])
+    assert _grid(client)["upgrade_available_count"] == 1
+
+    plan = client.get("/api/anime/library/bulk", params={"kind": "upgrade"}).json()["shows"]
+    assert [(row["key"], row["anilist_ids"]) for row in plan] == [("Show", [555])]
+    assert [row["episode"] for row in plan[0]["episodes"]] == [1]
+
+    asked: list[list[int]] = []
+
+    async def upgrade(anilist_ids, *, queue=True):
+        asked.append(anilist_ids)
+        return {"ok": True, "queued": 1, "downloads": 1, "no_replacement": 0}
+
+    monkeypatch.setattr(erai, "upgrade_show_to_hevc", upgrade)
+    response = client.post("/api/anime/library/bulk", json={"kind": "upgrade", "keys": ["Show"]})
+
+    assert response.status_code == 200
+    assert response.json()["queued"] == 1 and response.json()["failed"] == []
+    assert asked == [[555]]
+    assert client.get("/api/anime/library/bulk", params={"kind": "nope"}).status_code == 422

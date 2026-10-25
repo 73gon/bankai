@@ -2173,9 +2173,6 @@ def create_app() -> Any:
         missing episodes; one it did not find is refused rather than queued.
         Each goes as the drawer's own download of a missing episode does.
         """
-        from bankai.metadata import anilist
-        from bankai.web import anime_missing
-
         key = str(req.get("key") or "").strip()
         wanted = {str(raw).strip().casefold() for raw in req.get("info_hashes") or [] if str(raw).strip()}
         if not key or not wanted:
@@ -2185,9 +2182,16 @@ def create_app() -> Any:
         unknown = sorted(wanted - set(by_hash))
         if unknown:
             raise HTTPException(status_code=404, detail="not a release found for this show: " + unknown[0])
+        return await _queue_missing_releases([by_hash[info_hash] for info_hash in by_hash if info_hash in wanted])
+
+    async def _queue_missing_releases(items: list[dict]) -> dict:
+        """Queue releases found for missing episodes, each as the drawer's own download of one goes."""
+        from bankai.metadata import anilist
+        from bankai.web import anime_missing
+
         queued = duplicates = 0
         taken: list[tuple[int, int]] = []
-        for item in [by_hash[info_hash] for info_hash in by_hash if info_hash in wanted]:
+        for item in items:
             entry = await anilist.anime(int(item["anilist_id"]))
             if entry is None:
                 raise HTTPException(status_code=422, detail="AniList has no such anime")
@@ -2215,6 +2219,109 @@ def create_app() -> Any:
             taken.extend((int(row["anilist_id"]), int(row["anilist_episode"])) for row in item["episodes"])
         await asyncio.to_thread(anime_missing.mark_queued, taken)
         return {"ok": True, "queued": queued, "duplicates": duplicates, "episodes": len(taken)}
+
+    # -- Every show at once: "Upgrade all" and "Download all available" -------
+
+    async def _bulk_plan(kind: str) -> list[dict]:
+        """What the library's bulk action would take, a row per show, before anything is queued.
+
+        ``upgrade``: the AVC episodes a search found an HEVC release with
+        German subtitles for -- the shows' "Upgrade for N". ``missing``: the
+        releases found for missing episodes -- the shows' "N available".
+        Blacklisted shows are left out of both.
+        """
+        from bankai.web import anime_missing
+
+        listing = await _anime_library_payload(episodes=True)
+        state = await asyncio.to_thread(erai_mod.state_for_reading)
+        blocked = erai_mod._policy_anilist_ids(await asyncio.to_thread(erai_mod._load_policies))
+        upgrading = erai_mod.upgrading_episodes(state)
+        checked = await asyncio.to_thread(erai_mod.hevc_checked)
+        plan: list[dict] = []
+        for show in listing.get("shows") or []:
+            if show.get("blacklisted") or show.get("unmatched"):
+                continue
+            rows = show.get("episodes") or []
+            items: list[dict] = []
+            if kind == "upgrade":
+                wanted = [
+                    row for row in rows
+                    if row.get("codec") == "avc" and not row.get("german_dub") and not row.get("missing")
+                    and (key := (row.get("anilist_id"), row.get("anilist_episode"))) not in upgrading
+                    and checked.get(key, (0.0, False))[1]  # type: ignore[arg-type]
+                ]
+                episodes = [
+                    {name: row.get(name) for name in ("anilist_id", "anilist_episode", "season", "season_number", "episode")}
+                    for row in wanted
+                ]
+            else:
+                items = [
+                    item for item in await asyncio.to_thread(anime_missing.releases_for, rows, state)
+                    if item["anilist_id"] not in blocked
+                ]
+                episodes = [row for item in items for row in item["episodes"]]
+            if not episodes:
+                continue
+            plan.append(
+                {
+                    "key": show["key"],
+                    "title": show["title"],
+                    "poster_url": show.get("poster_url"),
+                    "anilist_ids": sorted({int(row["anilist_id"]) for row in episodes if row.get("anilist_id")}),
+                    "episodes": episodes,
+                    "downloads": len(items),
+                    "size_bytes": sum(int(item.get("size_bytes") or 0) for item in items),
+                    "items": items,
+                }
+            )
+        return sorted(plan, key=lambda row: row["title"].casefold())
+
+    def _bulk_kind(kind: str) -> str:
+        if kind not in {"upgrade", "missing"}:
+            raise HTTPException(status_code=422, detail="kind is upgrade or missing")
+        return kind
+
+    @app.get("/api/anime/library/bulk")
+    async def anime_library_bulk(kind: str = Query(...)) -> dict:
+        """The shows and episodes "Upgrade all" or "Download all available" would take; nothing is queued."""
+        plan = await _bulk_plan(_bulk_kind(kind))
+        return {"kind": kind, "shows": [{k: v for k, v in row.items() if k != "items"} for row in plan]}
+
+    @app.post("/api/anime/library/bulk")
+    async def anime_library_bulk_run(req: dict) -> dict:
+        """Queue what the bulk plan holds for the confirmed shows, in the background.
+
+        The keys only pick among the shows the plan lists; the plan is worked
+        out afresh, so an episode queued since the dialog opened is not taken twice.
+        """
+        kind = _bulk_kind(str(req.get("kind") or ""))
+        keys = {str(raw) for raw in req.get("keys") or [] if str(raw).strip()}
+        if not keys:
+            raise HTTPException(status_code=422, detail="keys are required")
+
+        async def work(action: Any) -> dict:
+            plan = [row for row in await _bulk_plan(kind) if row["key"] in keys]
+            total: dict[str, Any] = {"ok": True, "shows": len(plan), "queued": 0, "failed": []}
+            for index, row in enumerate(plan, start=1):
+                action.detail = f"{index}/{len(plan)}: {row['title']}"
+                try:
+                    if kind == "upgrade":
+                        result = await erai_mod.upgrade_show_to_hevc(row["anilist_ids"])
+                        for name in ("queued", "downloads", "no_replacement"):
+                            total[name] = total.get(name, 0) + int(result.get(name) or 0)
+                    else:
+                        result = await _queue_missing_releases(row["items"])
+                        for name in ("queued", "duplicates", "episodes"):
+                            total[name] = total.get(name, 0) + int(result.get(name) or 0)
+                except RuntimeError:
+                    raise  # qBittorrent is down: every show after this one would fail too
+                except Exception as exc:
+                    log.warning("Bulk %s of %s failed: %s", kind, row["title"], exc)
+                    total["failed"].append(row["title"])
+            return total
+
+        title = "Upgrade all to HEVC" if kind == "upgrade" else "Download all available episodes"
+        return await _run_action(req, kind=f"bulk-{kind}", title=title, path="/api/anime/library/bulk", work=work)
 
     def _episodes_on_disk() -> Callable[[int], int]:
         """How far each entry's files go, for the graph's counts and the Season 00 blocks."""
@@ -2610,6 +2717,7 @@ def create_app() -> Any:
         include_entries: bool = False,
         rescan: bool = False,
         drawers: bool = False,
+        episodes: bool = False,
     ) -> dict:
         def scan() -> tuple[Path, list[dict]]:
             root = Path(get_settings().transfer.anime_shows_dir)
@@ -2656,7 +2764,7 @@ def create_app() -> Any:
         shows = await group_shows(
             entries,
             root,
-            include_episodes=show is not None or drawers,
+            include_episodes=show is not None or drawers or episodes,
             only_key=show,
         )
         erai_mod.mark_blacklisted_shows(shows)
