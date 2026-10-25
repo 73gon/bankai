@@ -93,6 +93,8 @@ class MetadataSettings(BaseModel):
     tvdb_api_key: str = ""
     tvdb_pin: str = ""
     tvdb_languages: list[str] = Field(default_factory=lambda: ["deu", "eng"])
+    # TMDB's v3 API key or v4 read access token; the anime library's artwork.
+    tmdb_api_key: str = ""
 
 
 class TransferSettings(BaseModel):
@@ -139,6 +141,19 @@ class AnimeAutomationSettings(BaseModel):
     # them for another encode of it (AVC), take that one: German is required,
     # HEVC only preferred.
     german_avc_fallback: bool = True
+    # Episode pictures (see web.anime_thumbs), taken from each episode's own
+    # video beside it as <episode>-thumb.jpg. Where in the episode: a share of
+    # its length, or a fixed time into it (an episode shorter than that is
+    # taken at the share instead). Changing either takes every picture again.
+    thumbs_enabled: bool = True
+    thumb_mode: Literal["percent", "time"] = "percent"
+    thumb_percent: float = Field(default=50.0, ge=1.0, le=99.0)
+    thumb_time_seconds: int = Field(default=600, ge=0, le=6 * 3600)
+    thumb_width: int = Field(default=960, ge=320, le=3840)
+    # Show artwork from TMDB beside AniList's poster and banner: backdrops,
+    # logos, landscape thumbs and season posters, Specials included. Needs
+    # metadata.tmdb_api_key.
+    artwork_tmdb: bool = True
 
 
     @model_validator(mode="after")

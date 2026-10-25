@@ -36,8 +36,8 @@ from bankai.cli import bgjobs
 from bankai.logging import get_logger
 from bankai.metadata import anilist
 from bankai.processor.naming import sanitise
+from bankai.web import anime_artwork, anime_files
 from bankai.web import anime_collections as collections
-from bankai.web import anime_files
 
 log = get_logger(__name__)
 
@@ -183,7 +183,9 @@ def _companions(video: Path) -> list[Path]:
 
 
 # What bankai writes into a show's folder itself, and so may take away again.
-_OWN_FILES = frozenset({"tvshow.nfo", "season.nfo", "poster.jpg", "fanart.jpg"})
+_OWN_FILES = frozenset(
+    {"tvshow.nfo", "season.nfo", "poster.jpg", "fanart.jpg", "landscape.jpg", "logo.png", "banner.jpg"}
+)
 
 
 def _prune(directory: Path, root: Path) -> None:
@@ -534,12 +536,12 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
         if _write_text(folder / "tvshow.nfo", tvshow_nfo(row, show)):
             written += 1
             changed.append(folder)
-        main = row.title if row.title is not None else row.members[0]
-        if anilist.cover(main):
-            pictures.append(Picture(folder / "poster.jpg", anilist.cover(main)))
-        if anilist.media(main).get("banner"):
-            pictures.append(Picture(folder / "fanart.jpg", anilist.media(main)["banner"]))
         plan = layout.plans[cid]
+        # Each slot's picture, chosen by hand or automatically; see anime_artwork.
+        art = anime_artwork.resolved(cid, row, plan)
+        for slot, (_label, filename) in anime_artwork.SHOW_SLOTS.items():
+            if art.get(slot):
+                pictures.append(Picture(folder / filename, art[slot]))
         # A season made of several entries is named and pictured after its first.
         by_season = {number: plan.first_of(number) for number in set(plan.seasons.values())}
         for season_dir in folder.glob("Season *"):
@@ -555,8 +557,8 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
             if _write_text(season_dir / "season.nfo", season_nfo(number, aid, show)):
                 written += 1
                 changed.append(season_dir)
-            if aid is not None and anilist.cover(aid):
-                pictures.append(Picture(season_dir / "poster.jpg", anilist.cover(aid)))
+            if art.get(anime_artwork.season_slot(number)):
+                pictures.append(Picture(season_dir / "poster.jpg", art[anime_artwork.season_slot(number)]))
         for rel in by_folder.get(cid, []):
             video = root.joinpath(*PurePosixPath(rel).parts)
             if not video.is_file():

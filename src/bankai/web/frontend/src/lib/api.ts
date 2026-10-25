@@ -700,6 +700,28 @@ export interface AnimeBulkResult {
   failed: string[];
 }
 
+/** A picture an artwork slot can show. */
+export interface ArtworkCandidate {
+  url: string;
+  preview: string;
+  source: 'anilist' | 'tmdb';
+  label: string;
+  lang: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+/** One artwork slot of a collection: poster, backdrop, thumb, logo, banner, a season's poster. */
+export interface ArtworkSlot {
+  slot: string;
+  label: string;
+  /** The picture it shows now; null when there is none. */
+  url: string | null;
+  /** Chosen by hand rather than automatically. */
+  chosen: boolean;
+  candidates: ArtworkCandidate[];
+}
+
 /** One AniList entry in a collection's relation graph. */
 export interface CollectionNode {
   anilist_id: number;
@@ -1335,6 +1357,38 @@ export const api = {
   /** Queue it for the confirmed shows, in the background. */
   runAnimeBulk: (kind: AnimeBulkKind, keys: string[]) =>
     runAction<AnimeBulkResult>('/api/anime/library/bulk', { kind, keys }),
+  /** A collection's artwork slots and what each can show; TMDB's is fetched when not kept yet. */
+  collectionArtwork: (collectionId: number, refresh = false) =>
+    request<{ collection_id: number; tmdb: boolean; tmdb_error: { error?: string } | null; slots: ArtworkSlot[] }>(
+      `/api/anime/collections/${collectionId}/artwork` + (refresh ? '?refresh=true' : ''),
+    ),
+  /** Choose a slot's picture by URL; null gives it back to the automatic choice. */
+  chooseArtwork: (collectionId: number, slot: string, url: string | null) =>
+    request<{ ok: boolean; pictures: number }>(`/api/anime/collections/${collectionId}/artwork`, {
+      method: 'POST', body: JSON.stringify({ slot, url }),
+    }),
+  /** Take every episode picture again at the saved setting. */
+  regenerateThumbs: () => request<{ ok: boolean }>('/api/anime/thumbs/regenerate', { method: 'POST' }),
+  /** A frame of a library episode as these (unsaved) settings would take it. */
+  thumbPreview: async (params: { mode: string; percent: number; time_seconds: number; width: number; sample: number }) => {
+    const query = new URLSearchParams(Object.entries(params).map(([key, value]) => [key, String(value)]));
+    const res = await fetch('/api/anime/thumbs/preview?' + query);
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const body = await res.json();
+        if (typeof body.detail === 'string') detail = body.detail;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    return {
+      url: URL.createObjectURL(await res.blob()),
+      episode: decodeURIComponent(res.headers.get('X-Episode') ?? ''),
+      position: Number(res.headers.get('X-Position') ?? 0),
+    };
+  },
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
   storage: () => request<StorageUsage>('/api/storage'),

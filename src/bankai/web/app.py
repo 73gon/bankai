@@ -25,7 +25,7 @@ from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ValidationError
@@ -716,6 +716,13 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.erai_username",
     "anime.erai_password",
     "anime.german_avc_fallback",
+    "anime.thumbs_enabled",
+    "anime.thumb_mode",
+    "anime.thumb_percent",
+    "anime.thumb_time_seconds",
+    "anime.thumb_width",
+    "anime.artwork_tmdb",
+    "metadata.tmdb_api_key",
     "scraper.interactive_pick",
     "selector.max_size_gib",
     "selector.min_seeders",
@@ -1631,6 +1638,58 @@ def create_app() -> Any:
     @app.post("/api/anime/automation/run")
     async def anime_automation_run() -> dict:
         return erai_mod.trigger_cycle()
+
+    @app.post("/api/anime/thumbs/regenerate")
+    async def anime_thumbs_regenerate() -> dict:
+        """Take every episode picture again, a slice a pass, at the current setting."""
+        from bankai.web import anime_thumbs
+
+        await asyncio.to_thread(anime_thumbs.regenerate)
+        return {"ok": True}
+
+    @app.get("/api/anime/thumbs/preview", response_model=None)
+    async def anime_thumbs_preview(
+        mode: str = Query("percent", pattern="^(percent|time)$"),
+        percent: float = Query(50.0, ge=1.0, le=99.0),
+        time_seconds: int = Query(600, ge=0, le=6 * 3600),
+        width: int = Query(960, ge=320, le=3840),
+        sample: int = Query(0, ge=0),
+    ):
+        """A frame of a library episode as these settings would take it; ``sample`` picks another episode."""
+        from bankai.web import anime_thumbs, library_walk
+
+        root = Path(get_settings().transfer.anime_shows_dir)
+        videos = sorted(
+            row["path"] for row in await asyncio.to_thread(library_walk.files, [root])
+        ) if root.exists() else []
+        if not videos:
+            raise HTTPException(status_code=404, detail="the anime library has no episodes")
+        # Spread over the library, so the next sample is another show, not the next episode.
+        video = Path(videos[(sample * 7919) % len(videos)])
+        target = _clips_dir() / f"thumb-preview-{uuid.uuid4().hex[:8]}.jpg"
+
+        def grab() -> tuple[float | None, bytes]:
+            with _ffmpeg_slot():
+                at = anime_thumbs.preview(
+                    video, target, mode=mode, percent=percent, time_seconds=time_seconds, width=width
+                )
+            try:
+                return at, target.read_bytes() if at is not None else b""
+            finally:
+                target.unlink(missing_ok=True)
+
+        at, data = await asyncio.to_thread(grab)
+        if at is None:
+            raise HTTPException(status_code=422, detail="no frame could be taken from " + video.name)
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Episode": quote(video.name),
+                "X-Position": f"{at:.1f}",
+            },
+        )
 
     @app.post("/api/anime/automation/retry-held")
     async def anime_automation_retry_held(reason: str | None = Query(None, max_length=60)) -> dict:
@@ -2617,6 +2676,62 @@ def create_app() -> Any:
         result = await _collection_change(change)
         return {**result, "name": result["result"]}
 
+    async def _artwork_target(cid: int) -> tuple[Any, Any]:
+        """A collection and its plan, for its artwork; a 404 when there is no such collection."""
+        from bankai.web import anime_collections, anime_files
+
+        store = await asyncio.to_thread(anime_collections.load)
+        row = store.collections.get(cid)
+        if row is None:
+            raise HTTPException(status_code=404, detail="there is no such collection")
+        held = anime_files.by_entry(await asyncio.to_thread(anime_files.load))
+        plan = anime_collections.plan(
+            row, episodes_on_disk=lambda aid: max(held.get(aid, {0: []}), default=0), store=store
+        )
+        return row, plan
+
+    @app.get("/api/anime/collections/{cid}/artwork")
+    async def anime_collection_artwork(cid: int, refresh: bool = False) -> dict:
+        """Each artwork slot of a collection: its picture now, chosen by hand or not, and what it can show.
+
+        TMDB's artwork is fetched here when not kept yet, so the dialog offers
+        it at once rather than after the maintenance pass gets to the show.
+        """
+        from bankai.metadata import animelists, tmdb
+        from bankai.web import anime_artwork
+
+        row, plan = await _artwork_target(cid)
+        if not animelists.ids_all():
+            await animelists.refresh()
+        if get_settings().anime.artwork_tmdb and tmdb.configured():
+            for (kind, tmdb_id), seasons in anime_artwork.wanted(row, plan).items():
+                await tmdb.ensure(kind, tmdb_id, seasons, force=refresh)
+        return {
+            "collection_id": cid,
+            "tmdb": get_settings().anime.artwork_tmdb and tmdb.configured(),
+            "tmdb_error": dict(tmdb.last_error) or None,
+            "slots": await asyncio.to_thread(anime_artwork.panel, cid, row, plan),
+        }
+
+    @app.post("/api/anime/collections/{cid}/artwork")
+    async def anime_collection_artwork_choose(cid: int, req: dict) -> dict:
+        """Choose a slot's picture by its URL (null: automatic again); it is downloaded into the library at once."""
+        from bankai.web import anime_artwork, anime_layout
+
+        row, plan = await _artwork_target(cid)
+        slot = str(req.get("slot") or "")
+        slots = {item["slot"] for item in await asyncio.to_thread(anime_artwork.panel, cid, row, plan)}
+        if slot not in slots:
+            raise HTTPException(status_code=422, detail="no such artwork slot for this show")
+        url = str(req.get("url") or "").strip() or None
+        if url is not None and (urlparse(url).scheme not in {"http", "https"} or not urlparse(url).hostname):
+            raise HTTPException(status_code=422, detail="the picture must be an http(s) URL")
+        await asyncio.to_thread(anime_artwork.choose, cid, slot, url)
+        # Only the pictures change: the layout writes them into the show's folders.
+        result = await anime_layout.relayout({cid}, label="artwork")
+        snaps["anime_library"].invalidate()
+        return {"ok": True, "pictures": result.get("pictures", 0)}
+
     async def _relayout_entries(aids: set[int]) -> dict:
         """Entries just matched by hand: into their collections, and their files into place."""
         from bankai.web import anime_collections, anime_layout, library_walk
@@ -2814,6 +2929,7 @@ def create_app() -> Any:
         "anime_collections.json",
         "anime_hevc_checks.json",
         "anime_missing_checks.json",
+        "anime_artwork.json",
         "review.json",
     )
     snaps.add(

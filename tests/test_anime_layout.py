@@ -467,7 +467,9 @@ def test_nfo_files_are_written_next_to_the_files_in_the_library(titan, roots) ->
     assert (special.findtext("season"), special.findtext("episode")) == ("0", "2")
     assert {(picture.path.relative_to(show).as_posix(), picture.url) for picture in pictures} == {
         ("poster.jpg", "https://img/aot.jpg"),
+        # Without TMDB the banner is the backdrop too, as it always was.
         ("fanart.jpg", "https://img/aot-banner.jpg"),
+        ("banner.jpg", "https://img/aot-banner.jpg"),
         ("Season 01/poster.jpg", "https://img/aot.jpg"),
         ("Season 04/poster.jpg", "https://img/s3p2.jpg"),
     }
@@ -633,3 +635,75 @@ def test_new_specials_past_anilists_count_lengthen_their_block(titan, roots) -> 
     assert places == {10: _place(AOT, 0, 10)}
     # The order of the specials is fixed now, for the next newcomer.
     assert collections.load().collections[1].specials == [OVA, MOVIE]
+
+
+def _tmdb_artwork(monkeypatch) -> None:
+    """Attack on Titan as TMDB's show 1429, with a backdrop of each kind, two logos and a Specials poster."""
+    import json
+    import time
+
+    from bankai.metadata import animelists, tmdb
+
+    monkeypatch.setenv("BANKAI_METADATA__TMDB_API_KEY", "token")
+    reset_settings_cache()
+    store = animelists._store()
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({str(S1): {"tmdb_tv": 1429, "tmdb_season": 1}}), encoding="utf-8")
+
+    def image(path: str, lang: str | None) -> dict:
+        return {"path": path, "lang": lang, "w": 1920, "h": 1080, "votes": 5.0, "count": 3}
+
+    tmdb._save({
+        "tv:1429": {
+            "at": time.time(),
+            "posters": [image("/poster.jpg", "en")],
+            "backdrops": [image("/titled.jpg", "en"), image("/clean.jpg", None)],
+            "logos": [image("/logo.svg", "en"), image("/logo.png", "en")],
+            "seasons": {"0": [image("/specials.jpg", None)], "1": [image("/s1.jpg", "en")]},
+        }
+    })
+
+
+def test_tmdb_fills_the_backdrop_thumb_logo_and_specials_poster(titan, roots, monkeypatch) -> None:
+    from bankai.metadata import tmdb
+    from bankai.web import anime_artwork
+
+    _tmdb_artwork(monkeypatch)
+    files = {_place(AOT, 1, 1): [(S1, 1)], _place(AOT, 0, 2): [(OVA, 2)]}
+    for rel in files:
+        _touch(roots.anime / rel)
+    _index(files)
+
+    _written, pictures = anime_layout.write_nfo(Layout.build(_titan_store(), anime_files.load()), [1])
+
+    show = roots.anime / AOT
+    found = {picture.path.relative_to(show).as_posix(): picture.url for picture in pictures}
+    # AniList's own poster stays the poster; TMDB fills what AniList has none of.
+    assert found["poster.jpg"] == "https://img/aot.jpg"
+    assert found["fanart.jpg"] == tmdb.url("/clean.jpg")  # textless, under Jellyfin's own title
+    assert found["landscape.jpg"] == tmdb.url("/titled.jpg")  # a thumb carries the title
+    assert found["logo.png"] == tmdb.url("/logo.png")  # never the SVG one
+    assert found["banner.jpg"] == "https://img/aot-banner.jpg"
+    assert found["Season 00/poster.jpg"] == tmdb.url("/specials.jpg")
+
+    # A picture chosen by hand wins, and "Automatic" gives the slot back.
+    anime_artwork.choose(1, "poster", "https://example.org/mine.jpg")
+    _written, pictures = anime_layout.write_nfo(Layout.build(_titan_store(), anime_files.load()), [1])
+    assert {p.path.name: p.url for p in pictures if p.path.parent == show}["poster.jpg"] == "https://example.org/mine.jpg"
+    anime_artwork.choose(1, "poster", None)
+    assert anime_artwork.load() == {}
+
+
+def test_without_tmdb_its_artwork_is_neither_offered_nor_used(titan, roots, monkeypatch) -> None:
+    from bankai.web import anime_artwork
+
+    _tmdb_artwork(monkeypatch)
+    monkeypatch.setenv("BANKAI_ANIME__ARTWORK_TMDB", "false")
+    reset_settings_cache()
+    store = _titan_store()
+    layout = Layout.build(store, {})
+    slots = {row["slot"]: row for row in anime_artwork.panel(1, store.collections[1], layout.plans[1])}
+
+    assert slots["fanart"]["url"] == "https://img/aot-banner.jpg"
+    assert all(item["source"] == "anilist" for row in slots.values() for item in row["candidates"])
+    assert slots["logo"]["url"] is None

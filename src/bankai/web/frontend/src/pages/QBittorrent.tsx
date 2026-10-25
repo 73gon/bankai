@@ -8,6 +8,7 @@ import {
   CircleHelp,
   CirclePause,
   Clock3,
+  Columns3,
   Download,
   ListFilter,
   Loader2,
@@ -160,12 +161,56 @@ const FIRST_DIRECTION: Record<SortKey, 'asc' | 'desc'> = {
   peers: 'desc', dlspeed: 'desc', upspeed: 'desc', eta: 'asc', added_on: 'desc',
 };
 
+/** The columns that can be switched off (Name always shows), and how wide each needs the table to be. */
+const COLUMNS = [
+  { key: 'status', label: 'Status', width: 120 },
+  { key: 'size', label: 'Size', width: 90 },
+  { key: 'progress', label: 'Progress', width: 176 },
+  { key: 'seeds', label: 'Seeds', width: 80 },
+  { key: 'peers', label: 'Peers', width: 80 },
+  { key: 'dlspeed', label: 'Down', width: 95 },
+  { key: 'upspeed', label: 'Up', width: 95 },
+  { key: 'eta', label: 'ETA', width: 80 },
+  { key: 'added_on', label: 'Added on', width: 140 },
+] as const;
+type ColumnKey = (typeof COLUMNS)[number]['key'];
+const NAME_WIDTH = 360;
+const HIDDEN_KEY = 'bankai.qbittorrent.hiddenColumns';
+
+function storedHidden(): Set<ColumnKey> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HIDDEN_KEY) ?? '[]');
+    return new Set(Array.isArray(raw) ? raw.filter((key) => COLUMNS.some((column) => column.key === key)) : []);
+  } catch {
+    // Private windows and blocked site data throw here: every column shows.
+    return new Set();
+  }
+}
+
 export default function QBittorrent() {
   // Started from the last answer this browser saw, refreshed straight after.
   const [items, setItems] = useState<QBittorrentItem[]>(() => recall<{ items: QBittorrentItem[] }>(pagePaths.qbittorrent)?.items ?? []);
   const [query, setQuery] = useState('');
   const [statuses, setStatuses] = useState<Set<string>>(new Set());
   const [sort, setSort] = useState<Sort | null>(null);
+  // The columns switched off, remembered in this browser.
+  const [hidden, setHidden] = useState<Set<ColumnKey>>(storedHidden);
+  const shown = (key: ColumnKey) => !hidden.has(key);
+  const tableWidth = NAME_WIDTH + COLUMNS.reduce((sum, column) => sum + (hidden.has(column.key) ? 0 : column.width), 0);
+
+  function toggleColumn(key: ColumnKey) {
+    setHidden((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        localStorage.setItem(HIDDEN_KEY, JSON.stringify([...next]));
+      } catch {
+        /* remembering the choice is a convenience, not a requirement */
+      }
+      return next;
+    });
+  }
   const [loading, setLoading] = useState(() => recall(pagePaths.qbittorrent) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -359,6 +404,53 @@ export default function QBittorrent() {
           </PopoverContent>
         </Popover>
 
+        <Popover>
+          <PopoverTrigger render={<Button variant='secondary' aria-label='Choose columns' />}>
+            <Columns3 data-icon='inline-start' />
+            {hidden.size === 0 ? 'Columns' : `Columns (${COLUMNS.length - hidden.size}/${COLUMNS.length})`}
+            <ChevronDown className='opacity-60' aria-hidden='true' />
+          </PopoverTrigger>
+          <PopoverContent align='start' className='w-52 gap-0 p-1'>
+            {COLUMNS.map((column) => {
+              const on = shown(column.key);
+              return (
+                <button
+                  key={column.key}
+                  type='button'
+                  role='menuitemcheckbox'
+                  aria-checked={on}
+                  onClick={() => toggleColumn(column.key)}
+                  className='flex w-full cursor-pointer items-center gap-2 rounded-item material-row px-2 py-1.5 text-left text-[13px] focus-ring'
+                >
+                  <span className='flex size-3.5 shrink-0 items-center justify-center'>
+                    {on && <Check className='size-3.5' aria-hidden='true' />}
+                  </span>
+                  <span className='flex-1'>{column.label}</span>
+                </button>
+              );
+            })}
+            {hidden.size > 0 && (
+              <>
+                <Separator className='my-1' />
+                <button
+                  type='button'
+                  onClick={() => {
+                    setHidden(new Set());
+                    try {
+                      localStorage.removeItem(HIDDEN_KEY);
+                    } catch {
+                      /* see toggleColumn */
+                    }
+                  }}
+                  className='w-full cursor-pointer rounded-item material-row px-2 py-1.5 text-left text-[13px] text-muted-foreground focus-ring'
+                >
+                  Show all
+                </button>
+              </>
+            )}
+          </PopoverContent>
+        </Popover>
+
         {sort && (
           <Button variant='ghost' onClick={() => setSort(null)}>Reset sort</Button>
         )}
@@ -381,19 +473,19 @@ export default function QBittorrent() {
           <EmptyDescription>{query ? 'Try another filter.' : 'qBittorrent has no downloads yet.'}</EmptyDescription>
         </Empty>
       ) : (
-          <Table variant='plain' dense className='min-w-[1180px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+          <Table variant='plain' dense style={{ minWidth: tableWidth }} containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
             <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
               <TableRow>
                 <SortHeader label='Name' column='name' sort={sort} onSort={toggleSort} />
-                <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />
-                <SortHeader label='Size' column='size' sort={sort} onSort={toggleSort} align='right' />
-                <SortHeader label='Progress' column='progress' sort={sort} onSort={toggleSort} className='w-44' />
-                <SortHeader label='Seeds' column='seeds' sort={sort} onSort={toggleSort} align='right' />
-                <SortHeader label='Peers' column='peers' sort={sort} onSort={toggleSort} align='right' />
-                <SortHeader label='Down' column='dlspeed' sort={sort} onSort={toggleSort} align='right' />
-                <SortHeader label='Up' column='upspeed' sort={sort} onSort={toggleSort} align='right' />
-                <SortHeader label='ETA' column='eta' sort={sort} onSort={toggleSort} align='right' />
-                <SortHeader label='Added on' column='added_on' sort={sort} onSort={toggleSort} />
+                {shown('status') && <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />}
+                {shown('size') && <SortHeader label='Size' column='size' sort={sort} onSort={toggleSort} align='right' />}
+                {shown('progress') && <SortHeader label='Progress' column='progress' sort={sort} onSort={toggleSort} className='w-44' />}
+                {shown('seeds') && <SortHeader label='Seeds' column='seeds' sort={sort} onSort={toggleSort} align='right' />}
+                {shown('peers') && <SortHeader label='Peers' column='peers' sort={sort} onSort={toggleSort} align='right' />}
+                {shown('dlspeed') && <SortHeader label='Down' column='dlspeed' sort={sort} onSort={toggleSort} align='right' />}
+                {shown('upspeed') && <SortHeader label='Up' column='upspeed' sort={sort} onSort={toggleSort} align='right' />}
+                {shown('eta') && <SortHeader label='ETA' column='eta' sort={sort} onSort={toggleSort} align='right' />}
+                {shown('added_on') && <SortHeader label='Added on' column='added_on' sort={sort} onSort={toggleSort} />}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -418,22 +510,22 @@ export default function QBittorrent() {
                         <div className='truncate' title={item.name}>{item.name}</div>
                       </div>
                     </TableCell>
-                    <TableCell className='py-2'><StatusTag variant={status.badge}>{status.label}</StatusTag></TableCell>
-                    <TableCell numeric className='py-2 text-xs'>{formatBytes(item.size_bytes)}</TableCell>
-                    <TableCell className='py-2'>
+                    {shown('status') && <TableCell className='py-2'><StatusTag variant={status.badge}>{status.label}</StatusTag></TableCell>}
+                    {shown('size') && <TableCell numeric className='py-2 text-xs'>{formatBytes(item.size_bytes)}</TableCell>}
+                    {shown('progress') && <TableCell className='py-2'>
                       <div className='flex items-center gap-2'>
                         <div className='h-1.5 flex-1 overflow-hidden rounded-full bg-secondary'>
                           <div className={cn('h-full rounded-full transition-[width] duration-300', status.progress)} style={{ width: `${percent}%` }} />
                         </div>
                         <span className='w-10 text-right font-mono text-[0.68rem] tabular-nums'>{percent.toFixed(0)}%</span>
                       </div>
-                    </TableCell>
-                    <TableCell numeric className='py-2 text-xs'>{item.seeds} ({item.seeds_total})</TableCell>
-                    <TableCell numeric className='py-2 text-xs'>{item.peers} ({item.peers_total})</TableCell>
-                    <TableCell numeric className='py-2 text-xs'>{formatSpeed(item.dlspeed)}</TableCell>
-                    <TableCell numeric className='py-2 text-xs'>{formatSpeed(item.upspeed)}</TableCell>
-                    <TableCell numeric className='py-2 text-[0.68rem]'>{formatEta(item.eta, item.progress)}</TableCell>
-                    <TableCell className='whitespace-nowrap py-2 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatAdded(item.added_on)}</TableCell>
+                    </TableCell>}
+                    {shown('seeds') && <TableCell numeric className='py-2 text-xs'>{item.seeds} ({item.seeds_total})</TableCell>}
+                    {shown('peers') && <TableCell numeric className='py-2 text-xs'>{item.peers} ({item.peers_total})</TableCell>}
+                    {shown('dlspeed') && <TableCell numeric className='py-2 text-xs'>{formatSpeed(item.dlspeed)}</TableCell>}
+                    {shown('upspeed') && <TableCell numeric className='py-2 text-xs'>{formatSpeed(item.upspeed)}</TableCell>}
+                    {shown('eta') && <TableCell numeric className='py-2 text-[0.68rem]'>{formatEta(item.eta, item.progress)}</TableCell>}
+                    {shown('added_on') && <TableCell className='whitespace-nowrap py-2 font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatAdded(item.added_on)}</TableCell>}
                   </TableRow>
                 );
               })}

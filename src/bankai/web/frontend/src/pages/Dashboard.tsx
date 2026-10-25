@@ -42,18 +42,22 @@ function runningFor(ts: number | null | undefined): string | null {
   return `${Math.floor(diff / 86400)} d`;
 }
 
-function Stat({ icon: Icon, label, value, hint, tone }: { icon: typeof Users; label: string; value: string; hint?: string; tone?: string }) {
+// The strip's dividers: one row on a wide screen, two by two on a narrow one.
+const STAT_EDGES = ['', 'border-l', 'border-t lg:border-t-0 lg:border-l', 'border-l border-t lg:border-t-0'];
+
+/** One segment of the summary strip: label and number on one line; what it means on hover. */
+function Stat({ icon: Icon, label, value, hint, extra, tone, index }: {
+  icon: typeof Users; label: string; value: string; hint: string; extra?: string; tone?: string; index: number;
+}) {
   return (
-    <Card className='[--card-padding:12px]'>
-      <CardContent className='flex items-center gap-3'>
-        <Icon className={cn('size-4 shrink-0 text-muted-foreground', tone)} />
-        <div className='min-w-0 flex-1'>
-          <p className='eyebrow text-[10px]'>{label}</p>
-          <p className='truncate text-xs text-muted-foreground' title={hint}>{hint}</p>
-        </div>
-        <p className={cn('shrink-0 font-mono text-xl text-foreground', tone)}>{value}</p>
-      </CardContent>
-    </Card>
+    <div className={cn('flex min-w-0 items-center gap-2.5 border-border/60 px-3.5 py-2', STAT_EDGES[index])} title={hint}>
+      <Icon className={cn('size-3.5 shrink-0 text-muted-foreground', tone)} aria-hidden='true' />
+      <span className='eyebrow truncate text-[10px]'>{label}</span>
+      <span className='ml-auto flex shrink-0 items-center gap-2'>
+        {extra && <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{extra}</span>}
+        <span className={cn('font-mono text-base tabular-nums text-foreground', tone)}>{value}</span>
+      </span>
+    </div>
   );
 }
 
@@ -95,41 +99,66 @@ function WorkerRow({ worker }: { worker: DashboardLane['workers'][number] }) {
   );
 }
 
-function LaneCard({ lane }: { lane: DashboardLane }) {
+// A busy lane shows this many of its rows on the right; the rest are a "+N more".
+const LANE_ROWS = 6;
+
+/** What a lane says on its line of the lane list. */
+function laneState(lane: DashboardLane): string {
+  const capacity = lane.capacity ?? lane.workers.length;
+  if (lane.state === 'down') return lane.key === 'downloads' ? 'Unreachable' : 'Not reporting';
+  if (lane.busy) return 'Running';
+  if (lane.workers.length === 0) return 'Nothing running';
+  return capacity > 1 ? `All ${capacity} idle` : 'Idle';
+}
+
+/** One line of the lane list: how busy a lane is. Click: all its rows on the right. */
+function LaneLine({ lane, open, onToggle }: { lane: DashboardLane; open: boolean; onToggle: () => void }) {
   const down = lane.state === 'down';
   const capacity = lane.capacity ?? lane.workers.length;
-  // Empty slots say nothing one by one: one line for all of them. A worker with a task -- a
-  // scheduler pass with its last result -- keeps its row, busy or not.
-  const shown = lane.workers.filter((worker) => worker.busy || worker.task);
-  const idle = lane.workers.length - shown.length;
+  const rows = lane.workers.filter((worker) => worker.busy || worker.task).length;
   return (
-    // The scheduler's rows say what each pass did: they need the width of two cards.
-    <Card className={cn('flex h-full flex-col gap-2 [--card-padding:14px]', lane.key === 'scheduler' && 'md:col-span-2', down && 'border-destructive/40')}>
-      <CardHeader className='flex flex-row items-center justify-between gap-3'>
-        <div className='min-w-0'>
-          <CardTitle className='truncate text-base sm:text-base' title={lane.description}>{lane.label}</CardTitle>
-          {/* What went wrong behind the lane: two lines, the rest on hover. */}
-          {lane.note && <p className='line-clamp-2 text-xs text-warning' title={lane.note}>{lane.note}</p>}
-        </div>
-        {down ? (
-          <StatusTag variant='destructive' className='shrink-0 whitespace-nowrap'>Not reporting</StatusTag>
-        ) : (
-          <StatusTag variant={lane.busy ? 'success' : 'muted'} className='shrink-0 whitespace-nowrap' title={lane.capacity === null ? 'No fixed limit' : undefined}>
-            {lane.busy} / {lane.capacity === null ? (capacity || '∞') : capacity} busy
-          </StatusTag>
+    <div className='flex flex-col'>
+      <button
+        type='button'
+        onClick={onToggle}
+        disabled={rows === 0}
+        aria-pressed={open}
+        title={lane.description}
+        className={cn(
+          'flex w-full items-center gap-2 rounded-item px-2 py-1.5 text-left focus-ring enabled:cursor-pointer enabled:hover:bg-secondary/40',
+          open && 'bg-secondary/50',
         )}
-      </CardHeader>
-      {/* Scrolls: qBittorrent alone can run twenty. */}
-      <CardContent className='flex max-h-56 min-h-0 flex-1 flex-col gap-1 overflow-y-auto'>
-        {lane.workers.length === 0 && <p className='text-xs text-muted-foreground'>{down ? 'qBittorrent could not be reached.' : 'Nothing running.'}</p>}
+      >
+        <span className={cn('size-1.5 shrink-0 rounded-full', down ? 'bg-destructive' : lane.busy ? 'bg-success' : 'bg-muted-foreground/40')} aria-hidden='true' />
+        <span className={cn('truncate text-sm', lane.busy || down ? 'text-foreground' : 'text-muted-foreground')}>{lane.label}</span>
+        <span className={cn('ml-auto shrink-0 text-xs', down ? 'text-destructive' : 'text-muted-foreground')}>{laneState(lane)}</span>
+        <span className={cn('w-12 shrink-0 text-right font-mono text-[11px] tabular-nums', lane.busy ? 'text-success' : 'text-muted-foreground')} title={lane.capacity === null ? 'No fixed limit' : undefined}>
+          {lane.busy}/{lane.capacity === null ? (capacity || '∞') : capacity}
+        </span>
+      </button>
+      {/* What went wrong behind the lane: one line, the rest on hover. */}
+      {lane.note && <p className='truncate pl-5 pr-2 text-xs text-warning' title={lane.note}>{lane.note}</p>}
+    </div>
+  );
+}
+
+/** A lane's rows on the right: what runs (or, opened, every row it has), a few, then "+N more". */
+function LaneRows({ lane, open }: { lane: DashboardLane; open: boolean }) {
+  const rows = open ? lane.workers.filter((worker) => worker.busy || worker.task) : lane.workers.filter((worker) => worker.busy);
+  const shown = open ? rows : rows.slice(0, LANE_ROWS);
+  const more = rows.length - shown.length;
+  return (
+    <div className='flex flex-col gap-1.5'>
+      <p className='eyebrow text-[10px]'>{lane.label}</p>
+      <div className='grid gap-1.5 md:grid-cols-2'>
         {shown.map((worker) => <WorkerRow key={worker.id} worker={worker} />)}
-        {idle > 0 && (
-          <p className='px-1 text-xs text-muted-foreground'>
-            {shown.length ? `${idle} more ${idle === 1 ? 'slot' : 'slots'} idle` : idle === 1 ? 'Idle' : `All ${idle} slots idle`}
-          </p>
-        )}
-      </CardContent>
-    </Card>
+      </div>
+      {more > 0 && (
+        lane.key === 'downloads'
+          ? <Link to='/qbittorrent' className='self-start text-xs text-muted-foreground hover:text-foreground hover:underline'>+{more} more in qBittorrent</Link>
+          : <p className='text-xs text-muted-foreground'>+{more} more; click the lane to see them</p>
+      )}
+    </div>
   );
 }
 
@@ -195,6 +224,8 @@ export default function Dashboard() {
   // Started from the last answer this browser saw, refreshed straight after.
   const [data, setData] = useState<DashboardData | undefined>(() => recall<DashboardData>(pagePaths.dashboard));
   const [, setTick] = useState(0);
+  // The Workers panel's lanes opened to every row.
+  const [openLanes, setOpenLanes] = useState<Set<string>>(new Set());
   // Anime arrivals one row per episode, or grouped into their series; remembered.
   const [animeView, setAnimeView] = useState<'episodes' | 'series'>(() => {
     try {
@@ -252,39 +283,64 @@ export default function Dashboard() {
       </div>
 
       {!data ? (
-        <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
-          {Array.from({ length: 4 }, (_, index) => <Skeleton key={index} shape='card' className='h-14' />)}
-        </div>
+        <Skeleton shape='card' className='h-10' />
       ) : (
         <>
-          <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
-            <Stat icon={Users} label='Workers busy' value={`${summary!.workers_busy} / ${summary!.workers_total}`} hint='Across every lane below' />
-            <Stat icon={Clock} label='Due' value={String(summary!.due_total)} hint='Queued jobs and releases waiting' />
+          {/* The four numbers as one thin strip, not four cards: the lanes below are the content. */}
+          <Card className='grid grid-cols-2 gap-0 overflow-hidden [--card-padding:0] lg:grid-cols-4'>
+            <Stat index={0} icon={Users} label='Workers' value={`${summary!.workers_busy} / ${summary!.workers_total}`} hint='Workers busy, across every lane below' />
+            <Stat index={1} icon={Clock} label='Due' value={String(summary!.due_total)} hint='Queued jobs and releases waiting' />
             <Stat
+              index={2}
               icon={Download}
               label='Downloading'
               value={String(summary!.downloading)}
+              extra={summary!.download_speed > 0 ? `${formatBytes(summary!.download_speed)}/s` : undefined}
               hint={summary!.download_speed > 0 ? `${formatBytes(summary!.download_speed)}/s in total` : 'Nothing moving right now'}
             />
             <Stat
+              index={3}
               icon={Activity}
-              label='Anime automation'
+              label='Automation'
               value={summary!.automation === 'running' ? 'Running' : summary!.automation === 'down' ? 'Down' : 'Idle'}
               tone={summary!.automation === 'down' ? 'text-destructive' : summary!.automation === 'running' ? 'text-success' : undefined}
-              hint={summary!.automation === 'down' ? 'The worker is not reporting' : undefined}
+              hint={summary!.automation === 'down' ? 'The anime automation worker is not reporting' : 'The anime automation worker'}
             />
-          </div>
+          </Card>
 
-          <section className='flex flex-col gap-2'>
-            <h2 className='font-heading text-lg font-light'>Workers</h2>
-            {/* Two even rows on a wide screen: the four small lanes, then automation, qBittorrent
-                and the scheduler (two wide, for its passes). Each row's cards share its height. */}
-            <div className='grid gap-3 md:grid-cols-2 lg:grid-cols-4'>
-              {[...data.lanes]
-                .sort((a, b) => Number(a.key === 'scheduler') - Number(b.key === 'scheduler'))
-                .map((lane) => <LaneCard key={lane.key} lane={lane} />)}
-            </div>
-          </section>
+          {/* Every lane in one panel: on the left a line each, how busy; on the right only what
+              runs, so an idle lane costs one line, not a card. */}
+          <Card className='gap-3 [--card-padding:14px]'>
+            <CardHeader className='flex flex-row items-center gap-2'>
+              <Users className='size-4 shrink-0 text-muted-foreground' />
+              <CardTitle className='text-base sm:text-base'>Workers</CardTitle>
+            </CardHeader>
+            <CardContent className='grid gap-x-6 gap-y-4 lg:grid-cols-[minmax(0,19rem)_minmax(0,1fr)]'>
+              <div className='flex flex-col gap-0.5 lg:border-r lg:border-border/60 lg:pr-4'>
+                {data.lanes.map((lane) => (
+                  <LaneLine
+                    key={lane.key}
+                    lane={lane}
+                    open={openLanes.has(lane.key)}
+                    onToggle={() => setOpenLanes((current) => {
+                      const next = new Set(current);
+                      if (next.has(lane.key)) next.delete(lane.key);
+                      else next.add(lane.key);
+                      return next;
+                    })}
+                  />
+                ))}
+              </div>
+              <div className='flex min-w-0 flex-col gap-4'>
+                {data.lanes
+                  .filter((lane) => lane.busy > 0 || openLanes.has(lane.key))
+                  .map((lane) => <LaneRows key={lane.key} lane={lane} open={openLanes.has(lane.key)} />)}
+                {!data.lanes.some((lane) => lane.busy > 0 || openLanes.has(lane.key)) && (
+                  <p className='flex h-full items-center justify-center py-6 text-sm text-muted-foreground'>Nothing running. Click a lane to see what it did last.</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
 
           <section className='flex flex-col gap-2'>
             <h2 className='font-heading text-lg font-light'>Up next &amp; recently added</h2>

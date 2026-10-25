@@ -9,6 +9,8 @@ Every few minutes, a little at a time:
   so hundreds of entries are never asked for in one burst;
 - entries on disk or followed that are in no collection yet joining one, and
   sequels AniList has announced since joining their show's collection;
+- the AniList-TMDB id list weekly, and the TMDB artwork each collection
+  needs (backdrops, logos, season posters), a few records a pass;
 - every collection whose layout changed since the last pass laid out again:
   renamed into place, NFO files written. What changed is told by a
   fingerprint of what the layout is made from, so a pass with nothing new
@@ -27,14 +29,17 @@ from typing import Any
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata import anilist, jikan, offline
-from bankai.web import anime_collections, anime_files, anime_layout
+from bankai.metadata import anilist, animelists, jikan, offline, tmdb
+from bankai.web import anime_artwork, anime_collections, anime_files, anime_layout
 
 log = get_logger(__name__)
 
 _LOCK = asyncio.Lock()
 # 2: placeholder episode titles ("Untitled") are no longer written into NFO files.
-_LAYOUT_VERSION = 2
+# 3: artwork from TMDB beside AniList's: backdrop, thumb, logo, banner, Specials poster.
+_LAYOUT_VERSION = 3
+# TMDB records fetched a pass at most, for the collections' artwork.
+_TMDB_PER_PASS = 25
 
 
 def _fingerprints_path() -> Path:
@@ -87,8 +92,10 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
             for aid in row.members
         }
         files = sorted((rel, rel in published) for rel in by_collection.get(cid, []))
+        # The pictures each slot shows: a choice by hand, or TMDB's artwork arriving, lays it out anew.
+        art = anime_artwork.resolved(cid, row, plan)
         material = json.dumps(
-            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version],
+            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version, art],
             sort_keys=True,
             default=str,
         )
@@ -137,6 +144,7 @@ async def run(*, max_batches: int = 4, layout: bool = True) -> dict[str, Any]:
             if (mal := anilist.media(aid).get("mal_id")) and anilist.untitled(aid)
         ]
         titled = await jikan.ensure(untitled, max_requests=8)
+        await animelists.refresh()
 
         def regroup() -> set[int]:
             with anime_collections.editing() as current:
@@ -162,6 +170,11 @@ async def run(*, max_batches: int = 4, layout: bool = True) -> dict[str, Any]:
         store = await asyncio.to_thread(anime_collections.load)
         rows = await asyncio.to_thread(anime_files.load)
         built = await asyncio.to_thread(anime_layout.Layout.build, store, rows)
+        result["artwork_fetched"] = await anime_artwork.ensure(
+            ((row, built.plans[cid]) for cid, row in store.collections.items()), limit=_TMDB_PER_PASS
+        )
+        if tmdb.last_error:
+            result["tmdb_error"] = dict(tmdb.last_error)
         published = await asyncio.to_thread(_published)
         now = await asyncio.to_thread(fingerprints, built, published)
         before = await asyncio.to_thread(_load_fingerprints)

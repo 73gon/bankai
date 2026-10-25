@@ -440,7 +440,7 @@ _RELEASE_RECONCILE_SECONDS = 20.0
 # the held library tree, so a pass with nothing left to probe costs nothing.
 _CODEC_SWEEP_SECONDS = 60.0
 _CODEC_SWEEP_BATCH = 40
-# Each episode's picture for Jellyfin, from mid-episode (see anime_thumbs): the
+# Each episode's picture for Jellyfin, where the settings say (see anime_thumbs): the
 # same kind of one-off crawl, a frame each, a slice a minute.
 _THUMB_SWEEP_SECONDS = 60.0
 _THUMB_SWEEP_BATCH = 20
@@ -478,7 +478,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "release_reconcile": ("Publish finished downloads", _RELEASE_RECONCILE_SECONDS),
     "library_walk": ("Check the libraries for changes", _LIBRARY_WALK_SECONDS),
     "codec_sweep": ("Identify episode encodes", _CODEC_SWEEP_SECONDS),
-    "thumb_sweep": ("Episode pictures from mid-episode", _THUMB_SWEEP_SECONDS),
+    "thumb_sweep": ("Take episode pictures", _THUMB_SWEEP_SECONDS),
     "jellyfin_refresh": ("Tell Jellyfin what changed", _JELLYFIN_SECONDS),
     "hevc_check": ("Look for HEVC upgrades", _HEVC_CHECK_SECONDS),
     "missing_check": ("Look for missing episodes", _MISSING_CHECK_SECONDS),

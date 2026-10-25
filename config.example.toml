@@ -45,6 +45,9 @@ tvdb_enabled = true
 tvdb_api_key = ""
 tvdb_pin = ""
 tvdb_languages = ["deu", "eng"]
+# Optional TMDB v3 API key or v4 read access token. The anime library takes
+# show artwork from it: backdrops, logos, landscape thumbs, season posters.
+tmdb_api_key = ""
 
 [transfer]
 # Safe moves use: rsync --ignore-existing --remove-source-files
@@ -87,6 +90,16 @@ backfill_request_delay_seconds = 2
 # episodes without German get it added. Leave either empty to turn this off.
 erai_username = ""
 erai_password = ""
+# Episode pictures for Jellyfin (<episode>-thumb.jpg), taken from the video.
+# thumb_mode "percent" takes the frame thumb_percent into the episode, "time"
+# thumb_time_seconds into it. Changing either takes every picture again.
+thumbs_enabled = true
+thumb_mode = "percent"
+thumb_percent = 50
+thumb_time_seconds = 600
+thumb_width = 960
+# Backdrops, logos, thumbs and season posters from TMDB (metadata.tmdb_api_key).
+artwork_tmdb = true
 
 [queue]
 # Per-stage worker concurrency.

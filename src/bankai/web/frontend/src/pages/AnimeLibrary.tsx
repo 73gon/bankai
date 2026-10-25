@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, CircleArrowUp, ExternalLink, Search, Download, FileVideo, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, CircleArrowUp, ExternalLink, Search, Download, FileVideo, Images, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeBulkKind, type AnimeBulkShow, type MissingRelease } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
+import { ArtworkDialog } from '@/components/ArtworkDialog';
 import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { StatusTag } from '@/components/status-tag';
@@ -377,6 +378,8 @@ export default function AnimeLibrary() {
   const [titling, setTitling] = useState(false);
   // The collection whose relation graph is open.
   const [graphFor, setGraphFor] = useState<GraphTarget>(null);
+  // The collection whose Artwork dialog is open.
+  const [artworkFor, setArtworkFor] = useState<AnimeLibraryShow | null>(null);
   // Shows being removed in the background: kept off the page until done.
   const removing = useRef<Set<string>>(new Set());
   // "Download N remaining episodes": the show, what the background search found
@@ -1190,6 +1193,16 @@ export default function AnimeLibrary() {
                           <Pencil data-icon='inline-start' /> Rename
                         </Button>
                       )}
+                      {active.collection_id != null && (
+                        <Button
+                          size='sm'
+                          variant='secondary'
+                          onClick={() => setArtworkFor(active)}
+                          title='Poster, backdrop, thumb, logo, banner and season posters in Jellyfin: from AniList and TMDB, or any picture'
+                        >
+                          <Images data-icon='inline-start' /> Artwork
+                        </Button>
+                      )}
                       {isUnmatched(active) && (
                         <Button
                           size='sm'
@@ -1632,6 +1645,12 @@ export default function AnimeLibrary() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ArtworkDialog
+        collectionId={artworkFor?.collection_id ?? null}
+        title={artworkFor?.title ?? ''}
+        onClose={() => setArtworkFor(null)}
+        onChanged={() => void load()}
+      />
       {/* Every show's upgrades or available episodes at once; nothing is queued until confirmed. */}
       <Dialog open={bulkKind !== null} onOpenChange={(open) => { if (!open) setBulkKind(null); }}>
         <DialogContent size='xl' className='max-h-[90dvh]'>

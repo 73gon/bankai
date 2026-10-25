@@ -986,6 +986,9 @@ async def group_shows(
     from bankai.web import anime_missing
 
     findable = anime_missing.available(state)
+    from bankai.web import anime_artwork
+
+    chosen_art = anime_artwork.load()
 
     def upgrade_counts(episodes: list[dict]) -> dict:
         avc = [
@@ -1130,7 +1133,8 @@ async def group_shows(
                 ],
                 "numbering": "anilist",
                 "year": anilist.year(main),
-                "poster_url": anilist.cover(main),
+                # A poster chosen by hand in the Artwork dialog shows here too.
+                "poster_url": (chosen_art.get(str(slot["cid"])) or {}).get("poster") or anilist.cover(main),
                 "season_count": len({r["season_number"] for r in merged["episodes"] if r["season_number"] is not None}),
                 **counts(merged["episodes"]),
                 **merged,

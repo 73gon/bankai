@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Database, Play, Save, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Database, Image, Images, Play, RefreshCw, Save, Shuffle, ShieldCheck } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type AnimeAutomationStatus, type SettingRow } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
@@ -7,7 +7,9 @@ import { Button } from '@/zon/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
 import { Input } from '@/zon/ui/input';
 import { Skeleton } from '@/zon/ui/skeleton';
+import { Spinner } from '@/zon/ui/spinner';
 import { Switch } from '@/zon/ui/switch';
+import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 
 const LABELS: Record<string, { label: string; description: string; suffix?: string }> = {
   'transfer.anime_shows_dir': { label: 'Anime library folder', description: 'Dedicated Jellyfin Anime destination; bankai lays each show out by its AniList entries and writes NFO files for Jellyfin.' },
@@ -27,6 +29,19 @@ const LABELS: Record<string, { label: string; description: string; suffix?: stri
   'anime.erai_password': { label: 'Erai-raws password', description: 'The password of that login. Kept in config.toml; after a refused login bankai waits an hour before trying again, or until it is changed here.' },
 };
 
+// Shown in their own cards below, not in the download policy's list.
+const PICTURE_KEYS = new Set([
+  'anime.thumbs_enabled', 'anime.thumb_mode', 'anime.thumb_percent', 'anime.thumb_time_seconds', 'anime.thumb_width',
+  'anime.artwork_tmdb', 'metadata.tmdb_api_key',
+]);
+const THUMB_KEYS = ['anime.thumb_mode', 'anime.thumb_percent', 'anime.thumb_time_seconds', 'anime.thumb_width'];
+
+/** Seconds as m:ss. */
+function clock(seconds: number) {
+  const whole = Math.max(0, Math.round(seconds));
+  return Math.floor(whole / 60) + ':' + String(whole % 60).padStart(2, '0');
+}
+
 function formatDate(value: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : 'Never';
 }
@@ -37,12 +52,16 @@ export default function AnimeSettings() {
   const [edits, setEdits] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // A frame as the episode-picture setting being edited would take it.
+  const [preview, setPreview] = useState<{ url: string; episode: string; position: number } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [sample, setSample] = useState(0);
 
   async function load() {
     setLoading(true);
     try {
       const [settings, automation] = await Promise.all([api.settings(), api.animeAutomation()]);
-      setRows(settings.settings.filter((row) => row.key.startsWith('anime.') || row.key === 'transfer.anime_shows_dir'));
+      setRows(settings.settings.filter((row) => row.key.startsWith('anime.') || row.key === 'transfer.anime_shows_dir' || row.key === 'metadata.tmdb_api_key'));
       setStatus(automation);
     } catch (error: any) {
       toast.error(error.message);
@@ -64,7 +83,9 @@ export default function AnimeSettings() {
     setBusy(true);
     try {
       for (const key of dirty) await api.setSetting(key, edits[key]);
-      toast.success('Anime settings saved');
+      toast.success(dirty.some((key) => THUMB_KEYS.includes(key))
+        ? 'Anime settings saved; every episode picture is taken again at the new setting, about 20 a minute'
+        : 'Anime settings saved');
       setEdits({});
       await load();
     } catch (error: any) {
@@ -89,6 +110,50 @@ export default function AnimeSettings() {
   function value(row: SettingRow) {
     return row.key in edits ? edits[row.key] : row.value;
   }
+
+  function setting(key: string): any {
+    const row = rows.find((item) => item.key === key);
+    return row ? value(row) : undefined;
+  }
+
+  function edit(key: string, next: any) {
+    setEdits((old) => ({ ...old, [key]: next }));
+  }
+
+  async function showPreview(next = sample) {
+    setPreviewing(true);
+    try {
+      const frame = await api.thumbPreview({
+        mode: setting('anime.thumb_mode') ?? 'percent',
+        percent: Number(setting('anime.thumb_percent') ?? 50),
+        time_seconds: Number(setting('anime.thumb_time_seconds') ?? 600),
+        width: Number(setting('anime.thumb_width') ?? 960),
+        sample: next,
+      });
+      setPreview((old) => {
+        if (old) URL.revokeObjectURL(old.url);
+        return frame;
+      });
+      setSample(next);
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function regenerate() {
+    try {
+      await api.regenerateThumbs();
+      toast.success('Every episode picture is taken again, about 20 a minute; the Dashboard shows how far it is');
+    } catch (error: any) {
+      toast.error(error.message);
+    }
+  }
+
+  const thumbMode: string = setting('anime.thumb_mode') ?? 'percent';
+  const thumbSeconds = Number(setting('anime.thumb_time_seconds') ?? 600);
+  const tmdbKey = rows.find((row) => row.key === 'metadata.tmdb_api_key');
 
   return (
     <div className='flex flex-col gap-6'>
@@ -135,7 +200,7 @@ export default function AnimeSettings() {
       <Card>
         <CardHeader><CardTitle className='text-xl sm:text-xl'>Download policy</CardTitle><CardDescription>Every automatic item requires a trusted Erai uploader, explicit German subtitle evidence, an unambiguous AniList match, and post-download subtitle verification.</CardDescription></CardHeader>
         <CardContent className='grid gap-5 md:grid-cols-2'>
-          {rows.map((row) => {
+          {rows.filter((row) => !PICTURE_KEYS.has(row.key)).map((row) => {
             const meta = LABELS[row.key] || { label: row.key, description: '' };
             const current = value(row);
             const isBoolean = typeof row.value === 'boolean';
@@ -159,6 +224,123 @@ export default function AnimeSettings() {
           })}
         </CardContent>
       </Card>
+
+      {!loading && (
+        <Card>
+          <CardHeader>
+            <CardTitle className='flex items-center gap-2 text-xl sm:text-xl'><Image /> Episode pictures</CardTitle>
+            <CardDescription>
+              Each episode&apos;s picture in Jellyfin (<span className='font-mono'>&lt;episode&gt;-thumb.jpg</span>), taken by bankai from the
+              video itself. Jellyfin&apos;s own screen grabber takes its frame 10% in, usually the opening song. Saving a new position or width
+              takes every picture again.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]'>
+            <div className='flex flex-col gap-4'>
+              <label className='flex items-start justify-between gap-4 rounded-control border border-border/60 p-4'>
+                <span className='flex flex-col gap-1'>
+                  <span className='font-medium'>Take episode pictures</span>
+                  <span className='text-xs leading-relaxed text-muted-foreground'>Off: no new pictures are taken; those already there stay.</span>
+                </span>
+                <Switch checked={Boolean(setting('anime.thumbs_enabled'))} onCheckedChange={(next) => edit('anime.thumbs_enabled', next)} aria-label='Take episode pictures' />
+              </label>
+              <div className='flex flex-col gap-3 rounded-control border border-border/60 p-4'>
+                <span className='flex flex-col gap-1'>
+                  <span className='font-medium'>Where in the episode</span>
+                  <span className='text-xs leading-relaxed text-muted-foreground'>
+                    A share of each episode&apos;s length, or a fixed time into it. An episode shorter than the fixed time is taken at the share instead.
+                  </span>
+                </span>
+                <ToggleGroup aria-label='Where in the episode' value={[thumbMode]} onValueChange={(values) => { if (values[0]) edit('anime.thumb_mode', values[0]); }}>
+                  <ToggleGroupItem value='percent'>Share of the episode</ToggleGroupItem>
+                  <ToggleGroupItem value='time'>Fixed time</ToggleGroupItem>
+                </ToggleGroup>
+                <div className='flex flex-wrap items-center gap-4'>
+                  <span className='flex items-center gap-2'>
+                    <Input className='w-24' type='number' min={1} max={99} aria-label='Share of the episode' value={String(setting('anime.thumb_percent') ?? '')} onChange={(event) => edit('anime.thumb_percent', Number(event.target.value))} />
+                    <span className='text-xs text-muted-foreground'>% in{thumbMode === 'time' ? ' (for short episodes)' : ''}</span>
+                  </span>
+                  {thumbMode === 'time' && (
+                    <span className='flex items-center gap-2'>
+                      <Input className='w-20' type='number' min={0} aria-label='Minutes in' value={String(Math.floor(thumbSeconds / 60))} onChange={(event) => edit('anime.thumb_time_seconds', Math.max(0, Number(event.target.value)) * 60 + (thumbSeconds % 60))} />
+                      <span className='text-xs text-muted-foreground'>min</span>
+                      <Input className='w-20' type='number' min={0} max={59} aria-label='Seconds in' value={String(thumbSeconds % 60)} onChange={(event) => edit('anime.thumb_time_seconds', Math.floor(thumbSeconds / 60) * 60 + Math.min(59, Math.max(0, Number(event.target.value))))} />
+                      <span className='text-xs text-muted-foreground'>s</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+              <label className='flex items-start justify-between gap-4 rounded-control border border-border/60 p-4'>
+                <span className='flex flex-col gap-1'>
+                  <span className='font-medium'>Picture width</span>
+                  <span className='text-xs leading-relaxed text-muted-foreground'>The height follows the video. Jellyfin shows episode pictures small; 960 is plenty.</span>
+                </span>
+                <span className='flex min-w-36 items-center gap-2'>
+                  <Input type='number' min={320} max={3840} value={String(setting('anime.thumb_width') ?? '')} onChange={(event) => edit('anime.thumb_width', Number(event.target.value))} />
+                  <span className='text-xs text-muted-foreground'>px</span>
+                </span>
+              </label>
+              <div className='flex flex-wrap gap-2'>
+                <Button variant='secondary' onClick={() => void regenerate()} disabled={busy}>
+                  <RefreshCw data-icon='inline-start' /> Take all pictures again
+                </Button>
+              </div>
+            </div>
+            <div className='flex flex-col gap-3'>
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <span className='eyebrow'>Preview, with the values above</span>
+                <div className='flex gap-2'>
+                  <Button variant='secondary' size='sm' onClick={() => void showPreview()} disabled={previewing}>
+                    <Image data-icon='inline-start' /> {preview ? 'Again' : 'Preview'}
+                  </Button>
+                  <Button variant='secondary' size='sm' onClick={() => void showPreview(sample + 1)} disabled={previewing}>
+                    <Shuffle data-icon='inline-start' /> Another episode
+                  </Button>
+                </div>
+              </div>
+              <div className='relative flex aspect-video items-center justify-center overflow-hidden rounded-control border border-border/60 bg-field-surface'>
+                {preview ? <img src={preview.url} alt={'Frame of ' + preview.episode} className='h-full w-full object-contain' /> : !previewing && (
+                  <span className='px-6 text-center text-xs text-muted-foreground'>Shows the frame a library episode would get. Nothing is saved or written.</span>
+                )}
+                {previewing && <span className='absolute inset-0 flex items-center justify-center bg-background/40'><Spinner label='Taking the frame' /></span>}
+              </div>
+              {preview && <p className='break-all text-xs text-muted-foreground'><span className='font-mono'>{clock(preview.position)}</span> into {preview.episode}</p>}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {!loading && (
+        <Card>
+          <CardHeader>
+            <CardTitle className='flex items-center gap-2 text-xl sm:text-xl'><Images /> Show artwork</CardTitle>
+            <CardDescription>
+              AniList has a poster and a banner per entry. TMDB adds backdrops, logos, landscape thumbs and season posters, the Specials season&apos;s
+              too. Choose any show&apos;s pictures by hand from Artwork in its library drawer.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='grid gap-5 md:grid-cols-2'>
+            <label className='flex items-start justify-between gap-4 rounded-control border border-border/60 p-4'>
+              <span className='flex flex-col gap-1'>
+                <span className='font-medium'>Artwork from TMDB</span>
+                <span className='text-xs leading-relaxed text-muted-foreground'>Off: only AniList&apos;s pictures, as before. Pictures chosen by hand stay either way.</span>
+              </span>
+              <Switch checked={Boolean(setting('anime.artwork_tmdb'))} onCheckedChange={(next) => edit('anime.artwork_tmdb', next)} aria-label='Artwork from TMDB' />
+            </label>
+            {tmdbKey && (
+              <label className='flex items-start justify-between gap-4 rounded-control border border-border/60 p-4'>
+                <span className='flex flex-col gap-1'>
+                  <span className='font-medium'>TMDB API key</span>
+                  <span className='text-xs leading-relaxed text-muted-foreground'>A v3 API key or a v4 read access token, from themoviedb.org under Settings → API.</span>
+                </span>
+                <span className='flex min-w-36 items-center gap-2'>
+                  <Input type='password' autoComplete='off' placeholder={tmdbKey.is_set ? 'set -- type to replace' : 'not set'} value={String(edits[tmdbKey.key] ?? '')} onChange={(event) => edit(tmdbKey.key, event.target.value)} />
+                </span>
+              </label>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {status && (
         <Card>
