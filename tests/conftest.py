@@ -12,6 +12,30 @@ from bankai.metadata import anilist, offline
 from bankai.web import anime_collections, anime_files, anime_layout, library_walk
 
 
+@pytest.fixture(autouse=True)
+def _never_the_live_instance(tmp_path_factory, monkeypatch):
+    """Every test gets its own config and state directory, and a qBittorrent nobody answers at.
+
+    Without a config of its own a test read ``config.toml`` from the working
+    directory -- on the server, the live instance's: its qBittorrent, its
+    Jellyfin, its Erai-raws login. A test running the download hold pass
+    with an empty state paused every real download it did not know of, and
+    wrote its record of that into its own temporary state, so nothing ever
+    resumed them (Oct 2026). A test may still set its own; this is the floor.
+    """
+    from bankai.config import reset_settings_cache
+
+    root = tmp_path_factory.mktemp("isolated")
+    config = root / "config.toml"
+    config.write_text('[qbittorrent]\nurl = "http://127.0.0.1:9"\n', encoding="utf-8")
+    monkeypatch.setenv("BANKAI_CONFIG", str(config))
+    monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
+    reset_settings_cache()
+    yield
+    reset_settings_cache()
+
+
 class AniListData:
     """A small AniList, written where the code reads it: the offline titles and the API cache.
 

@@ -1638,6 +1638,36 @@ def free_space_gib() -> float | None:
         return None
 
 
+def _local_download_dir() -> Path | None:
+    """qBittorrent's download folder as bankai sees it (``path_map`` applied), when it can."""
+    settings = get_settings().qbittorrent
+    raw = settings.save_path or ""
+    for remote, local in settings.path_map.items():
+        if raw.startswith(remote):
+            raw = local + raw[len(remote) :]
+            break
+    path = Path(raw) if raw else None
+    return path if path is not None and path.is_dir() else None
+
+
+async def _download_free_bytes(qbit: Any) -> int | None:
+    """Free space where qBittorrent downloads, measured on the folder itself when bankai sees it.
+
+    qBittorrent's own figure comes through its API, and that stalls while it
+    deletes or moves files ("Server disconnected"): a bad reading then made
+    every download asked for by hand look as if it did not fit, and all of
+    them were paused (Oct 2026). Its figure is the fallback for a qBittorrent
+    on another machine.
+    """
+    folder = _local_download_dir()
+    if folder is not None:
+        try:
+            return shutil.disk_usage(folder).free
+        except OSError:
+            pass
+    return await qbit.free_space_bytes()
+
+
 def download_free_space_gib(state: dict[str, Any] | None = None) -> float | None:
     value = (state or _load_state()).get("download_free_space_gib")
     try:
@@ -2993,9 +3023,7 @@ async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
     # Chosen by hand, with what is listed for it in view: taken as it is,
     # without the automation's German check -- which, after the whole download,
     # would only refuse to publish what was knowingly picked.
-    args = [
-        arg for arg in _entry_args(entry, anime, plan["first"]) if arg != "--require-german-subtitles"
-    ]
+    args = _without_german_check(_entry_args(entry, anime, plan["first"]))
     args.append("--replace-existing")
     for episode in plan["german_dubs_kept"]:
         args.extend(["--keep-episode", str(episode)])
@@ -3571,7 +3599,7 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                         await _rotate_stuck_torrents(state, qbit, torrents)
                     except Exception as exc:
                         log.warning("[anime] could not rotate stuck downloads: %s", exc)
-                    download_free_bytes = await qbit.free_space_bytes()
+                    download_free_bytes = await _download_free_bytes(qbit)
                     state["download_free_space_gib"] = (
                         round(download_free_bytes / _GIB, 1)
                         if download_free_bytes is not None
@@ -3954,8 +3982,21 @@ def _publish_args(release: dict[str, Any], args: list[str]) -> list[str]:
     """
     policy = _series_policy(str(release.get("title") or ""))
     if policy and policy.get("mode") == "german_allowed":
-        return [arg for arg in args if arg != "--require-german-subtitles"]
+        return _without_german_check(args)
     return list(args)
+
+
+def _without_german_check(args: list[str]) -> list[str]:
+    """A job's arguments without the German check -- still publishing into the library.
+
+    ``--require-german-subtitles`` also told the job to publish: taken away
+    alone, the download stopped in staging, waiting for a Transfer nobody
+    asked for. 218 episodes sat there unseen (Oct 2026).
+    """
+    out = [arg for arg in args if arg != "--require-german-subtitles"]
+    if "--publish" not in out:
+        out.append("--publish")
+    return out
 
 
 def _episode_already_published(
@@ -4128,7 +4169,7 @@ async def hold_downloads(*, hold: bool) -> int:
             and (t.hash in held or not t.state.startswith(("paused", "stopped")))
         ]
         if candidates:
-            fits = _hand_downloads_that_fit(candidates, asked, await qbit.free_space_bytes())
+            fits = _hand_downloads_that_fit(candidates, asked, await _download_free_bytes(qbit))
             for t in candidates:
                 paused = t.state.startswith(("paused", "stopped"))
                 if t.hash in fits and paused:
@@ -4138,8 +4179,12 @@ async def hold_downloads(*, hold: bool) -> int:
         if not pause and not resume:
             return 0
         if pause:
-            await qbit.pause("|".join(pause))
+            # Written down before asking: a pause that times out has usually
+            # still happened, and one never written down is never resumed --
+            # bankai takes it for a pause made by hand.
             held.update(pause)
+            _save_held(held)
+            await qbit.pause("|".join(pause))
             log.info("Paused %d anime downloads (automation off, or no room yet)", len(pause))
         if resume:
             await qbit.resume("|".join(resume))
@@ -4148,11 +4193,16 @@ async def hold_downloads(*, hold: bool) -> int:
         changed = len(pause) + len(resume)
     finally:
         await qbit.aclose()
+    _save_held(held)
+    return changed
+
+
+def _save_held(held: set[str]) -> None:
+    path = _held_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(sorted(held)), encoding="utf-8")
     tmp.replace(path)
-    return changed
 
 
 async def _reconcile_releases() -> dict[str, int]:

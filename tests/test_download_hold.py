@@ -56,6 +56,8 @@ class FakeQbit:
 def qbit(tmp_path, monkeypatch):
     monkeypatch.setattr(erai, "_state_path", lambda: tmp_path / "erai_automation.json")
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", FakeQbit)
+    # Free space as FakeQbit reports it, not measured on a real download folder.
+    monkeypatch.setattr(erai, "_local_download_dir", lambda: None)
     # No download jobs running unless a test says so.
     monkeypatch.setattr("bankai.cli.bgjobs.list_jobs", lambda: [])
     FakeQbit.torrents = [
@@ -198,3 +200,36 @@ def test_the_space_rule_holds_with_automation_on_too(qbit, monkeypatch) -> None:
 
     asyncio.run(erai.hold_downloads(hold=False))
     assert qbit.paused == ["b"]
+
+
+def test_a_pause_that_times_out_is_still_resumed_once_there_is_room(qbit, monkeypatch) -> None:
+    """qBittorrent stalled: it paused them, the answer never came, and they were never resumed."""
+    import httpx
+
+    _upgrades(qbit, monkeypatch, ("huge", "downloading", 0.0, 40))
+    qbit.free = 30 * GIB
+
+    async def timing_out(self, hashes: str) -> None:
+        FakeQbit._set(hashes.split("|"), "stoppedDL")  # done...
+        raise httpx.ReadTimeout("")  # ...but no answer
+
+    monkeypatch.setattr(FakeQbit, "pause", timing_out)
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(erai.hold_downloads(hold=True))
+
+    qbit.free = 100 * GIB
+    asyncio.run(erai.hold_downloads(hold=True))
+    assert qbit.resumed == ["huge"]
+
+
+def test_free_space_is_measured_on_the_download_folder(qbit, monkeypatch, tmp_path) -> None:
+    """qBittorrent's own figure comes through its API, which stalls; the folder is right there."""
+    from types import SimpleNamespace
+
+    _upgrades(qbit, monkeypatch, ("a", "downloading", 0.0, 5))
+    qbit.free = 0  # what a stalling qBittorrent reported
+    monkeypatch.setattr(erai, "_local_download_dir", lambda: tmp_path)
+    monkeypatch.setattr(erai.shutil, "disk_usage", lambda _path: SimpleNamespace(free=500 * GIB))
+
+    asyncio.run(erai.hold_downloads(hold=True))
+    assert qbit.paused == []

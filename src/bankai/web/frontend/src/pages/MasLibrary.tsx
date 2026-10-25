@@ -148,7 +148,7 @@ export default function MasLibrary() {
       );
     }
     return (
-      <Table variant='plain' dense>
+      <Table dense>
         <TableHeader>
           <TableRow>
             <TableHead>Title</TableHead>

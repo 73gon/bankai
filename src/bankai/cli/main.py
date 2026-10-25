@@ -1716,6 +1716,84 @@ def anime_layout_undo(
     console.print(f"{undo(log_file)} files put back")
 
 
+@anime_app.command("publish-staged")
+def anime_publish_staged(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only list what would be published"),
+) -> None:
+    """Publish anime episodes stranded in staging into the library.
+
+    A finished Nyaa download that was approved but never moved: what a job
+    run without --publish left behind. An episode whose place in the library
+    is taken, or that the library already has elsewhere, is left in staging
+    and listed, never written over.
+    """
+    import asyncio
+    import os
+
+    from bankai.backend.transfer import plan_transfer
+    from bankai.processor.anime import publish_staged
+    from bankai.web import anime as anime_mod
+    from bankai.web import anime_files, anime_layout
+    from bankai.web import review as review_mod
+    from bankai.web.anime_layout import VIDEO_SUFFIXES
+
+    staging = Path(get_settings().output.directory) / "Shows"
+    library = Path(get_settings().transfer.anime_shows_dir)
+    videos = sorted(
+        Path(folder) / name
+        for folder, _dirs, names in os.walk(staging)
+        for name in names
+        if Path(name).suffix.casefold() in VIDEO_SUFFIXES
+    )
+    index = anime_files.load()
+    held: dict[tuple[int, int], list[str]] = {}
+    for rel, pairs in index.items():
+        for aid, episode in pairs:
+            held.setdefault((int(aid), int(episode)), []).append(rel)
+    due: list[Path] = []
+    left: list[tuple[Path, str]] = []
+    for video in videos:
+        state = review_mod.get_state(str(video))
+        if state.stage != "approved" or not anime_mod.is_nyaa_url(state.torrent_source_url or ""):
+            left.append((video, f"not an approved Nyaa download ({state.stage})"))
+            continue
+        destination = plan_transfer([video], kind="anime")[0].destination
+        if destination.exists():
+            left.append((video, "its place in the library is taken"))
+            continue
+        rel = anime_files.key(str(video))
+        elsewhere = [
+            other
+            for aid, episode in index.get(rel or "", [])
+            for other in held.get((int(aid), int(episode)), [])
+            if other != rel and (library / other).exists()
+        ]
+        if elsewhere:
+            left.append((video, f"the library has it as {elsewhere[0]}"))
+            continue
+        due.append(video)
+    for video, reason in left:
+        console.print(f"[yellow]left[/yellow] {video.relative_to(staging)}: {reason}")
+    console.print(f"{len(due)} to publish, {len(left)} left in staging")
+    if dry_run or not due:
+        return
+
+    async def run() -> dict:
+        moved = await publish_staged(due)
+        aids = {
+            int(aid)
+            for path in moved
+            for aid, _episode in index.get(anime_files.key(str(path)) or "", [])
+        }
+        cids = {cid for aid in aids if (cid := anime_layout.collection_of_entry(aid)) is not None}
+        if cids:
+            await anime_layout.relayout(cids, label="publish-staged")
+        return {"published": len(moved), "collections": len(cids)}
+
+    result = asyncio.run(run())
+    console.print(f"published {result['published']} episodes; {result['collections']} collections laid out again")
+
+
 @anime_app.command("worker")
 def anime_worker() -> None:
     """Run the anime automation cycle in the foreground, apart from the web UI.

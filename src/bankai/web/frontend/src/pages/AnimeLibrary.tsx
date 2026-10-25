@@ -1036,8 +1036,9 @@ export default function AnimeLibrary() {
         </div>
         </div>
       ) : (
-        <Table variant='plain' containerProps={{ className: '@container min-h-0 flex-1 overflow-auto' }}>
-            <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
+        // In its own container, as the dialogs' tables are; the header stays put as it scrolls.
+        <Table containerProps={{ className: '@container min-h-0 flex-1 overflow-auto' }}>
+            <TableHeader className='sticky top-0 z-10 bg-(--control-surface)'>
               <TableRow>
                 {/* The series takes what the other columns leave and truncates its
                     title there, and as the table narrows the lesser columns go --

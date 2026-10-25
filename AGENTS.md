@@ -425,6 +425,13 @@ poetry run pytest tests/test_web_api.py -v   # specific file
 Tests are pure-Python (no live servers required). They mock HTTP, ffprobe, and
 filesystem calls. Always run before committing.
 
+On seireitei the repo **is** the live instance, and bankai reads `config.toml`
+from the working directory. `tests/conftest.py` (`_never_the_live_instance`)
+gives every test its own config, state directory and an unreachable
+qBittorrent; before it existed, running the suite there paused every real
+download and wrote into the live config (Oct 2026). Never remove it, and a new
+test that needs a config sets its own.
+
 ---
 
 ## 14. Common one-liners

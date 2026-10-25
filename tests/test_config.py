@@ -52,6 +52,7 @@ def test_toml_overrides_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BANKAI_CONFIG", raising=False)
     settings = load_settings()
     assert settings.audio.codec == "eac3"
     assert settings.audio.track_name == "German"

@@ -365,6 +365,61 @@ def _progress(status: TorrentStatus) -> None:
     )
 
 
+async def publish_staged(outputs: list[Path], *, replace_existing: bool = False) -> dict[Path, Path]:
+    """Move staged anime files into the library, their subtitle sidecars with them.
+
+    Returns each moved file's new path by its staged one. ``replace_existing``
+    publishes over a file already at the destination (an upgrade). Raises when
+    any file could not be moved.
+    """
+    from bankai.backend.transfer import plan_transfer, transfer_with_rsync
+
+    # Publish external subtitles first: a failed subtitle copy must
+    # never leave a newly published video without its verified track.
+    items = await asyncio.to_thread(plan_transfer, outputs, kind="anime")
+    if replace_existing:
+        # An upgrade is published over the episode it replaces: the
+        # layout puts it at the same place, where Transfer would
+        # otherwise skip it as already there. The staged copy stays
+        # until it has moved, so a failed move loses nothing.
+        for item in items:
+            with suppress(OSError):
+                item.destination.unlink(missing_ok=True)
+    for item in items:
+        for sidecar in item.source.parent.glob(f"{item.source.stem}.*"):
+            if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
+                continue
+            qualifier = sidecar.name[len(item.source.stem) :]
+            target = item.destination.parent / f"{item.destination.stem}{qualifier}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_copy2(sidecar, target)
+    result = await asyncio.to_thread(
+        transfer_with_rsync,
+        outputs,
+        kind="anime",
+        progress=log.info,
+    )
+    if result.failed:
+        raise RuntimeError(
+            "Anime transfer failed: " + "; ".join(error for _, error in result.failed)
+        )
+    for item in [*result.transferred, *result.skipped]:
+        # Keep separately downloaded German subtitle sidecars with
+        # their video. The normal video transfer only plans videos.
+        for sidecar in item.source.parent.glob(f"{item.source.stem}.*"):
+            if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
+                continue
+            qualifier = sidecar.name[len(item.source.stem) :]
+            target = item.destination.parent / f"{item.destination.stem}{qualifier}"
+            if not target.exists():
+                _atomic_copy2(sidecar, target)
+            if target.exists() and target.stat().st_size == sidecar.stat().st_size:
+                sidecar.unlink()
+        review.set_stage(item.source, "transferred")
+        review.set_transfer(item.source, "done", percent=100)
+    return {item.source: item.destination for item in [*result.transferred, *result.skipped]}
+
+
 async def download_anime(
     *,
     release_title: str,
@@ -500,53 +555,8 @@ async def download_anime(
         # episode picked by hand in the library's drawer (``publish``); one
         # from the Anime search page waits in staging for Transfer.
         if require_german_subtitles or publish:
-            from bankai.backend.transfer import plan_transfer, transfer_with_rsync
-
             log.info('BANKAI_STAGE step=3 total=3 key=transfer label="Transfer to Anime library"')
-            # Publish external subtitles first: a failed subtitle copy must
-            # never leave a newly published video without its verified track.
-            items = await asyncio.to_thread(plan_transfer, outputs, kind="anime")
-            if replace_existing and media_kind == "show":
-                # An upgrade is published over the episode it replaces: the
-                # layout puts it at the same place, where Transfer would
-                # otherwise skip it as already there. The staged copy stays
-                # until it has moved, so a failed move loses nothing.
-                for item in items:
-                    with suppress(OSError):
-                        item.destination.unlink(missing_ok=True)
-            for item in items:
-                for sidecar in item.source.parent.glob(f"{item.source.stem}.*"):
-                    if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
-                        continue
-                    qualifier = sidecar.name[len(item.source.stem) :]
-                    target = item.destination.parent / f"{item.destination.stem}{qualifier}"
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    _atomic_copy2(sidecar, target)
-            result = await asyncio.to_thread(
-                transfer_with_rsync,
-                outputs,
-                kind="anime",
-                progress=log.info,
-            )
-            if result.failed:
-                raise RuntimeError(
-                    "Anime transfer failed: " + "; ".join(error for _, error in result.failed)
-                )
-            for item in [*result.transferred, *result.skipped]:
-                # Keep separately downloaded German subtitle sidecars with
-                # their video. The normal video transfer only plans videos.
-                for sidecar in item.source.parent.glob(f"{item.source.stem}.*"):
-                    if sidecar.suffix.casefold() not in _SIDE_CAR_EXTS:
-                        continue
-                    qualifier = sidecar.name[len(item.source.stem) :]
-                    target = item.destination.parent / f"{item.destination.stem}{qualifier}"
-                    if not target.exists():
-                        _atomic_copy2(sidecar, target)
-                    if target.exists() and target.stat().st_size == sidecar.stat().st_size:
-                        sidecar.unlink()
-                review.set_stage(item.source, "transferred")
-                review.set_transfer(item.source, "done", percent=100)
-            moved = {item.source: item.destination for item in [*result.transferred, *result.skipped]}
+            moved = await publish_staged(outputs, replace_existing=replace_existing and media_kind == "show")
             outputs = list(moved.values())
             episodes = [(moved[path], aid, episode) for path, aid, episode in episodes if path in moved]
 
@@ -589,4 +599,4 @@ async def download_anime(
         await qbit.aclose()
 
 
-__all__ = ["download_anime", "episode_number"]
+__all__ = ["download_anime", "episode_number", "publish_staged"]

@@ -2473,6 +2473,8 @@ def test_show_allowed_without_german_publishes_without_the_german_check(monkeypa
     by_hash = {row["args"][row["args"].index("--info-hash") + 1]: row["args"] for row in spawned}
     assert "--require-german-subtitles" not in by_hash[allowed]
     assert "--require-german-subtitles" in by_hash[checked]
+    # Still published into the library: without the check alone it stayed in staging.
+    assert "--publish" in by_hash[allowed]
     # The record keeps what discovery wrote; only the job runs without the check.
     assert "--require-german-subtitles" in state["releases"][allowed]["args"]
 
