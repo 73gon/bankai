@@ -657,9 +657,13 @@ def _tmdb_artwork(monkeypatch) -> None:
         "tv:1429": {
             "at": time.time(),
             "posters": [image("/poster.jpg", "en")],
-            "backdrops": [image("/titled.jpg", "en"), image("/clean.jpg", None)],
-            "logos": [image("/logo.svg", "en"), image("/logo.png", "en")],
-            "seasons": {"0": [image("/specials.jpg", None)], "1": [image("/s1.jpg", "en")]},
+            # TMDB's best-voted first, Japanese ones on top: English text still wins.
+            "backdrops": [image("/japanese.jpg", "ja"), image("/titled.jpg", "en"), image("/clean.jpg", None)],
+            "logos": [image("/logo-ja.png", "ja"), image("/logo.svg", "en"), image("/logo.png", "en")],
+            "seasons": {
+                "0": [image("/specials-ja.jpg", "ja"), image("/specials.jpg", None), image("/specials-en.jpg", "en")],
+                "1": [image("/s1.jpg", "en")],
+            },
         }
     })
 
@@ -681,10 +685,10 @@ def test_tmdb_fills_the_backdrop_thumb_logo_and_specials_poster(titan, roots, mo
     # AniList's own poster stays the poster; TMDB fills what AniList has none of.
     assert found["poster.jpg"] == "https://img/aot.jpg"
     assert found["fanart.jpg"] == tmdb.url("/clean.jpg")  # textless, under Jellyfin's own title
-    assert found["landscape.jpg"] == tmdb.url("/titled.jpg")  # a thumb carries the title
-    assert found["logo.png"] == tmdb.url("/logo.png")  # never the SVG one
+    assert found["landscape.jpg"] == tmdb.url("/titled.jpg")  # a thumb carries the title, in English
+    assert found["logo.png"] == tmdb.url("/logo.png")  # English, and never the SVG one
     assert found["banner.jpg"] == "https://img/aot-banner.jpg"
-    assert found["Season 00/poster.jpg"] == tmdb.url("/specials.jpg")
+    assert found["Season 00/poster.jpg"] == tmdb.url("/specials-en.jpg")
 
     # A picture chosen by hand wins, and "Automatic" gives the slot back.
     anime_artwork.choose(1, "poster", "https://example.org/mine.jpg")

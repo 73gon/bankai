@@ -128,6 +128,18 @@ def _anilist(aid: int, url: str | None, label: str) -> dict[str, Any] | None:
     return {"url": url, "preview": url, "source": "anilist", "label": label, "anilist_id": aid, "lang": None}
 
 
+# How a picture's language ranks, by what the slot wants: text in English
+# first wherever there is text; a textless picture where the text would be in
+# the way (a backdrop), else straight after English.
+_ENGLISH_FIRST = {"en": 0, None: 1}
+_TEXTLESS_FIRST = {None: 0, "en": 1}
+
+
+def _by_language(images: list[dict], rank: dict) -> list[dict]:
+    """TMDB's pictures by language as ``rank`` says, the rest after; best voted first within each."""
+    return sorted(images or [], key=lambda item: rank.get(item.get("lang"), len(rank)))
+
+
 def _tmdb(item: dict, label: str, preview: str = "w342") -> dict[str, Any]:
     return {
         "url": tmdb.url(item["path"]),
@@ -166,30 +178,28 @@ def candidates(row: collections.Collection, plan: collections.Plan) -> dict[str,
 
     ref = _show_ref(row)
     kept = tmdb.images(*ref) if ref is not None else {}
-    for item in kept.get("posters") or []:
+    for item in _by_language(kept.get("posters"), _ENGLISH_FIRST):
         add("poster", _tmdb(item, "TMDB"))
     # Textless backdrops first: the title on a backdrop sits under Jellyfin's own.
-    backdrops = sorted(kept.get("backdrops") or [], key=lambda item: item.get("lang") is not None)
-    for item in backdrops:
+    for item in _by_language(kept.get("backdrops"), _TEXTLESS_FIRST):
         add("fanart", _tmdb(item, "TMDB", "w780"))
-    # A thumb is the opposite: the title on it is the point.
-    for item in sorted(kept.get("backdrops") or [], key=lambda item: item.get("lang") is None):
+    # A thumb is the opposite: the title on it is the point, in English.
+    for item in _by_language(kept.get("backdrops"), _ENGLISH_FIRST):
         add("landscape", _tmdb(item, "TMDB", "w780"))
-    # Jellyfin reads logo.png; TMDB has some logos only as SVG.
-    order = {"en": 0, "ja": 1, "de": 2}
-    for item in sorted(kept.get("logos") or [], key=lambda item: order.get(item.get("lang") or "", 3)):
+    # Jellyfin reads logo.png; TMDB has some logos only as SVG. A logo is text: English first.
+    for item in _by_language(kept.get("logos"), {"en": 0}):
         if str(item.get("path") or "").casefold().endswith(".png"):
             add("logo", _tmdb(item, "TMDB", "w500"))
     for aid in members:
         add("fanart", _anilist(aid, anilist.media(aid).get("banner"), collections.entry_name(aid)))
     if ref is not None and ref[0] == "tv" and plan.specials:
-        for item in (kept.get("seasons") or {}).get("0") or []:
+        for item in _by_language((kept.get("seasons") or {}).get("0"), _ENGLISH_FIRST):
             add(season_slot(0), _tmdb(item, "TMDB Specials"))
     for aid, number in sorted(plan.seasons.items(), key=lambda pair: pair[1]):
         ids = animelists.ids(aid)
         if ids.get("tmdb_tv") and isinstance(ids.get("tmdb_season"), int):
             season = ids["tmdb_season"]
-            for item in (tmdb.images("tv", int(ids["tmdb_tv"])).get("seasons") or {}).get(str(season)) or []:
+            for item in _by_language((tmdb.images("tv", int(ids["tmdb_tv"])).get("seasons") or {}).get(str(season)), _ENGLISH_FIRST):
                 add(season_slot(number), _tmdb(item, f"TMDB season {season}"))
     return out
 
@@ -206,7 +216,8 @@ def _automatic(slot: str, items: list[dict[str, Any]], tmdb_on: bool) -> str | N
         # Specials are no one entry: TMDB's specials season, else the first side story's cover.
         pick = from_tmdb[:1] or from_anilist[:1]
     elif slot == "landscape":
-        pick = [item for item in from_tmdb if item.get("lang")][:1] or from_tmdb[:1]
+        # Ordered English, textless, then the rest (see candidates).
+        pick = from_tmdb[:1]
     else:  # fanart, logo
         pick = from_tmdb[:1] or from_anilist[:1]
     return pick[0]["url"] if pick else None
