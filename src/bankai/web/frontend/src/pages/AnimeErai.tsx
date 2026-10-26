@@ -53,6 +53,7 @@ const STATUS: Record<string, { label: string; variant: 'success' | 'warning' | '
   failed: { label: 'Failed', variant: 'destructive' },
   filtered: { label: 'Filtered', variant: 'muted' },
   replaced: { label: 'Replaced', variant: 'muted' },
+  removed: { label: 'Removed', variant: 'muted' },
 };
 
 // A release bankai is already fetching or has: nothing to replace with it.

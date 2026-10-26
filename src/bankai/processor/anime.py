@@ -28,7 +28,7 @@ from bankai.processor.naming import render_movie_path
 from bankai.torrent import actions as torrent_actions
 from bankai.torrent.matcher import find_video_files, pick_movie_file
 from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError, TorrentStatus
-from bankai.web import anime_files, anime_layout, review
+from bankai.web import anime_files, anime_layout, anime_unsorted, review
 
 log = get_logger(__name__)
 
@@ -37,6 +37,8 @@ _ANIME_EPISODE = re.compile(
     r"(?:\b(?:E|EP|Episode)\s*|\s+-\s+)(?P<episode>\d{1,4})(?:v\d+)?\b",
     flags=re.I,
 )
+# "S01E46": the E follows a digit, so the pattern above never sees it.
+_SEASON_EPISODE = re.compile(r"(?<![A-Za-z0-9])S(?P<season>\d{1,2})[._ -]?E(?P<episode>\d{1,4})(?:v\d+)?(?!\d)", flags=re.I)
 
 
 def batch_override(episode_override: int | None, sources: list[Path]) -> int | None:
@@ -58,8 +60,18 @@ def episode_number(filename: str, *, episode_override: int | None = None) -> int
     """The episode a file is: its own number, as Erai numbers per AniList entry."""
     if episode_override is not None:
         return episode_override
+    marked = season_episode(filename)
+    if marked is not None:
+        # Season 0 is specials: another AniList entry, never this one's episode.
+        return marked[1] if marked[0] > 0 else None
     match = _ANIME_EPISODE.search(Path(filename).stem)
     return int(match.group("episode")) if match else None
+
+
+def season_episode(filename: str) -> tuple[int, int] | None:
+    """(season, episode) of a name marked "S01E46", else None."""
+    match = _SEASON_EPISODE.search(Path(filename).stem)
+    return (int(match.group("season")), int(match.group("episode"))) if match else None
 
 
 def _staged_path(key: str, suffix: str) -> Path:
@@ -76,6 +88,7 @@ async def _organize_show(
     replace_existing: bool,
     keep_episodes: frozenset[int] = frozenset(),
     german_sub_url: str | None = None,
+    leftover: list[tuple[Path, str]] | None = None,
 ) -> list[tuple[Path, int, int]]:
     """Stage each video where the layout puts its episode, and say so in the file index.
 
@@ -87,6 +100,11 @@ async def _organize_show(
     over the episodes whose file carries a German dub. ``german_sub_url`` is
     the German file Erai-raws uploaded beside a single-episode release: it is
     staged next to the video as "<stem>.de.ass" before German is checked.
+
+    A file that is no episode of the entry it can tell -- no number, or
+    marked as another season ("S00E01" beside "S01E01".."S01E64": OVAs) --
+    goes to ``leftover`` with the reason, for matching by hand in Review.
+    Files marked with seasons are numbered by the lowest season past 0.
     """
     if episode_override is not None and len(sources) != 1:
         raise RuntimeError(
@@ -96,10 +114,21 @@ async def _organize_show(
     await anime_layout.ensure_metadata([anilist_id])
     entry = await anilist.anime(anilist_id)
     placed: list[tuple[Path, int, int]] = []
+    marked = {source: season_episode(source.name) for source in sources}
+    main = min((pair[0] for pair in marked.values() if pair and pair[0] > 0), default=None)
     for source in sources:
-        episode = episode_number(source.name, episode_override=episode_override)
+        pair = marked[source] if episode_override is None else None
+        if pair is not None and pair[0] != main:
+            reason = "a special (season 0)" if pair[0] == 0 else f"season {pair[0]}, beside season {main}"
+            log.warning("[anime] %s is %s: not filed as an episode of this entry", source.name, reason)
+            if leftover is not None:
+                leftover.append((source, reason))
+            continue
+        episode = pair[1] if pair is not None else episode_number(source.name, episode_override=episode_override)
         if episode is None:
             log.warning("[anime] skipped file with no episode number: %s", source.name)
+            if leftover is not None:
+                leftover.append((source, "no episode number"))
             continue
         if episode in keep_episodes:
             log.info("[anime] episode %d kept as it is (German dub): %s", episode, source.name)
@@ -502,6 +531,7 @@ async def download_anime(
         log.info('BANKAI_STAGE step=2 total=%d key=organize label="Organize"', total_steps)
         root = _download_root(status)
         outputs: list[Path] = []
+        kept_for_review = 0
         # Each show file with the AniList entry and episode it is.
         episodes: list[tuple[Path, int, int]] = []
         output = settings.output
@@ -525,6 +555,7 @@ async def download_anime(
         else:
             sources = find_video_files(root)
             log.info("[anime] filing as AniList %d: %s", anilist_id, anilist_title or english_title)
+            leftover: list[tuple[Path, str]] = []
             episodes = await _organize_show(
                 sources,
                 anilist_id=int(anilist_id),
@@ -533,9 +564,26 @@ async def download_anime(
                 replace_existing=replace_existing,
                 keep_episodes=keep_episodes,
                 german_sub_url=german_sub_url,
+                leftover=leftover,
             )
             outputs.extend(path for path, _aid, _episode in episodes)
-        if not outputs:
+            for source, reason in leftover:
+                pair = season_episode(source.name)
+                anime_unsorted.add(
+                    source,
+                    base=root,
+                    reason=reason,
+                    release_title=release_title,
+                    detail_url=detail_url,
+                    info_hash=info_hash,
+                    anilist_id=int(anilist_id),
+                    season=pair[0] if pair else None,
+                    episode=pair[1] if pair else episode_number(source.name),
+                )
+            if leftover:
+                log.info("[anime] %d file(s) wait in Anime -> Review to be matched by hand", len(leftover))
+            kept_for_review = len(leftover)
+        if not outputs and not kept_for_review:
             raise RuntimeError("the selected Nyaa release contained no recognizable anime files")
 
         for destination in outputs:
@@ -551,9 +599,9 @@ async def download_anime(
             )
         log.info('BANKAI_PROGRESS stage=organize pct=100 status="ready"')
 
-        # The automation's downloads go on into the library, and so does an
-        # episode picked by hand in the library's drawer (``publish``); one
-        # from the Anime search page waits in staging for Transfer.
+        # The automation's downloads go on into the library, and so does a
+        # show picked by hand (``publish``: the Anime search page, the
+        # library's drawer). Without it the files wait in staging for Transfer.
         if require_german_subtitles or publish:
             log.info('BANKAI_STAGE step=3 total=3 key=transfer label="Transfer to Anime library"')
             moved = await publish_staged(outputs, replace_existing=replace_existing and media_kind == "show")
@@ -590,8 +638,9 @@ async def download_anime(
             except Exception as exc:
                 log.warning("[anime] could not remove torrent %s: %s", torrent_hash[:8], exc)
         return {
-            "final_path": str(outputs[0]),
+            "final_path": str(outputs[0]) if outputs else None,
             "paths": [str(path) for path in outputs],
+            "kept_for_review": kept_for_review,
             "anilist_id": anilist_id,
             "torrent_hash": torrent_hash,
         }
@@ -599,4 +648,4 @@ async def download_anime(
         await qbit.aclose()
 
 
-__all__ = ["download_anime", "episode_number", "publish_staged"]
+__all__ = ["download_anime", "episode_number", "publish_staged", "season_episode"]

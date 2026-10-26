@@ -64,16 +64,28 @@ def retry(monkeypatch: pytest.MonkeyPatch):
         job: FakeJob,
         *,
         on_disk: bool = False,
-        release_status: str = "held",
+        release_status: str | None = "held",
         enqueue_result: dict | None = None,
+        in_qbittorrent: bool = False,
     ) -> dict:
         monkeypatch.setattr(app_mod.bgjobs_mod, "get_job", lambda _id: job)
         monkeypatch.setattr(erai_mod, "_episode_on_disk", lambda *a, **k: on_disk)
-        monkeypatch.setattr(
-            erai_mod,
-            "_load_state",
-            lambda: {"releases": {"a" * 40: {"status": release_status}}},
-        )
+        releases = {} if release_status is None else {"a" * 40: {"status": release_status}}
+        monkeypatch.setattr(erai_mod, "_load_state", lambda: {"releases": releases})
+
+        class Qbit:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            async def list_torrents(self, **_kwargs):
+                from types import SimpleNamespace
+
+                return [SimpleNamespace(hash="a" * 40)] if in_qbittorrent else []
+
+        monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", Qbit)
 
         def enqueue(**kwargs):
             calls["enqueued"].append(kwargs)
@@ -122,6 +134,27 @@ def test_a_release_already_moving_is_not_started_a_second_time(client, retry, st
     assert status in body["detail"]
     assert calls["enqueued"] == []
     assert job.deleted is True
+
+
+def test_a_torrent_the_automation_follows_is_left_to_it(client, retry):
+    job = FakeJob(ANIME_ARGS)
+    calls = retry(job, in_qbittorrent=True)
+
+    body = client.post("/api/queue/job1/retry").json()
+
+    assert body["status"] == "resolved"
+    assert calls["enqueued"] == []
+
+
+def test_a_hand_picked_download_still_in_qbittorrent_is_run_again(client, retry):
+    """No reconciler files a torrent picked by hand: dropping its retry left a finished batch unfiled."""
+    job = FakeJob(ANIME_ARGS)
+    calls = retry(job, release_status=None, in_qbittorrent=True)
+
+    body = client.post("/api/queue/job1/retry").json()
+
+    assert body["status"] == "queued"
+    assert len(calls["enqueued"]) == 1
 
 
 def test_a_duplicate_still_clears_the_failure(client, retry):
@@ -225,3 +258,41 @@ def test_a_tvdb_job_is_refused_and_kept(client, retry):
     assert "Anime Search" in response.json()["detail"]
     assert calls["enqueued"] == []
     assert job.deleted is False
+
+
+def test_removing_a_waiting_release_takes_it_and_its_torrent_out_for_good(client, monkeypatch):
+    """The anime queue's waiting rows are releases: their bin answered "job not found"."""
+    from bankai.web import app as app_mod
+    from bankai.web import erai as erai_mod
+
+    state = {"releases": {"ab" * 20: {"status": "queued", "title": "[Erai-raws] Dr. Stone - 03"}}}
+    saved: list[dict] = []
+    removed: list[tuple[str, bool]] = []
+    monkeypatch.setattr(app_mod.bgjobs_mod, "get_job", lambda _id: None)
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda _id: None)
+    monkeypatch.setattr(erai_mod, "_load_state", lambda: state)
+    monkeypatch.setattr(erai_mod, "_save_state", lambda value: saved.append(value))
+
+    class Qbit:
+        async def login(self): ...
+
+        async def list_torrents(self, **_kwargs):
+            from types import SimpleNamespace
+
+            return [SimpleNamespace(hash="ab" * 20)]
+
+        async def remove(self, info_hash, *, delete_files=False):
+            removed.append((info_hash, delete_files))
+
+        async def aclose(self): ...
+
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", Qbit)
+
+    body = client.delete("/api/queue/abababab").json()
+
+    assert body["deleted"] is True and body["torrent_removed"] is True
+    assert removed == [("ab" * 20, True)]
+    # Kept as removed: the next cycle must not find it new and queue it again.
+    assert state["releases"]["ab" * 20]["status"] == "removed"
+    assert not erai_mod._needs_consideration(state, type("Entry", (), {"title": "[Erai-raws] Dr. Stone - 03", "info_hash": "ab" * 20})())
+    assert client.delete("/api/queue/abababab").status_code == 404

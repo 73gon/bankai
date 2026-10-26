@@ -531,3 +531,104 @@ def test_the_uploaded_german_is_published_beside_the_episode(world, monkeypatch,
     published = world["library"] / show / "Season 01" / f"{show} - S01E05.mkv"
     assert published.exists()
     assert published.with_name(f"{show} - S01E05.de.ass").read_text(encoding="utf-8") == "[Script Info]\n"
+
+
+# -- Files no episode can be told of: kept for matching by hand (see anime_unsorted) --
+
+def test_a_season_and_episode_marker_is_read():
+    name = "[SavI0r] Fullmetal Alchemist Brotherhood - S01E46 - Looming Shadows [BD][1078p][AV1].mkv"
+    assert processor.episode_number(name) == 46
+    assert processor.season_episode(name) == (1, 46)
+    # Season 0 is specials: no episode of the show it came with.
+    assert processor.episode_number("[SavI0r] Show - S00E01 -  [BD].mkv") is None
+    assert processor.episode_number("Show S2E05.mkv") == 5
+
+
+def batch(tmp_path: Path, names: list[str]) -> list[Path]:
+    found = []
+    for name in names:
+        source = tmp_path / "dl" / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"video")
+        found.append(source)
+    return found
+
+
+def test_specials_in_a_season_batch_are_left_over_not_filed(world, copies, tmp_path):
+    files = batch(tmp_path, ["Show - S01E01 - A.mkv", "Show - S01E02 - B.mkv", "OVA/Show - S00E01 - .mkv"])
+    leftover: list = []
+
+    placed = organize(files, FRIEREN, leftover=leftover)
+
+    assert [(aid, episode) for _path, aid, episode in placed] == [(FRIEREN, 1), (FRIEREN, 2)]
+    assert [(path.name, reason) for path, reason in leftover] == [("Show - S00E01 - .mkv", "a special (season 0)")]
+
+
+def test_a_batch_s_leftovers_wait_in_review_and_the_download_does_not_fail(world, monkeypatch, tmp_path):
+    from bankai.web import anime_unsorted
+
+    result = download(
+        monkeypatch, tmp_path, {"Show - S01E05 - Five.mkv": b"five", "Show - S00E02 - Recap.mkv": b"ova"},
+        release_title="[SavI0r] Frieren S1 + OVAs [BD]",
+    )
+
+    assert sorted(anime_files.on_disk(FRIEREN)) == [5]
+    assert result["kept_for_review"] == 1
+    [group] = anime_unsorted.groups()
+    assert group["release_title"] == "[SavI0r] Frieren S1 + OVAs [BD]"
+    assert group["anilist_id"] == FRIEREN
+    [kept] = group["files"]
+    assert (kept["name"], kept["season"], kept["episode"]) == ("Show - S00E02 - Recap.mkv", 0, 2)
+    assert (anime_unsorted.root() / "[SavI0r] Frieren S1 + OVAs [BD]" / kept["name"]).read_bytes() == b"ova"
+
+
+def test_a_download_of_only_unknown_files_waits_whole(world, monkeypatch, tmp_path):
+    from bankai.web import anime_unsorted
+
+    result = download(monkeypatch, tmp_path, {"NCOP.mkv": b"op", "NCED.mkv": b"ed"})
+
+    assert result["final_path"] is None
+    assert result["kept_for_review"] == 2
+    assert sorted(item["name"] for item in anime_unsorted.groups()[0]["files"]) == ["NCED.mkv", "NCOP.mkv"]
+
+
+def test_a_left_over_file_matched_by_hand_goes_into_the_library_with_the_show(world, monkeypatch, anilist_data, tmp_path):
+    from bankai.web import anime_collections, anime_unsorted
+
+    anilist_data.add(FRIEREN, "Sousou no Frieren", english="Frieren: Beyond Journey's End", episodes=28,
+                     relations=[(2001, "SIDE_STORY")])
+    anilist_data.add(2001, "Sousou no Frieren: Mini Anime", format="ONA", episodes=4,
+                     relations=[(FRIEREN, "PARENT")])
+    download(
+        monkeypatch, tmp_path, {"Show - S01E05 - Five.mkv": b"five", "Show - S00E03 - Mini.mkv": b"mini"},
+        require_german_subtitles=True,
+    )
+    [group] = anime_unsorted.groups()
+    assert [item["anilist_id"] for item in group["suggestions"]][:2] == [FRIEREN, 2001]
+    [kept] = group["files"]
+
+    result = asyncio.run(anime_unsorted.file_into([kept["id"]], 2001, [3]))
+
+    assert result["filed"] == 1
+    [published] = anime_files.on_disk(2001)[3]
+    assert published.is_relative_to(world["library"]) and published.read_bytes() == b"mini"
+    # The side story joined the show it was downloaded with, not a show of its own.
+    store = anime_collections.load()
+    assert store.collection_of(2001).id == store.collection_of(FRIEREN).id
+    assert anime_unsorted.groups() == []
+    assert not list(anime_unsorted.root().rglob("*.mkv"))
+
+
+def test_matching_over_an_episode_the_library_has_asks_first(world, monkeypatch, tmp_path):
+    from bankai.web import anime_unsorted
+
+    download(monkeypatch, tmp_path, {"Show - S01E05 - Five.mkv": b"five", "Extra.mkv": b"fiv2"})
+    [kept] = anime_unsorted.groups()[0]["files"]
+
+    with pytest.raises(anime_unsorted.Taken) as taken:
+        asyncio.run(anime_unsorted.file_into([kept["id"]], FRIEREN, [5]))
+    assert taken.value.episodes == [5]
+
+    asyncio.run(anime_unsorted.file_into([kept["id"]], FRIEREN, [5], replace=True))
+    [only] = anime_files.on_disk(FRIEREN)[5]
+    assert only.read_bytes() == b"fiv2"

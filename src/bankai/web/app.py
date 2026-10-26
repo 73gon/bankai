@@ -598,8 +598,9 @@ class AnimeDownloadRequest(BaseModel):
     kind: str
     # The AniList episode, when the release is one; a batch numbers each file by its name.
     episode: int | None = None
-    # Straight into the library, as the automation's downloads go: a missing
-    # episode picked in the library's drawer. The Anime search page stages.
+    # Straight into the library, as the automation's downloads go: a show
+    # from the Anime search page or a missing episode picked in the drawer.
+    # A movie from the search page stages, for the movies' Transfer.
     publish: bool = False
 
 
@@ -1715,6 +1716,112 @@ def create_app() -> Any:
     @app.get("/api/anime/review", response_model=None)
     async def anime_review(request: Request):
         return snapshots_mod.response(await snaps["anime_review"].get(), request)
+
+    # -- Audio and subtitle tracks taken out of the libraries' videos ---------
+
+    @app.get("/api/tracks")
+    async def tracks_overview() -> dict:
+        """Each library's languages, the ones switched off, what that changes and what was done."""
+        from bankai.web import track_cleanup
+
+        return await asyncio.to_thread(track_cleanup.overview)
+
+    @app.post("/api/tracks/{scope}")
+    async def tracks_rules(scope: str, req: dict) -> dict:
+        """A library's rules: ``enabled``, and the ``audio`` and ``subtitles`` languages to take out."""
+        from bankai.web import track_cleanup
+
+        if scope not in track_cleanup.SCOPES:
+            raise HTTPException(status_code=404, detail="no such library")
+        changes: dict[str, Any] = {}
+        if "enabled" in req:
+            changes["enabled"] = bool(req["enabled"])
+        for kind in track_cleanup.KINDS:
+            if kind in req:
+                codes = req[kind]
+                if not isinstance(codes, list) or not all(isinstance(code, str) for code in codes):
+                    raise HTTPException(status_code=422, detail=f"{kind} is a list of language codes")
+                changes[kind] = codes
+        rule = await asyncio.to_thread(lambda: track_cleanup.set_rules(scope, **changes))
+        preview = await asyncio.to_thread(track_cleanup.preview, scope)
+        return {"rules": rule, "preview": preview}
+
+    # -- Oversized videos encoded again on the GPU ------------------------------
+
+    @app.get("/api/encode")
+    async def encode_overview() -> dict:
+        """Each library's switch, what it would encode, what is being encoded and what was done."""
+        from bankai.web import encode_library
+
+        return await asyncio.to_thread(encode_library.overview)
+
+    @app.post("/api/encode/{scope}")
+    async def encode_switch(scope: str, req: dict) -> dict:
+        """Switch a library's encoding on or off: ``{"enabled": true}``."""
+        from bankai.web import encode_library
+
+        if scope not in encode_library.SCOPES:
+            raise HTTPException(status_code=404, detail="no such library")
+        if not isinstance(req.get("enabled"), bool):
+            raise HTTPException(status_code=422, detail="enabled is true or false")
+        return {"rules": await asyncio.to_thread(encode_library.set_enabled, scope, req["enabled"])}
+
+    # -- A download's files no episode could be told of, matched by hand ------
+
+    @app.get("/api/anime/unsorted")
+    async def anime_unsorted_list() -> dict:
+        """The files waiting to be matched, by the download they came from, with the entries they likely are."""
+        from bankai.web import anime_unsorted
+
+        return {"groups": await asyncio.to_thread(anime_unsorted.groups)}
+
+    def _unsorted_request(req: dict) -> tuple[list[str], list[int]]:
+        ids = [str(raw) for raw in req.get("ids") or [] if str(raw).strip()]
+        episodes = req.get("episodes") or []
+        if not ids or not isinstance(episodes, list) or len(episodes) != len(ids):
+            raise HTTPException(status_code=422, detail="one episode number per file")
+        if not all(str(number).isdigit() for number in episodes):
+            raise HTTPException(status_code=422, detail="episode numbers are whole numbers")
+        numbers = [int(number) for number in episodes]
+        if len(set(numbers)) != len(numbers):
+            raise HTTPException(status_code=422, detail="two files cannot be the same episode")
+        return ids, numbers
+
+    @app.post("/api/anime/unsorted/check")
+    async def anime_unsorted_check(req: dict) -> dict:
+        """Which of these episodes of an entry the library has a file of already."""
+        from bankai.web import anime_files
+
+        entry = await _anilist_entry(req.get("anilist_id"))
+        numbers = [int(number) for number in req.get("episodes") or [] if str(number).isdigit()]
+        held = await asyncio.to_thread(anime_files.on_disk, entry.id)
+        return {"taken": sorted(number for number in numbers if number in held), "anilist_id": entry.id}
+
+    @app.post("/api/anime/unsorted/match")
+    async def anime_unsorted_match(req: dict) -> dict:
+        """Files become episodes of an AniList entry and go into the library (``replace``: over files it has)."""
+        from bankai.web import anime_unsorted
+
+        ids, numbers = _unsorted_request(req)
+        entry = await _anilist_entry(req.get("anilist_id"))
+
+        async def work(_action: Any) -> dict:
+            return await anime_unsorted.file_into(ids, entry.id, numbers, replace=bool(req.get("replace")))
+
+        return await _run_action(
+            req, kind="anime-match", title=_label(req, f"Match {len(ids)} files to {entry.title}"),
+            path="/api/anime/unsorted/match", work=work,
+        )
+
+    @app.post("/api/anime/unsorted/discard")
+    async def anime_unsorted_discard(req: dict) -> dict:
+        """Delete files waiting to be matched: extras nobody wants."""
+        from bankai.web import anime_unsorted
+
+        ids = [str(raw) for raw in req.get("ids") or [] if str(raw).strip()]
+        if not ids:
+            raise HTTPException(status_code=422, detail="ids are required")
+        return {"deleted": await asyncio.to_thread(anime_unsorted.forget, ids, delete=True)}
 
     # -- The user's actions, run in the background ---------------------------
 
@@ -3193,6 +3300,12 @@ def create_app() -> Any:
         with suppress(Exception):
             counts["anime_review"] = len((await snaps["anime_review"].get()).value["items"])
         with suppress(Exception):
+            from bankai.web import anime_unsorted
+
+            # Files waiting to be matched are review too.
+            waiting = len(await asyncio.to_thread(anime_unsorted.load))
+            counts["anime_review"] = (counts.get("anime_review") or 0) + waiting
+        with suppress(Exception):
             counts["anime_blacklist"] = len((await snaps["anime_blacklist"].get()).value["items"])
         with suppress(Exception):
             counts["qbittorrent"] = len((await snaps["qbittorrent"].get()).value["items"])
@@ -3688,10 +3801,16 @@ def create_app() -> Any:
             return None
 
         state = await asyncio.to_thread(erai_mod._load_state)
-        release = (state.get("releases") or {}).get(info_hash) or {}
-        status = str(release.get("status") or "")
+        release = (state.get("releases") or {}).get(info_hash)
+        status = str((release or {}).get("status") or "")
         if status in erai_mod._ACTIVE_RELEASE_STATES:
             return f"The release is already {status}"
+        if release is None:
+            # Picked by hand: no reconciler publishes its torrent, only this
+            # job. Fullmetal Alchemist's finished 21 GB batch had its retry
+            # dropped as "still in qBittorrent", and nothing else would ever
+            # have filed it. A job for a torrent qBittorrent has follows it.
+            return None
 
         with suppress(Exception):
             from bankai.torrent.qbittorrent import QBittorrentClient
@@ -3770,17 +3889,22 @@ def create_app() -> Any:
         return webjobs.enqueue(kind=job.kind, title=job.title, args=args)
 
     @app.delete("/api/queue/{job_id}")
-    def queue_delete(job_id: str) -> dict:
+    async def queue_delete(job_id: str) -> dict:
         from bankai.cli import bgjobs
 
-        if webjobs.cancel_pending(job_id):
+        if await asyncio.to_thread(webjobs.cancel_pending, job_id):
             return {"deleted": True, "pending": True}
-        job = bgjobs.get_job(job_id)
+        job = await asyncio.to_thread(bgjobs.get_job, job_id)
         if job is None:
+            # The anime queue's waiting rows are releases, not jobs: the
+            # release goes, and its torrent with it.
+            removed = await erai_mod.remove_release(job_id)
+            if removed is not None:
+                return {**removed, "pending": True}
             raise HTTPException(status_code=404, detail="job not found")
         if job.status == "running":
-            job.cancel()
-        ok = job.delete()
+            await asyncio.to_thread(job.cancel)
+        ok = await asyncio.to_thread(job.delete)
         if not ok:
             raise HTTPException(status_code=500, detail="job could not be removed from disk")
         return {"deleted": ok, "pending": False}

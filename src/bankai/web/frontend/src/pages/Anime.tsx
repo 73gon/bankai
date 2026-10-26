@@ -396,7 +396,9 @@ export default function Anime() {
     }
     setDownloading(true);
     try {
-      await api.animeDownload(selectedEntry, chosen.anilist_id, kind, episode);
+      // A show goes on into the library, as every other anime download does; staged, it waited
+      // for a Transfer click per episode (Fullmetal Alchemist: Brotherhood, 64 of them).
+      await api.animeDownload(selectedEntry, chosen.anilist_id, kind, episode, kind === 'show');
       toast.success(`${chosen.name} was added to the queue from Nyaa.`);
       setSelectedEntry(null);
     } catch (error: any) {

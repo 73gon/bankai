@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { cn } from '@/zon/lib/cn';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
@@ -22,6 +22,8 @@ import AnimeReview from '@/pages/AnimeReview';
 import AnimeErai from '@/pages/AnimeErai';
 import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
+import Tracks from '@/pages/Tracks';
+import Encode from '@/pages/Encode';
 
 // Two libraries live here, so the paths say which one they mean: /mas for
 // movies and shows, /a for anime. `count` names a key of /api/sidebar/counts.
@@ -48,6 +50,8 @@ const ANIME_NAV = [
 const SYSTEM_NAV = [
   { to: '/qbittorrent', label: 'qBittorrent', icon: Download, count: 'qbittorrent' },
   { to: '/library', label: 'Library', icon: HardDrive },
+  { to: '/tracks', label: 'Tracks', icon: Languages },
+  { to: '/encode', label: 'Encode', icon: Shrink },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -483,6 +487,8 @@ export default function App() {
 
               {/* Neither library's own. */}
               <Route path='/qbittorrent' element={<QBittorrent />} />
+              <Route path='/tracks' element={<Tracks />} />
+              <Route path='/encode' element={<Encode />} />
               <Route path='/library' element={<Server />} />
               <Route path='/settings' element={<Settings scope='global' />} />
 

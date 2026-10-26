@@ -470,6 +470,12 @@ _JOB_ARCHIVE_SECONDS = 3600.0
 _ANIME_METADATA_SECONDS = 300.0
 # How often Erai-raws' feeds are read for new releases and their subtitles.
 _ERAI_SITE_SECONDS = 600.0
+# The library's audio and subtitle tracks, read a slice a minute, and the
+# tracks the user switched off taken out, one file at a time (see track_cleanup).
+_TRACK_READ_SECONDS = 60.0
+_TRACK_CLEAN_SECONDS = 60.0
+# The libraries' oversized videos encoded again on the GPU, one at a time (see encode_library).
+_ENCODE_SECONDS = 60.0
 
 
 # The scheduler's periodic passes as the dashboard shows them: what each does,
@@ -486,6 +492,9 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
     "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
+    "track_read": ("Read the libraries' audio and subtitle tracks", _TRACK_READ_SECONDS),
+    "track_clean": ("Take out the tracks switched off", _TRACK_CLEAN_SECONDS),
+    "encode": ("Encode oversized videos", _ENCODE_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
 
@@ -607,6 +616,26 @@ def _pass_summary(name: str, result: object) -> str | None:
 
             return "Jellyfin could not be asked: " + str(jellyfin.last_error.get("message") or "no answer")
         return f"{_plural(number('refreshed'), 'item')} refreshed in Jellyfin, {number('remaining')} to go"
+    if name == "track_read":
+        if not number("read") and not number("remaining"):
+            return f"All {number('files')} files read"
+        return f"{_plural(number('read'), 'file')} read, {number('remaining')} to go"
+    if name == "encode":
+        if result.get("error") or result.get("skipped"):
+            return f"{Path(str(result.get('path') or '')).name}: {result.get('error') or result['skipped']}"
+        if result.get("idle"):
+            return str(result["idle"])
+        return (
+            f"{Path(str(result.get('path') or '')).name}: "
+            f"{int(result.get('before') or 0) / 2**30:.1f} GiB to {int(result.get('after') or 0) / 2**30:.1f} GiB"
+        )
+    if name == "track_clean":
+        if result.get("error"):
+            return f"{Path(str(result.get('path') or '')).name}: {result['error']}"
+        if result.get("idle"):
+            return str(result["idle"])
+        saved = int(result.get("saved") or 0) / 2**20
+        return f"{Path(str(result.get('path') or '')).name}: {saved:.0f} MiB freed"
     if name == "thumb_sweep":
         if number("held_for_space"):
             return "Held: the library disk is short on room"
@@ -633,6 +662,23 @@ def _pass_progress(name: str) -> dict | None:
         from bankai.web import erai_subs
 
         return dict(erai_subs.progress) or None
+    if name == "encode":
+        from bankai.web import encode_library
+
+        current = dict(encode_library.progress)
+        if not current.get("path"):
+            return None
+        steps = {"encode": "Encoding", "dolby_vision": "Adding Dolby Vision to", "mux": "Putting together", "check": "Checking"}
+        fraction = current.get("fraction")
+        return {
+            "step": f"{steps.get(current.get('step'), 'Encoding')} {Path(current['path']).name}",
+            "percent": round(fraction * 100, 1) if fraction is not None else None,
+        }
+    if name == "track_clean":
+        from bankai.web import track_cleanup
+
+        current = dict(track_cleanup.progress)
+        return {"step": "Writing " + Path(current["path"]).name + " anew"} if current.get("path") else None
     return None
 
 
@@ -696,6 +742,27 @@ def _archive_jobs() -> int:
     return bgjobs.archive_finished_jobs(keep_ids=keep)
 
 
+async def _track_read() -> None:
+    from bankai.web import track_cleanup
+
+    result = await asyncio.to_thread(track_cleanup.read_tracks)
+    _pass_result("track_read", result)
+
+
+async def _encode() -> None:
+    from bankai.web import encode_library
+
+    result = await asyncio.to_thread(encode_library.encode_next)
+    _pass_result("encode", result or {"idle": "Nothing to encode now"})
+
+
+async def _track_clean() -> None:
+    from bankai.web import track_cleanup
+
+    result = await asyncio.to_thread(track_cleanup.clean_next)
+    _pass_result("track_clean", result or {"idle": "Nothing to take out now"})
+
+
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
     """Dispatch queued work continuously, independent of an open browser page."""
 
@@ -715,6 +782,20 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     metadata_task: asyncio.Future | None = None
     next_erai_pass = time.monotonic() + 20.0
     erai_task: asyncio.Future | None = None
+    next_track_read = time.monotonic() + 45.0
+    track_read_task: asyncio.Future | None = None
+    next_track_clean = time.monotonic() + 120.0
+    track_clean_task: asyncio.Future | None = None
+    from bankai.web import track_cleanup
+
+    # A copy a restart cut off is thrown away before anything else is cleaned.
+    await asyncio.to_thread(track_cleanup.recover)
+    from bankai.web import encode_library
+
+    await asyncio.to_thread(encode_library.recover)
+    next_encode = time.monotonic() + 180.0
+    encode_task: asyncio.Future | None = None
+    _pass_due("track_read", next_track_read)
     _pass_due("library_walk", next_walk_pass)
     _pass_due("anime_metadata", next_metadata_pass)
     _pass_due("erai_site", next_erai_pass)
@@ -740,6 +821,33 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
 
             erai_task = asyncio.ensure_future(erai_site.refresh())
             _pass_task("erai_site", erai_task)
+        # Off to the side: a slice of ffprobe header reads over 9p.
+        if time.monotonic() >= next_track_read and (track_read_task is None or track_read_task.done()):
+            next_track_read = time.monotonic() + _TRACK_READ_SECONDS
+            _pass_due("track_read", next_track_read)
+            if track_read_task is not None and track_read_task.exception() is not None:
+                log.warning("track read failed: %r", track_read_task.exception())
+            track_read_task = asyncio.ensure_future(_track_read())
+            _pass_task("track_read", track_read_task)
+        # Off to the side as well, and one at a time: writing a 50 GB episode
+        # anew takes a quarter of an hour. Only with a library's cleanup on.
+        if time.monotonic() >= next_track_clean and (track_clean_task is None or track_clean_task.done()):
+            next_track_clean = time.monotonic() + _TRACK_CLEAN_SECONDS
+            if track_clean_task is not None and track_clean_task.exception() is not None:
+                log.warning("track cleanup failed: %r", track_clean_task.exception())
+            if await asyncio.to_thread(track_cleanup.enabled):
+                _pass_due("track_clean", next_track_clean)
+                track_clean_task = asyncio.ensure_future(_track_clean())
+                _pass_task("track_clean", track_clean_task)
+        # Off to the side and one at a time: a 4K episode is most of an hour on the GPU.
+        if time.monotonic() >= next_encode and (encode_task is None or encode_task.done()):
+            next_encode = time.monotonic() + _ENCODE_SECONDS
+            if encode_task is not None and encode_task.exception() is not None:
+                log.warning("encode failed: %r", encode_task.exception())
+            if await asyncio.to_thread(encode_library.enabled):
+                _pass_due("encode", next_encode)
+                encode_task = asyncio.ensure_future(_encode())
+                _pass_task("encode", encode_task)
         if time.monotonic() >= next_archive_pass:
             next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
             _pass_due("job_archive", next_archive_pass)

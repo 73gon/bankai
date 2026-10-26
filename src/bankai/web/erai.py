@@ -4412,6 +4412,54 @@ async def _reconcile_releases() -> dict[str, int]:
     return counts
 
 
+async def remove_release(row_id: str) -> dict[str, Any] | None:
+    """Take a release out of the queue for good, its torrent and download with it.
+
+    ``row_id`` is the queue row's id, the start of the info hash (see
+    release_queue_rows). The release is kept as "removed", not dropped: the
+    next cycle would otherwise find it again and queue it once more. None
+    when no release waiting in the queue has that id.
+    """
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    wanted = row_id.strip().casefold()
+    if not wanted:
+        return None
+    with _STATE_LOCK:
+        state = _load_state()
+        found = next(
+            (
+                (info_hash, release)
+                for info_hash, release in state["releases"].items()
+                if info_hash.casefold().startswith(wanted) and str(release.get("status") or "") in _PUBLISHABLE
+            ),
+            None,
+        )
+        if found is None:
+            return None
+        info_hash, release = found
+        release["status"] = "removed"
+        release["reason"] = "Removed from the queue by hand"
+        release["updated_at"] = time.time()
+        _save_state(state)
+    title = str(release.get("display_title") or release.get("title") or info_hash)
+    removed = False
+    qbit = QBittorrentClient()
+    try:
+        await qbit.login()
+        present = {torrent.hash.casefold() for torrent in await qbit.list_torrents(category=None)}
+        if info_hash.casefold() in present:
+            await qbit.remove(info_hash, delete_files=True)
+            removed = True
+    except Exception as exc:
+        # The release is out of the queue either way; the torrent can go by hand.
+        log.warning("Could not remove torrent %s of %s: %s", info_hash[:8], title, exc)
+    finally:
+        await qbit.aclose()
+    log.info("Removed from the queue: %s%s", title, " (and its torrent)" if removed else "")
+    return {"deleted": True, "release": True, "title": title, "torrent_removed": removed}
+
+
 def release_queue_rows(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Queue rows for releases that have no worker of their own yet.
 

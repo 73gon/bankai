@@ -77,7 +77,11 @@ metadata_app = typer.Typer(
 )
 web_app = typer.Typer(name="web", help="Run and manage the web UI.", no_args_is_help=True)
 anime_app = typer.Typer(name="anime", help="Anime automation.", no_args_is_help=True)
+shrink_app = typer.Typer(
+    name="shrink", help="Encode a video's picture again, smaller, everything else kept.", no_args_is_help=True
+)
 app.add_typer(anime_app, name="anime")
+app.add_typer(shrink_app, name="shrink")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
 app.add_typer(background_app, name="background")
@@ -1714,6 +1718,43 @@ def anime_layout_undo(
     from bankai.web.anime_layout import undo
 
     console.print(f"{undo(log_file)} files put back")
+
+
+@shrink_app.command("run")
+def shrink_run(
+    source: Path = typer.Argument(..., exists=True, dir_okay=False, help="The video to shrink; never changed"),
+    destination: Path = typer.Argument(..., help="Where the smaller video is written"),
+    work: Path | None = typer.Option(None, "--work", help="Folder for the steps' files (default: beside the destination)"),
+    quality: int = typer.Option(22, "--quality", min=10, max=40, help="Constant quality: lower is better and bigger"),
+    drop_audio: list[int] = typer.Option([], "--drop-audio", help="mkvmerge id of an audio track to leave out"),
+    keep_work: bool = typer.Option(False, "--keep-work", help="Keep the steps' files once done"),
+    dolby_vision: bool = typer.Option(True, "--dolby-vision/--no-dolby-vision", help="Keep Dolby Vision (needs dovi_tool)"),
+) -> None:
+    """Encode a video's picture again on the GPU; HDR10, Dolby Vision and every other track kept."""
+    from bankai.processor import shrink
+
+    folder = work or destination.with_name(f".{destination.stem}.shrink")
+    try:
+        result = shrink.shrink(
+            source, destination, work=folder, quality=quality, drop_audio=drop_audio, dolby_vision=dolby_vision
+        )
+    except shrink.ShrinkError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if not keep_work:
+        shutil.rmtree(folder, ignore_errors=True)
+    console.print_json(data=result)
+
+
+@shrink_app.command("check")
+def shrink_check(
+    source: Path = typer.Argument(..., exists=True, dir_okay=False),
+    result: Path = typer.Argument(..., exists=True, dir_okay=False),
+) -> None:
+    """Compare a shrunk video with its source at three places (SSIM, PSNR)."""
+    from bankai.processor import shrink
+
+    console.print_json(data={"windows": shrink.quality_check(source, result)})
 
 
 @anime_app.command("publish-staged")

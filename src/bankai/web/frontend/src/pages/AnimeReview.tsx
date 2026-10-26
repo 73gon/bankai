@@ -17,6 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 import AnimeErai from '@/pages/AnimeErai';
 import { ReplaceDialog, episodesLabel, type ReplaceCandidate } from '@/components/ReplaceDialog';
+import { UnsortedFiles } from '@/components/UnsortedFiles';
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -38,6 +39,8 @@ function storedView(): View {
 
 export default function AnimeReview({ blacklist = false }: { blacklist?: boolean }) {
   const [view, setView] = useState<View>(storedView);
+  // Files waiting to be matched, shown above the held releases.
+  const [unsorted, setUnsorted] = useState(0);
   const [linkTarget, setLinkTarget] = useState<AnimeReviewItem | null>(null);
   // A held show whose AniList entry the user picks, for review rather than the blacklist.
   const [entryFor, setEntryFor] = useState<AnimeReviewItem | null>(null);
@@ -300,10 +303,12 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
         )}
       </div>
 
+      {!blacklist && <UnsortedFiles onCount={setUnsorted} />}
+
       {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : items.length === 0 ? (
         <Empty>
           <EmptyMedia>{blacklist ? <Ban /> : <ShieldCheck />}</EmptyMedia>
-          <EmptyTitle>{blacklist ? 'No blacklisted Anime' : 'Nothing needs review'}</EmptyTitle>
+          <EmptyTitle>{blacklist ? 'No blacklisted Anime' : unsorted ? 'No releases held' : 'Nothing needs review'}</EmptyTitle>
           <EmptyDescription>{blacklist ? 'Discarded source shows will appear here with their cover.' : 'All indexed releases currently pass the automatic checks.'}</EmptyDescription>
         </Empty>
       ) : visible.length === 0 ? (

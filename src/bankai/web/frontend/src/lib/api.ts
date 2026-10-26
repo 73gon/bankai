@@ -520,6 +520,118 @@ export interface AniListAnime {
   cover: string | null;
 }
 
+/** The three libraries whose tracks are cleaned up, each by its own rules. */
+export type TrackScopeName = 'anime' | 'shows' | 'movies';
+
+/** One audio or subtitle language in a library. ``bytes`` counts the tracks that say their size. */
+export interface TrackLanguage {
+  code: string;
+  name: string;
+  files: number;
+  tracks: number;
+  bytes: number;
+}
+
+/** A library's rules: whether to clean it, and the languages to take out. */
+export interface TrackRules {
+  enabled: boolean;
+  audio: string[];
+  subtitles: string[];
+}
+
+/** What a library's rules change: files, tracks, bytes, and files put into MKV. */
+export interface TrackPreview {
+  files: number;
+  tracks: number;
+  bytes: number;
+  convert: number;
+}
+
+export interface TrackScope {
+  rules: TrackRules;
+  /** Languages never taken out here: German and English, and Japanese in anime. */
+  protected: string[];
+  languages: { audio: TrackLanguage[]; subtitles: TrackLanguage[] };
+  /** Files whose tracks are read, of ``files``. */
+  read: number;
+  files: number;
+  preview: TrackPreview;
+  /** Why files wait, by reason: "still seeding", "changed in the last hour". */
+  waiting: Record<string, number>;
+  done: { files: number; bytes: number };
+  last: { path: string; audio: number; subtitles: number; converted: boolean; saved: number; at: number } | null;
+  failed: { path: string; error: string; at: number }[];
+  current: { path: string; started: number; size: number } | null;
+}
+
+/** The file being encoded: its step ("encode", "dolby_vision", "mux", "check"), share done, seconds left. */
+export interface EncodeCurrent {
+  path: string;
+  step: 'encode' | 'dolby_vision' | 'mux' | 'check';
+  fraction: number | null;
+  started: number;
+  size: number;
+  codec: string;
+  eta?: number;
+}
+
+/** One library's encoding: its switch, what it would take, what is being done and what was. */
+export interface EncodeScope {
+  rules: { enabled: boolean };
+  /** Files whose video is read, of ``files``. */
+  read: number;
+  files: number;
+  /** Files above the line, their size now, and about how much encoding them frees. */
+  preview: { files: number; bytes: number; saving: number };
+  next: { path: string; size: number; mbps: number; codec: string; estimate: number }[];
+  /** Files left as they are, by reason: "Dolby Vision profile 5", "not worth it", … */
+  left: Record<string, number>;
+  waiting: Record<string, number>;
+  done: { files: number; bytes: number };
+  last: { path: string; codec: string; before: number; after: number; saved: number; ssim: number; dolby_vision: number | null; seconds: number; at: number } | null;
+  failed: { path: string; error: string; at: number }[];
+  current: EncodeCurrent | null;
+}
+
+/** A download's file bankai could not tell the episode of, waiting in Review to be matched. */
+export interface UnsortedFile {
+  id: string;
+  name: string;
+  /** Its folder inside the download ("OVA", "Movie"), empty at the top. */
+  folder: string;
+  size: number;
+  /** Why it was not filed: "a special (season 0)", "no episode number", … */
+  reason: string;
+  /** What its name says, if anything: "S00E03" is season 0, episode 3. */
+  season: number | null;
+  episode: number | null;
+}
+
+/** An AniList entry a download's leftover files likely are. */
+export interface UnsortedSuggestion {
+  anilist_id: number;
+  title: string;
+  format: string | null;
+  episodes: number | null;
+  year: number | null;
+  cover: string | null;
+  /** How it relates to the download's own entry: "This release", "Side story", "Same show", … */
+  relation: string;
+}
+
+/** The leftover files of one download. */
+export interface UnsortedGroup {
+  key: string;
+  release_title: string | null;
+  detail_url: string | null;
+  anilist_id: number | null;
+  anilist_title: string | null;
+  added_at: number;
+  size: number;
+  files: UnsortedFile[];
+  suggestions: UnsortedSuggestion[];
+}
+
 export interface AnimeAutomationStatus {
   retry_pending: number;
   rss_url: string;
@@ -1229,6 +1341,31 @@ export const api = {
   markAnimeOwned: (payload: { key?: string; info_hashes?: string[] }, label = '') =>
     runAction<{ ok: boolean; cleared: number }>('/api/anime/review/owned', { ...payload, label }),
   animeReview: () => remembering<{ items: AnimeReviewItem[] }>(pagePaths.animeReview),
+  /** Each library's encoding: what it would take, what is being encoded, what was done. */
+  encode: () => request<{ scopes: Record<TrackScopeName, EncodeScope> }>('/api/encode'),
+  /** Switch a library's encoding on or off. */
+  setEncode: (scope: TrackScopeName, enabled: boolean) =>
+    request<{ rules: { enabled: boolean } }>('/api/encode/' + scope, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  /** Each library's audio and subtitle languages, its rules and what they change. */
+  tracks: () => request<{ scopes: Record<TrackScopeName, TrackScope> }>('/api/tracks'),
+  /** Change a library's rules; the answer says what they change now. */
+  setTrackRules: (scope: TrackScopeName, body: Partial<TrackRules>) =>
+    request<{ rules: TrackRules; preview: TrackPreview }>('/api/tracks/' + scope, { method: 'POST', body: JSON.stringify(body) }),
+  /** Downloads' files waiting to be matched by hand, by download. */
+  animeUnsorted: () => request<{ groups: UnsortedGroup[] }>('/api/anime/unsorted'),
+  /** Which of these episodes of an entry the library has a file of already. */
+  checkUnsorted: (anilistId: number, episodes: number[]) =>
+    request<{ taken: number[] }>('/api/anime/unsorted/check', {
+      method: 'POST', body: JSON.stringify({ anilist_id: anilistId, episodes }),
+    }),
+  /** Files become these episodes of an entry and go into the library; ``replace`` files over episodes it has. */
+  matchUnsorted: (ids: string[], anilistId: number, episodes: number[], replace: boolean, label: string) =>
+    runAction<{ filed: number; replaced: number; anilist_id: number; moved: number }>('/api/anime/unsorted/match', {
+      ids, anilist_id: anilistId, episodes, replace, label,
+    }),
+  /** Delete files waiting to be matched. */
+  discardUnsorted: (ids: string[]) =>
+    request<{ deleted: number }>('/api/anime/unsorted/discard', { method: 'POST', body: JSON.stringify({ ids }) }),
   animeBlacklist: () => remembering<{ items: AnimeReviewItem[] }>(pagePaths.animeBlacklist),
   reviewAnime: (infoHash: string, action: 'recheck' | 'allow_german' | 'blacklist', label = '') =>
     runAction<{ ok: boolean; requested: number; blacklisted?: number }>('/api/anime/review/' + infoHash, { action, label }),

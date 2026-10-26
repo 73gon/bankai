@@ -256,7 +256,10 @@ def build(
         if stepping:
             done, total = stepping.get("done"), stepping.get("total")
             detail = str(stepping.get("step") or "") + (f" — {done} of {total}" if total else "")
-            percent = 100.0 * done / total if total and done is not None else None
+            # A pass may say its share itself: the encoder's, from ffmpeg's frame count.
+            percent = stepping.get("percent")
+            if percent is None and total and done is not None:
+                percent = 100.0 * done / total
         else:
             last = row.get("last_run")
             when = None if row.get("running") or not last else _ago(now - float(last))
