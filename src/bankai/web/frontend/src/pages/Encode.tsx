@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronRight, Clock, Loader2, Shrink, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type EncodeCandidate, type EncodeOverview, type EncodeScope, type TrackScopeName } from '@/lib/api';
+import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { StatusTag } from '@/components/status-tag';
 import { cn } from '@/zon/lib/cn';
 import { Button } from '@/zon/ui/button';
@@ -41,8 +42,39 @@ function duration(seconds: number) {
   return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
+const CODECS: Record<string, string> = { hevc: 'HEVC', h264: 'H.264', vc1: 'VC-1', mpeg2video: 'MPEG-2', mpeg4: 'MPEG-4' };
+
 function codecName(codec: string | null | undefined) {
-  return codec === 'h264' ? 'H.264' : 'HEVC';
+  return CODECS[codec ?? ''] ?? (codec ? codec.toUpperCase() : 'HEVC');
+}
+
+type SortKey = 'name' | 'size' | 'mbps' | 'source' | 'codec' | 'estimate' | 'status';
+// Names read A-Z; sizes, bitrates and savings are most telling at their largest.
+const FIRST: Record<SortKey, SortDir> = { name: 'asc', size: 'desc', mbps: 'desc', source: 'asc', codec: 'asc', estimate: 'desc', status: 'asc' };
+
+function sortValue(item: EncodeCandidate, key: SortKey, current: string | null): string | number {
+  switch (key) {
+    case 'name':
+      return fileName(item.path).toLowerCase();
+    case 'size':
+      return item.size;
+    case 'mbps':
+      return item.mbps;
+    case 'source':
+      return codecName(item.source);
+    case 'codec':
+      return codecName(item.codec);
+    case 'estimate':
+      return item.estimate;
+    case 'status':
+      // Encoding, then the queue in its order, then failed, then the rest.
+      return item.path === current ? 0 : item.queued ? item.queued : item.failed ? 1e6 : 2e6;
+  }
+}
+
+function compare(a: string | number, b: string | number, dir: SortDir) {
+  const order = typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b));
+  return dir === 'asc' ? order : -order;
 }
 
 /** A checkbox inside a table: a real button, so the click lands. */
@@ -174,12 +206,24 @@ function ScopePanel({ library, scope, current, onQueued }: {
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
+  const [sort, setSort] = useState<SortState<SortKey>>({ key: 'name', dir: 'asc' });
   const free = useMemo(() => scope.candidates.filter((row) => !row.queued && row.path !== current), [scope.candidates, current]);
+  const sorted = useMemo(
+    () => [...scope.candidates].sort((a, b) => compare(sortValue(a, sort.key, current), sortValue(b, sort.key, current), sort.dir)),
+    [scope.candidates, sort, current],
+  );
   const groups = useMemo(() => {
     const out = new Map<string, EncodeCandidate[]>();
-    for (const row of scope.candidates) out.set(row.group, [...(out.get(row.group) ?? []), row]);
-    return [...out.entries()];
-  }, [scope.candidates]);
+    for (const row of sorted) out.set(row.group, [...(out.get(row.group) ?? []), row]);
+    // A show sorts by its files together: their size and saving summed, else its first file's place.
+    const total = (items: EncodeCandidate[], key: 'size' | 'estimate') => items.reduce((sum, item) => sum + item[key], 0);
+    return [...out.entries()].sort(([nameA, a], [nameB, b]) => {
+      if (sort.key === 'size' || sort.key === 'estimate') return compare(total(a, sort.key), total(b, sort.key), sort.dir);
+      if (sort.key === 'name') return compare(nameA.toLowerCase(), nameB.toLowerCase(), sort.dir);
+      return compare(sortValue(a[0], sort.key, current), sortValue(b[0], sort.key, current), sort.dir);
+    });
+  }, [sorted, sort, current]);
+  const onSort = (key: SortKey) => setSort((before) => nextSort(before, key, FIRST));
   const flat = library === 'movies' || groups.every(([group]) => !group);
   const chosen = free.filter((row) => picked.has(row.path));
 
@@ -227,7 +271,8 @@ function ScopePanel({ library, scope, current, onQueued }: {
         </TableCell>
         <TableCell numeric className='whitespace-nowrap font-mono text-xs tabular-nums'>{formatBytes(item.size)}</TableCell>
         <TableCell numeric className='whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground'>{item.mbps} Mbps</TableCell>
-        <TableCell numeric className='text-xs'>{codecName(item.codec)}</TableCell>
+        <TableCell numeric className='whitespace-nowrap text-xs text-muted-foreground'>{codecName(item.source)}</TableCell>
+        <TableCell numeric className={cn('whitespace-nowrap text-xs', item.source && item.source !== item.codec && 'text-foreground font-medium')}>{codecName(item.codec)}</TableCell>
         <TableCell numeric className='whitespace-nowrap font-mono text-xs tabular-nums'>{formatBytes(item.estimate)}</TableCell>
         <TableCell numeric><Status row={item} current={current} /></TableCell>
       </TableRow>
@@ -272,16 +317,17 @@ function ScopePanel({ library, scope, current, onQueued }: {
                     onChange={(on) => tick(allFree, on)}
                   />
                 </TableHead>
-                <TableHead className='w-full'>{flat ? 'File' : 'Show / file'}</TableHead>
-                <TableHead numeric>Size</TableHead>
-                <TableHead numeric>Picture</TableHead>
-                <TableHead numeric>As</TableHead>
-                <TableHead numeric>Frees about</TableHead>
-                <TableHead numeric>Status</TableHead>
+                <SortHeader label={flat ? 'File' : 'Show / file'} column='name' sort={sort} onSort={onSort} className='w-full' />
+                <SortHeader label='Size' column='size' sort={sort} onSort={onSort} align='right' />
+                <SortHeader label='Picture' column='mbps' sort={sort} onSort={onSort} align='right' />
+                <SortHeader label='Now' column='source' sort={sort} onSort={onSort} align='right' />
+                <SortHeader label='As' column='codec' sort={sort} onSort={onSort} align='right' />
+                <SortHeader label='Frees about' column='estimate' sort={sort} onSort={onSort} align='right' />
+                <SortHeader label='Status' column='status' sort={sort} onSort={onSort} align='right' />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {flat ? scope.candidates.map((item) => row(item)) : groups.map(([group, items]) => {
+              {flat ? sorted.map((item) => row(item)) : groups.map(([group, items]) => {
                 const paths = items.filter((item) => !item.queued && item.path !== current).map((item) => item.path);
                 const ticked = paths.filter((path) => picked.has(path)).length;
                 const expanded = open.has(group);
@@ -315,6 +361,7 @@ function ScopePanel({ library, scope, current, onQueued }: {
                       </button>
                     </TableCell>
                     <TableCell numeric className='whitespace-nowrap font-mono text-xs tabular-nums'>{formatBytes(items.reduce((sum, item) => sum + item.size, 0))}</TableCell>
+                    <TableCell numeric />
                     <TableCell numeric />
                     <TableCell numeric />
                     <TableCell numeric className='whitespace-nowrap font-mono text-xs tabular-nums'>{formatBytes(items.reduce((sum, item) => sum + item.estimate, 0))}</TableCell>
@@ -383,8 +430,9 @@ export default function Encode() {
             ))}
           </Tabs>
           <p className='text-xs text-muted-foreground'>
-            Listed: pictures of 30 Mbps and more in 4K, 22 Mbps for 1080p H.264, 15 Mbps for other 1080p, 10 Mbps below. Left out: Dolby Vision
-            profile 5 and interlaced pictures. A queued file still seeding or changed in the last hour waits its turn; a result less than a fifth
+            Listed: pictures of 30 Mbps and more in 4K, 22 Mbps for 1080p H.264, 15 Mbps for other 1080p, 10 Mbps below; in anime, every
+            episode that is not HEVC, to become HEVC. Left out: Dolby Vision profile 5, interlaced pictures, and AV1, which is smaller than HEVC
+            already. A queued file still seeding or changed in the last hour waits its turn; a result less than a fifth
             smaller is thrown away and the original kept. The Dashboard's Encoding lane shows the file being encoded.
           </p>
         </>

@@ -62,6 +62,21 @@ def test_what_would_go_wrong_is_left_with_its_reason(row, reason):
     assert encode.assess("/m/a.mkv", row) == (None, reason)
 
 
+def test_an_anime_episode_that_is_not_hevc_becomes_hevc_whatever_its_bitrate():
+    change, reason = encode.assess("/a/Show - S01E01.mkv", entry("h264", 1920, 4.0, bit_depth=8, scope="anime", duration=1440.0))
+    shows, _ = encode.assess("/s/Show - S01E01.mkv", entry("h264", 1920, 4.0, bit_depth=8, duration=1440.0))
+
+    assert reason is None and shows is None
+    assert (change["codec"], change["quality"]) == ("hevc", 20)
+    # About 45% of its picture's bits.
+    assert change["estimate"] == pytest.approx(4e6 / 8 * 1440 * 0.45, rel=0.01)
+
+
+def test_hevc_and_av1_anime_are_not_listed_for_that():
+    assert encode.assess("/a/a.mkv", entry("hevc", 1920, 3.0, scope="anime")) == (None, None)
+    assert encode.assess("/a/a.mkv", entry("av1", 1920, 3.0, scope="anime")) == (None, None)
+
+
 def test_efficient_codecs_and_other_containers_are_left_alone():
     assert encode.assess("/m/a.mkv", entry("av1")) == (None, None)
     assert encode.assess("/m/a.mp4", entry()) == (None, None)

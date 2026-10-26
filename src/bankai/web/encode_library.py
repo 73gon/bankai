@@ -13,6 +13,8 @@ HDR10 and Dolby Vision (as profile 8.1) are kept. Measured: Game of Thrones in
 
 Listed are files well above what the result would be: a picture of 30 Mbps
 and more in 4K, 22 Mbps for 1080p H.264, 15 Mbps for other 1080p, 10 below.
+In anime, whose library is HEVC, every episode that is not HEVC is listed,
+whatever its bitrate, to become HEVC.
 Left out: Dolby Vision profile 5 (not HDR10 underneath), interlaced pictures,
 AV1 and VP9 (efficient already). A queued file hard-linked to a torrent still
 seeding, or changed in the last hour, waits its turn.
@@ -54,6 +56,8 @@ _LINE_1080_HEVC = 15.0
 _LINE_SMALL = 10.0
 # What the result runs at, roughly, for the estimate of the space freed.
 _EXPECTED = {"4k": 22.0, "1080_hevc": 8.0, "1080_h264": 15.0, "small": 5.0}
+# What HEVC saves of a non-HEVC anime episode's picture, roughly, for the estimate.
+_ANIME_SAVING = 0.45
 # A result less than a fifth smaller is not worth what it costs.
 _MIN_SAVING = 0.2
 _SSIM_FLOOR = 0.95
@@ -177,6 +181,8 @@ def assess(path: str, entry: dict) -> tuple[dict[str, Any] | None, str | None]:
     if codec not in _SOURCES:
         return None, None
     width = int(video.get("width") or 0)
+    if entry.get("scope") == "anime" and codec != "hevc":
+        return _anime_to_hevc(entry, video, width)
     # A 10-bit picture is HEVC either way: H.264 has no 10-bit NVENC, and 10-bit H.264 plays nowhere HEVC does not.
     target = "hevc" if codec == "hevc" or int(video.get("bit_depth") or 8) > 8 else "h264"
     if width >= 3200:
@@ -196,6 +202,27 @@ def assess(path: str, entry: dict) -> tuple[dict[str, Any] | None, str | None]:
     duration = float(entry.get("duration") or 0)
     estimate = max(0.0, mbps - min(mbps, _EXPECTED[size_class])) * 1e6 / 8 * duration
     return {"codec": target, "quality": quality, "mbps": round(mbps, 1), "estimate": int(estimate)}, None
+
+
+def _anime_to_hevc(entry: dict, video: dict, width: int) -> tuple[dict[str, Any] | None, str | None]:
+    """An anime episode that is not HEVC becomes HEVC, whatever its bitrate.
+
+    The anime library is HEVC but for these; HEVC carries the same picture in
+    about half of H.264's bits. A result less than a fifth smaller is thrown
+    away all the same, so a small episode keeps its H.264.
+    """
+    if video.get("interlaced"):
+        return None, "interlaced picture"
+    mbps = picture_mbps(entry)
+    duration = float(entry.get("duration") or 0)
+    bits = mbps * 1e6 / 8 * duration if mbps and duration else float(entry.get("size") or 0)
+    change = {
+        "codec": "hevc",
+        "quality": _QUALITY_4K if width >= 3200 else _QUALITY_HEVC,
+        "mbps": round(mbps or 0.0, 1),
+        "estimate": int(bits * _ANIME_SAVING),
+    }
+    return change, None
 
 
 def candidates(scope: str | None = None) -> tuple[list[tuple[str, str, dict]], dict[str, dict[str, int]]]:
@@ -223,7 +250,8 @@ def candidates(scope: str | None = None) -> tuple[list[tuple[str, str, dict]], d
             continue
         miss = state["failed"].get(path)
         failed = miss.get("error") if miss and miss.get("size") == entry.get("size") else None
-        out.append((path, library, {**change, "size": entry.get("size") or 0, "failed": failed}))
+        source = (entry.get("video") or {}).get("codec")
+        out.append((path, library, {**change, "size": entry.get("size") or 0, "failed": failed, "source": source}))
     out.sort(key=lambda item: (-item[2]["estimate"], item[0]))
     return out, left
 
@@ -455,6 +483,7 @@ def overview() -> dict[str, Any]:
                     "size": change["size"],
                     "mbps": change["mbps"],
                     "codec": change["codec"],
+                    "source": change.get("source"),
                     "estimate": change["estimate"],
                     "queued": position.get(path),
                     "failed": change["failed"],

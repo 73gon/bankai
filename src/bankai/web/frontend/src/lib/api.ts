@@ -582,7 +582,9 @@ export interface EncodeCandidate {
   group: string;
   size: number;
   mbps: number;
+  /** What it is encoded as, and what it is now: "hevc", "h264", … */
   codec: string;
+  source: string | null;
   estimate: number;
   /** Its place in the queue, from 1; null when not queued. */
   queued: number | null;
