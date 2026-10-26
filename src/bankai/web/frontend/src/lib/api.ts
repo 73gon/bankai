@@ -575,22 +575,50 @@ export interface EncodeCurrent {
   eta?: number;
 }
 
-/** One library's encoding: its switch, what it would take, what is being done and what was. */
+/** A file worth encoding: its size, picture bitrate, what it becomes and about what that frees. */
+export interface EncodeCandidate {
+  path: string;
+  /** The show it is of (its folder in the library); empty for a film. */
+  group: string;
+  size: number;
+  mbps: number;
+  codec: string;
+  estimate: number;
+  /** Its place in the queue, from 1; null when not queued. */
+  queued: number | null;
+  /** Why its last encode failed, if it did. */
+  failed: string | null;
+}
+
+/** One library on the Encode page: the files worth encoding, and why others are left out. */
 export interface EncodeScope {
-  rules: { enabled: boolean };
   /** Files whose video is read, of ``files``. */
   read: number;
   files: number;
-  /** Files above the line, their size now, and about how much encoding them frees. */
-  preview: { files: number; bytes: number; saving: number };
-  next: { path: string; size: number; mbps: number; codec: string; estimate: number }[];
-  /** Files left as they are, by reason: "Dolby Vision profile 5", "not worth it", … */
+  totals: { files: number; bytes: number; saving: number };
+  candidates: EncodeCandidate[];
+  /** Files left out, by reason: "Dolby Vision profile 5", "not worth it", … */
   left: Record<string, number>;
-  waiting: Record<string, number>;
+  done: { files: number; bytes: number };
+}
+
+export interface EncodeQueueItem {
+  path: string;
+  scope: string;
+  size: number | null;
+  estimate: number | null;
+  codec: string | null;
+  /** Why it waits its turn: "still seeding", "changed in the last hour", … */
+  waiting: string | null;
+}
+
+export interface EncodeOverview {
+  queue: EncodeQueueItem[];
+  current: EncodeCurrent | null;
   done: { files: number; bytes: number };
   last: { path: string; codec: string; before: number; after: number; saved: number; ssim: number; dolby_vision: number | null; seconds: number; at: number } | null;
   failed: { path: string; error: string; at: number }[];
-  current: EncodeCurrent | null;
+  scopes: Record<TrackScopeName, EncodeScope>;
 }
 
 /** A download's file bankai could not tell the episode of, waiting in Review to be matched. */
@@ -1341,11 +1369,14 @@ export const api = {
   markAnimeOwned: (payload: { key?: string; info_hashes?: string[] }, label = '') =>
     runAction<{ ok: boolean; cleared: number }>('/api/anime/review/owned', { ...payload, label }),
   animeReview: () => remembering<{ items: AnimeReviewItem[] }>(pagePaths.animeReview),
-  /** Each library's encoding: what it would take, what is being encoded, what was done. */
-  encode: () => request<{ scopes: Record<TrackScopeName, EncodeScope> }>('/api/encode'),
-  /** Switch a library's encoding on or off. */
-  setEncode: (scope: TrackScopeName, enabled: boolean) =>
-    request<{ rules: { enabled: boolean } }>('/api/encode/' + scope, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  /** The encode queue, the file being encoded, and per library the files worth encoding. */
+  encode: () => request<EncodeOverview>('/api/encode'),
+  /** Queue files to encode, in this order. */
+  enqueueEncode: (paths: string[]) =>
+    request<{ added: number; refused: string[]; queued: number }>('/api/encode/queue', { method: 'POST', body: JSON.stringify({ paths }) }),
+  /** Take files out of the encode queue; null takes them all. */
+  dequeueEncode: (paths: string[] | null) =>
+    request<{ removed: number }>('/api/encode/queue/remove', { method: 'POST', body: JSON.stringify(paths ? { paths } : { all: true }) }),
   /** Each library's audio and subtitle languages, its rules and what they change. */
   tracks: () => request<{ scopes: Record<TrackScopeName, TrackScope> }>('/api/tracks'),
   /** Change a library's rules; the answer says what they change now. */

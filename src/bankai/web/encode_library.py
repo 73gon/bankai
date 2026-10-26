@@ -3,26 +3,26 @@
 A UHD remux carries about 51 Mbps of picture, a Blu-ray 25-35 Mbps: more than
 the eye tells apart, and more than Wi-Fi or a connection from away carries.
 Per library -- anime, shows, movies, with the roots and the file inventory of
-track_cleanup -- once its switch is on, bankai takes the file that frees the
-most, one at a time, and encodes its picture again on the GPU (see
-processor.shrink). HEVC stays HEVC (quality 22 in 4K, 20 below), H.264 stays
-H.264 (quality 19): whatever played the original plays the result. Audio,
-subtitles, chapters, HDR10 and Dolby Vision (as profile 8.1) are kept.
-Measured: Game of Thrones in 4K and Ice Age in 1080p came out at half the
-size, SSIM 0.995 and 0.987.
+track_cleanup -- the Encode page lists the files worth encoding again; the
+ones ticked there join a queue, and bankai encodes them in its order, one at
+a time, on the GPU (see processor.shrink). Nothing is encoded unasked. HEVC
+stays HEVC (quality 22 in 4K, 20 below), H.264 stays H.264 (quality 19):
+whatever played the original plays the result. Audio, subtitles, chapters,
+HDR10 and Dolby Vision (as profile 8.1) are kept. Measured: Game of Thrones in
+4K and Ice Age in 1080p came out at half the size, SSIM 0.995 and 0.987.
 
-Only files well above what the result would be are taken: a picture of 30
-Mbps and more in 4K, 22 Mbps for 1080p H.264, 15 Mbps for other 1080p, 10
-below. Left as they are: Dolby Vision profile 5 (not HDR10 underneath),
-interlaced pictures, AV1 and VP9 (efficient already), files hard-linked to a
-torrent still seeding, and files changed in the last hour.
+Listed are files well above what the result would be: a picture of 30 Mbps
+and more in 4K, 22 Mbps for 1080p H.264, 15 Mbps for other 1080p, 10 below.
+Left out: Dolby Vision profile 5 (not HDR10 underneath), interlaced pictures,
+AV1 and VP9 (efficient already). A queued file hard-linked to a torrent still
+seeding, or changed in the last hour, waits its turn.
 
 The result replaces the original only once it is checked -- frames, length,
 tracks, HDR, Dolby Vision, and the picture compared at three places (SSIM at
 least 0.95: that catches a broken encode, it is no judgement of quality) --
 when it is at least a fifth smaller, and when the original did not change
 meanwhile. Each file is encoded once: the files done are kept with their
-size, so a dark episode that stays above the line is not taken again.
+size, so a dark episode that stays above the line is not listed again.
 """
 
 from __future__ import annotations
@@ -57,8 +57,6 @@ _EXPECTED = {"4k": 22.0, "1080_hevc": 8.0, "1080_h264": 15.0, "small": 5.0}
 # A result less than a fifth smaller is not worth what it costs.
 _MIN_SAVING = 0.2
 _SSIM_FLOOR = 0.95
-# A file that failed is tried again after this, or as soon as it changes.
-_RETRY_SECONDS = 24 * 3600.0
 _SOURCES = {"hevc", "h264", "vc1", "mpeg2video", "mpeg4"}
 
 _LOCK = threading.Lock()
@@ -86,23 +84,64 @@ def _write(name: str, data: dict) -> None:
     tmp.replace(path)
 
 
-def rules() -> dict[str, dict[str, bool]]:
-    raw = _read("encode_rules.json")
-    return {scope: {"enabled": bool((raw.get(scope) or {}).get("enabled"))} for scope in SCOPES}
+def queue() -> list[dict[str, Any]]:
+    """The files to encode, in their order: [{path, scope, added}]."""
+    rows = _read("encode_queue.json").get("items")
+    return [row for row in rows if isinstance(row, dict) and row.get("path")] if isinstance(rows, list) else []
 
 
-def set_enabled(scope: str, enabled: bool) -> dict[str, bool]:
-    if scope not in SCOPES:
-        raise ValueError(f"no such library: {scope}")
+def _save_queue(rows: list[dict[str, Any]]) -> None:
+    _write("encode_queue.json", {"items": rows})
+
+
+def has_work() -> bool:
+    return bool(queue())
+
+
+def enqueue(paths: list[str]) -> dict[str, Any]:
+    """Put files at the end of the queue, in the order given; only files the page lists.
+
+    A file that failed before is tried again: asked for by hand, it does not
+    wait out its day.
+    """
+    inventory = track_cleanup.load_inventory()
+    state = _state()
+    added, refused = [], []
     with _LOCK:
-        current = rules()
-        current[scope]["enabled"] = bool(enabled)
-        _write("encode_rules.json", current)
-    return current[scope]
+        rows = queue()
+        queued = {row["path"] for row in rows}
+        for path in dict.fromkeys(str(raw) for raw in paths):
+            entry = inventory.get(path)
+            change = assess(path, entry)[0] if entry else None
+            if change is None or _encoded_already(path, entry or {}, state["encoded"].get(path)):
+                refused.append(path)
+                continue
+            if path not in queued:
+                rows.append({"path": path, "scope": entry.get("scope"), "added": time.time()})
+                queued.add(path)
+                added.append(path)
+        _save_queue(rows)
+        if added:
+            state = _state()
+            for path in added:
+                state["failed"].pop(path, None)
+            _save_state(state)
+    return {"added": len(added), "refused": [Path(path).name for path in refused], "queued": len(rows)}
 
 
-def enabled() -> bool:
-    return any(row["enabled"] for row in rules().values())
+def dequeue(paths: list[str] | None = None) -> int:
+    """Take files out of the queue (all of them with None); the one being encoded goes on."""
+    with _LOCK:
+        rows = queue()
+        drop = set(paths) if paths is not None else {row["path"] for row in rows}
+        kept = [row for row in rows if row["path"] not in drop or row["path"] == progress.get("path")]
+        _save_queue(kept)
+    return len(rows) - len(kept)
+
+
+def _unqueue(path: str) -> None:
+    with _LOCK:
+        _save_queue([row for row in queue() if row["path"] != path])
 
 
 def _state() -> dict[str, Any]:
@@ -160,9 +199,11 @@ def assess(path: str, entry: dict) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def candidates(scope: str | None = None) -> tuple[list[tuple[str, str, dict]], dict[str, dict[str, int]]]:
-    """The files to encode, most space freed first, and per library why others are left."""
+    """The files worth encoding, most space freed first, and per library why others are left out.
+
+    A file that failed is listed with its error, to be queued again.
+    """
     state = _state()
-    now = time.time()
     out = []
     left: dict[str, dict[str, int]] = {}
     for path, entry in track_cleanup.load_inventory().items():
@@ -181,9 +222,8 @@ def candidates(scope: str | None = None) -> tuple[list[tuple[str, str, dict]], d
         if change is None:
             continue
         miss = state["failed"].get(path)
-        if miss and miss.get("size") == entry.get("size") and now - float(miss.get("at") or 0) < _RETRY_SECONDS:
-            continue
-        out.append((path, library, {**change, "size": entry.get("size") or 0}))
+        failed = miss.get("error") if miss and miss.get("size") == entry.get("size") else None
+        out.append((path, library, {**change, "size": entry.get("size") or 0, "failed": failed}))
     out.sort(key=lambda item: (-item[2]["estimate"], item[0]))
     return out, left
 
@@ -309,28 +349,39 @@ def encode_file(path: Path, scope: str, change: dict[str, Any]) -> dict[str, Any
 
 
 def encode_next() -> dict[str, Any] | None:
-    """Encode the next file of the libraries switched on; None when there is none to do now."""
-    every = rules()
-    rows, _left = candidates()
-    waiting: dict[str, dict[str, int]] = {}
+    """Encode the first file of the queue that can be encoded now; None when none can.
+
+    A queued file no longer worth it (encoded meanwhile, replaced, gone) leaves
+    the queue; one that waits -- still seeding, just changed, having tracks
+    taken out -- keeps its place, and the next one goes first.
+    """
+    inventory = track_cleanup.load_inventory()
+    state = _state()
+    waiting: dict[str, int] = {}
     busy = track_cleanup.progress.get("path")
-    for path, scope, change in rows:
-        if not every[scope]["enabled"]:
+    for row in queue():
+        path = row["path"]
+        entry = inventory.get(path)
+        change = assess(path, entry)[0] if entry else None
+        if change is None or _encoded_already(path, entry or {}, state["encoded"].get(path)):
+            _unqueue(path)
             continue
         reason = track_cleanup.held(Path(path))
         if reason is None and path == busy:
             reason = "having tracks taken out"
         if reason:
-            counts = waiting.setdefault(scope, {})
-            counts[reason] = counts.get(reason, 0) + 1
+            waiting[path] = reason
             continue
         _set_waiting({})
-        return encode_file(Path(path), scope, change)
+        result = encode_file(Path(path), entry.get("scope") or row.get("scope") or "shows", change)
+        if not result.get("interrupted"):
+            _unqueue(path)
+        return result
     _set_waiting(waiting)
     return None
 
 
-def _set_waiting(waiting: dict[str, dict[str, int]]) -> None:
+def _set_waiting(waiting: dict[str, str]) -> None:
     with _LOCK:
         state = _state()
         if state.get("waiting") != waiting:
@@ -353,64 +404,113 @@ def recover() -> None:
     log.info("[encode] %s was cut off; it goes on from its last finished step", Path(current["path"]).name)
 
 
-def overview() -> dict[str, Any]:
-    """The page: per library its switch, what it would encode, what is being encoded, what was done."""
-    state = _state()
-    every = rules()
-    rows, left = candidates()
+def _group(path: str, scope: str) -> str:
+    """The show a file is of -- its folder below the library's root; none for a film."""
+    if scope == "movies":
+        return ""
+    for root in track_cleanup.roots(scope):
+        prefix = root.rstrip("/") + "/"
+        if path.startswith(prefix):
+            return path[len(prefix):].split("/", 1)[0]
+    return ""
+
+
+def _current() -> dict[str, Any] | None:
     current = dict(progress) if progress else None
     if current and current.get("step") == "encode" and current.get("fraction"):
         elapsed = time.time() - float(current["started"])
         current["eta"] = round(elapsed / current["fraction"] - elapsed)
+    return current
+
+
+def overview() -> dict[str, Any]:
+    """The page: the queue and the file being encoded, and per library the files worth encoding."""
     from bankai.web import library_walk
 
+    state = _state()
+    rows, left = candidates()
+    queued = queue()
+    position = {row["path"]: index for index, row in enumerate(queued, 1)}
+    listed = {path: change for path, _library, change in rows}
     read: dict[str, int] = {}
     for entry in track_cleanup.load_inventory().values():
         if "video" in entry:
             read[entry.get("scope")] = read.get(entry.get("scope"), 0) + 1
-    out = {}
+    scopes = {}
     for scope in SCOPES:
         mine = [(path, change) for path, library, change in rows if library == scope]
-        out[scope] = {
-            "rules": every[scope],
+        scopes[scope] = {
             # Files whose video is read, of all: the list fills as the inventory goes.
             "read": read.get(scope, 0),
             "files": len(library_walk.files(track_cleanup.roots(scope))),
-            "preview": {
+            "totals": {
                 "files": len(mine),
                 "bytes": sum(change["size"] for _path, change in mine),
                 "saving": sum(change["estimate"] for _path, change in mine),
             },
-            "next": [
-                {"path": path, "size": change["size"], "mbps": change["mbps"], "codec": change["codec"], "estimate": change["estimate"]}
-                for path, change in mine[:8]
+            "candidates": [
+                {
+                    "path": path,
+                    "group": _group(path, scope),
+                    "size": change["size"],
+                    "mbps": change["mbps"],
+                    "codec": change["codec"],
+                    "estimate": change["estimate"],
+                    "queued": position.get(path),
+                    "failed": change["failed"],
+                }
+                for path, change in sorted(mine, key=lambda item: item[0].casefold())
             ],
             "left": left.get(scope, {}),
-            "waiting": state["waiting"].get(scope) or {},
             "done": state["done"].get(scope, {"files": 0, "bytes": 0}),
-            "last": state["last"].get(scope),
-            "failed": [
-                {"path": path, "error": row.get("error"), "at": row.get("at")}
-                for path, row in state["failed"].items()
-                if row.get("scope") == scope
-            ][-20:],
-            "current": current if current and current.get("scope") == scope else None,
         }
-    return {"scopes": out}
+    waiting = state.get("waiting") or {}
+    totals = {"files": 0, "bytes": 0}
+    for row in state["done"].values():
+        totals["files"] += int(row.get("files") or 0)
+        totals["bytes"] += int(row.get("bytes") or 0)
+    lasts = [row for row in state["last"].values() if isinstance(row, dict)]
+    return {
+        "queue": [
+            {
+                "path": row["path"],
+                "scope": row.get("scope"),
+                "size": (listed.get(row["path"]) or {}).get("size"),
+                "estimate": (listed.get(row["path"]) or {}).get("estimate"),
+                "codec": (listed.get(row["path"]) or {}).get("codec"),
+                "waiting": waiting.get(row["path"]) if isinstance(waiting, dict) else None,
+            }
+            for row in queued
+        ],
+        "current": _current(),
+        "done": totals,
+        "last": max(lasts, key=lambda row: row.get("at") or 0) if lasts else None,
+        "failed": [
+            {"path": path, "error": row.get("error"), "at": row.get("at")} for path, row in state["failed"].items()
+        ][-20:],
+        "scopes": scopes,
+    }
+
+
+def lane() -> dict[str, Any]:
+    """The Dashboard's Encoding lane: the file being encoded and how many wait."""
+    return {"current": _current(), "queued": max(0, len(queue()) - (1 if progress.get("path") else 0))}
 
 
 __all__ = [
     "SCOPES",
     "assess",
     "candidates",
-    "enabled",
+    "dequeue",
     "encode_file",
     "encode_next",
+    "enqueue",
+    "has_work",
+    "lane",
     "overview",
     "picture_mbps",
     "progress",
+    "queue",
     "recover",
-    "rules",
-    "set_enabled",
     "work_dir",
 ]

@@ -494,7 +494,6 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
     "track_read": ("Read the libraries' audio and subtitle tracks", _TRACK_READ_SECONDS),
     "track_clean": ("Take out the tracks switched off", _TRACK_CLEAN_SECONDS),
-    "encode": ("Encode oversized videos", _ENCODE_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
 
@@ -620,15 +619,6 @@ def _pass_summary(name: str, result: object) -> str | None:
         if not number("read") and not number("remaining"):
             return f"All {number('files')} files read"
         return f"{_plural(number('read'), 'file')} read, {number('remaining')} to go"
-    if name == "encode":
-        if result.get("error") or result.get("skipped"):
-            return f"{Path(str(result.get('path') or '')).name}: {result.get('error') or result['skipped']}"
-        if result.get("idle"):
-            return str(result["idle"])
-        return (
-            f"{Path(str(result.get('path') or '')).name}: "
-            f"{int(result.get('before') or 0) / 2**30:.1f} GiB to {int(result.get('after') or 0) / 2**30:.1f} GiB"
-        )
     if name == "track_clean":
         if result.get("error"):
             return f"{Path(str(result.get('path') or '')).name}: {result['error']}"
@@ -662,18 +652,6 @@ def _pass_progress(name: str) -> dict | None:
         from bankai.web import erai_subs
 
         return dict(erai_subs.progress) or None
-    if name == "encode":
-        from bankai.web import encode_library
-
-        current = dict(encode_library.progress)
-        if not current.get("path"):
-            return None
-        steps = {"encode": "Encoding", "dolby_vision": "Adding Dolby Vision to", "mux": "Putting together", "check": "Checking"}
-        fraction = current.get("fraction")
-        return {
-            "step": f"{steps.get(current.get('step'), 'Encoding')} {Path(current['path']).name}",
-            "percent": round(fraction * 100, 1) if fraction is not None else None,
-        }
     if name == "track_clean":
         from bankai.web import track_cleanup
 
@@ -752,8 +730,7 @@ async def _track_read() -> None:
 async def _encode() -> None:
     from bankai.web import encode_library
 
-    result = await asyncio.to_thread(encode_library.encode_next)
-    _pass_result("encode", result or {"idle": "Nothing to encode now"})
+    await asyncio.to_thread(encode_library.encode_next)
 
 
 async def _track_clean() -> None:
@@ -793,7 +770,7 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     from bankai.web import encode_library
 
     await asyncio.to_thread(encode_library.recover)
-    next_encode = time.monotonic() + 180.0
+    next_encode = time.monotonic() + 60.0
     encode_task: asyncio.Future | None = None
     _pass_due("track_read", next_track_read)
     _pass_due("library_walk", next_walk_pass)
@@ -839,15 +816,14 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 _pass_due("track_clean", next_track_clean)
                 track_clean_task = asyncio.ensure_future(_track_clean())
                 _pass_task("track_clean", track_clean_task)
-        # Off to the side and one at a time: a 4K episode is most of an hour on the GPU.
+        # Off to the side and one at a time: a 4K episode is most of an hour on
+        # the GPU. Only what the Encode page queued; the Dashboard's Encoding lane shows it.
         if time.monotonic() >= next_encode and (encode_task is None or encode_task.done()):
             next_encode = time.monotonic() + _ENCODE_SECONDS
             if encode_task is not None and encode_task.exception() is not None:
                 log.warning("encode failed: %r", encode_task.exception())
-            if await asyncio.to_thread(encode_library.enabled):
-                _pass_due("encode", next_encode)
+            if await asyncio.to_thread(encode_library.has_work):
                 encode_task = asyncio.ensure_future(_encode())
-                _pass_task("encode", encode_task)
         if time.monotonic() >= next_archive_pass:
             next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
             _pass_due("job_archive", next_archive_pass)

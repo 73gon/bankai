@@ -1755,16 +1755,26 @@ def create_app() -> Any:
 
         return await asyncio.to_thread(encode_library.overview)
 
-    @app.post("/api/encode/{scope}")
-    async def encode_switch(scope: str, req: dict) -> dict:
-        """Switch a library's encoding on or off: ``{"enabled": true}``."""
+    def _paths(req: dict) -> list[str]:
+        paths = req.get("paths")
+        if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+            raise HTTPException(status_code=422, detail="paths is a list of files")
+        return paths
+
+    @app.post("/api/encode/queue")
+    async def encode_enqueue(req: dict) -> dict:
+        """Queue files to encode, in the order given: ``{"paths": [...]}``."""
         from bankai.web import encode_library
 
-        if scope not in encode_library.SCOPES:
-            raise HTTPException(status_code=404, detail="no such library")
-        if not isinstance(req.get("enabled"), bool):
-            raise HTTPException(status_code=422, detail="enabled is true or false")
-        return {"rules": await asyncio.to_thread(encode_library.set_enabled, scope, req["enabled"])}
+        return await asyncio.to_thread(encode_library.enqueue, _paths(req))
+
+    @app.post("/api/encode/queue/remove")
+    async def encode_dequeue(req: dict) -> dict:
+        """Take files out of the queue: ``{"paths": [...]}``, or ``{"all": true}``."""
+        from bankai.web import encode_library
+
+        paths = None if req.get("all") is True else _paths(req)
+        return {"removed": await asyncio.to_thread(encode_library.dequeue, paths)}
 
     # -- A download's files no episode could be told of, matched by hand ------
 
@@ -3505,7 +3515,7 @@ def create_app() -> Any:
     )
 
     async def _dashboard_payload() -> dict:
-        from bankai.web import dashboard
+        from bankai.web import dashboard, encode_library
 
         mas_rows = await asyncio.to_thread(webjobs.snapshot)
         anime_rows = (await snaps["anime_queue_rows"].get()).value
@@ -3545,6 +3555,7 @@ def create_app() -> Any:
             publish_slots=s.anime.max_concurrent_transfers,
             retry_pending=retry_pending,
             recent=recent,
+            encoding=encode_library.lane(),
         )
 
     snaps.add(

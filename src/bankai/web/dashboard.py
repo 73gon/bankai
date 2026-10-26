@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from bankai.torrent.matcher import parse_se
@@ -145,6 +146,7 @@ def build(
     retry_pending: int | None,
     recent: dict[str, Any],
     actions: list[dict] | None = None,
+    encoding: dict[str, Any] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
@@ -349,7 +351,41 @@ def build(
         ),
     )
 
-    lanes = [actions_lane, pipelines, publishing, transfers, automation_lane, scheduler, downloads]
+    # -- Encoding ------------------------------------------------------------
+    # What the Encode page queued, on the graphics card one file at a time.
+    encoding = encoding or {}
+    current = encoding.get("current")
+    waiting = int(encoding.get("queued") or 0)
+    encode_task = None
+    if current:
+        steps = {
+            "encode": "Encoding the picture",
+            "dolby_vision": "Adding Dolby Vision",
+            "mux": "Putting the tracks together",
+            "check": "Checking against the original",
+        }
+        fraction = current.get("fraction")
+        left = current.get("eta")
+        detail = steps.get(str(current.get("step")), "Encoding")
+        if left is not None and current.get("step") == "encode":
+            detail += f", about {max(1, round(left / 60))} min left"
+        encode_task = _task(
+            Path(str(current.get("path") or "")).name,
+            detail=detail,
+            percent=100.0 * fraction if fraction is not None and current.get("step") == "encode" else None,
+            started_at=current.get("started"),
+            href="/encode",
+        )
+    encoding_lane = _lane(
+        "encoding",
+        "Encoding",
+        "Videos queued on the Encode page, encoded again on the graphics card one at a time.",
+        [{"id": "encode", "name": "GPU", "busy": encode_task is not None, "task": encode_task}],
+        capacity=1,
+        note=f"{waiting} more queued" if waiting else None,
+    )
+
+    lanes = [actions_lane, pipelines, publishing, transfers, encoding_lane, automation_lane, scheduler, downloads]
 
     # -- Due -----------------------------------------------------------------
     queued_jobs = sorted(
