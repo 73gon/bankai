@@ -123,6 +123,11 @@ class AnimeAutomationSettings(BaseModel):
     # same spinning library disk, and concurrent large copies there lose far
     # more to seeking than they gain in parallelism.
     max_concurrent_transfers: int = Field(default=2, ge=1, le=16)
+    # Anime jobs asked for by hand (the drawer, "Download all", "Upgrade all") running at once,
+    # each following its torrent and then publishing; the rest wait in the queue. Every job is
+    # a pair of processes (~65 MB): 76 at once from one "Download all" took 4.9 GB (Oct 2026).
+    # qBittorrent downloads about this many at a time anyway.
+    max_concurrent_downloads: int = Field(default=10, ge=1, le=64)
     # Replacing a queued AVC release with its HEVC encode can cost a Nyaa
     # detail fetch each, so the backlog is converted steadily rather than
     # in one burst.

@@ -102,16 +102,18 @@ class QBittorrentClient:
         *,
         magnet: str | None = None,
         torrent_url: str | None = None,
+        torrent_file: bytes | None = None,
         category: str | None = None,
         save_path: Path | None = None,
     ) -> bool:
-        """Add a torrent. Returns once qBittorrent acknowledges the add.
+        """Add a torrent: a magnet, a URL qBittorrent fetches itself, or a .torrent file's bytes.
+        Returns once qBittorrent acknowledges the add.
 
         ``True`` when it was added, ``False`` when qBittorrent already had it.
         """
         await self._ensure_login()
-        if not magnet and not torrent_url:
-            raise ValueError("magnet or torrent_url required")
+        if not magnet and not torrent_url and not torrent_file:
+            raise ValueError("magnet, torrent_url or torrent_file required")
         data: dict[str, Any] = {
             "category": category or self._settings.category,
             "autoTMM": "false",
@@ -127,7 +129,12 @@ class QBittorrentClient:
             data["urls"] = magnet
         elif torrent_url:
             data["urls"] = torrent_url
-        resp = await self._client.post("/api/v2/torrents/add", data=data)
+        files = (
+            {"torrents": ("release.torrent", torrent_file, "application/x-bittorrent")}
+            if torrent_file and not magnet and not torrent_url
+            else None
+        )
+        resp = await self._client.post("/api/v2/torrents/add", data=data, files=files)
         if resp.status_code == 409:
             # qBittorrent 5.x answers 409 Conflict for a torrent it already
             # has, where 4.x answered 200. Treated as an error, every job for a

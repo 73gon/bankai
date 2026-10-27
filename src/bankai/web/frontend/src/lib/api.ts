@@ -148,6 +148,8 @@ export interface ReplacementPlan {
   held_count: number;
   file_count: number;
   german_dubs_kept: number[];
+  /** Library files it would replace that can be watched in German, while it lists no German. */
+  replaces_german: number;
 }
 
 export interface EraiPage {
@@ -454,6 +456,31 @@ export interface AnimeEntry {
   anilist: AnimeAniListMatch | null;
 }
 
+/** Movies & Shows -> Torrents: a Prowlarr release, downloaded and filed as it is. */
+export type DirectKind = 'movie' | 'show';
+export type DirectRelease = {
+  id: string;
+  title: string;
+  indexer: string;
+  size_bytes: number;
+  seeders: number;
+  leechers: number;
+  published: string | null;
+  resolution: string | null;
+  codec: string | null;
+  source: string | null;
+  /** Languages the name says besides English. */
+  languages: string[];
+  info_url: string | null;
+  info_hash: string | null;
+  /** Told from the name, to fill the download dialog. */
+  guess: { title: string; year: number | null; season: number | null; kind: DirectKind };
+};
+export type DirectSearch = { query: string; kind: DirectKind; found: number; items: DirectRelease[]; problem: string | null };
+export type DirectSearchOptions = { quality?: string; titleFilters?: string; excludeFilters?: string; minSeeders?: number };
+/** A library folder a download can go to. */
+export type DirectTarget = { root: string; library: 'movies' | 'shows'; language: string; drive: string; label: string; exists: boolean };
+
 export interface AnimeSearchOptions {
   category?: string;
   page?: number;
@@ -522,6 +549,91 @@ export interface AniListAnime {
   episodes: number | null;
   year: number | null;
   cover: string | null;
+}
+
+// ---- Arcs: an anime season split into named seasons ------------------------
+
+export interface AnimeArc {
+  from: number;
+  name: string;
+}
+
+/** A season that is one entry alone, so it can be split into arcs. */
+export interface AnimeArcSeason {
+  anilist_id: number;
+  title: string;
+  season: number;
+  episodes: number;
+  on_disk: number;
+  arcs: AnimeArc[];
+  suggested: AnimeArc[];
+}
+
+// ---- Curated genres ------------------------------------------------------
+
+export type GenreLanguage = 'en' | 'de';
+
+/** A genre of bankai's vocabulary: its id, a name per language. */
+export interface GenreWord {
+  id: string;
+  en: string;
+  de: string;
+}
+
+/** The rules: the vocabulary in priority order, and what maps onto it (keys casefolded). */
+export interface GenreRules {
+  language: GenreLanguage;
+  vocabulary: GenreWord[];
+  genres: Record<string, string[]>;
+  tags: Record<string, string[]>;
+  libraries: Record<string, string[]>;
+  yields: Record<string, string[]>;
+}
+
+export interface GenreOverride {
+  add: string[];
+  remove: string[];
+}
+
+/** A title's genres now and as curated (a dry run). */
+export interface GenreTitle {
+  key: string;
+  item_id: string | null;
+  name: string;
+  year: number | null;
+  library: string;
+  type: string;
+  before: string[];
+  raw: string[];
+  /** Where its raw genres came from: "TMDB", "AniList", or "Jellyfin" where TMDB has none. */
+  raw_source: string;
+  after: string[];
+  ids: string[];
+  /** Each genre id's reasons: "genre: Sci-Fi", "tag: superhero", "library: anime", "added". */
+  reasons: Record<string, string[]>;
+  dropped: Record<string, string[]>;
+  unmapped: string[];
+  /** Genres Jellyfin's own genres give that the curated list does not: about to go. */
+  jellyfin_only: string[];
+  override: GenreOverride | null;
+  written: boolean;
+  changes: boolean;
+}
+
+export interface GenrePlan {
+  language: GenreLanguage;
+  rules: GenreRules;
+  vocabulary: Array<GenreWord & { titles: number }>;
+  titles: GenreTitle[];
+  unmapped: Array<{ raw: string; titles: number; examples: string[] }>;
+  catches: Array<{ kind: 'tag' | 'genre'; raw: string; ids: string[]; titles: string[] }>;
+  /** Raw genres dropped knowingly (mapped onto nothing), and the titles that carry them. */
+  discarded: Array<{ raw: string; titles: string[] }>;
+  unkeyed: Array<{ name: string; library: string; item_id: string }>;
+  shared: string[];
+  /** What bankai writes into Jellyfin: movies and series, all anime, or these anime collections (a trial). */
+  write: { movies: boolean; anime: boolean; anime_cids: number[] };
+  summary: { titles: number; changes: number; jellyfin: number; anime: number; written: number };
 }
 
 // ---- Manga and light novels ---------------------------------------------
@@ -1532,6 +1644,17 @@ export const api = {
       candidates: TorrentCandidate[];
     }>(`/api/torrents/search?${params.toString()}`);
   },
+  directSearch: (q: string, kind: DirectKind, options: DirectSearchOptions = {}) => {
+    const params = new URLSearchParams({ q, kind });
+    if (options.quality) params.set('quality', options.quality);
+    if (options.titleFilters) params.set('title_filters', options.titleFilters);
+    if (options.excludeFilters) params.set('exclude_filters', options.excludeFilters);
+    if (options.minSeeders) params.set('min_seeders', String(options.minSeeders));
+    return request<DirectSearch>(`/api/direct/search?${params.toString()}`);
+  },
+  directTargets: () => request<{ targets: DirectTarget[] }>('/api/direct/targets'),
+  directDownload: (body: { id: string; kind: DirectKind; root: string; title: string; year: number | null; season: number | null }) =>
+    request<Job>('/api/direct/download', { method: 'POST', body: JSON.stringify(body) }),
   animeSearch: (q: string, options: AnimeSearchOptions = {}) => {
     const params = new URLSearchParams({ q });
     if (options.category) params.set('category', options.category);
@@ -1600,6 +1723,8 @@ export const api = {
   enqueueEncode: (paths: string[]) =>
     request<{ added: number; refused: string[]; queued: number }>('/api/encode/queue', { method: 'POST', body: JSON.stringify({ paths }) }),
   /** Take files out of the encode queue; null takes them all. */
+  encodeToFront: (paths: string[]) =>
+    request<{ moved: number }>('/api/encode/queue/front', { method: 'POST', body: JSON.stringify({ paths }) }),
   dequeueEncode: (paths: string[] | null) =>
     request<{ removed: number }>('/api/encode/queue/remove', { method: 'POST', body: JSON.stringify(paths ? { paths } : { all: true }) }),
   /** Manga and light novel releases waiting for a decision, a card per series. */
@@ -1834,11 +1959,21 @@ export const api = {
   eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p', codec: EraiCodec = 'all') =>
     remembering<EraiPage>(eraiPath(page, q, german, res, codec)),
   refreshErai: () => request<{ refreshing: boolean }>('/api/anime/erai/refresh', { method: 'POST' }),
+  genres: (language?: GenreLanguage, fresh = false) =>
+    request<GenrePlan>('/api/genres?' + new URLSearchParams({ ...(language ? { language } : {}), ...(fresh ? { fresh: 'true' } : {}) })),
+  animeArcs: (cid: number) => request<{ collection_id: number; seasons: AnimeArcSeason[] }>(`/api/anime/collections/${cid}/arcs`),
+  saveAnimeArcs: (cid: number, anilistId: number, arcs: AnimeArc[]) =>
+    request<{ ok: boolean; moved: number; seasons: AnimeArcSeason[] }>(`/api/anime/collections/${cid}/arcs`, {
+      method: 'POST', body: JSON.stringify({ anilist_id: anilistId, arcs }),
+    }),
+  saveGenreRules: (rules: GenreRules) => request<GenreRules>('/api/genres/rules', { method: 'PUT', body: JSON.stringify(rules) }),
+  saveGenreOverride: (key: string, choices: GenreOverride) =>
+    request<GenreOverride>('/api/genres/titles/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify(choices) }),
   replacementPlan: (key: string, infoHash: string) =>
     request<ReplacementPlan>('/api/anime/review/replace-plan?' + new URLSearchParams({ key, info_hash: infoHash })),
-  replaceFromErai: (key: string, infoHash: string, label = '') =>
+  replaceFromErai: (key: string, infoHash: string, label = '', loseGerman = false) =>
     runAction<{ ok: boolean; queued: string; held_replaced: number; files_to_replace: number; german_dubs_kept: number[] }>(
-      '/api/anime/review/replace', { key, info_hash: infoHash, label },
+      '/api/anime/review/replace', { key, info_hash: infoHash, label, lose_german: loseGerman },
     ),
   sidebarCounts: () => remembering<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts),
   /** `rescan` checks the library against the disk first instead of the held tree. */

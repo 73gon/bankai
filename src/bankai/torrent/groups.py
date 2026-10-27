@@ -12,10 +12,10 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from bankai.cli import bgjobs
 

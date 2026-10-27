@@ -10,6 +10,7 @@ access token (a JWT, sent as a bearer token) or a v3 API key (a parameter).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -164,4 +165,82 @@ async def ensure(kind: str, tmdb_id: int, seasons: set[int] = frozenset(), *, fo
     return True
 
 
-__all__ = ["configured", "due", "ensure", "images", "url"]
+# -- Genres -------------------------------------------------------------------------------
+# A film's or show's genres as TMDB has them, in English, for web.genre_sync: one consistent
+# source, by the TMDB id Jellyfin keeps -- Jellyfin's own Genres come from whichever provider
+# matched, and a wrong TVDB match gave Avatar: The Way of Water its stunt documentary's.
+
+_GENRES_LOADED: tuple[float, dict[str, dict]] | None = None
+
+
+def _genre_store() -> Path:
+    return bgjobs.jobs_root().parent / "anime_metadata" / "tmdb_genres.json"
+
+
+def _genre_rows() -> dict[str, dict]:
+    global _GENRES_LOADED
+    path = _genre_store()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _GENRES_LOADED is None or _GENRES_LOADED[0] != mtime:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        _GENRES_LOADED = (mtime, raw if isinstance(raw, dict) else {})
+    return _GENRES_LOADED[1]
+
+
+def genres(kind: str, tmdb_id: int | str) -> list[str] | None:
+    """TMDB's genres of a film ("movie") or show ("tv"); None when TMDB was not asked or has none."""
+    row = _genre_rows().get(f"{kind}:{tmdb_id}") or {}
+    return list(row["genres"]) if row.get("genres") else None
+
+
+async def ensure_genres(items: list[tuple[str, int | str]], *, at_once: int = 8) -> int:
+    """Ask TMDB for the genres of the films and shows not kept, or kept longer than a month. How many were asked."""
+    global _GENRES_LOADED
+    if not configured():
+        return 0
+    rows = _genre_rows()
+    now = time.time()
+    due_items = list(dict.fromkeys(
+        (kind, str(tmdb_id)) for kind, tmdb_id in items
+        if now - float((rows.get(f"{kind}:{tmdb_id}") or {}).get("at") or 0) >= _TTL
+    ))
+    if not due_items:
+        return 0
+    headers, params = _auth()
+    found: dict[str, dict] = {}
+    gate = asyncio.Semaphore(at_once)
+
+    async def ask(client: httpx.AsyncClient, kind: str, tmdb_id: str) -> None:
+        async with gate:
+            try:
+                response = await client.get(f"{_API}/{kind}/{tmdb_id}", params={**params, "language": "en-US"})
+                if response.status_code == 404:
+                    found[f"{kind}:{tmdb_id}"] = {"genres": [], "at": time.time()}
+                    return
+                response.raise_for_status()
+                names = [str(row["name"]) for row in response.json().get("genres") or [] if row.get("name")]
+                found[f"{kind}:{tmdb_id}"] = {"genres": names, "at": time.time()}
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error.update(source="TMDB", error=str(exc))
+                log.warning("TMDB genres of %s %s: %s", kind, tmdb_id, exc)
+
+    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+        await asyncio.gather(*(ask(client, kind, tmdb_id) for kind, tmdb_id in due_items))
+    if found:
+        merged = {**_genre_rows(), **found}
+        path = _genre_store()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        _GENRES_LOADED = None
+    return len(found)
+
+
+__all__ = ["configured", "due", "ensure", "ensure_genres", "genres", "images", "url"]

@@ -347,6 +347,17 @@ def _save_codec_cache(cache: dict[str, dict]) -> None:
     _CODEC_CACHE_STAMP = _codec_cache_stamp()  # our own write needs no reading back
 
 
+def follow_renames(renamed: dict[str, str]) -> int:
+    """Files moved by the layout keep their probe: codec, audio and subtitle languages."""
+    cache = dict(_load_codec_cache())
+    moved = [old for old in renamed if old in cache]
+    for old in moved:
+        cache[renamed[old]] = cache.pop(old)
+    if moved:
+        _save_codec_cache(cache)
+    return len(moved)
+
+
 def probe_streams(path: Path) -> dict | None:
     """Video encode, audio and subtitle languages of one file, in a single probe.
 

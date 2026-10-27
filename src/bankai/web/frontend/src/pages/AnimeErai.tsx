@@ -64,6 +64,8 @@ const STATUS: Record<string, { label: string; variant: 'success' | 'warning' | '
   queued: { label: 'Queued', variant: 'info' },
   downloading: { label: 'Downloading', variant: 'info' },
   complete: { label: 'Downloaded', variant: 'info' },
+  // Downloaded once, its episodes another release's since: it can be taken again.
+  superseded: { label: 'Replaced since', variant: 'muted' },
   transferring: { label: 'Publishing', variant: 'info' },
   held: { label: 'Held', variant: 'warning' },
   blacklisted: { label: 'Blacklisted', variant: 'destructive' },

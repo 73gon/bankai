@@ -2520,6 +2520,47 @@ def anime_download(
     asyncio.run(go())
 
 
+@app.command("direct-download", hidden=True)
+def direct_download(
+    release_title: str = typer.Option(..., "--release-title"),
+    media_kind: str = typer.Option(..., "--kind", help="movie | show"),
+    root: str = typer.Option(..., "--root", help="The library folder it goes to"),
+    title: str = typer.Option(..., "--title"),
+    year: int | None = typer.Option(None, "--year"),
+    season: int | None = typer.Option(None, "--season"),
+    download_url: str | None = typer.Option(None, "--download-url"),
+    magnet_uri: str | None = typer.Option(None, "--magnet-uri"),
+    info_hash: str | None = typer.Option(None, "--info-hash"),
+    info_url: str | None = typer.Option(None, "--info-url"),
+) -> None:
+    """Download a release found on Prowlarr and file it as it is: no dub, sync or review."""
+    from bankai.processor.direct import download_direct
+
+    async def go() -> None:
+        try:
+            result = await download_direct(
+                release_title=release_title,
+                download_url=download_url,
+                magnet_uri=magnet_uri,
+                info_hash=info_hash,
+                info_url=info_url,
+                media_kind=media_kind,
+                root=root,
+                title=title,
+                year=year,
+                season=season,
+            )
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            log.debug("direct download traceback", exc_info=True)
+            log.error("Download failed — %s", reason)
+            print(reason, flush=True)
+            raise typer.Exit(code=1) from exc
+        console.print_json(data=result)
+
+    asyncio.run(go())
+
+
 # ---------------------------------------------------------------------------
 # daemon
 # ---------------------------------------------------------------------------

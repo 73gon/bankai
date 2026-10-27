@@ -589,6 +589,16 @@ class ShowQueueRequest(BaseModel):
     custom_episodes: list[CustomEpisodeRequest] | None = None
 
 
+class DirectDownloadRequest(BaseModel):
+    # A row of a recent Torrents search (web/direct.py keeps its links).
+    id: str
+    kind: str
+    root: str
+    title: str
+    year: int | None = None
+    season: int | None = None
+
+
 class AnimeDownloadRequest(BaseModel):
     release_title: str
     torrent_url: str
@@ -1567,6 +1577,83 @@ def create_app() -> Any:
         }
 
     # ------------------------------------------------------------------
+    # Movies & Shows -> Torrents: a release downloaded and filed as it is
+    # ------------------------------------------------------------------
+    @app.get("/api/direct/search")
+    async def direct_search(
+        q: str = Query(..., min_length=1),
+        kind: str = Query("movie"),
+        quality: str = Query("all"),
+        title_filters: str | None = Query(None),
+        exclude_filters: str | None = Query(None),
+        min_seeders: int = Query(0, ge=0),
+    ) -> dict:
+        from bankai.web import direct
+
+        if kind not in direct.CATEGORIES:
+            raise HTTPException(status_code=422, detail="kind must be movie or show")
+        try:
+            return await direct.search(
+                q.strip(),
+                kind=kind,
+                quality=quality,
+                title_filters=title_filters,
+                exclude_filters=exclude_filters,
+                min_seeders=min_seeders,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/api/direct/targets")
+    def direct_targets() -> dict:
+        from bankai.web import direct
+
+        return {"targets": direct.targets()}
+
+    @app.post("/api/direct/download")
+    async def direct_download(req: DirectDownloadRequest) -> dict:
+        from bankai.web import direct
+
+        row = direct.found(req.id)
+        if row is None:
+            raise HTTPException(status_code=409, detail="that release is no longer known: search again")
+        if req.kind not in direct.CATEGORIES:
+            raise HTTPException(status_code=422, detail="kind must be movie or show")
+        title = req.title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="a title is needed to name the folder")
+        if req.year is not None and not 1900 <= req.year <= 2100:
+            raise HTTPException(status_code=422, detail="the year is out of range")
+        try:
+            target = await asyncio.to_thread(direct.target, req.root, req.kind)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        args = [
+            "direct-download",
+            "--release-title", row["title"],
+            "--kind", req.kind,
+            "--root", target["root"],
+            "--title", title,
+        ]
+        for option, value in (
+            ("--download-url", row.get("download_url")),
+            ("--magnet-uri", row.get("magnet_uri")),
+            ("--info-hash", row.get("info_hash")),
+            ("--info-url", row.get("info_url")),
+            ("--year", req.year),
+            ("--season", req.season),
+        ):
+            if value:
+                args.extend([option, str(value)])
+        name = f"{title} ({req.year})" if req.year else title
+        return await asyncio.to_thread(
+            webjobs.enqueue,
+            kind="movie" if req.kind == "movie" else "show",
+            title=f"{name} · {target['label']} · {row['title']}",
+            args=args,
+        )
+
+    # ------------------------------------------------------------------
     # Anime (Nyaa-only direct downloads)
     # ------------------------------------------------------------------
     @app.get("/api/anime")
@@ -1742,6 +1829,101 @@ def create_app() -> Any:
     async def anime_review(request: Request):
         return snapshots_mod.response(await snaps["anime_review"].get(), request)
 
+    # -- bankai's curated genres (web.genres, web.genre_sync) -----------------
+
+    @app.get("/api/genres")
+    async def genres_overview(language: str | None = Query(None, pattern="^(en|de)$"), fresh: bool = False) -> dict:
+        """The vocabulary with its counts, every title's genres now and as curated (a dry run:
+        nothing is written), the raw genres no rule maps, and what each rule catches."""
+        import httpx
+
+        from bankai.web import genre_sync
+
+        try:
+            return await genre_sync.plan(fresh=fresh, language=language)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Jellyfin could not be asked: {exc}") from exc
+
+    @app.put("/api/genres/rules")
+    async def genres_rules(req: dict) -> dict:
+        """The rules: ``language``, ``vocabulary`` (in priority order), ``genres``, ``tags``,
+        ``libraries`` and ``yields`` mappings."""
+        from bankai.web import genres
+
+        try:
+            return await asyncio.to_thread(genres.save_rules, req)
+        except genres.RulesError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/genres/titles/{key:path}")
+    async def genres_title(key: str) -> dict:
+        """One title's genres now and as curated, with its hand choices."""
+        from bankai.web import genre_sync
+
+        plan = await genre_sync.plan()
+        row = next((row for row in plan["titles"] if row["key"] == key), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such title")
+        return {**row, "vocabulary": plan["vocabulary"]}
+
+    @app.put("/api/genres/titles/{key:path}")
+    async def genres_title_choices(key: str, req: dict) -> dict:
+        """One title's hand choices: ``add`` and ``remove``, lists of genre ids; both empty forgets them."""
+        from bankai.web import genres
+
+        add, remove = req.get("add") or [], req.get("remove") or []
+        if not isinstance(add, list) or not isinstance(remove, list):
+            raise HTTPException(status_code=422, detail="add and remove are lists of genre ids")
+        if not re.fullmatch(r"(anime:\d+|tmdb:(movie|tv):\d+|tvdb:tv:\d+|imdb:tt\d+)", key):
+            raise HTTPException(status_code=422, detail="not a title key")
+        try:
+            return await asyncio.to_thread(genres.save_override, key, [str(g) for g in add], [str(g) for g in remove])
+        except genres.RulesError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/genres/apply")
+    async def genres_apply(req: dict) -> dict:
+        """Write the curated genres to Jellyfin: ``keys`` (a trial, those titles only), or
+        ``movies`` / ``anime`` true to switch writing on for the whole library -- movies and
+        series then a pass at a time, anime through their tvshow.nfo as the layout writes it."""
+        from bankai.web import anime_layout, genre_sync
+
+        keys = req.get("keys")
+        result: dict[str, Any] = {}
+        if isinstance(keys, list) and keys:
+            anime = {int(key.split(":")[1]) for key in keys if str(key).startswith("anime:")}
+            others = {str(key) for key in keys if not str(key).startswith("anime:")}
+            if anime:
+                on = genre_sync.switches()
+                genre_sync.switch(anime_cids=sorted(set(on["anime_cids"]) | anime))
+                result["anime"] = await anime_layout.relayout(anime, label="genres")
+            if others:
+                result["movies"] = await genre_sync.apply(keys=others, limit=None)
+            return result
+        if req.get("movies"):
+            genre_sync.switch(movies=True)
+            result["movies"] = await genre_sync.apply(limit=None)
+        if req.get("anime"):
+            genre_sync.switch(anime=True)
+            # The maintenance pass lays out every collection whose tvshow.nfo changes.
+            result["anime"] = "on"
+        return result or {"idle": "nothing asked"}
+
+    @app.post("/api/genres/undo")
+    async def genres_undo(req: dict) -> dict:
+        """Put titles' genres back as they were before bankai wrote them: ``keys``; ``movies`` /
+        ``anime`` false switches writing off first."""
+        from bankai.web import genre_sync
+
+        if req.get("movies") is False:
+            genre_sync.switch(movies=False)
+        if req.get("anime") is False:
+            genre_sync.switch(anime=False, anime_cids=[])
+        done = 0
+        for key in req.get("keys") or []:
+            done += await genre_sync.undo(str(key))
+        return {"undone": done, "write": genre_sync.switches()}
+
     # -- Audio and subtitle tracks taken out of the libraries' videos ---------
 
     @app.get("/api/tracks")
@@ -1792,6 +1974,13 @@ def create_app() -> Any:
         from bankai.web import encode_library
 
         return await asyncio.to_thread(encode_library.enqueue, _paths(req))
+
+    @app.post("/api/encode/queue/front")
+    async def encode_to_front(req: dict) -> dict:
+        """Move queued files to the front of the queue: ``{"paths": [...]}``."""
+        from bankai.web import encode_library
+
+        return {"moved": await asyncio.to_thread(encode_library.to_front, _paths(req))}
 
     @app.post("/api/encode/queue/remove")
     async def encode_dequeue(req: dict) -> dict:
@@ -2139,8 +2328,10 @@ def create_app() -> Any:
         if not re.fullmatch(r"[0-9a-fA-F]{40}", info_hash):
             raise HTTPException(status_code=422, detail="info_hash is required")
 
+        lose_german = bool(req.get("lose_german"))
+
         async def replace(action: Any) -> dict:
-            return await erai_mod.replace_from_erai(key, info_hash)
+            return await erai_mod.replace_from_erai(key, info_hash, lose_german=lose_german)
 
         return await _run_action(
             req, kind="replace", title=("Replace: " if key else "Download: ") + _label(req, key or info_hash),
@@ -2940,6 +3131,36 @@ def create_app() -> Any:
 
         return await _collection_change(change)
 
+    @app.get("/api/anime/collections/{cid}/arcs")
+    async def anime_collection_arcs(cid: int) -> dict:
+        """A collection's seasons that can be split into arcs, their arcs, and suggestions."""
+        from bankai.web import anime_arcs
+
+        try:
+            return await asyncio.to_thread(anime_arcs.overview, cid)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/anime/collections/{cid}/arcs")
+    async def anime_collection_set_arcs(cid: int, req: dict) -> dict:
+        """Split an entry that is a season of its own into named arcs, each a season, the episodes
+        keeping their numbers: ``{"anilist_id", "arcs": [{"from", "name"}]}``; [] puts it back whole.
+        The files move into their seasons at once."""
+        from bankai.web import anime_arcs, anime_collections
+
+        try:
+            aid = int(req["anilist_id"])
+            arcs = [(int(arc["from"]), str(arc.get("name") or "")) for arc in req.get("arcs") or []]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="anilist_id and arcs [{from, name}] are required") from exc
+
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.set_arcs(store, cid, aid, arcs)
+            return {"ok": True}, {cid}
+
+        answer = await _collection_change(change)
+        return {**answer, **await asyncio.to_thread(anime_arcs.overview, cid)}
+
     @app.post("/api/anime/library/assign")
     async def anime_library_assign(req: dict) -> dict:
         """Files of one card become episodes of an AniList entry -- or (``anilist_id`` null) of none.
@@ -3560,10 +3781,13 @@ def create_app() -> Any:
         from bankai.web import erai_site
 
         releases = erai_site.load()["releases"]
-        tracked = erai_mod._load_state()["releases"]
+        state = erai_mod._load_state()
+        tracked = state["releases"]
         rows = []
         for info_hash, row in releases.items():
             mine = tracked.get(info_hash) or {}
+            # Downloaded once, its episodes another release's since: it may be taken again.
+            status = "superseded" if erai_mod.superseded(state, info_hash, mine) else mine.get("status")
             subs = list(row.get("subs") or [])
             name = row.get("name") or row.get("title") or info_hash
             rows.append(
@@ -3587,7 +3811,7 @@ def create_app() -> Any:
                     "category": row.get("category") or "",
                     "published": row.get("published") or 0,
                     "page": row.get("page") or "",
-                    "status": mine.get("status"),
+                    "status": status,
                     "reason": mine.get("reason"),
                 }
             )

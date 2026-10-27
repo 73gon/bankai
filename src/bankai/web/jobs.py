@@ -74,6 +74,12 @@ def _is_anime_job(args: list[str] | None) -> bool:
     return bool(args and args[0] == "anime-download")
 
 
+def _is_direct_job(args: list[str] | None) -> bool:
+    """A movie or show downloaded as it is (Movies & Shows -> Torrents): it only waits on
+    qBittorrent, which queues downloads itself, so it takes no pipeline slot."""
+    return bool(args and args[0] == "direct-download")
+
+
 def _completed_anime_hashes() -> frozenset[str]:
     """Return cached hashes and refresh qBittorrent outside request/queue locks."""
 
@@ -105,7 +111,7 @@ def _fetch_completed_anime_hashes() -> frozenset[str]:
 
     settings = get_settings().qbittorrent
     signature = (settings.url.rstrip("/"), settings.username, settings.password)
-    if _QBIT_STATUS_CLIENT is None or _QBIT_STATUS_SIGNATURE != signature:
+    if _QBIT_STATUS_CLIENT is None or signature != _QBIT_STATUS_SIGNATURE:
         if _QBIT_STATUS_CLIENT is not None:
             with suppress(Exception):
                 _QBIT_STATUS_CLIENT.close()
@@ -294,6 +300,17 @@ def _running_count(jobs: list | None = None) -> int:
         # spawned by the release reconciler, not from this queue. Counting it
         # here would let a couple of episode copies stall every movie pipeline.
         and not _is_anime_job(getattr(job, "args", None))
+        and not _is_direct_job(getattr(job, "args", None))
+    )
+
+
+def _running_anime_count(jobs: list | None = None) -> int:
+    """Anime jobs running now, automatic and by hand: hand-queued ones wait while
+    ``anime.max_concurrent_downloads`` run."""
+    return sum(
+        1
+        for job in (jobs if jobs is not None else (_context_jobs() if _context_jobs() is not None else bgjobs.list_jobs()))
+        if job.status in {"running", "stopped"} and _is_anime_job(getattr(job, "args", None))
     )
 
 
@@ -342,7 +359,14 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
         if not paused and kind in _OPERATION_KINDS:
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
-        if not paused and _running_count() < limit and _anime_storage_ready(args):
+        # An anime job counts against the anime limit, not the pipelines' (which it never
+        # counted against): without one, "Download all" started every episode at once.
+        room = (
+            _running_anime_count() < max(1, settings.anime.max_concurrent_downloads)
+            if _is_anime_job(args)
+            else _is_direct_job(args) or _running_count() < limit
+        )
+        if not paused and room and _anime_storage_ready(args):
             job = bgjobs.spawn(kind=kind, title=title, args=args)
             return {"status": "running", "id": job.id, "title": title}
         item = PendingJob(id=uuid.uuid4().hex[:8], kind=kind, title=title, args=args)
@@ -366,6 +390,8 @@ def reconcile() -> int:
         # hooks/tests while they consume the shared context internally.
         running_titles = _call_with_jobs(_running_titles, jobs)
         running_count = _call_with_jobs(_running_count, jobs)
+        anime_running = _running_anime_count(jobs)
+        anime_limit = max(1, settings.anime.max_concurrent_downloads)
         started = 0
 
         # Migrate transfers queued by older releases immediately, even when a
@@ -399,13 +425,20 @@ def reconcile() -> int:
         if pending and cooldown_until is not None:
             log.warning("stream source circuit open; non-Anime pipelines are paused")
 
-        while pending and running_count < limit:
+        while pending:
+            # Each kind by its own limit: an anime job by the anime limit, the rest by the
+            # pipelines'; one waiting for room does not hold back the other kind.
             index = next(
                 (
                     i
                     for i, item in enumerate(pending)
-                    if (cooldown_until is None or _is_anime_job(item.args))
+                    if (cooldown_until is None or _is_anime_job(item.args) or _is_direct_job(item.args))
                     and _anime_storage_ready(item.args)
+                    and (
+                        anime_running < anime_limit
+                        if _is_anime_job(item.args)
+                        else _is_direct_job(item.args) or running_count < limit
+                    )
                 ),
                 None,
             )
@@ -423,7 +456,10 @@ def reconcile() -> int:
                     created_at=item.created_at,
                 )
                 running_titles.add(nt)
-                running_count += 1
+                if _is_anime_job(item.args):
+                    anime_running += 1
+                elif not _is_direct_job(item.args):
+                    running_count += 1
                 started += 1
             except Exception as exc:  # pragma: no cover - spawn failure
                 log.warning("failed to start pending job %s: %s", item.id, exc)
@@ -481,6 +517,7 @@ _ENCODE_SECONDS = 60.0
 # is only what the dashboard says); approved ones followed in qBittorrent.
 _MANGA_DISCOVER_SECONDS = 900.0
 _MANGA_RECONCILE_SECONDS = 30.0
+_GENRE_SYNC_SECONDS = 3600.0
 
 
 # The scheduler's periodic passes as the dashboard shows them: what each does,
@@ -501,6 +538,7 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "track_clean": ("Take out the tracks switched off", _TRACK_CLEAN_SECONDS),
     "manga_discover": ("Look for manga and light novels", _MANGA_DISCOVER_SECONDS),
     "manga_reconcile": ("Download approved manga", _MANGA_RECONCILE_SECONDS),
+    "genre_sync": ("Write curated genres to Jellyfin", _GENRE_SYNC_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
 
@@ -642,6 +680,11 @@ def _pass_summary(name: str, result: object) -> str | None:
             f"{_plural(number('found'), 'new release')} to review; "
             f"{_plural(number('searched'), 'series', 'series')} searched of {number('followed')} followed"
         )
+    if name == "genre_sync":
+        if result.get("idle"):
+            return str(result["idle"])
+        failed = f", {number('failed')} failed" if result.get("failed") else ""
+        return f"{_plural(number('written'), 'title')} written{failed}, {number('remaining')} to go"
     if name == "manga_reconcile":
         if result.get("idle"):
             return str(result["idle"])
@@ -782,6 +825,13 @@ async def _manga_reconcile() -> None:
     _pass_result("manga_reconcile", await manga_releases.reconcile() or {"idle": "Nothing downloading"})
 
 
+async def _genre_sync() -> None:
+    from bankai.web import genre_sync
+
+    result = await genre_sync.apply()
+    _pass_result("genre_sync", {**result, "failed": len(result.get("failed") or [])} if "written" in result else result)
+
+
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
     """Dispatch queued work continuously, independent of an open browser page."""
 
@@ -818,6 +868,9 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     manga_discover_task: asyncio.Future | None = None
     next_manga_reconcile = time.monotonic() + 30.0
     manga_reconcile_task: asyncio.Future | None = None
+    next_genre_sync = time.monotonic() + 300.0
+    genre_sync_task: asyncio.Future | None = None
+    _pass_due("genre_sync", next_genre_sync)
     from bankai.web import manga_releases
 
     _pass_due("manga_discover", next_manga_discover)
@@ -890,6 +943,14 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 _pass_due("manga_reconcile", next_manga_reconcile)
                 manga_reconcile_task = asyncio.ensure_future(_manga_reconcile())
                 _pass_task("manga_reconcile", manga_reconcile_task)
+        # Off to the side: curated genres into Jellyfin, a few dozen titles an hour, once switched on.
+        if time.monotonic() >= next_genre_sync and (genre_sync_task is None or genre_sync_task.done()):
+            next_genre_sync = time.monotonic() + _GENRE_SYNC_SECONDS
+            _pass_due("genre_sync", next_genre_sync)
+            if genre_sync_task is not None and genre_sync_task.exception() is not None:
+                log.warning("genre sync failed: %r", genre_sync_task.exception())
+            genre_sync_task = asyncio.ensure_future(_genre_sync())
+            _pass_task("genre_sync", genre_sync_task)
         if time.monotonic() >= next_archive_pass:
             next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
             _pass_due("job_archive", next_archive_pass)

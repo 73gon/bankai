@@ -342,3 +342,14 @@ def test_the_dashboard_shows_the_encoding_lane():
     task = lane["workers"][0]["task"]
     assert (task["title"], task["percent"]) == ("GoT - S08E06.mkv", 42.0)
     assert "30 min left" in task["detail"]
+
+
+def test_files_moved_to_the_front_are_encoded_next_in_the_order_given(library):
+    first = library("A - S01E01.mkv", entry(mbps=35.0))
+    second = library("A - S01E02.mkv", entry(mbps=36.0))
+    third = library("A - S01E03.mkv", entry(mbps=37.0))
+    encode.enqueue([str(first), str(second), str(third)])
+
+    assert encode.to_front([str(third), str(second)]) == 2
+
+    assert [row["path"] for row in encode.queue()] == [str(third), str(second), str(first)]

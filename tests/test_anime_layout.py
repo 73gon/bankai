@@ -711,3 +711,75 @@ def test_without_tmdb_its_artwork_is_neither_offered_nor_used(titan, roots, monk
     assert slots["fanart"]["url"] == "https://img/aot-banner.jpg"
     assert all(item["source"] == "anilist" for row in slots.values() for item in row["candidates"])
     assert slots["logo"]["url"] is None
+
+
+# -- Arcs: one long entry as named seasons ---------------------------------------------------
+
+
+def test_an_entry_split_into_arcs_is_a_season_each_its_episodes_keeping_their_numbers(roots, titan) -> None:
+    store = _titan_store()
+    collections.set_arcs(store, 1, S1, [(1, "Fall of Shiganshina"), (14, "Trost")])
+    plan = collections.plan(store.collections[1], store=store)
+
+    assert plan.place(S1, 13) == (1, 13)
+    assert plan.place(S1, 14) == (2, 14)
+    assert plan.place(S1, 25) == (2, 25)
+    # The seasons after it move up; the specials stay.
+    assert plan.place(S2, 1) == (3, 1)
+    assert plan.place(OVA, 1) == (0, 1)
+    assert plan.names == {1: "Fall of Shiganshina", 2: "Trost"}
+    assert (plan.first_of(2), plan.opens_entry(1), plan.opens_entry(2)) == (S1, True, False)
+    # Kept and read back.
+    _save(store)
+    assert collections.load().collections[1].arcs == {S1: [(1, "Fall of Shiganshina"), (14, "Trost")]}
+
+
+@pytest.mark.parametrize(
+    ("arcs", "message"),
+    [
+        ([(2, "A"), (14, "B")], "starts at episode 1"),
+        ([(1, "A"), (14, "B"), (10, "C")], "after the one before"),
+        ([(1, "A"), (14, "")], "needs a name"),
+        ([(1, "A/B")], "without /"),
+    ],
+)
+def test_arcs_that_cannot_be_kept_are_refused(roots, titan, arcs, message) -> None:
+    store = _titan_store()
+    with pytest.raises(ValueError, match=message):
+        collections.set_arcs(store, 1, S1, arcs)
+
+
+def test_only_an_entry_that_is_a_season_alone_is_split(roots, titan) -> None:
+    store = _titan_store()
+    rest = [[aid] for aid in store.collections[1].members if aid not in (S1, S2, OVA)]
+    collections.arrange(store, 1, [[S1, S2], *rest], [OVA])
+    with pytest.raises(ValueError, match="season of its own"):
+        collections.set_arcs(store, 1, S1, [(1, "A"), (14, "B")])
+
+
+def test_arcs_move_the_files_name_their_seasons_and_carry_the_files_records(roots, titan) -> None:
+    from bankai.web import encode_library
+
+    store = _titan_store()
+    _save(store)
+    old13, old14, old20 = _place(AOT, 1, 13), _place(AOT, 1, 14), _place(AOT, 1, 20)
+    for rel in (old13, old14, old20):
+        _touch(roots.anime / rel)
+    _index({old13: [(S1, 13)], old14: [(S1, 14)], old20: [(S1, 20)]})
+    asyncio.run(anime_layout.relayout({1}))
+    # Encoded once, and one being encoded now.
+    encode_library._save_state({"encoded": {str(roots.anime / old14): 400}, "current": {"path": str(roots.anime / old20)}})
+
+    with collections.editing() as current:
+        collections.set_arcs(current, 1, S1, [(1, "Fall of Shiganshina"), (14, "Trost")])
+    result = asyncio.run(anime_layout.relayout({1}))
+
+    new14 = f"{AOT}/Season 02/{AOT} - S02E14.mkv"
+    assert (roots.anime / old13).is_file() and (roots.anime / new14).is_file()
+    # The one under the encoder waits for a later pass.
+    assert (roots.anime / old20).is_file() and any("being encoded" in line for line in result["skipped"])
+    assert _xml((roots.anime / AOT / "Season 02" / "season.nfo").read_text(encoding="utf-8")).findtext("title") == "Trost"
+    assert _xml((roots.anime / AOT / "Season 01" / "season.nfo").read_text(encoding="utf-8")).findtext("title") == "Fall of Shiganshina"
+    assert _xml((roots.anime / new14).with_suffix(".nfo").read_text(encoding="utf-8")).findtext("episode") == "14"
+    # Its encode follows it: not listed again.
+    assert str(roots.anime / new14) in encode_library._state()["encoded"]

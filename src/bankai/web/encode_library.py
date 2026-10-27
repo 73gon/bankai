@@ -140,6 +140,20 @@ def dequeue(paths: list[str] | None = None) -> int:
     return len(rows) - len(kept)
 
 
+def to_front(paths: list[str]) -> int:
+    """Move queued files to the front of the queue, in the order given; the one being encoded stays first."""
+    with _LOCK:
+        rows = queue()
+        wanted = list(dict.fromkeys(str(path) for path in paths))
+        busy = progress.get("path")
+        front = [row for path in wanted for row in rows if row["path"] == path and path != busy]
+        moved = {row["path"] for row in front}
+        head = [row for row in rows if row["path"] == busy]
+        rest = [row for row in rows if row["path"] not in moved and row["path"] != busy]
+        _save_queue([*head, *front, *rest])
+    return len(front)
+
+
 def _unqueue(path: str) -> None:
     with _LOCK:
         _save_queue([row for row in queue() if row["path"] != path])
@@ -186,6 +200,33 @@ def state_stamp() -> int:
         return _path("encode_state.json").stat().st_mtime_ns
     except OSError:
         return 0
+
+
+def busy_path() -> str | None:
+    """The file being encoded now, if any: never moved meanwhile (anime_layout.apply)."""
+    current = _state().get("current") or {}
+    return str(current["path"]) if current.get("path") else None
+
+
+def follow_renames(renamed: dict[str, str]) -> int:
+    """Files moved by the layout keep their records: done, skipped, failed, when, and their place
+    in the queue. Without it a show laid out anew -- Bleach split into arcs -- was listed again."""
+    if not renamed:
+        return 0
+    moved = 0
+    with _LOCK:
+        state = _state()
+        for section in ("encoded", "encoded_at", "skipped", "failed"):
+            rows = state.get(section) or {}
+            for old, new in renamed.items():
+                if old in rows:
+                    rows[new] = rows.pop(old)
+                    moved += 1
+        _save_state(state)
+        rows = queue()
+        if any(row["path"] in renamed for row in rows):
+            _save_queue([{**row, "path": renamed.get(row["path"], row["path"])} for row in rows])
+    return moved
 
 
 # -- which files, and as what --------------------------------------------------

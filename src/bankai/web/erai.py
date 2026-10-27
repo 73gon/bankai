@@ -2866,6 +2866,39 @@ def _is_german_dub(path: Path) -> bool:
     return has_german_audio(cached)
 
 
+def superseded(state: dict[str, Any], info_hash: str, release: dict[str, Any] | None = None) -> bool:
+    """A downloaded release whose episodes are another release's now: taken over by an
+    upgrade or a Replace. It no longer stands for what the library has, so it may be taken
+    again (Mushoku Tensei's German batch, swapped for HEVC singles without German, Oct 2026)."""
+    release = release if release is not None else (state.get("releases") or {}).get(info_hash) or {}
+    if release.get("status") != "done" or not str(release.get("anilist_id") or "").isdigit():
+        return False
+    span = _release_range(str(release.get("title") or ""))
+    if span is None:
+        return False
+    aid, first, last = int(release["anilist_id"]), span[0], span[1]
+    canonical = state.get("canonical") or {}
+    if last >= SEASON_PACK_LAST:
+        slots = [row for slot, row in canonical.items() if slot.startswith(f"anilist:{aid}|")]
+    else:
+        slots = [canonical.get(f"anilist:{aid}|{episode}") for episode in range(first, last + 1)]
+    holders = {str((row or {}).get("info_hash") or "").casefold() for row in slots if row}
+    return bool(holders) and info_hash.casefold() not in holders
+
+
+def _has_german(path: Path) -> bool:
+    """A library file that can be watched in German: German subtitles (in it or beside it) or a German dub."""
+    from bankai.web.anime_library import (
+        _load_codec_cache,
+        german_sidecar,
+        has_german_audio,
+        has_german_subtitles,
+    )
+
+    cached = _load_codec_cache().get(str(path)) or {}
+    return bool(has_german_subtitles(cached) or has_german_audio(cached) or german_sidecar(path))
+
+
 def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     """What taking this release for a review card would do.
 
@@ -2908,7 +2941,9 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
         raise ValueError("Choose the AniList entry for this card first" if key else "Its AniList entry could not be told from the release name")
     key = key or f"anilist:{anime.id}"
     existing = own
-    if existing.get("status") in {*_ACTIVE_RELEASE_STATES, "done"}:
+    if existing.get("status") in _ACTIVE_RELEASE_STATES or (
+        existing.get("status") == "done" and not superseded(state, info_hash.casefold(), existing)
+    ):
         raise ValueError("This release is already downloading or in the library")
     first, last = span
     mappings = _load_mappings()
@@ -2953,6 +2988,8 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
         "held": held,
         "files": replaced,
         "german_dubs_kept": dubs,
+        # Files it would replace that can be watched in German, while it lists no German itself.
+        "replaces_german": 0 if german else sum(1 for row in replaced if _has_german(Path(row["path"]))),
     }
 
 
@@ -3001,12 +3038,21 @@ async def replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     }
 
 
-async def replace_from_erai(key: str, info_hash: str) -> dict[str, Any]:
-    """Queue an Erai-raws release in place of what a review card holds."""
+async def replace_from_erai(key: str, info_hash: str, *, lose_german: bool = False) -> dict[str, Any]:
+    """Queue an Erai-raws release in place of what a review card holds.
+
+    One that lists no German never replaces files that have it unless asked to
+    (``lose_german``): that swap took Mushoku Tensei's German away unnoticed.
+    """
     from bankai.torrent.qbittorrent import QBittorrentClient
 
     await anilist.index()
     plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
+    if plan["replaces_german"] and not lose_german:
+        raise ValueError(
+            f"It lists no German subtitles, and would replace {plan['replaces_german']} "
+            "file(s) that can be watched in German; confirm that to take it anyway"
+        )
     settings = get_settings()
     saved = ((_load_state().get("releases") or {}).get(plan["info_hash"]) or {}).get("entry")
     if saved and saved.get("magnet_uri"):

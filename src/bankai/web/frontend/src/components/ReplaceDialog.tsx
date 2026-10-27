@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Download, Replace } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { Button } from '@/zon/ui/button';
+import { Checkbox } from '@/zon/ui/checkbox';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
 import { api, type ReplacementPlan } from '@/lib/api';
 
@@ -59,12 +60,15 @@ export function ReplaceDialog({
 }) {
   const [plan, setPlan] = useState<ReplacementPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
+  // Files with German replaced by a release without: only once confirmed.
+  const [loseGerman, setLoseGerman] = useState(false);
 
   useEffect(() => {
     if (!candidate) return;
     let current = true;
     setPlan(null);
     setPlanError(null);
+    setLoseGerman(false);
     api
       .replacementPlan(cardKey, candidate.info_hash)
       .then((answer) => current && setPlan(answer))
@@ -80,7 +84,7 @@ export function ReplaceDialog({
     onClose();
     onStart?.(row.info_hash);
     try {
-      const result = await api.replaceFromErai(cardKey, row.info_hash, label);
+      const result = await api.replaceFromErai(cardKey, row.info_hash, label, loseGerman);
       toast.success(`Queued ${result.queued}`);
       onQueued?.();
     } catch (error: any) {
@@ -124,6 +128,18 @@ export function ReplaceDialog({
                 ? `Replaces ${plan.file_count} file${plan.file_count === 1 ? '' : 's'} already in the library, removed once the new ones are published.`
                 : 'Nothing of these episodes is in the library yet.'}
             </li>
+            {plan.replaces_german > 0 && (
+              <li className='flex flex-col gap-2 rounded-control border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive'>
+                <span>
+                  {plan.replaces_german} of the files it replaces can be watched in German; this release lists no German subtitles, so
+                  they would lose it.
+                </span>
+                <label className='flex items-center gap-2 text-foreground'>
+                  <Checkbox checked={loseGerman} onCheckedChange={(next) => setLoseGerman(Boolean(next))} />
+                  Take it anyway, without German
+                </label>
+              </li>
+            )}
             {plan.german_dubs_kept.length > 0 && (
               <li className='text-transfer'>
                 Keeps {plan.german_dubs_kept.length === 1 ? 'episode' : 'episodes'} {plan.german_dubs_kept.map(pad).join(', ')}: German dub, never replaced.
@@ -135,7 +151,7 @@ export function ReplaceDialog({
         </DialogBody>
         <DialogFooter>
           <Button variant='secondary' onClick={onClose}>Cancel</Button>
-          <Button onClick={() => void confirm()} disabled={!plan}>
+          <Button onClick={() => void confirm()} disabled={!plan || (plan.replaces_german > 0 && !loseGerman)}>
             <Icon data-icon='inline-start' /> {verb}
           </Button>
         </DialogFooter>

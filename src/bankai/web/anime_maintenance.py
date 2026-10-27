@@ -30,7 +30,14 @@ from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.metadata import anilist, animelists, jikan, offline, tmdb
-from bankai.web import anime_artwork, anime_collections, anime_files, anime_layout
+from bankai.web import (
+    anime_artwork,
+    anime_collections,
+    anime_files,
+    anime_layout,
+    encode_library,
+    genre_sync,
+)
 
 log = get_logger(__name__)
 
@@ -76,6 +83,7 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
         cid = layout.of.get(pairs[0][0])
         if cid is not None:
             by_collection.setdefault(cid, []).append(rel)
+    busy = encode_library.busy_path()
     result = {}
     for cid, row in layout.store.collections.items():
         plan = layout.plans[cid]
@@ -94,8 +102,13 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
         files = sorted((rel, rel in published) for rel in by_collection.get(cid, []))
         # The pictures each slot shows: a choice by hand, or TMDB's artwork arriving, lays it out anew.
         art = anime_artwork.resolved(cid, row, plan)
+        # A file of it being encoded was not moved: its fingerprint changes once the encode is done.
+        holding = bool(busy) and any(busy.endswith("/" + rel) for rel in by_collection.get(cid, []))
+        # The genres tvshow.nfo writes: a rule changed, or curated genres switched on, writes it anew.
+        main = row.title if row.title is not None else row.members[0]
+        shown_genres = genre_sync.anime_genres(cid, list(anilist.media(main).get("genres") or []))
         material = json.dumps(
-            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version, art],
+            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version, art, shown_genres, holding, plan.names],
             sort_keys=True,
             default=str,
         )

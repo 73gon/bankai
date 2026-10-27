@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
-import { HardDrive, RefreshCw, ArrowRight, CircleArrowUp, ExternalLink, Search, Download, FileVideo, Images, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Unlink, X } from 'lucide-react';
+import { HardDrive, RefreshCw, ArrowRight, CircleArrowUp, ExternalLink, Search, Download, FileVideo, Images, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, Split, Unlink, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeBulkKind, type AnimeBulkShow, type MissingRelease } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
@@ -7,6 +7,7 @@ import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { LinkedManga } from '@/components/LinkedManga';
 import { ArtworkDialog } from '@/components/ArtworkDialog';
+import { SeasonArcsDialog } from '@/components/SeasonArcsDialog';
 import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { SegmentMeter, rampParts } from '@/components/segment-meter';
@@ -331,6 +332,8 @@ export default function AnimeLibrary() {
   const [graphFor, setGraphFor] = useState<GraphTarget>(null);
   // The collection whose Artwork dialog is open.
   const [artworkFor, setArtworkFor] = useState<AnimeLibraryShow | null>(null);
+  // The collection whose Seasons (arcs) dialog is open.
+  const [arcsFor, setArcsFor] = useState<AnimeLibraryShow | null>(null);
   // Shows being removed in the background: kept off the page until done.
   const removing = useRef<Set<string>>(new Set());
   // "Download N remaining episodes": the show, what the background search found
@@ -1156,6 +1159,16 @@ export default function AnimeLibrary() {
                           <Images data-icon='inline-start' /> Artwork
                         </Button>
                       )}
+                      {active.collection_id != null && (
+                        <Button
+                          size='sm'
+                          variant='secondary'
+                          onClick={() => setArcsFor(active)}
+                          title='Split a long season into named arcs, a season each: Bleach as its 16 arcs'
+                        >
+                          <Split data-icon='inline-start' /> Seasons
+                        </Button>
+                      )}
                       {isUnmatched(active) && (
                         <Button
                           size='sm'
@@ -1599,6 +1612,12 @@ export default function AnimeLibrary() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <SeasonArcsDialog
+        collectionId={arcsFor?.collection_id ?? null}
+        title={arcsFor?.title ?? ''}
+        onClose={() => setArcsFor(null)}
+        onChanged={() => { void load(); if (selected) void openShow(selected); }}
+      />
       <ArtworkDialog
         collectionId={artworkFor?.collection_id ?? null}
         title={artworkFor?.title ?? ''}

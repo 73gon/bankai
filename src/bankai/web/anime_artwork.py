@@ -103,7 +103,7 @@ def _show_ref(row: collections.Collection) -> tuple[str, int] | None:
 
 
 def _season_numbers(plan: collections.Plan) -> set[int]:
-    numbers = set(plan.seasons.values())
+    numbers = plan.numbers()
     if plan.specials:
         numbers.add(0)
     return numbers
@@ -167,8 +167,8 @@ def candidates(row: collections.Collection, plan: collections.Plan) -> dict[str,
         name = collections.entry_name(aid)
         add("poster", _anilist(aid, anilist.cover(aid), name))
         add("banner", _anilist(aid, anilist.media(aid).get("banner"), name))
-    for number in sorted(set(plan.seasons.values())):
-        # A season of several entries is pictured after its first, as it is named.
+    for number in sorted(plan.numbers()):
+        # A season of several entries is pictured after its first, as it is named; an arc after its entry.
         first = plan.first_of(number)
         for aid in [first, *(aid for aid, at in plan.seasons.items() if at == number and aid != first)]:
             if aid is not None:

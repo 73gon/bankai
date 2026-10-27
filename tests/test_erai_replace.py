@@ -102,6 +102,41 @@ def test_a_release_already_downloading_is_refused(library):
         erai._replacement_plan("anilist:1002", "a" * 40)
 
 
+def test_a_downloaded_release_whose_episodes_another_took_over_may_be_taken_again(library):
+    state = library["state"]
+    state["releases"]["a" * 40] = {"status": "done", "title": BATCH, "anilist_id": 1002}
+    # Still its own episodes: in the library, refused.
+    state["canonical"] = {f"anilist:1002|{n}": {"info_hash": "a" * 40} for n in range(1, 13)}
+    assert not erai.superseded(state, "a" * 40)
+    with pytest.raises(ValueError, match="already downloading or in the library"):
+        erai._replacement_plan("anilist:1002", "a" * 40)
+
+    # Singles took them over (Mushoku Tensei's HEVC upgrade without German).
+    state["canonical"] = {f"anilist:1002|{n}": {"info_hash": f"{n:040d}"} for n in range(1, 13)}
+    assert erai.superseded(state, "a" * 40)
+    assert erai._replacement_plan("anilist:1002", "a" * 40)["first"] == 1
+
+
+def test_a_release_without_german_never_quietly_replaces_files_that_have_it(library, monkeypatch):
+    monkeypatch.setattr(erai.erai_site, "lookup", lambda info_hash: {"name": BATCH, "subs": ["us"]})
+    monkeypatch.setattr(erai, "_has_german", lambda path: path.name.endswith(("S04E13.mkv", "S04E14.mkv")))
+
+    plan = erai._replacement_plan("anilist:1002", "a" * 40)
+    assert (plan["german"], plan["replaces_german"]) == (False, 2)
+
+    import asyncio
+
+    async def index():
+        return None
+
+    monkeypatch.setattr(erai.anilist, "index", index)
+    with pytest.raises(ValueError, match="would replace 2 file"):
+        asyncio.run(erai.replace_from_erai("anilist:1002", "a" * 40))
+    # With German itself, nothing is lost.
+    monkeypatch.setattr(erai.erai_site, "lookup", lambda info_hash: {"name": BATCH, "subs": ["us", "de"]})
+    assert erai._replacement_plan("anilist:1002", "a" * 40)["replaces_german"] == 0
+
+
 def _recorded(path: Path, episode: int) -> dict:
     stat = path.stat()
     return {"path": str(path), "episode": episode, "size": stat.st_size, "mtime": stat.st_mtime}

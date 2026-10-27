@@ -1,0 +1,42 @@
+# Prowlarr on seireitei, beside qBittorrent (Oct 2026: the mediaserver that
+# ran it went dark). bankai searches it for the pipeline's torrents, the
+# review picker and Movies & Shows -> Torrents.
+#
+# Not inside gluetun: it only fetches search pages and .torrent files, never
+# peers, and putting it there means recreating gluetun -- which takes
+# qBittorrent down with it. bankai fetches each .torrent itself and hands
+# qBittorrent the file (or the magnet it redirects to), so qBittorrent never
+# has to reach Prowlarr from inside the tunnel.
+#
+# DNS: public resolvers, not the provider's, which leave some indexers
+# unresolved (CUII blocks are DNS-only).
+#
+# FlareSolverr opens indexers behind Cloudflare (1337x): an indexer proxy in
+# Prowlarr at http://flaresolverr:8191, applied by the tag "flaresolverr".
+#
+#     cd /home/malik/projects/bankai/deploy/seireitei/prowlarr
+#     sudo docker compose up -d
+
+services:
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Berlin
+    volumes:
+      - /home/malik/.config/prowlarr:/config
+    ports:
+      - 127.0.0.1:9696:9696
+    dns: [1.1.1.1, 9.9.9.9]
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      TZ: Europe/Berlin
+      LOG_LEVEL: info
+    dns: [1.1.1.1, 9.9.9.9]
+    restart: unless-stopped

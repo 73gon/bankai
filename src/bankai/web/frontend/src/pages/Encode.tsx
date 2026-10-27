@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, Clock, Loader2, Shrink, X } from 'lucide-react';
+import { ArrowUpToLine, ChevronRight, Clock, Loader2, Shrink, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type EncodeCandidate, type EncodeOverview, type EncodeScope, type TrackScopeName } from '@/lib/api';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
@@ -105,6 +105,19 @@ function QueueCard({ data, onChanged }: { data: EncodeOverview; onChanged: () =>
   const { current } = data;
   const waiting = data.queue.filter((row) => row.path !== current?.path);
 
+  async function toFront(path: string) {
+    setBusy(true);
+    try {
+      await api.encodeToFront([path]);
+      toast.success(fileName(path) + ' is next');
+      onChanged();
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remove(paths: string[] | null) {
     setBusy(true);
     try {
@@ -157,6 +170,11 @@ function QueueCard({ data, onChanged }: { data: EncodeOverview; onChanged: () =>
                 </div>
                 <span className='shrink-0 font-mono text-xs tabular-nums text-muted-foreground'>{formatBytes(row.size)}</span>
                 <span className='hidden shrink-0 font-mono text-xs tabular-nums sm:inline' title='Frees about'>−{formatBytes(row.estimate)}</span>
+                {index > 0 && (
+                  <Button size='icon-sm' variant='ghost' aria-label={'Encode ' + fileName(row.path) + ' next'} title='Move to the front: encoded next' onClick={() => void toFront(row.path)} disabled={busy}>
+                    <ArrowUpToLine />
+                  </Button>
+                )}
                 <Button size='icon-sm' variant='ghost' aria-label={'Take ' + fileName(row.path) + ' out of the queue'} onClick={() => void remove([row.path])} disabled={busy}>
                   <X />
                 </Button>

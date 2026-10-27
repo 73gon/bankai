@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink, BookOpen } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink, BookOpen, Tags, Magnet } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { cn } from '@/zon/lib/cn';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
@@ -13,6 +13,7 @@ import Search from '@/pages/Search';
 import Library from '@/pages/Library';
 import Server from '@/pages/Server';
 import MasLibrary from '@/pages/MasLibrary';
+import Torrents from '@/pages/Torrents';
 import Settings from '@/pages/Settings';
 import Anime from '@/pages/Anime';
 import AnimeQueue from '@/pages/AnimeQueue';
@@ -24,6 +25,7 @@ import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
 import Tracks from '@/pages/Tracks';
 import Encode from '@/pages/Encode';
+import Genres from '@/pages/Genres';
 import MangaLibrary from '@/pages/MangaLibrary';
 import MangaReview from '@/pages/MangaReview';
 import MangaSearch from '@/pages/MangaSearch';
@@ -35,6 +37,7 @@ const MAS_NAV = [
   { to: '/mas/discover', label: 'Discover', icon: Compass },
   { to: '/mas/search', label: 'Search', icon: SearchIcon },
   { to: '/mas/filmpalast', label: 'Filmpalast', icon: CalendarClock },
+  { to: '/mas/torrents', label: 'Torrents', icon: Magnet },
   { to: '/mas/queue', label: 'Queue', icon: ListVideo, count: 'mas_queue' },
   { to: '/mas/library', label: 'Library', icon: HardDrive },
   { to: '/mas/settings', label: 'Settings', icon: SettingsIcon },
@@ -65,6 +68,7 @@ const SYSTEM_NAV = [
   { to: '/library', label: 'Library', icon: HardDrive },
   { to: '/tracks', label: 'Tracks', icon: Languages },
   { to: '/encode', label: 'Encode', icon: Shrink },
+  { to: '/genres', label: 'Genres', icon: Tags },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -482,6 +486,7 @@ export default function App() {
               <Route path='/mas/discover' element={<Discover />} />
               <Route path='/mas/search' element={<Search />} />
               <Route path='/mas/filmpalast' element={<Recent />} />
+              <Route path='/mas/torrents' element={<Torrents />} />
               <Route path='/mas/queue' element={<Library />} />
               <Route path='/mas/library' element={<MasLibrary />} />
               <Route path='/mas/settings' element={<Settings scope='mas' />} />
@@ -509,6 +514,7 @@ export default function App() {
               <Route path='/qbittorrent' element={<QBittorrent />} />
               <Route path='/tracks' element={<Tracks />} />
               <Route path='/encode' element={<Encode />} />
+              <Route path='/genres' element={<Genres />} />
               <Route path='/library' element={<Server />} />
               <Route path='/settings' element={<Settings scope='global' />} />
 

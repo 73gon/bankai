@@ -162,6 +162,18 @@ def load_inventory() -> dict[str, dict]:
     return _INVENTORY[1]
 
 
+def follow_renames(renamed: dict[str, str]) -> int:
+    """Files moved by the anime layout keep what was read of their tracks: not read again."""
+    with _LOCK:
+        rows = dict(load_inventory())
+        moved = [old for old in renamed if old in rows]
+        for old in moved:
+            rows[renamed[old]] = rows.pop(old)
+        if moved:
+            _save_inventory(rows)
+    return len(moved)
+
+
 def _save_inventory(rows: dict[str, dict]) -> None:
     global _INVENTORY
     _write("track_inventory.json", rows)

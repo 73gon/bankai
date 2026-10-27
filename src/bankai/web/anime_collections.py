@@ -84,6 +84,9 @@ class Collection:
     # Seasons arranged by hand, each the entries that make it up in order: a
     # movie appended to the season it ends. Empty: the sequel chain decides.
     arrangement: list[list[int]] = field(default_factory=list)
+    # An entry that is a season of its own, split into arcs by hand: each arc's first episode
+    # and name, a season each (Bleach's 366 episodes as its 16 arcs). Episodes keep their numbers.
+    arcs: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -92,6 +95,7 @@ class Collection:
             "name": self.name,
             "specials": self.specials,
             "arrangement": self.arrangement,
+            **({"arcs": {str(aid): [{"from": first, "name": name} for first, name in arcs] for aid, arcs in sorted(self.arcs.items())}} if self.arcs else {}),
         }
 
 
@@ -170,6 +174,11 @@ def _read() -> Store:
                 for season in row.get("arrangement") or []
                 if isinstance(season, list)
             ],
+            {
+                int(aid): [(int(arc["from"]), str(arc["name"])) for arc in arcs if str(arc.get("from", "")).isdigit() and arc.get("name")]
+                for aid, arcs in (row.get("arcs") or {}).items()
+                if str(aid).isdigit() and int(aid) in members and isinstance(arcs, list)
+            },
         )
     store.next = max([store.next, *(cid + 1 for cid in store.collections)])
     return store
@@ -477,8 +486,19 @@ class Plan:
     # An entry appended to a season: the episodes of the season before it.
     offsets: dict[int, int] = field(default_factory=dict)
     custom: bool = False
+    # An entry split into arcs: (first episode, season, name) each, in order.
+    arcs: dict[int, list[tuple[int, int, str]]] = field(default_factory=dict)
+    # Season -> its arc's name.
+    names: dict[int, str] = field(default_factory=dict)
 
     def place(self, aid: int, episode: int) -> tuple[int, int] | None:
+        if aid in self.arcs:
+            # The arc it falls in, its number its own (S02E21): before the first arc, the first.
+            season = self.arcs[aid][0][1]
+            for first, number, _name in self.arcs[aid]:
+                if episode >= first:
+                    season = number
+            return season, episode
         if aid in self.seasons:
             return self.seasons[aid], self.offsets.get(aid, 0) + episode
         if aid in self.specials:
@@ -502,8 +522,19 @@ class Plan:
 
     def first_of(self, season: int) -> int | None:
         """The entry a season is named and pictured after: its first."""
+        for aid, arcs in self.arcs.items():
+            if any(number == season for _first, number, _name in arcs):
+                return aid
         found = [aid for aid in self.order() if self.seasons.get(aid) == season]
         return found[0] if found else None
+
+    def numbers(self) -> set[int]:
+        """Every season number but the specials', an arc's included."""
+        return set(self.seasons.values()) | {number for arcs in self.arcs.values() for _first, number, _name in arcs}
+
+    def opens_entry(self, season: int) -> bool:
+        """Whether a season starts its entry: the entry's description and dates are its."""
+        return not any(number == season and index for arcs in self.arcs.values() for index, (_f, number, _n) in enumerate(arcs))
 
     def arrangement(self) -> dict:
         return {
@@ -569,13 +600,22 @@ def plan(row: Collection, *, episodes_on_disk: Callable[[int], int] = lambda aid
     else:
         arranged = [[aid] for aid in line]
     result = Plan(custom=bool(row.arrangement))
-    for number, season in enumerate(arranged, start=1):
+    number = 0
+    for season in arranged:
+        number += 1
         offset = 0
         for aid in season:
             result.seasons[aid] = number
             if offset:
                 result.offsets[aid] = offset
             offset += length(aid)
+        # An entry that is a season alone, split into arcs: a season each, the seasons after
+        # it moving up.
+        if len(season) == 1 and row.arcs.get(season[0]):
+            arcs = sorted(row.arcs[season[0]])
+            result.arcs[season[0]] = [(first, number + index, name) for index, (first, name) in enumerate(arcs)]
+            result.names.update({number + index: name for index, (_first, name) in enumerate(arcs)})
+            number += len(arcs) - 1
     rest = [aid for aid in row.members if aid not in result.seasons]
     ordered = [aid for aid in row.specials if aid in rest]
     ordered += sorted((aid for aid in rest if aid not in ordered), key=lambda aid: (start(aid), aid))
@@ -606,6 +646,33 @@ def arrange(store: Store, cid: int, seasons_: list[list[int]] | None, specials: 
         raise ValueError("a collection needs at least one season")
     row.arrangement = lists
     row.specials = extra
+
+
+def set_arcs(store: Store, cid: int, aid: int, arcs: list[tuple[int, str]]) -> None:
+    """Split an entry that is a season of its own into arcs, each a season; [] puts it back whole.
+
+    Each arc is its first episode and its name: the first arc starts at episode 1, the
+    rest after it in order, and every arc has a name.
+    """
+    row = store.collections.get(cid)
+    if row is None:
+        raise ValueError("there is no such collection")
+    if aid not in row.members:
+        raise ValueError("that entry is not in this collection")
+    if not arcs:
+        row.arcs.pop(aid, None)
+        return
+    if [aid] not in plan(row, store=store).season_lists():
+        raise ValueError("only an entry that is a season of its own can be split into arcs")
+    clean = [(int(first), " ".join(str(name).split())) for first, name in arcs]
+    firsts = [first for first, _name in clean]
+    if firsts[0] != 1:
+        raise ValueError("the first arc starts at episode 1")
+    if firsts != sorted(set(firsts)):
+        raise ValueError("each arc starts after the one before")
+    if any(not name or "/" in name for _first, name in clean):
+        raise ValueError("every arc needs a name, without /")
+    row.arcs[aid] = clean
 
 
 def settle_specials(row: Collection) -> None:

@@ -112,27 +112,71 @@ def _jellyfin_relative(path: str, location: str) -> str | None:
         return None
 
 
+async def _libraries(client: httpx.AsyncClient) -> list[dict[str, Any]]:
+    response = await client.get("/Library/VirtualFolders")
+    response.raise_for_status()
+    return response.json() or []
+
+
+def _is_anime(row: dict[str, Any]) -> bool:
+    """The anime library: the one named in the settings, else the one on the anime root's folder."""
+    from bankai.web import anime_files
+
+    wanted = get_settings().jellyfin.library
+    if wanted:
+        return str(row.get("Name")) == wanted
+    folder = anime_files.anime_root().name.casefold()
+    return any(PureWindowsPath(str(loc)).name.casefold() == folder
+               or PurePosixPath(str(loc)).name.casefold() == folder
+               for loc in row.get("Locations") or [])
+
+
+async def catalog() -> list[dict[str, Any]]:
+    """Every movie and series of the movie and show libraries but the anime one, with what
+    their genres are made of: for genre_sync. BoxSets take theirs from their children and are
+    left out, as are items in no library (a removed plugin's, until Jellyfin's next scan)."""
+    rows: list[dict[str, Any]] = []
+    async with _client() as client:
+        for library in await _libraries(client):
+            kind = library.get("CollectionType")
+            if kind not in ("movies", "tvshows") or _is_anime(library):
+                continue
+            response = await client.get(
+                "/Items",
+                params={
+                    "ParentId": library["ItemId"],
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Movie" if kind == "movies" else "Series",
+                    "Fields": "Genres,Tags,ProviderIds,Path,Settings,ProductionYear",
+                    "EnableImages": "false",
+                    "EnableUserData": "false",
+                },
+            )
+            response.raise_for_status()
+            for item in response.json().get("Items") or []:
+                rows.append({
+                    "item_id": str(item["Id"]),
+                    "type": str(item.get("Type") or ""),
+                    "name": str(item.get("Name") or ""),
+                    "year": item.get("ProductionYear"),
+                    "library": str(library.get("Name") or ""),
+                    "genres": list(item.get("Genres") or []),
+                    "tags": list(item.get("Tags") or []),
+                    "provider_ids": dict(item.get("ProviderIds") or {}),
+                    "locked_fields": list(item.get("LockedFields") or []),
+                    "path": item.get("Path"),
+                })
+    return rows
+
+
 async def _index(client: httpx.AsyncClient) -> dict[str, str]:
     """The anime library's shows, seasons and episodes in Jellyfin, by path under the library folder."""
     global _INDEX
     if _INDEX is not None and time.monotonic() - _INDEX[0] < _INDEX_SECONDS:
         return _INDEX[1]
-    from bankai.web import anime_files
-
     wanted = get_settings().jellyfin.library
-    folder = anime_files.anime_root().name.casefold()
-    response = await client.get("/Library/VirtualFolders")
-    response.raise_for_status()
-    libraries: list[dict[str, Any]] = response.json() or []
-
-    def ours(row: dict[str, Any]) -> bool:
-        if wanted:
-            return str(row.get("Name")) == wanted
-        return any(PureWindowsPath(str(loc)).name.casefold() == folder
-                   or PurePosixPath(str(loc)).name.casefold() == folder
-                   for loc in row.get("Locations") or [])
-
-    library = next((row for row in libraries if ours(row)), None)
+    libraries = await _libraries(client)
+    library = next((row for row in libraries if _is_anime(row)), None)
     if library is None:
         raise RuntimeError(f"no Jellyfin library {'named ' + wanted if wanted else 'on the anime folder'}")
     response = await client.get(

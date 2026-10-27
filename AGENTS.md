@@ -110,6 +110,7 @@ tests/                       pytest — always target 107 pass
 | Services     | `systemctl {status,restart} bankai-web` / `bankai-automation` / `qbittorrent` |
 | Logs         | `journalctl -u bankai-web -f`                                         |
 | Listens      | bankai `127.0.0.1:3003`, qBittorrent `127.0.0.1:8080`                 |
+| Prowlarr     | `127.0.0.1:9696`, docker `deploy/seireitei/prowlarr/compose.yaml` (+ FlareSolverr), config `~/.config/prowlarr`; public indexers Knaben, The Pirate Bay, YTS, EZTV, LimeTorrents, 1337x (via FlareSolverr). Moved here Oct 2026 when the mediaserver went dark |
 | Reachable    | `http://seireitei:7003` , qBittorrent `http://seireitei:7004`         |
 | Downloads    | `/mnt/g/qbit` (G:\qbit) — **not** inside the WSL image, see below    |
 | Staging      | `/mnt/g/bankai/staging` — same volume as the library, so publish renames |
@@ -165,6 +166,11 @@ download, staging and library share one volume.
 object kills all detached child processes → job fails with empty reason.
 
 ### mediaserver (Linux — qBittorrent + Prowlarr + extraction)
+
+> **Dark since Oct 2026** (no answer to ARP on .29). Prowlarr runs on seireitei now (see above);
+> `[prowlarr] url` is `http://127.0.0.1:9696`. qBittorrent sits inside gluetun and cannot reach
+> Prowlarr's loopback links, so bankai fetches each `.torrent` itself (`torrent.worker.fetch_torrent`)
+> and hands qBittorrent the magnet it redirects to or the file.
 
 | Property        | Value                                                                                                                   |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------- |
@@ -474,7 +480,7 @@ an entry plus its own episode number.
 | Identity | `metadata/anilist.py` | title index over anime-offline-database + AniList API cache (`anime_metadata/anilist_media.json`, batches of 50, weekly); `resolve_in` (season markers walk SEQUEL chains), `settle_in` (episode past an entry's end -> its sequel) |
 | File index | `web/anime_files.py` | `anime_files.json`: path relative to the anime root (same under `<staging>/Shows`) -> `[(anilist_id, episode)]`. Written on publish, layout moves, deletes, manual match. Never guess identity from folder names. |
 | Collections | `web/anime_collections.py` | `anime_collections.json`, bankai-owned: members, title entry, custom name, Season 00 order. New entries join by SEQUEL/PREQUEL; side stories by hand in the relation graph. |
-| Disk layout | `web/anime_layout.py` | `<root>/<Collection>/Season NN/<Collection> - SxxEyy.mkv`; main line = Season 1..n, every other member a Season 00 block. Writes `tvshow.nfo`, `season.nfo`, episode `.nfo`, posters (skipped under 2 GiB free). Renames are journaled in `anime_layout_moves/`; `bankai anime layout-undo <file>` reverts one run. |
+| Disk layout | `web/anime_layout.py` | `<root>/<Collection>/Season NN/<Collection> - SxxEyy.mkv`; main line = Season 1..n, every other member a Season 00 block. Writes `tvshow.nfo`, `season.nfo`, episode `.nfo`, posters (skipped under 2 GiB free). Renames are journaled in `anime_layout_moves/`; `bankai anime layout-undo <file>` reverts one run. An entry that is a season alone can be split into named arcs, a season each (`Collection.arcs`, drawer → Seasons; `web/anime_arcs.py` holds suggestions, Bleach's 16): episodes keep their numbers (S02E21), the seasons after move up, arc names go into `season.nfo`. A rename carries the file's encode records, track inventory and probe along (`_follow`), and never moves the file being encoded: its show's fingerprint holds it until the encode is done. |
 | Upkeep | `web/anime_maintenance.py` | scheduler pass every 5 min: offline DB weekly, AniList refresh a few batches per pass, joins/extends collections, re-lays out collections whose fingerprint changed. |
 | Missing episodes | `web/anime_missing.py` | pass "Look for missing episodes" (10 min): German-subtitled releases for aired episodes not on disk -> `anime_missing_checks.json`; library tag "N available", drawer "Download N remaining episodes" (queued only on approval) |
 | Late German subs | `web/erai_subs.py` | Erai-raws uploads `.ger.ass` files after release in a members-only folder (`/subs/?dir=Sub/<year>/<season>/<show>/<NN>`, `HEVC/<NN>` for encodes). Needs `anime.erai_username`/`erai_password` (a real login; the feed token gets 403). A release qualifies through it (`--german-sub-url`, staged as `<stem>.de.ass`); pass "Add German subtitles from Erai-raws" (15 min) adds them beside library episodes without German. Cache: `erai_subs.json` |
@@ -482,6 +488,8 @@ an entry plus its own episode number.
 | Episode pictures | `web/anime_thumbs.py` | `<episode>-thumb.jpg` from the video at `anime.thumb_mode` (`percent` / `time`), `thumb_percent`, `thumb_time_seconds`, `thumb_width`; each picture's setting in `anime_thumb_specs.json`, so a changed setting (or "Take all pictures again") retakes them, 20 a minute |
 | Files to match | `web/anime_unsorted.py` | A download's files that are no episode of its entry -- marked another season (`S00E01` OVAs and films beside `S01E..`), or with no number (NCOP) -- are not filed and do not fail the job: hard-linked to `<staging>/../anime_unsorted/<release>/` (beside staging, which Library and Transfer read whole), rows in `anime_unsorted.json`. Review → "Files to match": tick files, pick an entry (the release's, its relations, its collection's; or search), adjust numbers; filed through the layout, published, and an entry in no collection joins the release's show. Over an episode the library has: `/check` first, then `replace` |
 | Migration | `web/anilist_migration.py` | `bankai anime migrate-anilist [--dry-run]` — one-off from AniDB/Shoko; backups in `anilist_migration_backup/`. |
+
+Replace (a review card's Erai-raws search, or Download on the Erai-raws page without a card: the entry from the release name) takes a hand-picked release as it is, but one listing no German never replaces files that can be watched in German unless that is confirmed (`replaces_german`, `lose_german`). A downloaded release whose episodes another release holds now (`erai.superseded`: an upgrade or a Replace took them) shows "Replaced since" and may be taken again -- Mushoku Tensei's German batch, swapped for HEVC singles without German (Oct 2026).
 
 Keys: canonical `anilist:<id>|<ep>`, blacklist/review cards `anilist:<id>`, job
 args `--anilist-id/--anilist-title`. Jellyfin's anime library reads the NFO files
@@ -511,6 +519,33 @@ CBZ; EPUB only as page-less entries so far).
 | Releases | `web/manga_releases.py` | pass `manga_discover` (`manga.poll_interval_seconds`): adopts folders, reads the newest `3_1` uploads, searches `searches_per_pass` series due (each every `search_interval_days`, by English/romaji title up to the subtitle). Kept only when a name is a followed series' title (manga vs novel by kind; searched for, a name that starts the title is a guess); audiobooks and month-old 0-seeder torrents skipped; "owned" when it adds nothing (`adds`: volumes the folder has no book of, whole chapters it lacks by `Holdings.lacks` -- read from names and pages, or where nothing else can be; a FINISHED series with every volume lacks only the holes between the chapters its books name, Jujutsu Kaisen's 191). A release whose tags say novel (`(Novel)`, `[WN ...]`; `tagged_novel`, not a title with the word in it) is never a manga. Every release's name is read again each pass (`tidy`), so a better reading reaches rows found before it; a waiting one it no longer matches goes, as if never found. `manga_releases.json` statuses: review -> queued -> downloading -> publishing -> done; discarded, owned, failed. Pass `manga_reconcile` (30 s, only with approved ones): adds to qBittorrent (category `bankai-manga`, `<save_path>/manga`); once qBittorrent knows the torrent's files, those the library does not need get priority 0 (`_pick`; a torrent with nothing needed is removed undownloaded); files only the finished books that fill a gap (`wanted`: a volume the folder has no book of, a chapter it lacks -- not a name it has, one moved from it to another series, an in-between number, a second copy, or a book without a number beside numbered ones; `.part` then rename), removes the torrent with the rest, asks OpenPanel to scan (`web/openpanel.py`, `manga.openpanel_*`). The row keeps `copied` and `left` (name, why), shown on Downloads and Releases |
 | Chapters | `web/manga_contents.py` (`holdings`, cached by folder mtime), `manga_views.breakdown` | Which chapters each CBZ holds, read from its pages' names (`c0036 (v005)`, `Chapter 001 - .../`, `v01c01/`, `001/01.jpg`; a ZIP's name list is one small read), kept per file by size+mtime in `manga_contents.json` and warmed 400 archives per discovery pass. A volume holds its pages' longest stretch of chapters without a gap over 10, every chapter from its first to its last (`own_chapters`: pages named for the chapter before; a number far off is another numbering or a slip -- JoJo Part 5 v01 opens with Part 4's 172-174, TG:re v15's "c197"); two volumes one after the other hold the chapters between them (JJK v22 names 191-199 "c192"-"c200"). The drawer's Chapters tab: every chapter in runs -- in which volume file, as chapter files (with the volume their pages name), or missing; volumes whose pages name nothing share the chapters between the volumes around them by volume number (a volume not on disk keeps its share missing), trailing ones the rest of a finished series or the average ("worked out"), a row each; a FINISHED series with every volume is whole whatever AniList counts. Every file of the folder is in a row, so the tab is the file list too: a file that holds no chapter of its own (Vol 0 with its own numbering, a second copy, an in-between number, chapters another file holds, no number at all) stands beside where it belongs, saying why. A light novel's rows count volumes (an EPUB names no chapters) |
 | Pages | `/m/search`, `/m/library`, `/m/review`, `/m/blacklist`, `/m/settings` | Review: a card per series, Download / Discard per release, Change series (ticked releases), Blacklist series. Library: series on disk, followed ones, downloads, folders to match, as posters or a sortable table like the anime library's (Volumes and Chapters as `have/total` meters -- the card's `count` is the drawer's -- State a badge: Complete, Up to date (not finished), Partial, Unknown, Not in library; the drawer's Chapters tab shows the same badge); a drawer per series (`?series=<id>`, the State badge beside its title): Chapters (a tick box and a Move button, shown on hover, per row), Relations (`MangaGraph`: anime left, manga/novels right, at most three cards a column, what the library has nearest the middle in full colour with a green frame, the rest greyed with a dashed frame and faint lines; pointer events stop at the graph so a pan does not swipe the drawer shut), Releases. Books that are another series (Jujutsu Kaisen's Vol 00 is Jujutsu Kaisen 0) move there: a row's Move, or tick rows and use the bar that then floats at the drawer's bottom (as the anime library's). `manga_library.move` checks every name first, makes the target's folder, renames (Vol 00 -> Vol 01 suggested) and keeps what left in the series' `moved` (`manga_library.json`), so a later download of it does not file the book back; `POST /api/manga/series/{id}/move`. The anime drawer lists an anime's manga (`LinkedManga`, `/api/manga/linked`) |
+
+## 15d. Curated genres
+
+bankai's own genre list, written into Jellyfin's normal Genres field so every client shows it (no client integration).
+`web/genres.py`: the pure rules engine -- vocabulary in priority order (English + German names, no `/` or `|`), raw genre /
+`#tag` / library mappings, `yields` (Anime takes Animation's place) -- with stores `genre_rules.json`, per-title
+`genre_overrides.json` (keys `anime:<cid>`, `tmdb:movie:<id>`, `tmdb:tv:<id>`; never Jellyfin item ids),
+`genre_sources.json` (Jellyfin's raw values, frozen once bankai writes a title) and `genre_state.json`. `web/genre_sync.py`:
+the dry run. Raw genres: TMDB's by TMDB id (`metadata.tmdb.ensure_genres`, English, a month in
+`anime_metadata/tmdb_genres.json`; a wrong TVDB match gave Avatar: The Way of Water a documentary's genre), Jellyfin's
+where TMDB has none, AniList's for anime. Page `/genres`: Vocabulary (drag to order, sources per genre), Titles (filter,
+add / remove per title), Unmapped. The writer (full DTO round trip without `Trickplay`, Genres locked; anime via
+tvshow.nfo, never locked) runs as the hourly pass `genre_sync` once switched on (Oct 2026: on for movies, shows and anime).
+
+## 15e. Torrents (Movies & Shows)
+
+Page `/mas/torrents`: any release Prowlarr finds (Movies or TV categories; quality, title has / lacks,
+minimum seeders -- Prowlarr gives no descriptions to filter on), downloaded **as it is** into a library
+root picked per download (`web/direct.py` `targets()`: every Movies and Shows root, "English" when the
+folder ends in `_en`; the anime roots are left out -- anime is filed by AniList from the Anime page).
+No dub, sync or review. Job `direct-download` (`processor/direct.py`): its own lane, no pipeline slot
+(`jobs._is_direct_job`), and its own qBittorrent category `bankai-direct` -- under `bankai` the anime automation,
+while off, paused it with the rest of its backlog. A movie is its largest video, `<root>/<Title (Year)>/<Title (Year)>.ext`; a
+show's files go by their SxxEyy into `<show>/Season NN/<show> - SxxEyy.ext` -- the root's own folder
+for the show when it has one (matched with or without its year), flat when that folder is flat. A file
+already there is never replaced. Search rows keep their links server-side (`direct.found`): Prowlarr's
+download links carry its API key.
 
 ## 16. Things that must NOT happen
 

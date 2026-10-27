@@ -305,16 +305,23 @@ class TorrentWorker(Worker):
             m = _re.search(r"xt=urn:btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})", link)
             if m:
                 magnet_hash = m.group(1).lower()
-        else:
+        torrent_file: bytes | None = None
+        if not link.startswith("magnet:"):
+            # Fetched here and handed over as a magnet or a file: qBittorrent,
+            # inside the VPN container, cannot reach Prowlarr's link itself.
             try:
-                magnet_hash = await _fetch_torrent_info_hash(link)
+                magnet, torrent_file = await fetch_torrent(link)
+                if magnet:
+                    link = magnet
+                magnet_hash = magnet_hash or torrent_info_hash(magnet, torrent_file)
             except Exception as exc:
-                log.warning("could not pre-compute info-hash for %s: %s", link, exc)
+                log.warning("could not fetch the torrent behind %s: %s", link, exc)
 
         try:
             await self._qbit.add(
                 magnet=link if link.startswith("magnet:") else None,
-                torrent_url=None if link.startswith("magnet:") else link,
+                torrent_url=None if link.startswith("magnet:") or torrent_file else link,
+                torrent_file=None if link.startswith("magnet:") else torrent_file,
                 category=ctx.job.payload.get("category"),
                 save_path=Path(save_path_override) if save_path_override else None,
             )
@@ -551,18 +558,13 @@ _log_torrent_progress._last_pct = -1.0  # type: ignore[attr-defined]
 _log_torrent_progress._last_t = 0.0  # type: ignore[attr-defined]
 
 
-async def _fetch_torrent_info_hash(url: str) -> str | None:
-    """Resolve a torrent download URL to its info-hash (hex).
+async def fetch_torrent(url: str) -> tuple[str | None, bytes | None]:
+    """A torrent download URL as (magnet, None) when it redirects to one -- as Prowlarr's
+    often do -- else (None, the .torrent file's bytes).
 
-    Handles two cases:
-      1. The URL redirects to a ``magnet:`` link (typical for Prowlarr).
-         We parse ``xt=urn:btih:`` from the Location header.
-      2. The URL serves a .torrent file. We bencode-decode the ``info``
-         dict and SHA1 it.
+    Fetched here rather than handed to qBittorrent: qBittorrent runs inside the
+    VPN container and cannot reach Prowlarr on this machine's loopback.
     """
-    import hashlib
-    import re as _re
-
     import httpx
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
@@ -573,17 +575,24 @@ async def _fetch_torrent_info_hash(url: str) -> str | None:
             if r.status_code in (301, 302, 303, 307, 308):
                 loc = r.headers.get("location", "")
                 if loc.startswith("magnet:"):
-                    m = _re.search(r"xt=urn:btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})", loc)
-                    return m.group(1).lower() if m else None
+                    return loc, None
                 cur = loc
                 continue
             r.raise_for_status()
-            data = r.content
-            break
-        else:
-            return None
+            return None, r.content
+    return None, None
 
-    # Bencoded .torrent: locate the `info` dict and SHA1 it.
+
+def torrent_info_hash(magnet: str | None, data: bytes | None) -> str | None:
+    """The info-hash (hex) of a magnet, or of a .torrent's bencoded ``info`` dict."""
+    import hashlib
+    import re as _re
+
+    if magnet:
+        m = _re.search(r"xt=urn:btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})", magnet)
+        return m.group(1).lower() if m else None
+    if not data:
+        return None
     key = b"4:info"
     idx = data.find(key)
     if idx < 0:
@@ -593,6 +602,11 @@ async def _fetch_torrent_info_hash(url: str) -> str | None:
     if end is None:
         return None
     return hashlib.sha1(data[start:end]).hexdigest().lower()
+
+
+async def _fetch_torrent_info_hash(url: str) -> str | None:
+    """Resolve a torrent download URL to its info-hash (hex)."""
+    return torrent_info_hash(*(await fetch_torrent(url)))
 
 
 def _bencode_end(data: bytes, pos: int) -> int | None:

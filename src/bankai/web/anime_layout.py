@@ -247,7 +247,13 @@ def apply(moves: Moves, *, label: str = "layout") -> dict:
         log_path = folder / f"{stamp}-{number}.jsonl"
     renamed: dict[str, str] = {}
     done: set[Path] = set()
-    pending = list(moves.moves)
+    # The file being encoded is never moved under the encoder: it waits for a later pass
+    # (its show's fingerprint holds it, so the pass comes once the encode is done).
+    from bankai.web import encode_library
+
+    busy = encode_library.busy_path()
+    held = [move for move in moves.moves if busy and anime_files.anime_root().joinpath(*PurePosixPath(move.old).parts) == Path(busy)]
+    pending = [move for move in moves.moves if move not in held]
     with log_path.open("a", encoding="utf-8") as journal:
         while pending:
             waiting = []
@@ -260,15 +266,32 @@ def apply(moves: Moves, *, label: str = "layout") -> dict:
             if len(waiting) == len(pending):
                 break
             pending = waiting
-    skipped = [f"{move.old}: {move.new} is taken" for move in pending]
+    skipped = [f"{move.old}: {move.new} is taken" for move in pending] + [f"{move.old}: being encoded" for move in held]
     if renamed:
         with anime_files.editing() as rows:
             for old, new in renamed.items():
                 if old in rows:
                     rows[new] = rows.pop(old)
+        _follow(renamed)
     if not renamed:
         log_path.unlink(missing_ok=True)
     return {"moved": len(renamed), "skipped": skipped, "log": str(log_path) if renamed else None}
+
+
+def _follow(renamed: dict[str, str]) -> None:
+    """What other parts of bankai keep by a file's path follows its rename: the encode queue and
+    history, the track inventory, the probe cache."""
+    from bankai.web import anime_library, encode_library, track_cleanup
+
+    absolute = {}
+    for root in (anime_files.anime_root(), anime_files.staging_root()):
+        for old, new in renamed.items():
+            absolute[str(root.joinpath(*PurePosixPath(old).parts))] = str(root.joinpath(*PurePosixPath(new).parts))
+    for follow in (encode_library.follow_renames, track_cleanup.follow_renames, anime_library.follow_renames):
+        try:
+            follow(absolute)
+        except Exception as exc:  # a record left behind is read again later; the move stands
+            log.warning("layout: records did not follow the renames: %s", exc)
 
 
 def _same_file(left: Path, right: Path) -> bool:
@@ -410,6 +433,12 @@ def _plain(text: str | None) -> str | None:
     return re.sub(r"\n{3,}", "\n\n", text).strip() or None
 
 
+def _show_genres(row: collections.Collection, kept: dict) -> list[str]:
+    from bankai.web import genre_sync
+
+    return genre_sync.anime_genres(row.id, list(kept.get("genres") or []))
+
+
 def tvshow_nfo(row: collections.Collection, title: str) -> str:
     main = row.title if row.title is not None else row.members[0]
     kept = anilist.media(main)
@@ -421,19 +450,24 @@ def tvshow_nfo(row: collections.Collection, title: str) -> str:
         + _xml("year", kept.get("year"))
         + _xml("premiered", kept.get("start"))
         + _xml("status", status)
-        + "".join(_xml("genre", genre) for genre in kept.get("genres") or [])
+        # bankai's curated genres where writing them is on (web.genre_sync), else AniList's.
+        + "".join(_xml("genre", genre) for genre in _show_genres(row, kept))
         + "".join(_xml("studio", studio) for studio in kept.get("studios") or [])
         + f'  <uniqueid type="anilist" default="true">{main}</uniqueid>\n'
     )
     return f'<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n<tvshow>\n{body}</tvshow>\n'
 
 
-def season_nfo(season: int, aid: int | None, show: str) -> str:
+def season_nfo(season: int, aid: int | None, show: str, *, arc: str | None = None, opens: bool = True) -> str:
+    """A season's NFO: named after its entry -- or its arc (``arc``), where an entry is split into
+    arcs; the entry's description and dates only on the season that opens it (``opens``)."""
     if season == 0 or aid is None:
         title, extra = "Specials", ""
+    elif arc is not None and not opens:
+        title, extra = arc, ""
     else:
         kept = anilist.media(aid)
-        title = collections.short_label(collections.entry_name(aid), show)
+        title = arc or collections.short_label(collections.entry_name(aid), show)
         if title == show:
             title = f"Season {season}"
         extra = (
@@ -543,7 +577,7 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
             if art.get(slot):
                 pictures.append(Picture(folder / filename, art[slot]))
         # A season made of several entries is named and pictured after its first.
-        by_season = {number: plan.first_of(number) for number in set(plan.seasons.values())}
+        by_season = {number: plan.first_of(number) for number in plan.numbers()}
         for season_dir in folder.glob("Season *"):
             match = re.fullmatch(r"Season (\d+)", season_dir.name)
             if not match or not season_dir.is_dir():
@@ -554,7 +588,8 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
                 continue
             number = int(match[1])
             aid = by_season.get(number)
-            if _write_text(season_dir / "season.nfo", season_nfo(number, aid, show)):
+            nfo = season_nfo(number, aid, show, arc=plan.names.get(number), opens=plan.opens_entry(number))
+            if _write_text(season_dir / "season.nfo", nfo):
                 written += 1
                 changed.append(season_dir)
             if art.get(anime_artwork.season_slot(number)):

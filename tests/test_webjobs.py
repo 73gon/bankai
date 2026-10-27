@@ -293,7 +293,7 @@ def test_reconcile_promotes_old_transfer_without_free_pipeline_slot(
     monkeypatch.setattr(
         webjobs,
         "get_settings",
-        lambda: SimpleNamespace(web=SimpleNamespace(max_concurrent_jobs=1)),
+        lambda: SimpleNamespace(web=SimpleNamespace(max_concurrent_jobs=1), anime=SimpleNamespace(max_concurrent_downloads=10)),
     )
     monkeypatch.setattr(webjobs, "_load_pending", lambda: [transfer, movie])
     monkeypatch.setattr(webjobs, "_save_pending", lambda items: saved.extend(items))
@@ -335,7 +335,7 @@ def test_reconcile_pauses_pipeline_queue_after_clustered_extraction_failures(
     monkeypatch.setattr(
         webjobs,
         "get_settings",
-        lambda: SimpleNamespace(web=SimpleNamespace(max_concurrent_jobs=3)),
+        lambda: SimpleNamespace(web=SimpleNamespace(max_concurrent_jobs=3), anime=SimpleNamespace(max_concurrent_downloads=10)),
     )
     monkeypatch.setattr(webjobs, "_load_pending", lambda: [movie])
     monkeypatch.setattr(webjobs, "_save_pending", lambda items: saved.extend(items))
@@ -506,3 +506,29 @@ def test_anime_queue_phases_stay_inside_the_release_state_machine():
     assert anime_phases == {"downloading", "transferring"}
     assert anime_phases <= erai._ACTIVE_RELEASE_STATES
 
+
+
+def test_anime_jobs_asked_for_by_hand_wait_once_the_anime_limit_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One "Download all" started 76 anime jobs at once: 152 processes, 4.9 GB (Oct 2026)."""
+    running = [SimpleNamespace(status="running", kind="show", args=["anime-download", "--episode", str(n)], title=f"Show {n}") for n in range(3)]
+    spawned: list[dict[str, object]] = []
+    pending: list = []
+    monkeypatch.setattr(
+        webjobs,
+        "get_settings",
+        lambda: SimpleNamespace(web=SimpleNamespace(max_concurrent_jobs=1), anime=SimpleNamespace(max_concurrent_downloads=3)),
+    )
+    monkeypatch.setattr(webjobs, "_load_pending", lambda: list(pending))
+    monkeypatch.setattr(webjobs, "_save_pending", lambda rows: pending.__init__(rows))
+    monkeypatch.setattr(webjobs, "_anime_storage_ready", lambda args: True)
+    monkeypatch.setattr(webjobs.updates, "maintenance_active", lambda: False)
+    monkeypatch.setattr(webjobs.bgjobs, "list_jobs", lambda: list(running))
+    monkeypatch.setattr(webjobs.bgjobs, "spawn", lambda **kwargs: spawned.append(kwargs) or SimpleNamespace(id="new"))
+
+    result = webjobs.enqueue(kind="show", title="Show 9 - 01", args=["anime-download", "--episode", "1"])
+
+    # Three anime jobs run: the fourth waits, though no pipeline runs at all.
+    assert (result["status"], spawned) == ("queued", [])
+    running.pop()
+    assert webjobs.reconcile() == 1
+    assert [call["title"] for call in spawned] == ["Show 9 - 01"] and pending == []
