@@ -2870,7 +2870,9 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     """What taking this release for a review card would do.
 
     The release is one Erai-raws lists, or one held for the card itself -- a
-    batch the automation did not take on its own.
+    batch the automation did not take on its own. Without a card (``key``
+    empty: downloaded straight from the Erai-raws page) the release's own name
+    says its AniList entry, and that entry's card is the one it stands for.
     """
     state = _load_state()
     releases = state.get("releases") or {}
@@ -2903,7 +2905,8 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     aid = card_aid or release_aid
     anime = table.anime.get(aid) if table and aid else None
     if anime is None:
-        raise ValueError("Choose the AniList entry for this card first")
+        raise ValueError("Choose the AniList entry for this card first" if key else "Its AniList entry could not be told from the release name")
+    key = key or f"anilist:{anime.id}"
     existing = own
     if existing.get("status") in {*_ACTIVE_RELEASE_STATES, "done"}:
         raise ValueError("This release is already downloading or in the library")

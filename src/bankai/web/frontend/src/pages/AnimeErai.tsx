@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, ExternalLink, RefreshCw, Replace, Search, Subtitles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, ExternalLink, RefreshCw, Replace, Search, Subtitles } from 'lucide-react';
 import { toast } from '@/lib/toast';
 
 import { StatusTag } from '@/components/status-tag';
@@ -28,6 +28,23 @@ function storedResolution(): EraiResolution {
     return saved && RESOLUTIONS.includes(saved) ? saved : '1080p';
   } catch {
     return '1080p';
+  }
+}
+
+// The search, the German filter and the page, kept for this browser tab: leaving the page
+// and coming back finds them as they were.
+const VIEW_KEY = 'bankai:erai:view';
+
+function storedView(): { query: string; german: GermanFilter; page: number } {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(VIEW_KEY) ?? '{}');
+    return {
+      query: typeof saved.query === 'string' ? saved.query : '',
+      german: ['all', 'yes', 'no'].includes(saved.german) ? saved.german : 'all',
+      page: Number.isInteger(saved.page) && saved.page >= 0 ? saved.page : 0,
+    };
+  } catch {
+    return { query: '', german: 'all', page: 0 };
   }
 }
 
@@ -98,15 +115,17 @@ export default function AnimeErai({
   replaceFor?: { key: string; label: string };
   onReplaced?: () => void;
 } = {}) {
-  const [query, setQuery] = useState(initialQuery);
-  const [search, setSearch] = useState(initialQuery);
-  const [german, setGerman] = useState<GermanFilter>('all');
+  // Embedded (a review card's search), it starts from the card's title; on its own page, as it was left.
+  const [start] = useState(() => (embedded ? { query: initialQuery, german: 'all' as GermanFilter, page: 0 } : storedView()));
+  const [query, setQuery] = useState(start.query);
+  const [search, setSearch] = useState(start.query);
+  const [german, setGerman] = useState<GermanFilter>(start.german);
   const [res, setRes] = useState<EraiResolution>(storedResolution);
   const [codec, setCodec] = useState<EraiCodec>(storedCodec);
-  const [page, setPage] = useState(0);
+  const [page, setPage] = useState(start.page);
   // Started from the last answer this browser saw, refreshed straight after.
-  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(0, initialQuery, 'all', storedResolution(), storedCodec())));
-  const [loading, setLoading] = useState(() => recall(eraiPath(0, initialQuery, 'all', storedResolution(), storedCodec())) === undefined);
+  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(start.page, start.query, start.german, storedResolution(), storedCodec())));
+  const [loading, setLoading] = useState(() => recall(eraiPath(start.page, start.query, start.german, storedResolution(), storedCodec())) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   // The row being considered for a replacement.
@@ -121,14 +140,28 @@ export default function AnimeErai({
     });
 
   function consider(row: EraiRelease) {
-    if (replaceFor && row.episodes) setCandidate({ info_hash: row.info_hash, name: row.name, episodes: row.episodes });
+    if (row.episodes) setCandidate({ info_hash: row.info_hash, name: row.name, episodes: row.episodes });
   }
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(query), 250);
     return () => window.clearTimeout(timer);
   }, [query]);
-  useEffect(() => setPage(0), [search, german, res, codec]);
+  // A changed search or filter starts at its first page; the page restored on arrival stays.
+  const filters = useRef(JSON.stringify([start.query, start.german, res, codec]));
+  useEffect(() => {
+    const now = JSON.stringify([search, german, res, codec]);
+    if (now !== filters.current) setPage(0);
+    filters.current = now;
+  }, [search, german, res, codec]);
+  useEffect(() => {
+    if (embedded) return;
+    try {
+      sessionStorage.setItem(VIEW_KEY, JSON.stringify({ query, german, page }));
+    } catch {
+      /* a remembered search is a convenience */
+    }
+  }, [embedded, query, german, page]);
   useEffect(() => {
     try {
       localStorage.setItem(RES_KEY, res);
@@ -241,17 +274,17 @@ export default function AnimeErai({
                   <TableHead numeric>Size</TableHead>
                   <TableHead>Released</TableHead>
                   <TableHead>bankai</TableHead>
-                  {replaceFor && <TableHead>Use</TableHead>}
+                  <TableHead>{replaceFor ? 'Use' : 'Download'}</TableHead>
                   <TableHead numeric>Link</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading && !data && (
-                  <TableRow><TableCell colSpan={replaceFor ? 8 : 7} className='py-8 text-center text-muted-foreground'>Loading…</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={8} className='py-8 text-center text-muted-foreground'>Loading…</TableCell></TableRow>
                 )}
                 {data && data.items.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={replaceFor ? 8 : 7} className='py-8 text-center text-muted-foreground'>
+                    <TableCell colSpan={8} className='py-8 text-center text-muted-foreground'>
                       {data.empty_show ? (
                         <>
                           Erai-raws has a page for this show, but lists no release on it: older shows are often emptied there.
@@ -280,21 +313,22 @@ export default function AnimeErai({
                       <TableCell className='py-2'>
                         {status ? <StatusTag variant={status.variant} title={row.reason ?? undefined}>{status.label}</StatusTag> : <span className='text-xs text-muted-foreground'>—</span>}
                       </TableCell>
-                      {replaceFor && (
-                        <TableCell className='whitespace-nowrap py-2'>
-                          {row.episodes ? (
-                            <Button
-                              size='sm'
-                              variant={row.german ? 'primary' : 'secondary'}
-                              disabled={TAKEN.has(row.status ?? '') || queueing.has(row.info_hash)}
-                              title={TAKEN.has(row.status ?? '') ? 'bankai already has this release' : 'Take this release in place of what the card holds'}
-                              onClick={() => consider(row)}
-                            >
-                              <Replace data-icon='inline-start' /> {queueing.has(row.info_hash) ? 'Queueing…' : replaceLabel(row.episodes)}
-                            </Button>
-                          ) : <span className='text-xs text-muted-foreground'>—</span>}
-                        </TableCell>
-                      )}
+                      <TableCell className='whitespace-nowrap py-2'>
+                        {row.episodes ? (
+                          <Button
+                            size='sm'
+                            variant={row.german ? 'primary' : 'secondary'}
+                            disabled={TAKEN.has(row.status ?? '') || queueing.has(row.info_hash)}
+                            title={TAKEN.has(row.status ?? '')
+                              ? 'bankai already has this release'
+                              : replaceFor ? 'Take this release in place of what the card holds' : 'Download it for the AniList entry its name says; what it changes is shown first'}
+                            onClick={() => consider(row)}
+                          >
+                            {replaceFor ? <Replace data-icon='inline-start' /> : <Download data-icon='inline-start' />}{' '}
+                            {queueing.has(row.info_hash) ? 'Queueing…' : replaceFor ? replaceLabel(row.episodes) : 'Download'}
+                          </Button>
+                        ) : <span className='text-xs text-muted-foreground' title='Its episode numbers cannot be read from the name'>—</span>}
+                      </TableCell>
                       <TableCell className='py-2 text-right'>
                         {row.page && (
                           <Button
@@ -324,17 +358,16 @@ export default function AnimeErai({
         </>
       )}
 
-      {replaceFor && (
-        <ReplaceDialog
-          cardKey={replaceFor.key}
-          label={replaceFor.label}
-          candidate={candidate}
-          onClose={() => setCandidate(null)}
-          onStart={(infoHash) => setQueueing((current) => new Set(current).add(infoHash))}
-          onSettled={settle}
-          onQueued={() => { onReplaced?.(); void load(); }}
-        />
-      )}
+      <ReplaceDialog
+        cardKey={replaceFor?.key ?? ''}
+        label={replaceFor?.label ?? candidate?.name ?? ''}
+        verb={replaceFor ? 'Replace' : 'Download'}
+        candidate={candidate}
+        onClose={() => setCandidate(null)}
+        onStart={(infoHash) => setQueueing((current) => new Set(current).add(infoHash))}
+        onSettled={settle}
+        onQueued={() => { onReplaced?.(); void load(); }}
+      />
     </div>
   );
 }

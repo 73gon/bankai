@@ -87,6 +87,8 @@ export const pagePaths = {
   sidebarCounts: '/api/sidebar/counts',
   titles: '/api/titles',
   masLibrary: '/api/mas/library?include_episodes=true&rescan=false',
+  mangaReview: '/api/manga/review',
+  mangaLibrary: '/api/manga/library',
 } as const;
 
 export function animeQueuePath(page = 0, pageSize = 100, includeDone = false, filters: AnimeQueueFilters = {}): string {
@@ -284,6 +286,8 @@ export interface DashboardRecent {
   added_at: number;
   count: number;
   episode_label: string | null;
+  /** Encoded again (smaller) rather than new: dated when that was done. */
+  encoded?: boolean;
 }
 
 export interface Dashboard {
@@ -518,6 +522,225 @@ export interface AniListAnime {
   episodes: number | null;
   year: number | null;
   cover: string | null;
+}
+
+// ---- Manga and light novels ---------------------------------------------
+
+/** "manga" is read as pictures (AniList's MANGA, ONE_SHOT), "novel" as text (NOVEL). */
+export type MangaKind = 'manga' | 'novel';
+
+/** An AniList manga or light novel, as cards and the pick dialog show it. */
+export interface MangaEntry {
+  anilist_id: number;
+  name: string | null;
+  romaji: string | null;
+  english: string | null;
+  /** AniList's format: MANGA, ONE_SHOT, NOVEL. */
+  format: string | null;
+  kind: MangaKind;
+  volumes: number | null;
+  chapters: number | null;
+  /** AniList's status: FINISHED, RELEASING, HIATUS, ... */
+  status: string | null;
+  year: number | null;
+  cover: string | null;
+}
+
+/** An anime on disk a series is linked to. */
+export interface MangaAnimeLink {
+  anilist_id: number;
+  name: string;
+  relation: string;
+}
+
+/** A series as the library and the review show it. */
+export interface MangaSeries extends MangaEntry {
+  /** Why it is followed: "anime", "library", "hand". */
+  why: string[];
+  anime: MangaAnimeLink[];
+  /** What its folder holds: "Vol 1–12 · Ch 138–147"; "" when nothing. */
+  owned: string;
+  owned_volumes?: number;
+  owned_chapters?: number;
+  /** The highest volume and chapter number among its files. */
+  last_volume?: number | null;
+  last_chapter?: number | null;
+  /** Its books on disk and their size. */
+  books?: number;
+  size?: number;
+  /** What the drawer's Chapters tab counts: chapters (volumes for a light novel) in the library, of all. */
+  count?: { unit: 'chapter' | 'volume'; have: number; total: number };
+  /** A finished series whose every volume is on disk. */
+  complete?: boolean;
+  /** Its releases waiting for review. */
+  waiting?: number;
+  folder: string | null;
+}
+
+/** A row of a series' Chapters table: a run of chapters (volumes for a light novel), or a file apart. */
+export interface MangaChapterRun {
+  /** Null for a file that holds no chapter of its own that its pages name. */
+  from: number | null;
+  to: number | null;
+  have: boolean;
+  /** "other": a file whose name gives no single volume or chapter. */
+  kind: 'volume' | 'chapter' | 'missing' | 'other';
+  volume: number | null;
+  /** Set on the missing run at the end when it spans volumes: "Vol 15–20". */
+  volume_to: number | null;
+  /** The volume's file, or the first chapter file. */
+  via: string | null;
+  /** Every file of the row: what ticking it moves. */
+  names: string[];
+  /** Where in the volume its pages do not say: worked out from its neighbours. */
+  guessed: boolean;
+  /** Why a file stands apart: Vol 0, a second copy, chapters another file holds too… */
+  note: string | null;
+}
+
+export interface MangaBreakdown {
+  /** What the rows count: chapters, or volumes for a light novel (an EPUB names no chapters). */
+  unit: 'chapter' | 'volume';
+  first: number;
+  last: number;
+  have: number;
+  missing: number;
+  /** Every file of the folder is in a row. */
+  rows: MangaChapterRun[];
+  volumes: Array<{ volume: number; state: 'file' | 'chapters' | 'unknown' | 'missing' }>;
+  complete: boolean;
+}
+
+/** A release found on nyaa. */
+export interface MangaRelease {
+  info_hash: string;
+  title: string;
+  size: string;
+  size_bytes: number;
+  seeders: number;
+  leechers: number;
+  downloads: number;
+  trusted: boolean;
+  remake: boolean;
+  published_at: string | null;
+  detail_url: string;
+  group: string | null;
+  volumes: [number, number] | null;
+  chapters: [number, number] | null;
+  kind: MangaKind | null;
+  /** The match is a guess: check it. */
+  guess: boolean;
+  /** How it was found: "feed", "search", "hand". */
+  how: string | null;
+  /** review, queued, downloading, publishing, done, failed, discarded, owned. */
+  status: string;
+  reason: string | null;
+  error: string | null;
+  progress: number | null;
+  /** What it would add to the series' folder; "" nothing, null when it does not say. */
+  adds: string | null;
+  found_at: number;
+  /** Downloaded: the books it filed, and those it left out with why (the library has them…). */
+  copied?: string[] | null;
+  left?: Array<[string, string]> | null;
+  /** Library page only: the series it is. */
+  anilist_id?: number;
+  name?: string;
+}
+
+export interface MangaReviewCard extends MangaSeries {
+  releases: MangaRelease[];
+}
+
+export interface MangaFolder {
+  kind: MangaKind;
+  folder: string;
+  title: string;
+  year: number | null;
+}
+
+export interface MangaLibrary {
+  series: MangaSeries[];
+  followed: MangaSeries[];
+  unmatched: MangaFolder[];
+  downloads: MangaRelease[];
+}
+
+export interface MangaGraphNode {
+  anilist_id: number;
+  type: 'MANGA' | 'ANIME';
+  format: string | null;
+  title: string;
+  year: number | null;
+  cover: string | null;
+  relation: string | null;
+  on_disk: boolean;
+  followed?: boolean;
+  blacklisted?: boolean;
+  /** A manga in the library: what its folder holds, "Vol 1–29". */
+  owned?: string;
+}
+
+export interface MangaDetail extends MangaSeries {
+  description: string | null;
+  genres: string[];
+  authors: string[];
+  banner: string | null;
+  country: string | null;
+  files: Array<{ name: string; size: number }>;
+  releases: MangaRelease[];
+  policy: { mode: string } | null;
+  breakdown: MangaBreakdown;
+  graph: { root: number; nodes: MangaGraphNode[]; edges: Array<{ from: number; to: number; label: string }> };
+}
+
+/** A manga or light novel an anime links to, for the anime drawer. */
+export interface LinkedManga {
+  anilist_id: number;
+  title: string;
+  format: string | null;
+  relation: string;
+  year: number | null;
+  cover: string | null;
+  owned: string;
+  on_disk: boolean;
+  followed: boolean;
+  blacklisted: boolean;
+  in_review: boolean;
+}
+
+export interface MangaBlacklistRow {
+  anilist_id: number;
+  title: string;
+  format: string | null;
+  cover: string | null;
+  updated_at: number;
+}
+
+/** A nyaa release from the search, read and matched where it could be. */
+export interface MangaSearchRow extends AnimeEntry {
+  volumes: [number, number] | null;
+  chapters: [number, number] | null;
+  group: string | null;
+  audiobook: boolean;
+  kind: MangaKind | null;
+  match: MangaEntry | null;
+  guess: boolean;
+  /** What bankai did with it already, if anything. */
+  status: string | null;
+}
+
+export interface MangaStatus {
+  enabled: boolean;
+  followed: number;
+  counts: Record<string, number>;
+  review: number;
+  last_poll: number | null;
+  last_found: number | null;
+  last_error: string | null;
+  searched: number;
+  openpanel: boolean;
+  progress: { step?: string; series?: string };
 }
 
 /** The three libraries whose tracks are cleaned up, each by its own rules. */
@@ -1379,6 +1602,51 @@ export const api = {
   /** Take files out of the encode queue; null takes them all. */
   dequeueEncode: (paths: string[] | null) =>
     request<{ removed: number }>('/api/encode/queue/remove', { method: 'POST', body: JSON.stringify(paths ? { paths } : { all: true }) }),
+  /** Manga and light novel releases waiting for a decision, a card per series. */
+  mangaReview: () => remembering<{ items: MangaReviewCard[] }>(pagePaths.mangaReview),
+  /** Approve a release: downloaded, then filed into the library. */
+  downloadMangaRelease: (infoHash: string) =>
+    request<{ status: string }>(`/api/manga/releases/${infoHash}/download`, { method: 'POST' }),
+  /** Discard a release: never offered again. */
+  discardMangaRelease: (infoHash: string) =>
+    request<{ status: string }>(`/api/manga/releases/${infoHash}/discard`, { method: 'POST' }),
+  /** These releases are another series. */
+  matchMangaReleases: (infoHashes: string[], anilistId: number) =>
+    request<{ changed: number }>('/api/manga/releases/match', { method: 'POST', body: JSON.stringify({ info_hashes: infoHashes, anilist_id: anilistId }) }),
+  /** Never look for a series again. */
+  blacklistMangaSeries: (anilistId: number) =>
+    request<{ discarded: number }>(`/api/manga/series/${anilistId}/blacklist`, { method: 'POST' }),
+  /** Off the blacklist: its discarded releases wait for review again. */
+  restoreMangaSeries: (anilistId: number) =>
+    request<{ restored: number }>(`/api/manga/series/${anilistId}/restore`, { method: 'POST' }),
+  followMangaSeries: (anilistId: number) =>
+    request<{ followed: boolean }>(`/api/manga/series/${anilistId}/follow`, { method: 'POST' }),
+  unfollowMangaSeries: (anilistId: number) =>
+    request<{ followed: boolean }>(`/api/manga/series/${anilistId}/unfollow`, { method: 'POST' }),
+  mangaSeries: (anilistId: number) => request<MangaDetail>(`/api/manga/series/${anilistId}`),
+  /** Books of one series that are another's: into its folder, each under its new name. */
+  moveMangaFiles: (fromId: number, files: string[], toId: number, names: Record<string, string>) =>
+    request<{ moved: number; folder: string; names: string[] }>(`/api/manga/series/${fromId}/move`, {
+      method: 'POST', body: JSON.stringify({ files, anilist_id: toId, names }),
+    }),
+  mangaLibrary: () => remembering<MangaLibrary>(pagePaths.mangaLibrary),
+  /** A library folder is this series. */
+  matchMangaFolder: (kind: MangaKind, folder: string, anilistId: number) =>
+    request<{ matched: boolean }>('/api/manga/library/match', { method: 'POST', body: JSON.stringify({ kind, folder, anilist_id: anilistId }) }),
+  mangaBlacklist: () => request<{ items: MangaBlacklistRow[] }>('/api/manga/blacklist'),
+  /** The manga and light novels these anime entries link to. */
+  mangaLinked: (anilistIds: number[]) => request<{ items: LinkedManga[] }>('/api/manga/linked?anime=' + anilistIds.join(',')),
+  /** AniList's manga or light novels by title; also takes an anilist.co link or an id. */
+  mangaAnilistSearch: (q: string, kind?: MangaKind | null) =>
+    request<{ items: MangaEntry[] }>('/api/manga/anilist/search?q=' + encodeURIComponent(q) + (kind ? '&kind=' + kind : '')),
+  /** nyaa's English literature, searched by hand. */
+  mangaSearch: (q: string) => request<{ items: MangaSearchRow[] }>('/api/manga/search?q=' + encodeURIComponent(q)),
+  /** Download a release picked by hand, as this series. */
+  downloadManga: (entry: AnimeEntry, anilistId: number) =>
+    request<{ status: string }>('/api/manga/download', { method: 'POST', body: JSON.stringify({ entry, anilist_id: anilistId }) }),
+  mangaStatus: () => request<MangaStatus>('/api/manga/status'),
+  /** Look for releases now rather than at the next pass. */
+  runManga: () => request<{ started: boolean }>('/api/manga/run', { method: 'POST' }),
   /** Each library's audio and subtitle languages, its rules and what they change. */
   tracks: () => request<{ scopes: Record<TrackScopeName, TrackScope> }>('/api/tracks'),
   /** Change a library's rules; the answer says what they change now. */

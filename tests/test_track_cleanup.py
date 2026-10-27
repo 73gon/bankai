@@ -256,6 +256,40 @@ def test_a_new_file_missing_a_track_is_thrown_away(library, mkvmerge):
     assert tracks.candidates("movies") == [] or str(path) not in {row[0] for row in tracks.candidates("movies")}
 
 
+def test_a_track_that_ran_past_the_picture_takes_the_container_s_length_with_it(library, mkvmerge, monkeypatch):
+    # Polar Opposites S01E05: a subtitle switched off ran to 1561.8 s; the picture ends at 1447.0 s.
+    path = video(library["anime"], "Show/Season 01/Show - S01E05.mkv", b"original")
+    tracks.set_rules("anime", enabled=True, subtitles=["ara"])
+    fake = mkvmerge(
+        [mk(0, "video", "jpn"), mk(1, "audio", "jpn"), mk(2, "subtitles", "ara")],
+        [mk(0, "video", "jpn"), mk(1, "audio", "jpn")],
+    )
+    fake.source["container"]["properties"]["duration"] = 1_561_770_000_000
+    fake.written["container"]["properties"]["duration"] = 1_447_000_000_000
+    monkeypatch.setattr(tracks, "_picture_end", lambda _path, _start: 1446.987)
+
+    result = tracks.clean_file(path, "anime")
+
+    assert "error" not in result
+    assert path.read_bytes() == b"clean"
+
+
+def test_a_new_file_whose_picture_ends_early_is_thrown_away(library, mkvmerge, monkeypatch):
+    path = video(library["anime"], "Show/Season 01/Show - S01E05.mkv", b"original")
+    tracks.set_rules("anime", enabled=True, subtitles=["ara"])
+    fake = mkvmerge(
+        [mk(0, "video", "jpn"), mk(1, "audio", "jpn"), mk(2, "subtitles", "ara")],
+        [mk(0, "video", "jpn"), mk(1, "audio", "jpn")],
+    )
+    fake.written["container"]["properties"]["duration"] = 2_000_000_000_000
+    monkeypatch.setattr(tracks, "_picture_end", lambda part, _start: 1999.9 if part.name.endswith(tracks._PART) else 2999.9)
+
+    result = tracks.clean_file(path, "anime")
+
+    assert "runs 2000.0s" in result["error"]
+    assert path.read_bytes() == b"original"
+
+
 def test_an_mp4_is_put_into_mkv_and_the_mp4_removed(library, mkvmerge):
     path = video(library["movies"], "Mr. Bean's Holiday (2007)/Mr. Bean's Holiday (2007).mp4", b"mp4")
     tracks.set_rules("movies", enabled=True)

@@ -5,16 +5,15 @@ the eye tells apart, and more than Wi-Fi or a connection from away carries.
 Per library -- anime, shows, movies, with the roots and the file inventory of
 track_cleanup -- the Encode page lists the files worth encoding again; the
 ones ticked there join a queue, and bankai encodes them in its order, one at
-a time, on the GPU (see processor.shrink). Nothing is encoded unasked. HEVC
-stays HEVC (quality 22 in 4K, 20 below), H.264 stays H.264 (quality 19):
-whatever played the original plays the result. Audio, subtitles, chapters,
+a time, on the GPU (see processor.shrink). Nothing is encoded unasked. The
+result is HEVC (quality 22 in 4K, 20 below): HEVC stays HEVC, and H.264 (or
+an older codec) becomes it. Audio, subtitles, chapters,
 HDR10 and Dolby Vision (as profile 8.1) are kept. Measured: Game of Thrones in
 4K and Ice Age in 1080p came out at half the size, SSIM 0.995 and 0.987.
 
-Listed are files well above what the result would be: a picture of 30 Mbps
-and more in 4K, 22 Mbps for 1080p H.264, 15 Mbps for other 1080p, 10 below.
-In anime, whose library is HEVC, every episode that is not HEVC is listed,
-whatever its bitrate, to become HEVC.
+Listed are HEVC files well above what the result would be: a picture of 30
+Mbps and more in 4K, 15 Mbps for 1080p, 10 below; and every file that is not
+HEVC, whatever its bitrate, to become HEVC.
 Left out: Dolby Vision profile 5 (not HDR10 underneath), interlaced pictures,
 AV1 and VP9 (efficient already). A queued file hard-linked to a torrent still
 seeding, or changed in the last hour, waits its turn.
@@ -48,16 +47,14 @@ SCOPES = track_cleanup.SCOPES
 # What a file's picture is encoded as, by what it is.
 _QUALITY_4K = 22
 _QUALITY_HEVC = 20
-_QUALITY_H264 = 19
-# The least bitrate (Mbps) of a picture worth encoding again.
+# The least bitrate (Mbps) of an HEVC picture worth encoding again.
 _LINE_4K = 30.0
-_LINE_1080_H264 = 22.0
 _LINE_1080_HEVC = 15.0
 _LINE_SMALL = 10.0
 # What the result runs at, roughly, for the estimate of the space freed.
-_EXPECTED = {"4k": 22.0, "1080_hevc": 8.0, "1080_h264": 15.0, "small": 5.0}
-# What HEVC saves of a non-HEVC anime episode's picture, roughly, for the estimate.
-_ANIME_SAVING = 0.45
+_EXPECTED = {"4k": 22.0, "1080_hevc": 8.0, "small": 5.0}
+# What HEVC saves of a non-HEVC picture, roughly, for the estimate.
+_HEVC_SAVING = 0.45
 # A result less than a fifth smaller is not worth what it costs.
 _MIN_SAVING = 0.2
 _SSIM_FLOOR = 0.95
@@ -159,6 +156,38 @@ def _save_state(state: dict[str, Any]) -> None:
     _write("encode_state.json", state)
 
 
+# When files encoded before the time was kept were replaced: their ctime, read once.
+_CTIMES: dict[str, float] = {}
+
+
+def encoded_times() -> dict[str, float]:
+    """When each file still in the library was encoded, for the Dashboard's Recently added.
+
+    Files encoded before ``encoded_at`` was kept answer with their ctime: the
+    replace sets it, while their mtime is the original's + 1 s.
+    """
+    state = _state()
+    times = dict(state.get("encoded_at") or {})
+    for path in state["encoded"]:
+        if path in times:
+            continue
+        if path not in _CTIMES:
+            try:
+                _CTIMES[path] = Path(path).stat().st_ctime
+            except OSError:
+                continue
+        times[path] = _CTIMES[path]
+    return times
+
+
+def state_stamp() -> int:
+    """Changes whenever the encode state does, for the snapshots that show it."""
+    try:
+        return _path("encode_state.json").stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 # -- which files, and as what --------------------------------------------------
 
 
@@ -181,17 +210,14 @@ def assess(path: str, entry: dict) -> tuple[dict[str, Any] | None, str | None]:
     if codec not in _SOURCES:
         return None, None
     width = int(video.get("width") or 0)
-    if entry.get("scope") == "anime" and codec != "hevc":
-        return _anime_to_hevc(entry, video, width)
-    # A 10-bit picture is HEVC either way: H.264 has no 10-bit NVENC, and 10-bit H.264 plays nowhere HEVC does not.
-    target = "hevc" if codec == "hevc" or int(video.get("bit_depth") or 8) > 8 else "h264"
+    if codec != "hevc":
+        return _to_hevc(entry, video, width)
     if width >= 3200:
-        line, size_class, quality = _LINE_4K, "4k", _QUALITY_4K if target == "hevc" else _QUALITY_H264
+        line, size_class, quality = _LINE_4K, "4k", _QUALITY_4K
     elif width >= 1800:
-        line = _LINE_1080_H264 if target == "h264" else _LINE_1080_HEVC
-        size_class, quality = ("1080_h264", _QUALITY_H264) if target == "h264" else ("1080_hevc", _QUALITY_HEVC)
+        line, size_class, quality = _LINE_1080_HEVC, "1080_hevc", _QUALITY_HEVC
     else:
-        line, size_class, quality = _LINE_SMALL, "small", _QUALITY_HEVC if target == "hevc" else _QUALITY_H264
+        line, size_class, quality = _LINE_SMALL, "small", _QUALITY_HEVC
     mbps = picture_mbps(entry)
     if mbps is None or mbps < line:
         return None, None
@@ -201,15 +227,15 @@ def assess(path: str, entry: dict) -> tuple[dict[str, Any] | None, str | None]:
         return None, "interlaced picture"
     duration = float(entry.get("duration") or 0)
     estimate = max(0.0, mbps - min(mbps, _EXPECTED[size_class])) * 1e6 / 8 * duration
-    return {"codec": target, "quality": quality, "mbps": round(mbps, 1), "estimate": int(estimate)}, None
+    return {"codec": "hevc", "quality": quality, "mbps": round(mbps, 1), "estimate": int(estimate)}, None
 
 
-def _anime_to_hevc(entry: dict, video: dict, width: int) -> tuple[dict[str, Any] | None, str | None]:
-    """An anime episode that is not HEVC becomes HEVC, whatever its bitrate.
+def _to_hevc(entry: dict, video: dict, width: int) -> tuple[dict[str, Any] | None, str | None]:
+    """A picture that is not HEVC becomes HEVC, whatever its bitrate.
 
-    The anime library is HEVC but for these; HEVC carries the same picture in
-    about half of H.264's bits. A result less than a fifth smaller is thrown
-    away all the same, so a small episode keeps its H.264.
+    HEVC carries the same picture in about half of H.264's bits. A result less
+    than a fifth smaller is thrown away all the same, so a small file keeps its
+    H.264.
     """
     if video.get("interlaced"):
         return None, "interlaced picture"
@@ -220,7 +246,7 @@ def _anime_to_hevc(entry: dict, video: dict, width: int) -> tuple[dict[str, Any]
         "codec": "hevc",
         "quality": _QUALITY_4K if width >= 3200 else _QUALITY_HEVC,
         "mbps": round(mbps or 0.0, 1),
-        "estimate": int(bits * _ANIME_SAVING),
+        "estimate": int(bits * _HEVC_SAVING),
     }
     return change, None
 
@@ -313,6 +339,7 @@ def encode_file(path: Path, scope: str, change: dict[str, Any]) -> dict[str, Any
         windows = shrink.quality_check(path, output, seconds=5.0)
         worst = min((row["ssim"] for row in windows), default=0.0)
         if worst < _SSIM_FLOOR:
+            shutil.rmtree(work, ignore_errors=True)
             raise shrink.ShrinkError(f"the new picture differs from the original (SSIM {worst:.3f})")
         size = output.stat().st_size
         if size > before.st_size * (1 - _MIN_SAVING):
@@ -323,6 +350,7 @@ def encode_file(path: Path, scope: str, change: dict[str, Any]) -> dict[str, Any
             return {"path": str(path), "scope": scope, "skipped": f"only {saving:.0%} smaller"}
         after = path.stat()
         if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            shutil.rmtree(work, ignore_errors=True)
             raise shrink.ShrinkError("the original changed while it was encoded")
         output.replace(path)
         # Its place among the recently added kept; a second later, so Jellyfin reads it again.
@@ -334,10 +362,18 @@ def encode_file(path: Path, scope: str, change: dict[str, Any]) -> dict[str, Any
         log.info("[encode] %s was stopped; it goes on from its last finished step", path.name)
         return {"path": str(path), "scope": scope, "interrupted": True}
     except shrink.ShrinkError as exc:
-        shutil.rmtree(work, ignore_errors=True)
-        _remember("failed", path, scope, {"error": str(exc), "size": before.st_size})
-        log.warning("[encode] %s: %s", path.name, exc)
-        return {"path": str(path), "scope": scope, "error": str(exc)}
+        # A step after the encode failed: the encode -- up to an hour on the
+        # GPU -- stays, and the file queued again goes on from it.
+        error = str(exc)
+        if shrink.encoded(work):
+            for name in ("out.mkv", ".out.mkv.part"):
+                (work / name).unlink(missing_ok=True)
+            error += "; the encode is kept, queued again it goes on from there"
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+        _remember("failed", path, scope, {"error": error, "size": before.st_size})
+        log.warning("[encode] %s: %s", path.name, error)
+        return {"path": str(path), "scope": scope, "error": error}
     finally:
         progress.clear()
         with _LOCK:
@@ -366,6 +402,7 @@ def encode_file(path: Path, scope: str, change: dict[str, Any]) -> dict[str, Any
     with _LOCK:
         state = _state()
         state["encoded"][str(path)] = size
+        state.setdefault("encoded_at", {})[str(path)] = done["at"]
         totals = state["done"].setdefault(scope, {"files": 0, "bytes": 0})
         totals["files"] += 1
         totals["bytes"] += max(0, saved)

@@ -170,8 +170,8 @@ function DueWhen({ item }: { item: DashboardDueItem }) {
 }
 
 /**
- * The middle row's card: Up next and both Recently added lists side by side, one height and one
- * header each (room for the anime toggle in every header), the list scrolling inside.
+ * A Recently added card: both side by side, one height (Up next's table's) and one header each
+ * (room for the anime toggle), the list scrolling inside.
  */
 function Panel({ title, icon: Icon, action, children, className }: { title: string; icon: typeof Film; action?: React.ReactNode; children: React.ReactNode; className?: string }) {
   return (
@@ -205,11 +205,12 @@ function RecentList({ title, icon, rows, empty, action }: { title: string; icon:
                   ? 'Movie'
                   : row.kind === 'episode'
                   ? row.episode_label
-                  : [row.episode_label, row.count > 1 ? `${row.count} new episodes` : row.episode_label ? null : 'New episode']
+                  : [row.episode_label, row.count > 1 ? `${row.count} ${row.encoded ? '' : 'new '}episodes` : row.episode_label ? null : 'New episode']
                       .filter(Boolean)
                       .join(' · ')}
               </p>
             </div>
+            {row.encoded && <StatusTag variant='info' title='Encoded again to HEVC: smaller, the same picture'>Encoded</StatusTag>}
             <span className='shrink-0 text-xs text-muted-foreground'>{timeAgo(row.added_at)}</span>
           </Link>
         ))}
@@ -342,70 +343,72 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          <section className='flex flex-col gap-2'>
-            <h2 className='font-heading text-lg font-light'>Up next &amp; recently added</h2>
-            {/* Up next is a table: half the row on a wide screen, the full row on a narrower one. */}
-            <div className='grid gap-3 lg:grid-cols-2 xl:grid-cols-4'>
-              <Panel title='Up next' icon={Clock} className='lg:col-span-2'>
-                <CardContent className='min-h-0 flex-1 overflow-y-auto'>
-                  {/* Fixed columns: the task takes what the lane and the time leave, and is cut there,
-                      so the table never scrolls sideways. */}
-                  <Table variant='plain' dense className='table-fixed'>
-                    <TableHeader className='sticky top-0 z-10 bg-card'>
-                      <TableRow>
-                        <TableHead className='w-24'>Lane</TableHead>
-                        <TableHead>Task</TableHead>
-                        <TableHead numeric className='w-28'>When</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {dueRows.length === 0 && (
-                        <TableRow><TableCell colSpan={3} className='py-6 text-center text-muted-foreground'>Nothing due.</TableCell></TableRow>
-                      )}
-                      {dueRows.map(({ group, item, index }) => (
-                        <TableRow key={group.lane + ':' + index + ':' + item.title}>
-                          <TableCell className='truncate py-1.5 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
-                          <TableCell className='py-1.5'>
-                            {item.href ? (
-                              <Link to={item.href} className={cn('block truncate hover:underline', index === -1 ? 'text-muted-foreground' : 'text-foreground')} title={item.title}>
-                                {item.position ? <span className='mr-2 font-mono text-xs text-muted-foreground'>#{item.position}</span> : null}
-                                {item.title}
-                                {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
-                              </Link>
-                            ) : (
-                              <span className='block truncate text-foreground' title={item.title}>
-                                {item.title}
-                                {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell className='whitespace-nowrap py-1.5 text-right'>{index === -1 ? null : <DueWhen item={item} />}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </CardContent>
-              </Panel>
-              <RecentList title='Movies & Shows' icon={Film} rows={data.recent.mas} empty='Nothing new in the Movies & Shows library.' />
-              <RecentList
-                title='Anime'
-                icon={Sparkles}
-                rows={animeView === 'episodes' ? data.recent.anime_episodes ?? [] : data.recent.anime}
-                empty='Nothing new in the anime library.'
-                action={
-                  <ToggleGroup<'episodes' | 'series'>
-                    aria-label='Recently added anime as'
-                    value={[animeView]}
-                    onValueChange={(values) => values[0] && chooseAnimeView(values[0])}
-                  >
-                    {/* Words where the card is wide enough; icons alone beside a narrow card's title. */}
-                    <ToggleGroupItem<'episodes' | 'series'> value='episodes' icon={<ListVideo />} title='Episodes'><span className='sr-only 2xl:not-sr-only'>Episodes</span></ToggleGroupItem>
-                    <ToggleGroupItem<'episodes' | 'series'> value='series' icon={<Layers />} title='Series'><span className='sr-only 2xl:not-sr-only'>Series</span></ToggleGroupItem>
-                  </ToggleGroup>
-                }
-              />
-            </div>
-          </section>
+          {/* Up next on the left, Recently added on the right, each under its own heading; a column
+              each on a narrower screen. */}
+          <div className='grid gap-4 xl:grid-cols-2'>
+            <section className='flex min-w-0 flex-col gap-2'>
+              <h2 className='font-heading text-lg font-light'>Up next</h2>
+              {/* Fixed columns: the task takes what the lane and the time leave, and is cut there,
+                  so the table never scrolls sideways. */}
+              <Table dense className='table-fixed' containerProps={{ className: 'h-[26rem] overflow-y-auto' }}>
+                <TableHeader className='sticky top-0 z-10 bg-card'>
+                  <TableRow>
+                    <TableHead className='w-24'>Lane</TableHead>
+                    <TableHead>Task</TableHead>
+                    <TableHead numeric className='w-28'>When</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {dueRows.length === 0 && (
+                    <TableRow><TableCell colSpan={3} className='py-6 text-center text-muted-foreground'>Nothing due.</TableCell></TableRow>
+                  )}
+                  {dueRows.map(({ group, item, index }) => (
+                    <TableRow key={group.lane + ':' + index + ':' + item.title}>
+                      <TableCell className='truncate py-1.5 text-xs text-muted-foreground'>{index <= 0 ? group.label : ''}</TableCell>
+                      <TableCell className='py-1.5'>
+                        {item.href ? (
+                          <Link to={item.href} className={cn('block truncate hover:underline', index === -1 ? 'text-muted-foreground' : 'text-foreground')} title={item.title}>
+                            {item.position ? <span className='mr-2 font-mono text-xs text-muted-foreground'>#{item.position}</span> : null}
+                            {item.title}
+                            {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
+                          </Link>
+                        ) : (
+                          <span className='block truncate text-foreground' title={item.title}>
+                            {item.title}
+                            {item.detail && <span className='ml-2 text-xs text-muted-foreground'>{item.detail}</span>}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell className='whitespace-nowrap py-1.5 text-right'>{index === -1 ? null : <DueWhen item={item} />}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </section>
+            <section className='flex min-w-0 flex-col gap-2'>
+              <h2 className='font-heading text-lg font-light'>Recently added</h2>
+              <div className='grid gap-3 md:grid-cols-2'>
+                <RecentList title='Movies & Shows' icon={Film} rows={data.recent.mas} empty='Nothing new in the Movies & Shows library.' />
+                <RecentList
+                  title='Anime'
+                  icon={Sparkles}
+                  rows={animeView === 'episodes' ? data.recent.anime_episodes ?? [] : data.recent.anime}
+                  empty='Nothing new in the anime library.'
+                  action={
+                    <ToggleGroup<'episodes' | 'series'>
+                      aria-label='Recently added anime as'
+                      value={[animeView]}
+                      onValueChange={(values) => values[0] && chooseAnimeView(values[0])}
+                    >
+                      {/* Words where the card is wide enough; icons alone beside a narrow card's title. */}
+                      <ToggleGroupItem<'episodes' | 'series'> value='episodes' icon={<ListVideo />} title='Episodes'><span className='sr-only 2xl:not-sr-only'>Episodes</span></ToggleGroupItem>
+                      <ToggleGroupItem<'episodes' | 'series'> value='series' icon={<Layers />} title='Series'><span className='sr-only 2xl:not-sr-only'>Series</span></ToggleGroupItem>
+                    </ToggleGroup>
+                  }
+                />
+              </div>
+            </section>
+          </div>
 
           <DiskUsage />
         </>

@@ -5,9 +5,11 @@ import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
+import { LinkedManga } from '@/components/LinkedManga';
 import { ArtworkDialog } from '@/components/ArtworkDialog';
 import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
+import { SegmentMeter, rampParts } from '@/components/segment-meter';
 import { StatusTag } from '@/components/status-tag';
 import { cn } from '@/zon/lib/cn';
 import { Button } from '@/zon/ui/button';
@@ -31,57 +33,6 @@ function formatSize(bytes: number) {
   if (tib >= 1) return tib.toFixed(2) + ' TiB';
   const gib = bytes / 1024 ** 3;
   return gib >= 1 ? gib.toFixed(2) + ' GiB' : (bytes / 1024 ** 2).toFixed(0) + ' MiB';
-}
-
-/** A segmented meter: discrete steps, each able to carry its own colour, so one
- *  meter can show a composition (the encode mix) as well as a ratio. */
-const SEGMENTS = 12;
-
-type MeterPart = { value: number; className: string };
-
-function SegmentMeter({ parts, total, className, title }: { parts: MeterPart[]; total: number; className?: string; title?: string }) {
-  const filled: string[] = [];
-  if (total > 0) {
-    // Largest-remainder allocation, so a part that exists at all keeps a
-    // segment instead of rounding away to nothing.
-    const exact = parts.map((part) => ({ ...part, exact: (part.value / total) * SEGMENTS }));
-    const base = exact.map((part) => ({ ...part, whole: Math.floor(part.exact) }));
-    let used = base.reduce((sum, part) => sum + part.whole, 0);
-    const order = [...base]
-      .map((part, index) => ({ index, rest: part.exact - part.whole, any: part.value > 0 }))
-      .filter((row) => row.any)
-      .sort((a, b) => b.rest - a.rest);
-    for (const row of order) {
-      if (used >= SEGMENTS) break;
-      if (base[row.index].whole === 0 || row.rest > 0) {
-        base[row.index].whole += 1;
-        used += 1;
-      }
-    }
-    for (const part of base) {
-      for (let i = 0; i < part.whole; i += 1) filled.push(part.className);
-    }
-  }
-  return (
-    <div
-      className={cn('flex h-[13px] items-center gap-[2px] overflow-hidden rounded-[3px] border border-field-edge bg-field-surface px-[2px] shadow-field', className)}
-      title={title}
-      role='img'
-      aria-label={title}
-    >
-      {Array.from({ length: SEGMENTS }, (_, index) => (
-        <span key={index} className={cn('h-[7px] min-w-px flex-1 rounded-[1px]', filled[index] ?? 'bg-control-surface')} />
-      ))}
-    </div>
-  );
-}
-
-/** Threshold colours for a single ratio, ramping as the meter fills. */
-function rampParts(value: number, total: number): MeterPart[] {
-  if (total <= 0 || value <= 0) return [];
-  const ratio = value / total;
-  const className = ratio >= 0.85 ? 'bg-success' : ratio >= 0.5 ? 'bg-warning' : 'bg-destructive';
-  return [{ value, className }];
 }
 
 type LibrarySortKey = 'title' | 'seasons' | 'episodes' | 'encode' | 'size' | 'state';
@@ -1036,8 +987,9 @@ export default function AnimeLibrary() {
         </div>
         </div>
       ) : (
-        // In its own container, as the dialogs' tables are; the header stays put as it scrolls.
-        <Table containerProps={{ className: '@container min-h-0 flex-1 overflow-auto' }}>
+        // In its own container, as the dialogs' tables are; the header stays put as it scrolls. Plain,
+        // across the page's whole width: through its gutter, the cells' padding lining up with it.
+        <Table variant='plain' containerProps={{ className: '@container -mx-(--page-gutter) w-auto min-h-0 flex-1 overflow-auto' }}>
             <TableHeader className='sticky top-0 z-10 bg-(--control-surface)'>
               <TableRow>
                 {/* The series takes what the other columns leave and truncates its
@@ -1273,6 +1225,7 @@ export default function AnimeLibrary() {
                         <Trash2 data-icon='inline-start' /> Remove and blacklist
                       </Button>
                     </div>
+                    <LinkedManga ids={active.anilist_ids?.length ? active.anilist_ids : active.anilist_id != null ? [active.anilist_id] : []} />
                   </div>
                 </div>
               </DrawerHeader>
@@ -1311,7 +1264,7 @@ export default function AnimeLibrary() {
                   </div>
                 )}
                 {seasons.map((season) => (
-                  <TabsPanel key={String(season)} value={String(season)} className={'flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto' + (activeChecked.length > 0 ? ' pb-16' : '')}>
+                  <TabsPanel key={String(season)} value={String(season)} className={'flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto' + (activeChecked.length > 0 ? ' pb-16 scroll-pb-24' : '')}>
                     {season !== null && (active.season_anilist?.[String(season)]?.length ?? 0) > 0 && (
                       <p className='flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground'>
                         <span>AniList:</span>

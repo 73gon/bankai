@@ -30,7 +30,9 @@ export interface ReplaceCandidate {
 }
 
 /**
- * The confirm step for taking a release in place of what a review card holds.
+ * The confirm step for taking a release in place of what a review card holds -- or, with no
+ * card (``cardKey`` empty, ``verb`` "Download"), straight from the Erai-raws page for the
+ * AniList entry its name says.
  *
  * Shows what it would change before anything is queued. On confirm the dialog
  * closes at once and the queueing runs in the background: ``onStart`` and
@@ -49,7 +51,7 @@ export function ReplaceDialog({
   cardKey: string;
   label: string;
   candidate: ReplaceCandidate | null;
-  verb?: 'Replace' | 'Download batch';
+  verb?: 'Replace' | 'Download batch' | 'Download';
   onClose: () => void;
   onStart?: (infoHash: string) => void;
   onSettled?: (infoHash: string) => void;
@@ -93,7 +95,9 @@ export function ReplaceDialog({
     ? verb
     : verb === 'Replace'
       ? replaceLabel(candidate.episodes)
-      : `Download batch: ${episodesLabel(candidate.episodes)}`;
+      : verb === 'Download'
+        ? `Download ${episodesLabel(candidate.episodes)}`
+        : `Download batch: ${episodesLabel(candidate.episodes)}`;
 
   return (
     <Dialog open={candidate !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -114,7 +118,7 @@ export function ReplaceDialog({
               <span className='font-medium text-foreground'>{plan.anilist_title}</span>
               {plan.german ? ', with German subtitles as listed for it.' : '. No German subtitles are listed for it; it is taken as it is.'}
             </li>
-            <li>{plan.held_count ? `Replaces ${plan.held_count} held release${plan.held_count === 1 ? '' : 's'} in review.` : 'No other held release of this card falls in its episodes.'}</li>
+            <li>{plan.held_count ? `Replaces ${plan.held_count} held release${plan.held_count === 1 ? '' : 's'} in review.` : `No release held in review falls in its episodes.`}</li>
             <li>
               {plan.file_count
                 ? `Replaces ${plan.file_count} file${plan.file_count === 1 ? '' : 's'} already in the library, removed once the new ones are published.`

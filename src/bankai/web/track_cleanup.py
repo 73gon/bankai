@@ -504,6 +504,43 @@ def _duration(info: dict) -> float | None:
     return int(raw) / 1e9 if raw else None
 
 
+def _seconds(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _picture_end(path: Path, start: float) -> float | None:
+    """Where the picture ends, in seconds: its frames read from ``start`` to the end."""
+    from bankai.web.media import ffprobe_bin
+
+    command = [
+        ffprobe_bin() or "ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", f"{start:.3f}%",
+        "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", str(path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", errors="replace", timeout=300, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    ends = []
+    for line in result.stdout.splitlines():
+        pts, _, duration = line.partition(",")
+        at = _seconds(pts)
+        if at is not None:
+            ends.append(at + (_seconds(duration) or 0.0))
+    return max(ends, default=None)
+
+
+def _same_picture(original: Path, new: Path, near: float) -> bool:
+    """Whether both pictures end alike. A track taken out can have run past the
+    picture -- a subtitle whose last line comes late -- and the container gets
+    shorter with it; the picture must not."""
+    start = max(0.0, near - 30.0)
+    old, new_end = _picture_end(original, start), _picture_end(new, start)
+    return old is not None and new_end is not None and abs(old - new_end) <= 0.5
+
+
 def _fail(path: Path, scope: str, error: str, *, size: int | None) -> dict[str, Any]:
     log.warning("[tracks] %s: %s", path.name, error)
     with _LOCK:
@@ -578,7 +615,7 @@ def clean_file(path: Path, scope: str) -> dict[str, Any]:
         if _counts(written) != expected:
             raise CleanupError(f"the new file has {_counts(written)} tracks, not {expected}")
         old, new = _duration(info), _duration(written)
-        if old and new and abs(old - new) > 1.0:
+        if old and new and abs(old - new) > 1.0 and not _same_picture(path, part, min(old, new)):
             raise CleanupError(f"the new file runs {new:.1f}s, the original {old:.1f}s")
         after = path.stat()
         if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):

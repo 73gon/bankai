@@ -73,6 +73,23 @@ def test_a_batch_replaces_its_held_episodes_and_files_but_never_a_german_dub(lib
     assert names == [f"Dr. Stone - S04E{n:02d}.mkv" for n in range(13, 25) if n != 15]
 
 
+def test_without_a_card_the_release_s_name_says_its_entry(library, monkeypatch):
+    held(library["state"], "2" * 40, "[Erai-raws] Dr. Stone Science Future (2025) - 01 ~ 04 [1080p HEVC][Multiple Subtitle]")
+    monkeypatch.setattr(erai, "_release_anilist_id", lambda title, **kw: 1002)
+
+    plan = erai._replacement_plan("", "a" * 40)
+
+    assert (plan["anilist_id"], plan["first"], plan["last"]) == (1002, 1, 12)
+    # The entry's card stands in for the card it was not opened from.
+    assert plan["held"] == ["2" * 40]
+
+
+def test_without_a_card_a_name_that_says_no_entry_is_refused(library, monkeypatch):
+    monkeypatch.setattr(erai, "_release_anilist_id", lambda title, **kw: None)
+    with pytest.raises(ValueError, match="could not be told from the release name"):
+        erai._replacement_plan("", "a" * 40)
+
+
 def test_a_release_of_another_entry_is_refused(library, monkeypatch):
     monkeypatch.setattr(erai, "_release_anilist_id", lambda title, **kw: 1001)
     with pytest.raises(ValueError, match="not the AniList entry of this card"):

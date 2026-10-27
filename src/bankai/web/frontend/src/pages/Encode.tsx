@@ -404,7 +404,7 @@ export default function Encode() {
         <h1 className='font-heading text-3xl font-light'>Encode</h1>
         <p className='text-sm text-muted-foreground'>
           Videos far bigger than anyone can see, encoded again on the graphics card: about half the size, the same picture, and they play
-          wherever the originals did. HEVC stays HEVC, H.264 stays H.264; every audio track, subtitle, HDR10 and Dolby Vision is kept, and
+          on anything that plays HEVC. HEVC stays HEVC, H.264 becomes HEVC; every audio track, subtitle, HDR10 and Dolby Vision is kept, and
           each file replaces its original only once it is checked.
         </p>
       </div>
@@ -430,8 +430,8 @@ export default function Encode() {
             ))}
           </Tabs>
           <p className='text-xs text-muted-foreground'>
-            Listed: pictures of 30 Mbps and more in 4K, 22 Mbps for 1080p H.264, 15 Mbps for other 1080p, 10 Mbps below; in anime, every
-            episode that is not HEVC, to become HEVC. Left out: Dolby Vision profile 5, interlaced pictures, and AV1, which is smaller than HEVC
+            Listed: HEVC pictures of 30 Mbps and more in 4K, 15 Mbps for 1080p, 10 Mbps below; and every file that is not HEVC (H.264 and
+            older), whatever its bitrate, to become HEVC. Left out: Dolby Vision profile 5, interlaced pictures, and AV1, which is smaller than HEVC
             already. A queued file still seeding or changed in the last hour waits its turn; a result less than a fifth
             smaller is thrown away and the original kept. The Dashboard's Encoding lane shows the file being encoded.
           </p>

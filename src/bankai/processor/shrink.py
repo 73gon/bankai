@@ -102,6 +102,10 @@ class Source:
     hdr10plus: bool = False
     size: int = 0
     streams: list[dict[str, Any]] = field(default_factory=list)
+    # The picture's own frames and length, as the file states them. ``duration``
+    # is the container's, which runs longer when an audio track starts late.
+    frame_count: int | None = None
+    video_duration: float = 0.0
 
     @property
     def fps(self) -> float:
@@ -109,7 +113,9 @@ class Source:
 
     @property
     def frames(self) -> int:
-        return round(self.duration * self.fps)
+        if self.frame_count:
+            return self.frame_count
+        return round((self.video_duration or self.duration) * self.fps)
 
     @property
     def hdr(self) -> bool:
@@ -120,13 +126,22 @@ def _ratio(value: Any) -> float:
     return float(Fraction(str(value))) if value not in (None, "") else 0.0
 
 
-def _ffprobe(args: list[str]) -> dict[str, Any]:
+def _clock(value: Any) -> float:
+    """``01:01:40.113000000`` in seconds; 0 for anything else."""
+    try:
+        hours, minutes, seconds = str(value).split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except ValueError:
+        return 0.0
+
+
+def _ffprobe(args: list[str], *, timeout: float = 300) -> dict[str, Any]:
     result = subprocess.run(
         [_tool("ffprobe"), "-v", "error", *args, "-of", "json"],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
-        timeout=300,
+        timeout=timeout,
         check=False,
     )
     if result.returncode != 0:
@@ -155,6 +170,9 @@ def inspect(path: Path) -> Source:
     duration = float((data.get("format") or {}).get("duration") or video.get("duration") or 0)
     if duration <= 0:
         raise ShrinkError(f"{path.name} has no duration")
+    # mkvmerge's statistics tags ("NUMBER_OF_FRAMES", or with "-eng"); MP4 counts in nb_frames.
+    tags = {str(key).upper().partition("-")[0]: value for key, value in (video.get("tags") or {}).items()}
+    stated = str(tags.get("NUMBER_OF_FRAMES") or video.get("nb_frames") or "")
     pix_fmt = str(video.get("pix_fmt") or "")
     source = Source(
         path=path,
@@ -170,6 +188,8 @@ def inspect(path: Path) -> Source:
         dv_profile=dv_profile,
         size=int((data.get("format") or {}).get("size") or 0),
         streams=streams,
+        frame_count=int(stated) if stated.isdigit() and int(stated) > 0 else None,
+        video_duration=_ratio(video.get("duration")) or _clock(tags.get("DURATION")),
     )
     # The static HDR metadata rides on the frames.
     frames = _ffprobe(
@@ -192,6 +212,13 @@ def inspect(path: Path) -> Source:
             elif kind == "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)":
                 source.hdr10plus = True
     return source
+
+
+def count_frames(path: Path) -> int:
+    """The picture's frames counted, the whole file read through (not decoded): minutes for a large one."""
+    data = _ffprobe(["-select_streams", "v:0", "-count_packets", "-show_entries", "stream=nb_read_packets", str(path)], timeout=3600)
+    streams = data.get("streams") or [{}]
+    return int(streams[0].get("nb_read_packets") or 0)
 
 
 def encode_command(
@@ -374,6 +401,25 @@ def _settings(source: Source, quality: int, codec: str = "hevc") -> dict[str, An
 _WORK_FILES = ("video.hevc", "video.h264", "rpu.bin", "video.dv.hevc")
 
 
+def encoded(work: Path) -> bool:
+    """Whether ``work`` holds a finished encode, which a run with the same settings goes on from."""
+    try:
+        done = json.loads((work / "encode.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return "frames" in done and any((work / name).is_file() for name in ("video.hevc", "video.h264", "video.dv.hevc"))
+
+
+def _check_frames(source: Source, written: int) -> None:
+    """The encode holds the source's picture frame for frame."""
+    expected = source.frames
+    if source.frame_count is None and abs(written - expected) > 2:
+        # Only an estimate from the length (no count in the file, a variable frame rate): counted.
+        source.frame_count = expected = count_frames(source.path)
+    if abs(written - expected) > 2:
+        raise ShrinkError(f"the encode wrote {written} frames of {expected}")
+
+
 def shrink(
     source_path: Path,
     destination: Path,
@@ -428,9 +474,7 @@ def shrink(
             )
             done = {"settings": settings, "frames": frames}
             marker.write_text(json.dumps(done), encoding="utf-8")
-        frames = int(done.get("frames") or 0)
-        if abs(frames - source.frames) > 2:
-            raise ShrinkError(f"the encode wrote {frames} frames of {source.frames}")
+        _check_frames(source, int(done.get("frames") or 0))
         if keep_dv:
             log.info('BANKAI_STAGE step=2 total=3 key=dolby_vision label="Dolby Vision"')
             report("dolby_vision")
@@ -445,8 +489,7 @@ def shrink(
             # Only the picture with Dolby Vision is needed from here: room for the mux.
             video.unlink(missing_ok=True)
     frames = int(done.get("frames") or 0)
-    if abs(frames - source.frames) > 2:
-        raise ShrinkError(f"the encode wrote {frames} frames of {source.frames}")
+    _check_frames(source, frames)
     log.info('BANKAI_STAGE step=3 total=3 key=mux label="Put the tracks together"')
     report("mux")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -485,7 +528,12 @@ def shrink(
 
 
 def quality_check(source_path: Path, output: Path, *, points: tuple[float, ...] = (0.15, 0.5, 0.85), seconds: float = 10.0) -> list[dict[str, float]]:
-    """SSIM and PSNR of the result against the source at a few places, frames paired by their order."""
+    """SSIM of the result against the source at a few places, frames paired by their order.
+
+    One comparison, one output: with a second (PSNR beside SSIM, through a
+    split) ffmpeg ran one branch to its end while the other's frames waited in
+    memory -- 240 4K frames, 7 GB, and the OOM killer took bankai with it.
+    """
     source = inspect(source_path)
     rate = source.frame_rate
     count = max(1, round(seconds * source.fps))
@@ -493,15 +541,15 @@ def quality_check(source_path: Path, output: Path, *, points: tuple[float, ...] 
     for point in points:
         start = f"{source.duration * point:.3f}"
         graph = (
-            f"[0:v]setpts=N/({rate})/TB,trim=end_frame={count},split[a1][a2];"
-            f"[1:v]setpts=N/({rate})/TB,trim=end_frame={count},split[b1][b2];"
-            "[a1][b1]ssim;[a2][b2]psnr"
+            f"[0:v]setpts=N/({rate})/TB,trim=end_frame={count}[a];"
+            f"[1:v]setpts=N/({rate})/TB,trim=end_frame={count}[b];"
+            "[a][b]ssim"
         )
         result = subprocess.run(
             [
                 _tool("ffmpeg"), "-hide_banner", "-nostdin", "-nostats",
                 "-ss", start, "-i", str(output), "-ss", start, "-i", str(source_path),
-                "-lavfi", graph, "-f", "null", "-",
+                "-lavfi", graph, "-an", "-sn", "-dn", "-f", "null", "-",
             ],
             capture_output=True,
             encoding="utf-8",
@@ -509,13 +557,11 @@ def quality_check(source_path: Path, output: Path, *, points: tuple[float, ...] 
             timeout=3600,
             check=False,
         )
-        ssim = psnr = 0.0
+        ssim = 0.0
         for line in result.stderr.splitlines():
             if "SSIM" in line and "All:" in line:
                 ssim = float(line.split("All:")[1].split()[0])
-            if "PSNR" in line and "y:" in line:
-                psnr = float(line.split("y:")[1].split()[0])
-        rows.append({"at": float(start), "ssim": ssim, "psnr_y": psnr})
+        rows.append({"at": float(start), "ssim": ssim})
     return rows
 
 

@@ -5,6 +5,11 @@ export function anilistUrl(id: number | string): string {
   return 'https://anilist.co/anime/' + id;
 }
 
+/** A manga's or light novel's page on AniList. */
+export function anilistMangaUrl(id: number | string): string {
+  return 'https://anilist.co/manga/' + id;
+}
+
 const FORMATS: Record<string, string> = {
   TV: 'TV',
   TV_SHORT: 'TV short',
@@ -13,6 +18,9 @@ const FORMATS: Record<string, string> = {
   ONA: 'ONA',
   SPECIAL: 'Special',
   MUSIC: 'Music',
+  MANGA: 'Manga',
+  NOVEL: 'Light novel',
+  ONE_SHOT: 'One-shot',
 };
 
 /** AniList's format (TV, TV_SHORT, MOVIE, ...) as a label; null when unknown. */

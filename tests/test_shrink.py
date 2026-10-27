@@ -117,6 +117,31 @@ def test_what_ffprobe_says_is_read(tmp_path, monkeypatch):
     assert source.mastering["max_luminance"] == pytest.approx(1000)
 
 
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {"NUMBER_OF_FRAMES": "88714", "DURATION": "01:01:40.113000000"},
+        {"NUMBER_OF_FRAMES-eng": "88714"},
+        {"DURATION-eng": "01:01:40.113000000"},
+    ],
+)
+def test_the_picture_s_own_frames_count_not_the_container_s_length(tmp_path, monkeypatch, tags):
+    # Game of Thrones S01E01: its AC3 tracks start 2.002 s in, the container runs 48 frames past the picture.
+    answers = [
+        {
+            "format": {"duration": "3702.098000", "size": "26980337550"},
+            "streams": [
+                {"codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p10le", "r_frame_rate": "24000/1001", "tags": tags},
+                {"codec_type": "audio", "codec_name": "ac3", "start_time": "2.002000"},
+            ],
+        },
+        {"frames": []},
+    ]
+    monkeypatch.setattr(shrink, "_ffprobe", lambda _args: answers.pop(0))
+
+    assert shrink.inspect(tmp_path / "video.mkv").frames == 88_714
+
+
 def test_dolby_vision_profile_5_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(shrink, "inspect", lambda _path: got(tmp_path, dv_profile=5))
 
@@ -124,9 +149,9 @@ def test_dolby_vision_profile_5_is_refused(tmp_path, monkeypatch):
         shrink.shrink(tmp_path / "in.mkv", tmp_path / "out.mkv", work=tmp_path / "work")
 
 
-def run_steps(tmp_path, monkeypatch, *, encoded: dict | None = None):
+def run_steps(tmp_path, monkeypatch, *, encoded: dict | None = None, **changes):
     """shrink() with each tool faked; returns which steps ran."""
-    source = got(tmp_path)
+    source = got(tmp_path, **changes)
     ran: list[str] = []
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
@@ -194,11 +219,29 @@ def test_an_encode_with_other_settings_is_done_again(tmp_path, monkeypatch):
 
 
 def test_an_encode_missing_frames_is_refused(tmp_path, monkeypatch):
-    source = got(tmp_path)
+    source = got(tmp_path, frame_count=117_020)
     settings = shrink._settings(source, shrink.DEFAULT_QUALITY)
 
     with pytest.raises(shrink.ShrinkError, match="frames"):
-        run_steps(tmp_path, monkeypatch, encoded={"settings": settings, "frames": source.frames - 100})
+        run_steps(tmp_path, monkeypatch, encoded={"settings": settings, "frames": 117_020 - 100}, frame_count=117_020)
+
+
+@pytest.mark.parametrize(("counted", "refused"), [(88_714, False), (88_762, True)])
+def test_a_length_that_disagrees_with_the_encode_is_settled_by_counting(tmp_path, monkeypatch, counted, refused):
+    # No count in the file, and the container runs 48 frames longer than the encode.
+    counts: list[Path] = []
+    monkeypatch.setattr(shrink, "count_frames", lambda path: counts.append(path) or counted)
+    source = got(tmp_path, duration=3702.098)
+    settings = shrink._settings(source, shrink.DEFAULT_QUALITY)
+    encoded = {"settings": settings, "frames": 88_714}
+
+    if refused:
+        with pytest.raises(shrink.ShrinkError, match="88714 frames of 88762"):
+            run_steps(tmp_path, monkeypatch, encoded=encoded, duration=3702.098)
+    else:
+        ran, _result, _source = run_steps(tmp_path, monkeypatch, encoded=encoded, duration=3702.098)
+        assert ran == ["rpu", "inject", "mux"]
+    assert len(counts) == 1
 
 
 def test_dolby_vision_can_be_left_out_and_added_later_from_the_same_encode(tmp_path, monkeypatch):

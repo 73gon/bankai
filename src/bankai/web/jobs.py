@@ -476,6 +476,11 @@ _TRACK_READ_SECONDS = 60.0
 _TRACK_CLEAN_SECONDS = 60.0
 # The libraries' oversized videos encoded again on the GPU, one at a time (see encode_library).
 _ENCODE_SECONDS = 60.0
+# Manga and light novels (see manga_releases): nyaa's newest literature uploads
+# and a few followed series searched, every manga.poll_interval_seconds (this
+# is only what the dashboard says); approved ones followed in qBittorrent.
+_MANGA_DISCOVER_SECONDS = 900.0
+_MANGA_RECONCILE_SECONDS = 30.0
 
 
 # The scheduler's periodic passes as the dashboard shows them: what each does,
@@ -494,6 +499,8 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
     "track_read": ("Read the libraries' audio and subtitle tracks", _TRACK_READ_SECONDS),
     "track_clean": ("Take out the tracks switched off", _TRACK_CLEAN_SECONDS),
+    "manga_discover": ("Look for manga and light novels", _MANGA_DISCOVER_SECONDS),
+    "manga_reconcile": ("Download approved manga", _MANGA_RECONCILE_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
 
@@ -626,6 +633,19 @@ def _pass_summary(name: str, result: object) -> str | None:
             return str(result["idle"])
         saved = int(result.get("saved") or 0) / 2**20
         return f"{Path(str(result.get('path') or '')).name}: {saved:.0f} MiB freed"
+    if name == "manga_discover":
+        if result.get("skipped"):
+            return "Off in the manga settings"
+        if result.get("error"):
+            return f"nyaa could not be read: {result['error']}"
+        return (
+            f"{_plural(number('found'), 'new release')} to review; "
+            f"{_plural(number('searched'), 'series', 'series')} searched of {number('followed')} followed"
+        )
+    if name == "manga_reconcile":
+        if result.get("idle"):
+            return str(result["idle"])
+        return f"{number('active')} downloading, {number('filed')} filed"
     if name == "thumb_sweep":
         if number("held_for_space"):
             return "Held: the library disk is short on room"
@@ -652,6 +672,16 @@ def _pass_progress(name: str) -> dict | None:
         from bankai.web import erai_subs
 
         return dict(erai_subs.progress) or None
+    if name in ("manga_discover", "manga_reconcile"):
+        from bankai.web import manga_releases
+
+        current = dict(manga_releases.progress)
+        steps = {"series": "Learning the library's series", "feed": "Reading nyaa's newest uploads", "filing": "Filing"}
+        if current.get("step") == "search":
+            return {"step": f"Searching for {current.get('series')}"}
+        if current.get("step") in steps:
+            return {"step": " ".join(filter(None, (steps[current["step"]], current.get("series"))))}
+        return None
     if name == "track_clean":
         from bankai.web import track_cleanup
 
@@ -740,6 +770,18 @@ async def _track_clean() -> None:
     _pass_result("track_clean", result or {"idle": "Nothing to take out now"})
 
 
+async def _manga_discover() -> None:
+    from bankai.web import manga_releases
+
+    _pass_result("manga_discover", await manga_releases.discover())
+
+
+async def _manga_reconcile() -> None:
+    from bankai.web import manga_releases
+
+    _pass_result("manga_reconcile", await manga_releases.reconcile() or {"idle": "Nothing downloading"})
+
+
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
     """Dispatch queued work continuously, independent of an open browser page."""
 
@@ -772,6 +814,13 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     await asyncio.to_thread(encode_library.recover)
     next_encode = time.monotonic() + 60.0
     encode_task: asyncio.Future | None = None
+    next_manga_discover = time.monotonic() + 120.0
+    manga_discover_task: asyncio.Future | None = None
+    next_manga_reconcile = time.monotonic() + 30.0
+    manga_reconcile_task: asyncio.Future | None = None
+    from bankai.web import manga_releases
+
+    _pass_due("manga_discover", next_manga_discover)
     _pass_due("track_read", next_track_read)
     _pass_due("library_walk", next_walk_pass)
     _pass_due("anime_metadata", next_metadata_pass)
@@ -824,6 +873,23 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 log.warning("encode failed: %r", encode_task.exception())
             if await asyncio.to_thread(encode_library.has_work):
                 encode_task = asyncio.ensure_future(_encode())
+        # Off to the side: nyaa read a few times, AniList asked about the series followed.
+        if time.monotonic() >= next_manga_discover and (manga_discover_task is None or manga_discover_task.done()):
+            next_manga_discover = time.monotonic() + get_settings().manga.poll_interval_seconds
+            _pass_due("manga_discover", next_manga_discover)
+            if manga_discover_task is not None and manga_discover_task.exception() is not None:
+                log.warning("manga discovery failed: %r", manga_discover_task.exception())
+            manga_discover_task = asyncio.ensure_future(_manga_discover())
+            _pass_task("manga_discover", manga_discover_task)
+        # Approved manga, only while there are some: added, followed, filed once complete.
+        if time.monotonic() >= next_manga_reconcile and (manga_reconcile_task is None or manga_reconcile_task.done()):
+            next_manga_reconcile = time.monotonic() + _MANGA_RECONCILE_SECONDS
+            if manga_reconcile_task is not None and manga_reconcile_task.exception() is not None:
+                log.warning("manga downloads failed: %r", manga_reconcile_task.exception())
+            if await asyncio.to_thread(manga_releases.has_work):
+                _pass_due("manga_reconcile", next_manga_reconcile)
+                manga_reconcile_task = asyncio.ensure_future(_manga_reconcile())
+                _pass_task("manga_reconcile", manga_reconcile_task)
         if time.monotonic() >= next_archive_pass:
             next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
             _pass_due("job_archive", next_archive_pass)

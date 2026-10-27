@@ -532,13 +532,15 @@ def recent_additions(
     href: str,
     limit: int = RECENT_LIMIT,
     window: float = RECENT_WINDOW_SECONDS,
+    encoded: bool = False,
 ) -> list[dict]:
     """The newest arrivals, one row per title, newest first.
 
     ``files`` are library-walk entries (``series`` is the title's folder);
     ``cards`` maps a folder name to its library card, for the poster and
     proper title. A show's episodes that arrived within ``window`` of its
-    newest are counted together.
+    newest are counted together. ``encoded``: these are files encoded again
+    (``encodes``), each row marked so.
     """
     groups: dict[tuple[str, str], dict] = {}
     for entry in sorted(files, key=lambda row: -float(row.get("mtime") or 0)):
@@ -551,7 +553,8 @@ def recent_additions(
                 continue  # a title older than every one already shown
             card = cards.get(folder) or {}
             group = groups[key] = {
-                "key": card.get("key") or folder,
+                "key": ("encoded:" if encoded else "") + str(card.get("key") or folder),
+                "encoded": encoded,
                 "title": card.get("title") or folder,
                 "poster_url": card.get("poster_url"),
                 "kind": kind,
@@ -581,8 +584,9 @@ def recent_episodes(
     *,
     href: str,
     limit: int = RECENT_EPISODES_LIMIT,
+    encoded: bool = False,
 ) -> list[dict]:
-    """The newest episode files, one row each, newest first."""
+    """The newest episode files, one row each, newest first (``encoded``: as recent_additions)."""
     newest = sorted(files, key=lambda row: -float(row.get("mtime") or 0))[:limit]
     out = []
     for entry in newest:
@@ -591,7 +595,8 @@ def recent_episodes(
         identity = parse_se(str(entry.get("name") or ""))
         out.append(
             {
-                "key": str(entry.get("path") or entry.get("name")),
+                "key": ("encoded:" if encoded else "") + str(entry.get("path") or entry.get("name")),
+                "encoded": encoded,
                 "title": card.get("title") or folder,
                 "poster_url": card.get("poster_url"),
                 "kind": "episode",
@@ -602,6 +607,11 @@ def recent_episodes(
             }
         )
     return out
+
+
+def encodes(files: Iterable[dict], times: dict[str, float]) -> list[dict]:
+    """The library-walk entries of files encoded again, dated when that was done."""
+    return [{**entry, "mtime": times[str(entry.get("path"))]} for entry in files if str(entry.get("path")) in times]
 
 
 def _episode_label(episodes: list[tuple[int, int]]) -> str | None:

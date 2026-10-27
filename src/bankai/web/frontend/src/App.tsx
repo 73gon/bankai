@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink, BookOpen } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { cn } from '@/zon/lib/cn';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
@@ -24,6 +24,10 @@ import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
 import Tracks from '@/pages/Tracks';
 import Encode from '@/pages/Encode';
+import MangaLibrary from '@/pages/MangaLibrary';
+import MangaReview from '@/pages/MangaReview';
+import MangaSearch from '@/pages/MangaSearch';
+import MangaSettings from '@/pages/MangaSettings';
 
 // Two libraries live here, so the paths say which one they mean: /mas for
 // movies and shows, /a for anime. `count` names a key of /api/sidebar/counts.
@@ -46,6 +50,15 @@ const ANIME_NAV = [
   { to: '/a/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
+// Manga and light novels: found on nyaa, reviewed, filed for OpenPanel.
+const MANGA_NAV = [
+  { to: '/m/search', label: 'Search', icon: SearchIcon },
+  { to: '/m/library', label: 'Library', icon: BookOpen },
+  { to: '/m/review', label: 'Review', icon: ShieldAlert, count: 'manga_review' },
+  { to: '/m/blacklist', label: 'Blacklist', icon: Ban },
+  { to: '/m/settings', label: 'Settings', icon: SettingsIcon },
+];
+
 // Neither library's own: the torrent client and the machine behind both.
 const SYSTEM_NAV = [
   { to: '/qbittorrent', label: 'qBittorrent', icon: Download, count: 'qbittorrent' },
@@ -64,6 +77,7 @@ const NAV_GROUPS = [
   { label: '', items: TOP_NAV },
   { label: 'Movies & Shows', items: MAS_NAV },
   { label: 'Anime', items: ANIME_NAV },
+  { label: 'Manga', items: MANGA_NAV },
   { label: '', items: SYSTEM_NAV },
 ];
 
@@ -486,6 +500,12 @@ export default function App() {
           <Route path='/a/settings' element={<AnimeSettings />} />
 
               {/* Neither library's own. */}
+              <Route path='/m' element={<Navigate to='/m/library' replace />} />
+              <Route path='/m/search' element={<MangaSearch />} />
+              <Route path='/m/library' element={<MangaLibrary />} />
+              <Route path='/m/review' element={<MangaReview key='review' />} />
+              <Route path='/m/blacklist' element={<MangaReview key='blacklist' blacklist />} />
+              <Route path='/m/settings' element={<MangaSettings />} />
               <Route path='/qbittorrent' element={<QBittorrent />} />
               <Route path='/tracks' element={<Tracks />} />
               <Route path='/encode' element={<Encode />} />

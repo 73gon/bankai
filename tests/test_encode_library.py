@@ -37,12 +37,14 @@ def test_a_4k_remux_is_encoded_as_hevc_at_22():
     assert change["estimate"] == pytest.approx(29e6 / 8 * 4880, rel=0.01)
 
 
-def test_h264_stays_h264_and_only_well_above_the_line():
+def test_h264_becomes_hevc_whatever_its_bitrate_and_hevc_only_well_above_the_line():
     change, _ = encode.assess("/m/Ice Age (2009).mkv", entry("h264", 1920, 25.4, bit_depth=8))
-    small, _ = encode.assess("/m/Gladiator II (2024).mkv", entry("h264", 1920, 16.0, bit_depth=8))
+    small, _ = encode.assess("/m/Gladiator II (2024).mkv", entry("h264", 1920, 4.0, bit_depth=8))
+    hevc, _ = encode.assess("/m/Dune (2021).mkv", entry("hevc", 1920, 12.0))
 
-    assert (change["codec"], change["quality"]) == ("h264", 19)
-    assert small is None
+    assert (change["codec"], change["quality"]) == ("hevc", 20)
+    assert (small["codec"], small["quality"]) == ("hevc", 20)
+    assert hevc is None
 
 
 def test_10_bit_h264_becomes_hevc():
@@ -62,11 +64,11 @@ def test_what_would_go_wrong_is_left_with_its_reason(row, reason):
     assert encode.assess("/m/a.mkv", row) == (None, reason)
 
 
-def test_an_anime_episode_that_is_not_hevc_becomes_hevc_whatever_its_bitrate():
+def test_an_episode_that_is_not_hevc_becomes_hevc_whatever_its_bitrate():
     change, reason = encode.assess("/a/Show - S01E01.mkv", entry("h264", 1920, 4.0, bit_depth=8, scope="anime", duration=1440.0))
     shows, _ = encode.assess("/s/Show - S01E01.mkv", entry("h264", 1920, 4.0, bit_depth=8, duration=1440.0))
 
-    assert reason is None and shows is None
+    assert reason is None and shows == change
     assert (change["codec"], change["quality"]) == ("hevc", 20)
     # About 45% of its picture's bits.
     assert change["estimate"] == pytest.approx(4e6 / 8 * 1440 * 0.45, rel=0.01)
@@ -161,6 +163,15 @@ def test_a_queued_file_is_encoded_and_takes_the_original_s_place(library, monkey
     # Done once: not listed again though it may stay above the line.
     assert encode.candidates()[0] == []
     assert encode.overview()["done"] == {"files": 1, "bytes": 600}
+    # When, for the Dashboard's Recently added.
+    assert encode.encoded_times()[str(path)] == pytest.approx(time.time(), abs=60)
+
+
+def test_a_file_encoded_before_its_time_was_kept_answers_with_its_ctime(library):
+    path = library("A - S01E01.mkv", entry())
+    encode._save_state({"encoded": {str(path): 1000, "/gone.mkv": 5}})
+
+    assert encode.encoded_times() == {str(path): path.stat().st_ctime}
 
 
 def test_the_queue_goes_in_its_order_one_at_a_time(library, monkeypatch):
@@ -207,7 +218,7 @@ def test_a_result_not_a_fifth_smaller_is_thrown_away(library, monkeypatch):
     assert encode.overview()["scopes"]["shows"]["left"] == {"not worth it": 1}
 
 
-def test_a_picture_that_differs_is_not_put_in_place_and_can_be_queued_again(library, monkeypatch):
+def test_a_picture_that_differs_is_not_put_in_place_and_can_be_queued_again(library, monkeypatch, tmp_path):
     path = library("A - S01E01.mkv", entry())
     fake_shrink(monkeypatch, ssim=0.62)
     encode.enqueue([str(path)])
@@ -216,6 +227,7 @@ def test_a_picture_that_differs_is_not_put_in_place_and_can_be_queued_again(libr
 
     assert "differs" in result["error"]
     assert path.read_bytes() == b"x" * 1000
+    assert not (tmp_path / "work" / path.stem).exists()
     listed = encode.overview()["scopes"]["shows"]["candidates"]
     assert "differs" in listed[0]["failed"]
     assert encode.enqueue([str(path)])["added"] == 1
@@ -243,6 +255,28 @@ def test_queued_files_not_free_to_touch_keep_their_place(library, monkeypatch):
     assert calls == []
     waiting = {row["path"]: row["waiting"] for row in encode.overview()["queue"]}
     assert waiting == {str(fresh): "changed in the last hour", str(busy): "having tracks taken out"}
+
+
+def test_a_step_after_the_encode_failing_keeps_the_encode_to_go_on_from(library, monkeypatch, tmp_path):
+    path = library("GoT - S01E01.mkv", entry())
+    encode.enqueue([str(path)])
+
+    def failed(source, destination, *, work, quality, codec, on_progress=None):
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "video.hevc").write_bytes(b"an hour of encoding")
+        (work / "encode.json").write_text('{"settings": {}, "frames": 88714}', encoding="utf-8")
+        destination.write_bytes(b"a mux that went wrong")
+        raise shrink.ShrinkError("mkvmerge failed")
+
+    monkeypatch.setattr(shrink, "shrink", failed)
+
+    result = encode.encode_next()
+
+    work = tmp_path / "work" / path.stem
+    assert "kept" in result["error"]
+    assert (work / "video.hevc").exists() and not (work / "out.mkv").exists()
+    assert path.read_bytes() == b"x" * 1000
+    assert encode.enqueue([str(path)])["added"] == 1
 
 
 def test_an_encode_cut_off_keeps_its_steps_and_drops_its_result(tmp_path):

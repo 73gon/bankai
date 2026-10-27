@@ -132,6 +132,22 @@ def test_recent_episodes_of_a_show_are_one_addition():
     assert rows[1]["episode_label"] == "S02E01"
 
 
+def test_files_encoded_again_are_additions_marked_and_dated_when_encoded():
+    files = [
+        {**_file("Bleach", "Bleach - S01E05.mkv", NOW - 30 * 86400), "path": "/lib/Bleach/Bleach - S01E05.mkv"},
+        {**_file("Bleach", "Bleach - S01E06.mkv", NOW - 30 * 86400), "path": "/lib/Bleach/Bleach - S01E06.mkv"},
+        {**_file("Frieren", "Frieren - S01E01.mkv", NOW - 30 * 86400), "path": "/lib/Frieren/Frieren - S01E01.mkv"},
+    ]
+    times = {"/lib/Bleach/Bleach - S01E05.mkv": NOW - 20, "/lib/Bleach/Bleach - S01E06.mkv": NOW - 10}
+
+    rows = dashboard.recent_additions(dashboard.encodes(files, times), {}, kind="show", href="/a/library", encoded=True)
+    episodes = dashboard.recent_episodes(dashboard.encodes(files, times), {}, href="/a/library", encoded=True)
+
+    assert [(row["title"], row["episode_label"], row["added_at"], row["encoded"]) for row in rows] == [("Bleach", "S01E05-E06", NOW - 10, True)]
+    assert rows[0]["key"] == "encoded:Bleach"
+    assert [(row["episode_label"], row["encoded"]) for row in episodes] == [("S01E06", True), ("S01E05", True)]
+
+
 def test_recent_additions_stop_at_the_limit():
     files = [_file(f"Movie {n}", f"Movie {n}.mkv", NOW - n) for n in range(30)]
     rows = dashboard.recent_additions(files, {}, kind="movie", href="/mas/library", limit=5)
