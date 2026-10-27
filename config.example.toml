@@ -101,6 +101,29 @@ thumb_width = 960
 # Backdrops, logos, thumbs and season posters from TMDB (metadata.tmdb_api_key).
 artwork_tmdb = true
 
+[manga]
+# Manga and light novels from nyaa's English literature category, matched to
+# AniList. Every release found waits in Manga -> Review; nothing downloads
+# unapproved. Followed: the manga/light novels AniList links to anime on disk,
+# the series in the folders below, and those followed by hand.
+enabled = true
+# OpenPanel's libraries: a folder per series ("Title (Year)", bankai's own
+# "Title (Year) - <AniList id>"), "Vol 01.cbz" / "Chapter 0001.cbz" inside.
+library_dir = "/mnt/d/books/manga"
+novels_dir = "/mnt/d/books/light_novels"
+novels = true
+poll_interval_seconds = 900      # nyaa's newest uploads
+search_interval_days = 7         # each followed series searched by name
+searches_per_pass = 6
+request_delay_seconds = 5
+qbittorrent_category = "bankai-manga"   # saved under qbittorrent.save_path/manga
+min_free_space_gib = 5
+# OpenPanel scans only at startup or when asked: an admin login lets bankai
+# ask after every download. Off while the URL is empty.
+openpanel_url = ""
+openpanel_username = ""
+openpanel_password = ""
+
 [queue]
 # Per-stage worker concurrency.
 search_workers = 2

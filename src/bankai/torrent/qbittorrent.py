@@ -167,6 +167,15 @@ class QBittorrentClient:
         resp.raise_for_status()
         return list(resp.json())
 
+    async def file_priority(self, torrent_hash: str, indexes: list[int], priority: int) -> None:
+        """Set some of a torrent's files' priority (their ``index`` in ``files``); 0 leaves them out."""
+        await self._ensure_login()
+        response = await self._client.post(
+            "/api/v2/torrents/filePrio",
+            data={"hash": torrent_hash, "id": "|".join(str(index) for index in indexes), "priority": str(priority)},
+        )
+        response.raise_for_status()
+
     async def free_space_bytes(self) -> int | None:
         """Return free bytes for qBittorrent's configured download location."""
         await self._ensure_login()

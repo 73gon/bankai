@@ -174,6 +174,34 @@ class AnimeAutomationSettings(BaseModel):
         return self
 
 
+class MangaSettings(BaseModel):
+    """Manga and light novels (see web.manga_releases): found on nyaa, matched to
+    AniList, downloaded only once approved, filed for OpenPanel."""
+
+    # Looking for releases at all. Nothing is ever downloaded unapproved.
+    enabled: bool = True
+    # Where they are filed: a folder per series, "Vol 01.cbz" inside.
+    library_dir: Path = Path("/mnt/d/books/manga")
+    novels_dir: Path = Path("/mnt/d/books/light_novels")
+    # Light novels looked for at all.
+    novels: bool = True
+    # The newest English literature uploads are read this often...
+    poll_interval_seconds: int = Field(default=900, ge=300)
+    # ...and each followed series searched for every this many days, a few a pass.
+    search_interval_days: float = Field(default=7.0, ge=1.0)
+    searches_per_pass: int = Field(default=6, ge=0, le=50)
+    request_delay_seconds: float = Field(default=5.0, ge=2.0)
+    # A category of their own, so the anime automation never touches them;
+    # saved under qbittorrent.save_path/manga.
+    qbittorrent_category: str = "bankai-manga"
+    min_free_space_gib: float = Field(default=5.0, ge=0)
+    # OpenPanel, the reader: told to scan after each download (it scans only at
+    # startup otherwise). An admin's login; off while the URL is empty.
+    openpanel_url: str = ""
+    openpanel_username: str = ""
+    openpanel_password: str = ""
+
+
 class QueueSettings(BaseModel):
     search_workers: int = 2
     extract_workers: int = 3
@@ -308,6 +336,7 @@ class Settings(BaseSettings):
     metadata: MetadataSettings = Field(default_factory=MetadataSettings)
     transfer: TransferSettings = Field(default_factory=TransferSettings)
     anime: AnimeAutomationSettings = Field(default_factory=AnimeAutomationSettings)
+    manga: MangaSettings = Field(default_factory=MangaSettings)
     paths: PathsSettings = Field(default_factory=PathsSettings)
     prowlarr: ProwlarrSettings = Field(default_factory=ProwlarrSettings)
     qbittorrent: QBittorrentSettings = Field(default_factory=QBittorrentSettings)

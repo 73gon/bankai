@@ -182,6 +182,13 @@ def parse(item: dict) -> dict:
         for edge in (item.get("relations") or {}).get("edges") or []
         if (edge.get("node") or {}).get("type") == "ANIME" and isinstance(edge["node"].get("id"), int)
     ]
+    # The manga and light novels it is linked to (its source, adaptations,
+    # spin-offs), apart: the anime's own relations stay anime only.
+    manga = [
+        [edge["node"]["id"], edge.get("relationType"), edge["node"].get("format")]
+        for edge in (item.get("relations") or {}).get("edges") or []
+        if (edge.get("node") or {}).get("type") == "MANGA" and isinstance(edge["node"].get("id"), int)
+    ]
     image = item.get("coverImage") or {}
     return {
         "romaji": title.get("romaji"),
@@ -205,6 +212,7 @@ def parse(item: dict) -> dict:
         "airing": airing,
         "streaming": streaming,
         "relations": relations,
+        "manga": manga,
         "fetched_at": time.time(),
     }
 
@@ -253,8 +261,9 @@ async def ensure(anilist_ids: set[int] | list[int], *, max_batches: int = 6, ref
             int(aid) for aid in dict.fromkeys(anilist_ids)
             if int(aid) not in rows
             or (refresh and now - float(rows[int(aid)].get("fetched_at", 0)) >= _KEEP)
-            # Kept by a build that did not ask for the MyAnimeList id: taken again.
-            or (refresh and "mal_id" not in rows[int(aid)] and not rows[int(aid)].get("missing"))
+            # Kept by a build that did not ask for the MyAnimeList id, or did not
+            # keep the manga links: taken again.
+            or (refresh and not ({"mal_id", "manga"} <= rows[int(aid)].keys()) and not rows[int(aid)].get("missing"))
         ][: _BATCH * max_batches]
         if not wanted:
             return 0
