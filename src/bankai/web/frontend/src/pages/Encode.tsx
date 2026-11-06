@@ -9,6 +9,7 @@ import { Button } from '@/zon/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
 import { Checkbox } from '@/zon/ui/checkbox';
 import { Progress } from '@/zon/ui/progress';
+import { ScrollArea } from '@/zon/ui/scroll-area';
 import { Skeleton } from '@/zon/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
@@ -22,6 +23,7 @@ const SCOPES: Array<{ key: TrackScopeName; label: string }> = [
 const STEPS: Record<string, string> = {
   encode: 'Encoding the picture',
   dolby_vision: 'Adding Dolby Vision',
+  frame_times: 'Reading the frame times',
   mux: 'Putting the tracks together',
   check: 'Checking against the original',
 };
@@ -160,7 +162,9 @@ function QueueCard({ data, onChanged }: { data: EncodeOverview; onChanged: () =>
           </div>
         )}
         {waiting.length ? (
-          <ol className='flex flex-col divide-y divide-border/60 rounded-control border border-field-edge'>
+          // A long queue scrolls in its own box, so what comes after it is never a long scroll away.
+          <ScrollArea className='max-h-[24rem] rounded-control border border-field-edge'>
+          <ol className='flex flex-col divide-y divide-border/60'>
             {waiting.map((row, index) => (
               <li key={row.path} className='flex items-center gap-3 px-3 py-1.5'>
                 <span className='w-6 shrink-0 font-mono text-xs tabular-nums text-muted-foreground'>{index + 1}</span>
@@ -181,6 +185,7 @@ function QueueCard({ data, onChanged }: { data: EncodeOverview; onChanged: () =>
               </li>
             ))}
           </ol>
+          </ScrollArea>
         ) : !current && <p className='text-muted-foreground'>Nothing queued. Tick files below and press Encode.</p>}
         {data.done.files > 0 && (
           <p>

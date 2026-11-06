@@ -6,7 +6,7 @@ Per library -- anime, shows, movies, with the roots and the file inventory of
 track_cleanup -- the Encode page lists the files worth encoding again; the
 ones ticked there join a queue, and bankai encodes them in its order, one at
 a time, on the GPU (see processor.shrink). Nothing is encoded unasked. The
-result is HEVC (quality 22 in 4K, 20 below): HEVC stays HEVC, and H.264 (or
+result is HEVC (quality 24 in 4K, 22 below; 22 and 20 until Oct 30 2026): HEVC stays HEVC, and H.264 (or
 an older codec) becomes it. Audio, subtitles, chapters,
 HDR10 and Dolby Vision (as profile 8.1) are kept. Measured: Game of Thrones in
 4K and Ice Age in 1080p came out at half the size, SSIM 0.995 and 0.987.
@@ -32,7 +32,6 @@ import hashlib
 import json
 import os
 import shutil
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -40,33 +39,46 @@ from typing import Any
 from bankai.cli import bgjobs
 from bankai.logging import get_logger
 from bankai.web import track_cleanup
+from bankai.web.state_lock import StateLock
 
 log = get_logger(__name__)
 
 SCOPES = track_cleanup.SCOPES
 # What a file's picture is encoded as, by what it is.
-_QUALITY_4K = 22
-_QUALITY_HEVC = 20
+# Two steps smaller than the first runs (22 / 20), for more space (Oct 30 2026);
+# 26 looked softer in dark grain.
+_QUALITY_4K = 24
+_QUALITY_HEVC = 22
 # The least bitrate (Mbps) of an HEVC picture worth encoding again.
 _LINE_4K = 30.0
 _LINE_1080_HEVC = 15.0
 _LINE_SMALL = 10.0
 # What the result runs at, roughly, for the estimate of the space freed.
-_EXPECTED = {"4k": 22.0, "1080_hevc": 8.0, "small": 5.0}
+_EXPECTED = {"4k": 18.0, "1080_hevc": 6.5, "small": 4.0}
 # What HEVC saves of a non-HEVC picture, roughly, for the estimate.
 _HEVC_SAVING = 0.45
 # A result less than a fifth smaller is not worth what it costs.
 _MIN_SAVING = 0.2
 _SSIM_FLOOR = 0.95
+# A file smaller than this has too little to win: not listed, and taken out of the queue.
+_MIN_SIZE = 800 * 2**20
 _SOURCES = {"hevc", "h264", "vc1", "mpeg2video", "mpeg4"}
 
-_LOCK = threading.Lock()
+# Shared with the library worker's process (web.state_lock): its passes write these files too.
+_LOCK = StateLock("encode")
 # What encode_next is doing now, for the page: path, step, share done, start.
 progress: dict[str, Any] = {}
 
 
 def _path(name: str) -> Path:
     return bgjobs.jobs_root().parent / name
+
+
+def current_progress() -> dict[str, Any]:
+    """What is being encoded, wherever it runs: the library worker's heartbeat when it runs the pass (web.library_worker)."""
+    from bankai.web import library_worker
+
+    return library_worker.progress("encode") if library_worker.delegated() else dict(progress)
 
 
 def _read(name: str) -> dict:
@@ -135,7 +147,7 @@ def dequeue(paths: list[str] | None = None) -> int:
     with _LOCK:
         rows = queue()
         drop = set(paths) if paths is not None else {row["path"] for row in rows}
-        kept = [row for row in rows if row["path"] not in drop or row["path"] == progress.get("path")]
+        kept = [row for row in rows if row["path"] not in drop or row["path"] == current_progress().get("path")]
         _save_queue(kept)
     return len(rows) - len(kept)
 
@@ -145,7 +157,7 @@ def to_front(paths: list[str]) -> int:
     with _LOCK:
         rows = queue()
         wanted = list(dict.fromkeys(str(path) for path in paths))
-        busy = progress.get("path")
+        busy = current_progress().get("path")
         front = [row for path in wanted for row in rows if row["path"] == path and path != busy]
         moved = {row["path"] for row in front}
         head = [row for row in rows if row["path"] == busy]
@@ -250,6 +262,8 @@ def assess(path: str, entry: dict) -> tuple[dict[str, Any] | None, str | None]:
     codec = str(video.get("codec") or "")
     if codec not in _SOURCES:
         return None, None
+    if int(entry.get("size") or 0) < _MIN_SIZE:
+        return None, "under 800 MB"
     width = int(video.get("width") or 0)
     if codec != "hevc":
         return _to_hevc(entry, video, width)
@@ -375,7 +389,16 @@ def encode_file(path: Path, scope: str, change: dict[str, Any]) -> dict[str, Any
         state["current"] = {"path": str(path), "scope": scope, "work": str(work), "started": started}
         _save_state(state)
     try:
-        result = shrink.shrink(path, output, work=work, quality=change["quality"], codec=change["codec"], on_progress=report)
+        try:
+            result = shrink.shrink(
+                path, output, work=work, quality=change["quality"], codec=change["codec"], on_progress=report,
+                min_saving=_MIN_SAVING,
+            )
+        except shrink.NotWorthIt as exc:
+            shutil.rmtree(work, ignore_errors=True)
+            _remember("skipped", path, scope, {"reason": "not worth it", "size": before.st_size, "saving": round(exc.saving, 3), "trial": True})
+            log.info("[encode] %s: the trial predicts only %.0f%% smaller, not encoded", path.name, exc.saving * 100)
+            return {"path": str(path), "scope": scope, "skipped": f"trial: only {exc.saving:.0%} smaller"}
         report("check", None)
         windows = shrink.quality_check(path, output, seconds=5.0)
         worst = min((row["ssim"] for row in windows), default=0.0)
@@ -423,10 +446,10 @@ def encode_file(path: Path, scope: str, change: dict[str, Any]) -> dict[str, Any
             _save_state(state)
     shutil.rmtree(work, ignore_errors=True)
     track_cleanup.note(path, scope)
-    if scope == "anime":
-        from bankai.web import jellyfin
+    from bankai.web import jellyfin
 
-        jellyfin.queue([path])
+    # Written anew: Jellyfin reads its tracks again, in every library.
+    jellyfin.queue([path], reprobe=True)
     saved = before.st_size - size
     done = {
         "path": str(path),
@@ -461,10 +484,12 @@ def encode_next() -> dict[str, Any] | None:
     the queue; one that waits -- still seeding, just changed, having tracks
     taken out -- keeps its place, and the next one goes first.
     """
+    from bankai.web import browser_audio
+
     inventory = track_cleanup.load_inventory()
     state = _state()
     waiting: dict[str, int] = {}
-    busy = track_cleanup.progress.get("path")
+    busy = track_cleanup.current_progress().get("path")
     for row in queue():
         path = row["path"]
         entry = inventory.get(path)
@@ -475,6 +500,8 @@ def encode_next() -> dict[str, Any] | None:
         reason = track_cleanup.held(Path(path))
         if reason is None and path == busy:
             reason = "having tracks taken out"
+        if reason is None and path == browser_audio.current_progress().get("path"):
+            reason = "getting browser audio"
         if reason:
             waiting[path] = reason
             continue
@@ -522,7 +549,7 @@ def _group(path: str, scope: str) -> str:
 
 
 def _current() -> dict[str, Any] | None:
-    current = dict(progress) if progress else None
+    current = current_progress() or None
     if current and current.get("step") == "encode" and current.get("fraction"):
         elapsed = time.time() - float(current["started"])
         current["eta"] = round(elapsed / current["fraction"] - elapsed)
@@ -601,7 +628,8 @@ def overview() -> dict[str, Any]:
 
 def lane() -> dict[str, Any]:
     """The Dashboard's Encoding lane: the file being encoded and how many wait."""
-    return {"current": _current(), "queued": max(0, len(queue()) - (1 if progress.get("path") else 0))}
+    current = _current()
+    return {"current": current, "queued": max(0, len(queue()) - (1 if (current or {}).get("path") else 0))}
 
 
 __all__ = [

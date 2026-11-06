@@ -575,9 +575,14 @@ def _read_log_tail(path: Path, *, lines: int = 200) -> list[str]:
                 chunks.append(chunk)
                 newline_count += chunk.count(b"\n")
             data = b"".join(reversed(chunks))
-        return data.decode("utf-8", errors="replace").splitlines()[-lines:]
+        # Without the colours: a job that logs through Rich in colour (anime downloads) wrote
+        # "\x1b[33mstage\x1b[0m=...", which no marker matched -- every one sat at "Starting", 0%.
+        return _ANSI_RE.sub("", data.decode("utf-8", errors="replace")).splitlines()[-lines:]
     except Exception:
         return []
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def _extract_final_path(path: Path) -> str | None:

@@ -162,6 +162,9 @@ def _runtime_from_mapping(raw: dict[str, Any]) -> float | None:
     return walk(raw)
 
 
+SEARCH_TIMEOUT = 100.0
+
+
 class ProwlarrClient:
     def __init__(self, settings: ProwlarrSettings | None = None) -> None:
         self._settings = settings or get_settings().prowlarr
@@ -214,7 +217,9 @@ class ProwlarrClient:
             params["categories"] = categories
         if self._settings.indexer_ids:
             params["indexerIds"] = self._settings.indexer_ids
-        resp = await self._client.get("/api/v1/search", params=params)
+        # Prowlarr answers once every indexer has; one hanging behind FlareSolverr holds it
+        # until its own limit (about 65 s: 1337x, Nov 2026), so 30 s gave up on good results.
+        resp = await self._client.get("/api/v1/search", params=params, timeout=SEARCH_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         return [self._normalize(row) for row in data]

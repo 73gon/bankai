@@ -467,6 +467,10 @@ def build(
                 "detail": f"Every {_interval(row['every_seconds'])}",
                 "due_at": row.get("due_at"),
                 "running": bool(row.get("running")),
+                # Its interval, editable from the row.
+                "pass_name": row.get("name"),
+                "every_seconds": row.get("every_seconds"),
+                "default_seconds": row.get("default_seconds"),
             }
         )
     scheduled.sort(key=lambda row: (not row["running"], row.get("due_at") or now))
@@ -533,15 +537,18 @@ def recent_additions(
     limit: int = RECENT_LIMIT,
     window: float = RECENT_WINDOW_SECONDS,
     encoded: bool = False,
+    change: str | None = None,
 ) -> list[dict]:
     """The newest arrivals, one row per title, newest first.
 
     ``files`` are library-walk entries (``series`` is the title's folder);
     ``cards`` maps a folder name to its library card, for the poster and
     proper title. A show's episodes that arrived within ``window`` of its
-    newest are counted together. ``encoded``: these are files encoded again
-    (``encodes``), each row marked so.
+    newest are counted together. ``change`` says what happened to these files:
+    "added" (new), "encoded" (``encodes``) or "remuxed" (``remuxes``: tracks
+    taken out); ``encoded`` is "encoded".
     """
+    change = change or ("encoded" if encoded else "added")
     groups: dict[tuple[str, str], dict] = {}
     for entry in sorted(files, key=lambda row: -float(row.get("mtime") or 0)):
         folder = str(entry.get("series") or entry.get("name") or "")
@@ -553,8 +560,9 @@ def recent_additions(
                 continue  # a title older than every one already shown
             card = cards.get(folder) or {}
             group = groups[key] = {
-                "key": ("encoded:" if encoded else "") + str(card.get("key") or folder),
-                "encoded": encoded,
+                "key": ("" if change == "added" else change + ":") + str(card.get("key") or folder),
+                "encoded": change == "encoded",
+                "change": change,
                 "title": card.get("title") or folder,
                 "poster_url": card.get("poster_url"),
                 "kind": kind,
@@ -585,8 +593,10 @@ def recent_episodes(
     href: str,
     limit: int = RECENT_EPISODES_LIMIT,
     encoded: bool = False,
+    change: str | None = None,
 ) -> list[dict]:
-    """The newest episode files, one row each, newest first (``encoded``: as recent_additions)."""
+    """The newest episode files, one row each, newest first (``change``: as recent_additions)."""
+    change = change or ("encoded" if encoded else "added")
     newest = sorted(files, key=lambda row: -float(row.get("mtime") or 0))[:limit]
     out = []
     for entry in newest:
@@ -595,8 +605,9 @@ def recent_episodes(
         identity = parse_se(str(entry.get("name") or ""))
         out.append(
             {
-                "key": ("encoded:" if encoded else "") + str(entry.get("path") or entry.get("name")),
-                "encoded": encoded,
+                "key": ("" if change == "added" else change + ":") + str(entry.get("path") or entry.get("name")),
+                "encoded": change == "encoded",
+                "change": change,
                 "title": card.get("title") or folder,
                 "poster_url": card.get("poster_url"),
                 "kind": "episode",
@@ -614,6 +625,15 @@ def encodes(files: Iterable[dict], times: dict[str, float]) -> list[dict]:
     return [{**entry, "mtime": times[str(entry.get("path"))]} for entry in files if str(entry.get("path")) in times]
 
 
+def remuxes(files: Iterable[dict], rows: dict[str, dict]) -> list[dict]:
+    """The library-walk entries of files tracks were taken out of, dated when (track_cleanup.remuxed)."""
+    return [
+        {**entry, "mtime": float(rows[str(entry.get("path"))].get("at") or 0)}
+        for entry in files
+        if str(entry.get("path")) in rows
+    ]
+
+
 def _episode_label(episodes: list[tuple[int, int]]) -> str | None:
     """S01E04, S01E04-E06 or S01E09, S02E01 -- short enough for one line."""
     if not episodes:
@@ -629,3 +649,57 @@ def _episode_label(episodes: list[tuple[int, int]]) -> str | None:
             return f"S{season:02d}E{numbers[0]:02d}-E{numbers[-1]:02d}"
         return f"S{season:02d}, {len(numbers)} episodes"
     return f"{len(episodes)} episodes across {len(seasons)} seasons"
+
+
+def recent_manga(releases: Iterable[dict], *, limit: int = RECENT_LIMIT) -> list[dict]:
+    """Manga and light novel downloads filed into the library, one row per download, newest first:
+    its series' poster and name, and the books it brought ("Vol 01-12", "Chapter 0191")."""
+    from bankai.metadata import anilist_manga
+
+    done = [row for row in releases if row.get("status") == "done" and row.get("copied") and row.get("done_at")]
+    out = []
+    for row in sorted(done, key=lambda item: -float(item["done_at"]))[:limit]:
+        aid = row.get("anilist_id")
+        media = anilist_manga.media(aid) if aid else {}
+        books = list(row.get("copied") or [])
+        out.append(
+            {
+                "key": "manga:" + str(row.get("entry", {}).get("info_hash") or row.get("folder") or row["done_at"]),
+                "change": "added",
+                "title": (anilist_manga.name(aid) if aid else None) or row.get("folder") or "Manga",
+                "poster_url": media.get("cover"),
+                "kind": "book",
+                "href": f"/m/library?series={aid}" if aid else "/m/library",
+                "added_at": float(row["done_at"]),
+                "count": len(books),
+                "episode_label": _book_label(books, len(row.get("replaced") or [])),
+            }
+        )
+    return out
+
+
+def _book_label(books: list[str], replaced: int = 0) -> str:
+    """"Vol 01-12", "Vol 03, Vol 07", "Chapter 0191-0195", "12 books" -- and what they took the place of."""
+    import re
+
+    runs: list[str] = []
+    for label in ("Vol", "Chapter"):
+        numbers = sorted(
+            {float(match.group(1)) for name in books if (match := re.match(rf"{label} (\d+(?:\.\d+)?)", name))}
+        )
+        if not numbers:
+            continue
+        width = 2 if label == "Vol" else 4
+
+        def shown(number: float) -> str:
+            return f"{int(number):0{width}d}" if number == int(number) else f"{number:0{width + 2}.1f}"
+
+        whole = all(n == int(n) for n in numbers) and numbers == [float(n) for n in range(int(numbers[0]), int(numbers[-1]) + 1)]
+        if len(numbers) == 1:
+            runs.append(f"{label} {shown(numbers[0])}")
+        elif whole:
+            runs.append(f"{label} {shown(numbers[0])}-{shown(numbers[-1])}")
+        else:
+            runs.append(f"{len(numbers)} {'volumes' if label == 'Vol' else 'chapters'}")
+    text = ", ".join(runs) or (f"{len(books)} books" if len(books) != 1 else books[0])
+    return text + (f" · replaces {replaced} chapter file{'s' if replaced != 1 else ''}" if replaced else "")

@@ -1,24 +1,32 @@
-"""Telling Jellyfin what bankai changed in the anime library.
+"""Telling Jellyfin what bankai changed in its libraries.
 
 Jellyfin's monitor notices new and removed videos, and its scan new and
 removed items. Neither reads a changed NFO file or a new ``-thumb.jpg`` of an
 episode it already has: the new episode titles and the mid-episode pictures
 waited for a refresh by hand. So whatever bankai writes beside an episode,
-season or show is queued here by its path under the anime root, and a
-scheduler pass asks Jellyfin to refresh those items -- a normal refresh, which
-takes a new local picture over one it grabbed itself.
+season or show is queued here by its path, and a scheduler pass asks Jellyfin
+to refresh those items -- a normal refresh, which takes a new local picture
+over one it grabbed itself.
 
-Jellyfin runs on Windows and sees the library as ``G:\\media\\shows_anime``;
-bankai sees ``/mnt/g/media/shows_anime``. What follows the library's folder
-is the same, so items are matched by that.
+A video bankai wrote anew (tracks taken out, encoded) is queued to be probed
+again: a normal refresh keeps the tracks Jellyfin read before, which then
+point at other tracks of the new file -- German audio became a subtitle and
+played silent. Jellyfin also keeps the subtitles it extracted under each
+track's number, whatever the file now holds there, so those are deleted first.
+
+Jellyfin runs on Windows and sees the libraries as ``G:\\media\\movies`` and
+the like; bankai sees ``/mnt/g/media/movies``. The anime library is matched
+by what follows its folder and the anime root; the others by their drive.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import threading
+import shutil
 import time
+import uuid
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -28,6 +36,7 @@ import httpx
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
+from bankai.web.state_lock import StateLock
 
 log = get_logger(__name__)
 
@@ -36,7 +45,8 @@ _BATCH = 200
 # Jellyfin's list of the library's items, by path, is fetched again after this.
 _INDEX_SECONDS = 600.0
 
-_LOCK = threading.Lock()
+# Shared with the library worker's process (web.state_lock): its passes write these files too.
+_LOCK = StateLock("jellyfin_queue")
 _INDEX: tuple[float, dict[str, str]] | None = None
 # The last time Jellyfin could not be asked and why, for the dashboard.
 last_error: dict[str, object] = {}
@@ -51,15 +61,27 @@ def _queue_path() -> Path:
     return bgjobs.jobs_root().parent / "jellyfin_refresh.json"
 
 
-def _load() -> list[str]:
+def _load() -> list[dict[str, Any]]:
+    """The queue: ``{"path", "reprobe"}`` rows, the path as bankai sees it."""
+    from bankai.web import anime_files
+
     try:
         rows = json.loads(_queue_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    return [str(row) for row in rows] if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        return []
+    loaded = []
+    for row in rows:
+        if isinstance(row, str):
+            # An earlier queue's row: a path under the anime root.
+            row = {"path": str(anime_files.anime_root() / row)}
+        if isinstance(row, dict) and row.get("path"):
+            loaded.append({"path": str(row["path"]), "reprobe": bool(row.get("reprobe"))})
+    return loaded
 
 
-def _save(rows: list[str]) -> None:
+def _save(rows: list[dict[str, Any]]) -> None:
     path = _queue_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
@@ -67,29 +89,30 @@ def _save(rows: list[str]) -> None:
     tmp.replace(path)
 
 
-def _relative(path: Path) -> str | None:
-    from bankai.web import anime_files
+def queue(paths: Iterable[Path], *, reprobe: bool = False) -> int:
+    """Have Jellyfin refresh the items at these paths (a video, a season or show folder).
 
-    try:
-        return PurePosixPath(*path.relative_to(anime_files.anime_root()).parts).as_posix()
-    except ValueError:
-        return None
-
-
-def queue(paths: Iterable[Path]) -> int:
-    """Have Jellyfin refresh the items at these paths (an episode's video, a season or show folder)."""
+    ``reprobe`` for a video written anew: Jellyfin reads its tracks again.
+    """
     if not configured():
         return 0
-    wanted = [rel for path in paths if (rel := _relative(Path(path))) and rel != "."]
+    wanted = [str(Path(path)) for path in paths if Path(path).is_absolute()]
     if not wanted:
         return 0
     with _LOCK:
         rows = _load()
-        known = set(rows)
-        added = [rel for rel in dict.fromkeys(wanted) if rel not in known]
-        if added:
-            _save(rows + added)
-    return len(added)
+        known = {row["path"]: row for row in rows}
+        added = 0
+        for path in dict.fromkeys(wanted):
+            if path in known:
+                known[path]["reprobe"] |= reprobe
+                continue
+            row = {"path": path, "reprobe": reprobe}
+            rows.append(row)
+            known[path] = row
+            added += 1
+        _save(rows)
+    return added
 
 
 def _client() -> httpx.AsyncClient:
@@ -133,7 +156,7 @@ def _is_anime(row: dict[str, Any]) -> bool:
 
 async def catalog() -> list[dict[str, Any]]:
     """Every movie and series of the movie and show libraries but the anime one, with what
-    their genres are made of: for genre_sync. BoxSets take theirs from their children and are
+    their genres are made of (and their age rating): for genre_sync and age_ratings. BoxSets take theirs from their children and are
     left out, as are items in no library (a removed plugin's, until Jellyfin's next scan)."""
     rows: list[dict[str, Any]] = []
     async with _client() as client:
@@ -147,7 +170,7 @@ async def catalog() -> list[dict[str, Any]]:
                     "ParentId": library["ItemId"],
                     "Recursive": "true",
                     "IncludeItemTypes": "Movie" if kind == "movies" else "Series",
-                    "Fields": "Genres,Tags,ProviderIds,Path,Settings,ProductionYear",
+                    "Fields": "Genres,Tags,ProviderIds,Path,Settings,ProductionYear,OfficialRating",
                     "EnableImages": "false",
                     "EnableUserData": "false",
                 },
@@ -163,46 +186,96 @@ async def catalog() -> list[dict[str, Any]]:
                     "genres": list(item.get("Genres") or []),
                     "tags": list(item.get("Tags") or []),
                     "provider_ids": dict(item.get("ProviderIds") or {}),
+                    "rating": item.get("OfficialRating"),
                     "locked_fields": list(item.get("LockedFields") or []),
                     "path": item.get("Path"),
                 })
     return rows
 
 
+def _local(location: str) -> Path | None:
+    """A Jellyfin path as bankai sees it: ``G:\\media\\movies`` is ``/mnt/g/media/movies``."""
+    windows = PureWindowsPath(location)
+    if len(windows.drive) == 2:
+        return Path("/mnt", windows.drive[0].lower(), *windows.parts[1:])
+    return Path(location) if location.startswith("/") else None
+
+
 async def _index(client: httpx.AsyncClient) -> dict[str, str]:
-    """The anime library's shows, seasons and episodes in Jellyfin, by path under the library folder."""
+    """The movies, shows, seasons and episodes in Jellyfin, by their path as bankai sees it."""
+    from bankai.web import anime_files
+
     global _INDEX
     if _INDEX is not None and time.monotonic() - _INDEX[0] < _INDEX_SECONDS:
         return _INDEX[1]
     wanted = get_settings().jellyfin.library
     libraries = await _libraries(client)
-    library = next((row for row in libraries if _is_anime(row)), None)
-    if library is None:
+    if not any(_is_anime(row) for row in libraries):
         raise RuntimeError(f"no Jellyfin library {'named ' + wanted if wanted else 'on the anime folder'}")
-    response = await client.get(
-        "/Items",
-        params={
-            "ParentId": library["ItemId"],
-            "Recursive": "true",
-            "IncludeItemTypes": "Series,Season,Episode",
-            "Fields": "Path",
-            "EnableImages": "false",
-            "EnableUserData": "false",
-        },
-    )
-    response.raise_for_status()
     index: dict[str, str] = {}
-    for item in response.json().get("Items") or []:
-        path = item.get("Path")
-        if not path:
+    for library in libraries:
+        anime = _is_anime(library)
+        if not anime and library.get("CollectionType") not in ("movies", "tvshows"):
             continue
-        for location in library.get("Locations") or []:
-            rel = _jellyfin_relative(str(path), str(location))
-            if rel and rel != ".":
-                index[rel] = str(item["Id"])
-                break
+        response = await client.get(
+            "/Items",
+            params={
+                "ParentId": library["ItemId"],
+                "Recursive": "true",
+                "IncludeItemTypes": "Series,Season,Episode" if anime else "Movie,Series,Season,Episode",
+                "Fields": "Path",
+                "EnableImages": "false",
+                "EnableUserData": "false",
+            },
+        )
+        response.raise_for_status()
+        for item in response.json().get("Items") or []:
+            path = item.get("Path")
+            if not path:
+                continue
+            for location in library.get("Locations") or []:
+                rel = _jellyfin_relative(str(path), str(location))
+                root = anime_files.anime_root() if anime else _local(str(location))
+                if rel and rel != "." and root is not None:
+                    index[str(root / rel)] = str(item["Id"])
+                    break
     _INDEX = (time.monotonic(), index)
     return index
+
+
+async def _subtitle_cache(client: httpx.AsyncClient) -> Path | None:
+    """Where Jellyfin keeps the subtitles it extracted, one folder per video; None out of reach."""
+    response = await client.get("/System/Info")
+    response.raise_for_status()
+    data = _local(str(response.json().get("ProgramDataPath") or ""))
+    folder = data / "data" / "subtitles" if data else None
+    return folder if folder and folder.is_dir() else None
+
+
+def _forget_subtitles(cache: Path | None, item: str) -> None:
+    """Delete what Jellyfin extracted from a video's earlier file; it extracts the new one's again."""
+    if cache is None:
+        return
+    try:
+        name = str(uuid.UUID(item))
+    except ValueError:
+        return
+    shutil.rmtree(cache / name[:2] / name, ignore_errors=True)
+
+
+async def _known_parent(client: httpx.AsyncClient, path: Path, index: dict[str, str]) -> str | None:
+    """The nearest folder above ``path`` Jellyfin has an item for: a show or season, else the library."""
+    from bankai.web import anime_files
+
+    for folder in path.parents:
+        if str(folder) in index:
+            return index[str(folder)]
+    for library in await _libraries(client):
+        for location in library.get("Locations") or []:
+            root = anime_files.anime_root() if _is_anime(library) else _local(str(location))
+            if root is not None and (path == root or root in path.parents):
+                return str(library["ItemId"])
+    return None
 
 
 async def flush(*, limit: int = _BATCH) -> dict[str, int]:
@@ -216,24 +289,42 @@ async def flush(*, limit: int = _BATCH) -> dict[str, int]:
     try:
         async with _client() as client:
             index = await _index(client)
-            if any(rel not in index for rel in taken):
+            if any(row["path"] not in index for row in taken):
                 # Published since the list was fetched: look again once.
                 _INDEX = None
                 index = await _index(client)
-            for rel in taken:
-                item = index.get(rel)
+            cache = await _subtitle_cache(client) if any(row["reprobe"] for row in taken) else None
+            folders: dict[str, str] = {}
+            for row in taken:
+                item = index.get(row["path"])
                 if item is None:
-                    # Not in Jellyfin (yet): its first scan reads the NFO and picture anyway.
+                    # Not in Jellyfin yet: the nearest folder it knows (the show, else the library)
+                    # is refreshed recursively, which finds it -- its watcher misses files written
+                    # over /mnt/g, and the next scan may be hours away.
                     unknown += 1
+                    parent = await _known_parent(client, Path(row["path"]), index)
+                    if parent is not None:
+                        folders.setdefault(parent, row["path"])
                     continue
+                if row["reprobe"]:
+                    await asyncio.to_thread(_forget_subtitles, cache, item)
                 response = await client.post(
                     f"/Items/{item}/Refresh",
                     params={
-                        "MetadataRefreshMode": "Default",
+                        # A full refresh probes the file again; it still replaces no metadata.
+                        "MetadataRefreshMode": "FullRefresh" if row["reprobe"] else "Default",
                         "ImageRefreshMode": "Default",
                         "ReplaceAllMetadata": "false",
                         "ReplaceAllImages": "false",
                     },
+                )
+                response.raise_for_status()
+                refreshed += 1
+            for parent in folders:
+                response = await client.post(
+                    f"/Items/{parent}/Refresh",
+                    params={"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default",
+                            "ReplaceAllMetadata": "false", "ReplaceAllImages": "false"},
                 )
                 response.raise_for_status()
                 refreshed += 1
@@ -245,8 +336,8 @@ async def flush(*, limit: int = _BATCH) -> dict[str, int]:
         return {"refreshed": 0, "remaining": len(pending), "failed": 1}
     last_error.clear()
     with _LOCK:
-        done = set(taken)
-        rest = [rel for rel in _load() if rel not in done]
+        done = {row["path"] for row in taken}
+        rest = [row for row in _load() if row["path"] not in done]
         _save(rest)
     return {"refreshed": refreshed, "not_in_jellyfin": unknown, "remaining": len(rest)}
 

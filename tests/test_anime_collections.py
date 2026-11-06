@@ -244,6 +244,17 @@ def test_the_main_line_is_its_seasons_in_sequel_order(titan) -> None:
     assert placing.place(12345, 1) is None
 
 
+def test_a_season_named_by_hand_is_the_name_its_season_nfo_gets(titan) -> None:
+    store = Store()
+    row = store.create([S3P2, OVA, S1, S3, S2], title=S1)
+    collections.name_season(store, row.id, S3, "Return to Shiganshina")
+
+    placing = collections.plan(row)
+
+    assert placing.names == {3: "Return to Shiganshina"}
+    assert placing.opens_entry(3)
+
+
 def test_a_prequel_made_later_is_the_season_after_the_ones_already_there(anilist_data) -> None:
     """Seasons are counted as they aired, not by AniList's story order."""
     anilist_data.add(1, "Show", episodes=12, start="2015-01-01", relations=[(2, "PREQUEL")])
@@ -328,9 +339,46 @@ def test_the_sequel_chain_comes_first_and_the_rest_by_air_date() -> None:
 def test_a_tab_is_named_without_the_collections_own_name() -> None:
     assert collections.short_label("Attack on Titan Season 2", "Attack on Titan") == "Season 2"
     assert collections.short_label("Attack on Titan: Junior High", "attack on titan") == "Junior High"
-    assert collections.short_label("Attack on Titan", "Attack on Titan") == "Attack on Titan"
+    # The entry that is the show itself: nothing left, its tab says "Season 1".
+    assert collections.short_label("Attack on Titan", "Attack on Titan") == ""
     assert collections.short_label("Kimi no Na wa.", "Attack on Titan") == "Kimi no Na wa."
     assert collections.short_label("Attack on Titan Season 2", None) == "Attack on Titan Season 2"
+    # Not inside a word.
+    assert collections.short_label("Attack on Titans", "Attack on Titan") == "Attack on Titans"
+
+
+def test_a_collection_named_like_its_folder_still_leaves_its_seasons_just_season_n() -> None:
+    folder = "ReZero - Starting Life in Another World"
+    assert collections.short_label("Re:ZERO -Starting Life in Another World- Season 2", folder) == "Season 2"
+    assert collections.short_label("Re:ZERO -Starting Life in Another World-", folder) == ""
+    # Renamed to something else entirely: the title entry's name is taken off instead.
+    assert collections.short_label(
+        "Re:ZERO -Starting Life in Another World- Season 3", "Re:Zero", also="Re:ZERO -Starting Life in Another World-"
+    ) == "Season 3"
+
+
+def test_a_season_tab_says_season_n_unless_its_name_says_more() -> None:
+    from bankai.web.anime_library import season_tab
+
+    assert season_tab(1, "") == "Season 1"
+    assert season_tab(2, "Season 2") == "Season 2"
+    assert season_tab(2, "season 02") == "Season 2"
+    assert season_tab(4, "Final Season") == "S4 · Final Season"
+
+
+def test_a_season_named_by_hand_keeps_its_name_with_the_entry_it_opens_with() -> None:
+    store = Store()
+    store.collections[1] = collections.Collection(1, [10, 20, 30], title=10)
+    collections.name_season(store, 1, 20, "  The   Sanctuary  ")
+    assert store.collections[1].season_names == {20: "The Sanctuary"}
+    with pytest.raises(ValueError):
+        collections.name_season(store, 1, 99, "Not a member")
+    # Kept and read back.
+    data = store.collections[1].as_dict()
+    assert data["season_names"] == {"20": "The Sanctuary"}
+    collections.name_season(store, 1, 20, "")
+    assert store.collections[1].season_names == {}
+    assert "season_names" not in store.collections[1].as_dict()
 
 
 # -- Changes by hand ---------------------------------------------------------------------

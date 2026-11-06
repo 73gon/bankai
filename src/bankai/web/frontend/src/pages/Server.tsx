@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Server as ServerIcon, RefreshCw, Film, Tv, Sparkles, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type ServerTitle, type ServerSeason, type ServerDirKind } from '@/lib/api';
@@ -256,11 +256,19 @@ export default function Server() {
   const [draft, setDraft] = useState<Record<ServerDirKind, string>>({ movie: '', show: '', anime: '' });
   const [dirBusy, setDirBusy] = useState(false);
 
+  // The last answers: the same one again (coming back to the tab) changes nothing on the page.
+  const lastContents = useRef<unknown>(null);
+  const lastDirs = useRef<unknown>(null);
+
   async function load(rescan = false) {
-    rescan ? setRescanning(true) : setLoading(true);
+    // The spinner only while there is nothing to show yet.
+    if (rescan) setRescanning(true);
+    else if (lastContents.current === null) setLoading(true);
     setError(null);
     try {
       const r = await api.serverContents(rescan);
+      if (r === lastContents.current) return;
+      lastContents.current = r;
       setMovies(r.movies);
       setShows(r.shows);
       setAnime(r.anime ?? []);
@@ -276,6 +284,8 @@ export default function Server() {
   async function loadDirs() {
     try {
       const r = await api.serverDirs();
+      if (r === lastDirs.current) return;
+      lastDirs.current = r;
       setDirs({ movie: r.movie_dirs, show: r.show_dirs, anime: r.anime_dirs ?? [] });
     } catch (e: any) {
       toast.error(e.message);

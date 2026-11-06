@@ -1,11 +1,12 @@
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
 import { cn } from '@/zon/lib/cn';
-import { TableHead } from '@/zon/ui/table';
+import { TableHead, type TableHeadProps } from '@/zon/ui/table';
 
 export type SortDir = 'asc' | 'desc';
 export type SortState<K extends string> = { key: K; dir: SortDir };
 
-/** A column heading that sorts, for any table that has one.
+/** A column heading that sorts, for any table that has one. In a `fit` table
+ *  it takes the column's fit options (`priority`, `inline`, …) as TableHead does.
  *
  *  The arrow only appears on the column actually sorting, and faintly on
  *  hover elsewhere, so a row of headings does not read as a row of controls
@@ -18,6 +19,7 @@ export function SortHeader<K extends string>({
   onSort,
   align = 'left',
   className,
+  ...fit
 }: {
   label: string;
   column: K;
@@ -25,11 +27,12 @@ export function SortHeader<K extends string>({
   onSort: (key: K) => void;
   align?: 'left' | 'right';
   className?: string;
-}) {
+} & Pick<TableHeadProps, 'priority' | 'inline' | 'minWidth' | 'width' | 'titleColumn'>) {
   const active = sort?.key === column;
   const Icon = !active ? ArrowUpDown : sort.dir === 'asc' ? ArrowUp : ArrowDown;
   return (
     <TableHead
+      {...fit}
       numeric={align === 'right'}
       className={className}
       aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}

@@ -12,7 +12,7 @@ import httpx
 from bankai.config import get_settings
 from bankai.metadata import anilist
 from bankai.metadata import anilist_manga as manga_meta
-from bankai.web import anime_files, manga_contents, manga_library, manga_names, manga_series
+from bankai.web import anime_files, manga_collections, manga_contents, manga_layout, manga_library, manga_names, manga_series
 from bankai.web import manga_releases as releases_mod
 
 # Finished downloads stay on the library page this long.
@@ -331,17 +331,56 @@ def library() -> dict[str, Any]:
     return {
         "series": [_card(aid, **cards) for aid in on_disk],
         "followed": [_card(aid, **cards) for aid in followed if aid not in on_disk],
+        "collections": collections(),
         "unmatched": manga_library.unmatched(),
         "downloads": downloads,
+    }
+
+
+def collections() -> list[dict[str, Any]]:
+    """The collections (manga_collections): {id, name, custom, folder, members} -- ``folder`` once two
+    or more of them are on disk (manga_layout), the members in their order."""
+    on_disk = set(manga_library.series())
+    store = manga_collections.refresh(manga_collections.present())
+    return [
+        {
+            "id": cid,
+            "name": manga_collections.name(row),
+            "custom": row.custom,
+            "folder": manga_collections.folder_name(row) if manga_layout.gathered(row, on_disk) else None,
+            "members": row.members,
+        }
+        for cid, row in sorted(store.collections.items())
+    ]
+
+
+def _collection_of(anilist_id: int) -> dict[str, Any] | None:
+    """The collection a series is in, with each entry's name and whether the library has it: the drawer's tabs."""
+    row = manga_collections.refresh(manga_collections.present()).collection_of(int(anilist_id))
+    if row is None:
+        return None
+    on_disk = set(manga_library.series())
+    return {
+        "id": row.id,
+        "name": manga_collections.name(row),
+        "custom": row.custom,
+        "members": [
+            {"anilist_id": aid, "name": manga_meta.name(aid), "year": manga_meta.media(aid).get("year"), "on_disk": aid in on_disk}
+            for aid in row.members
+        ],
     }
 
 
 async def linked(anime_ids: list[int]) -> list[dict[str, Any]]:
     """The manga and light novels these anime link to, with what bankai does about each."""
     edges: dict[int, tuple[str, str | None]] = {}
+    # Which of the anime link each one, in the order asked: the relation graph draws its line from the first.
+    linking: dict[int, list[int]] = {}
     for anime_id in anime_ids:
         for manga_id, relation, format_ in anilist.media(anime_id).get("manga") or []:
             edges.setdefault(int(manga_id), (str(relation), format_))
+            if anime_id not in linking.setdefault(int(manga_id), []):
+                linking[int(manga_id)].append(anime_id)
     await manga_meta.ensure(list(edges), refresh=False, max_batches=1)
     on_disk = manga_library.series()
     followed = manga_series.followed()
@@ -360,6 +399,7 @@ async def linked(anime_ids: list[int]) -> list[dict[str, Any]]:
             "followed": aid in followed,
             "blacklisted": aid in blacklisted,
             "in_review": aid in waiting,
+            "anime": linking.get(aid, []),
         }
         for aid, (relation, format_) in edges.items()
     ]
@@ -384,31 +424,58 @@ async def graph(anilist_id: int) -> dict[str, Any]:
     on_disk = manga_library.series()
     followed = manga_series.followed()
     blacklisted = manga_series.blacklisted()
+    # Its collection whole, as the anime library's graph: every entry of it, with what each relates to.
+    store = manga_collections.refresh(manga_collections.present())
+    owners = store.of()
+    mine = owners.get(int(anilist_id))
+    members = store.collections[mine].members if mine is not None else [int(anilist_id)]
+    await manga_meta.ensure([*members, *(int(row[0]) for aid in members for row in manga_meta.media(aid).get("relations") or [] if row[2] == "MANGA")],
+                            refresh=False, max_batches=1)
 
     def manga_node(aid: int, relation: str | None) -> dict[str, Any]:
         kept = manga_meta.media(aid)
+        owner = owners.get(aid)
         return {
             "anilist_id": aid, "type": "MANGA", "format": kept.get("format"), "title": manga_meta.name(aid) or f"AniList {aid}",
             "year": kept.get("year"), "cover": kept.get("cover"), "relation": relation,
             "on_disk": aid in on_disk, "followed": aid in followed, "blacklisted": aid in blacklisted,
             "owned": manga_names.describe(*manga_library.owned(aid)) if aid in on_disk else "",
+            "collection_id": owner,
+            "collection_name": manga_collections.name(store.collections[owner]) if owner is not None else None,
+            "in_collection": owner is not None and owner == mine,
         }
 
-    nodes = [manga_node(anilist_id, None)]
+    # The same graph from every entry of a collection: its entries, and what each relates to.
+    await anilist.ensure([int(row[0]) for aid in members for row in manga_meta.media(aid).get("relations") or [] if row[2] == "ANIME"],
+                         refresh=False, max_batches=1)
+    nodes = [manga_node(member, None) for member in members]
+    seen = {("MANGA", member) for member in members}
     edges = []
-    for other, relation, kind, _format in relations:
-        if kind == "MANGA":
-            nodes.append(manga_node(int(other), relation))
-        else:
-            kept = anilist.media(int(other))
-            nodes.append({
-                "anilist_id": int(other), "type": "ANIME", "format": kept.get("format"),
-                "title": anilist.name(int(other)) if kept else f"AniList {other}",
-                "year": kept.get("year"), "cover": kept.get("cover"), "relation": relation,
-                "on_disk": int(other) in anime_on_disk,
-            })
-        edges.append({"from": anilist_id, "to": int(other), "label": relation})
-    return {"root": anilist_id, "nodes": nodes, "edges": edges}
+    for member in members:
+        for other, relation, kind, _format in manga_meta.media(member).get("relations") or []:
+            key = (kind, int(other))
+            if key not in seen:
+                seen.add(key)
+                if kind == "MANGA":
+                    nodes.append(manga_node(int(other), relation))
+                else:
+                    kept = anilist.media(int(other))
+                    nodes.append({
+                        "anilist_id": int(other), "type": "ANIME", "format": kept.get("format"),
+                        "title": anilist.name(int(other)) if kept else f"AniList {other}",
+                        "year": kept.get("year"), "cover": kept.get("cover"), "relation": relation,
+                        "on_disk": int(other) in anime_on_disk,
+                    })
+            edges.append({"from": member, "to": int(other), "label": relation, "to_type": kind})
+    drawn: set[frozenset[int]] = set()
+    unique = []
+    for edge in edges:
+        pair = frozenset((edge["from"], edge["to"]))
+        if pair not in drawn:
+            drawn.add(pair)
+            unique.append(edge)
+    return {"root": anilist_id, "nodes": nodes, "edges": unique, "members": members, "collection_id": mine,
+            "collection_name": manga_collections.name(store.collections[mine]) if mine is not None else None}
 
 
 async def series_detail(anilist_id: int) -> dict[str, Any]:
@@ -434,6 +501,7 @@ async def series_detail(anilist_id: int) -> dict[str, Any]:
         "policy": manga_series.policies().get(int(anilist_id)),
         "breakdown": await asyncio.to_thread(breakdown, anilist_id),
         "graph": await graph(anilist_id),
+        "collection": _collection_of(anilist_id),
     }
 
 

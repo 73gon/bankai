@@ -227,3 +227,32 @@ async def test_extract_worker_falls_back_to_playwright(tmp_path: Path) -> None:
         (job,) = repo.list_jobs()
     assert job.status.value == "done"
     assert inner.calls == ["http://stream/y.mp4"]
+
+
+async def test_a_capture_of_only_short_clips_is_refused_so_the_next_source_is_tried(tmp_path: Path, monkeypatch) -> None:
+    """voe served an ad clip as the only media (Spider-Man: Brand New Day, Oct 2026)."""
+    from bankai.processor import extractor
+
+    runner = extractor.PlaywrightRunner()
+    ad = "https://cdn.example/sb/notifications/clip/icon.mp4"
+
+    async def capture(url):
+        return [ad], url
+
+    async def longest(urls, _runner):
+        return ad, 15.0
+
+    monkeypatch.setattr(extractor, "_acquire_capture_lease", lambda: None)
+    monkeypatch.setattr(extractor, "_release_capture_lease", lambda handle: None)
+    monkeypatch.setattr(runner, "_capture", capture)
+    monkeypatch.setattr(runner, "_pick_longest", longest)
+    with pytest.raises(extractor.PlaywrightError, match="only short clips"):
+        await runner.extract("https://voe.sx/abc", tmp_path)
+
+
+def test_ad_banner_clips_are_never_candidates() -> None:
+    from bankai.processor import extractor
+
+    url = "https://cdn.cloudpiko.com/sb/notifications/gambling/default/custom-banner/8-1/img/icon.mp4"
+    assert any(bad in url.lower() for bad in extractor._NOT_THE_FEATURE)
+    assert not any(bad in "https://cdn.example/engine/hls2/01/18442/x_,n,.urlset/master.m3u8" for bad in extractor._NOT_THE_FEATURE)

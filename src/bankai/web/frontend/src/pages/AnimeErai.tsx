@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Download, ExternalLink, RefreshCw, Replace, Search, Subtitles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, ExternalLink, Magnet, RefreshCw, Replace, Subtitles } from 'lucide-react';
 import { toast } from '@/lib/toast';
+import { copyText } from '@/lib/clipboard';
+import { SuggestField, type Suggestion } from '@/components/suggest-field';
 
 import { StatusTag } from '@/components/status-tag';
 import { ReplaceDialog, replaceLabel, type ReplaceCandidate } from '@/components/ReplaceDialog';
 import { Button } from '@/zon/ui/button';
 import { Empty, EmptyActions, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
 import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
-import { api, eraiPath, recall, type EraiCodec, type EraiPage, type EraiRelease, type EraiResolution } from '@/lib/api';
+import { api, eraiPath, recall, type EraiCodec, type EraiKind, type EraiPage, type EraiRelease, type EraiResolution } from '@/lib/api';
 import { timeAgo } from '@/lib/utils';
 import { cn } from '@/zon/lib/cn';
 
@@ -18,8 +20,17 @@ type GermanFilter = 'all' | 'yes' | 'no';
 
 const RES_KEY = 'bankai:erai:resolution';
 const CODEC_KEY = 'bankai:erai:codec';
+const KIND_KEY = 'bankai:erai:kind';
 const CODECS: Array<[EraiCodec, string]> = [['all', 'All'], ['hevc', 'HEVC'], ['avc', 'AVC']];
 const RESOLUTIONS: EraiResolution[] = ['1080p', '720p', 'SD', 'all'];
+// What Erai's category says a release is. A finale counts as airing; a batch of encodes is both.
+const KINDS: Array<{ value: EraiKind; label: string }> = [
+  { value: 'all', label: 'All releases' },
+  { value: 'airing', label: 'Airing' },
+  { value: 'encoded', label: 'Encoded' },
+  { value: 'batch', label: 'Batch' },
+  { value: 'special', label: 'Movies & specials' },
+];
 
 // 1080p unless this browser chose otherwise: the other qualities rarely matter.
 function storedResolution(): EraiResolution {
@@ -35,6 +46,25 @@ function storedResolution(): EraiResolution {
 // and coming back finds them as they were.
 const VIEW_KEY = 'bankai:erai:view';
 
+/** The search's suggestions: Erai-raws' show names, another name that led to one beside it. */
+async function suggestShows(query: string): Promise<Suggestion[]> {
+  const { items } = await api.eraiSuggest(query);
+  return items.map((item) => ({
+    value: item.name,
+    label: item.name,
+    hint: item.via ? item.via : item.releases + ' release' + (item.releases === 1 ? '' : 's'),
+  }));
+}
+
+async function copyMagnet(row: EraiRelease) {
+  try {
+    await copyText(row.magnet!);
+    toast.success('Magnet link copied');
+  } catch (error: any) {
+    toast.error(error.message);
+  }
+}
+
 function storedView(): { query: string; german: GermanFilter; page: number } {
   try {
     const saved = JSON.parse(sessionStorage.getItem(VIEW_KEY) ?? '{}');
@@ -45,6 +75,15 @@ function storedView(): { query: string; german: GermanFilter; page: number } {
     };
   } catch {
     return { query: '', german: 'all', page: 0 };
+  }
+}
+
+function storedKind(): EraiKind {
+  try {
+    const saved = localStorage.getItem(KIND_KEY) as EraiKind | null;
+    return saved && KINDS.some((kind) => kind.value === saved) ? saved : 'all';
+  } catch {
+    return 'all';
   }
 }
 
@@ -124,10 +163,11 @@ export default function AnimeErai({
   const [german, setGerman] = useState<GermanFilter>(start.german);
   const [res, setRes] = useState<EraiResolution>(storedResolution);
   const [codec, setCodec] = useState<EraiCodec>(storedCodec);
+  const [kind, setKind] = useState<EraiKind>(storedKind);
   const [page, setPage] = useState(start.page);
   // Started from the last answer this browser saw, refreshed straight after.
-  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(start.page, start.query, start.german, storedResolution(), storedCodec())));
-  const [loading, setLoading] = useState(() => recall(eraiPath(start.page, start.query, start.german, storedResolution(), storedCodec())) === undefined);
+  const [data, setData] = useState<EraiPage | undefined>(() => recall<EraiPage>(eraiPath(start.page, start.query, start.german, storedResolution(), storedCodec(), storedKind())));
+  const [loading, setLoading] = useState(() => recall(eraiPath(start.page, start.query, start.german, storedResolution(), storedCodec(), storedKind())) === undefined);
   const [refreshing, setRefreshing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   // The row being considered for a replacement.
@@ -150,12 +190,12 @@ export default function AnimeErai({
     return () => window.clearTimeout(timer);
   }, [query]);
   // A changed search or filter starts at its first page; the page restored on arrival stays.
-  const filters = useRef(JSON.stringify([start.query, start.german, res, codec]));
+  const filters = useRef(JSON.stringify([start.query, start.german, res, codec, kind]));
   useEffect(() => {
-    const now = JSON.stringify([search, german, res, codec]);
+    const now = JSON.stringify([search, german, res, codec, kind]);
     if (now !== filters.current) setPage(0);
     filters.current = now;
-  }, [search, german, res, codec]);
+  }, [search, german, res, codec, kind]);
   useEffect(() => {
     if (embedded) return;
     try {
@@ -168,23 +208,24 @@ export default function AnimeErai({
     try {
       localStorage.setItem(RES_KEY, res);
       localStorage.setItem(CODEC_KEY, codec);
+      localStorage.setItem(KIND_KEY, kind);
     } catch {
       /* a remembered filter is a convenience */
     }
-  }, [res, codec]);
+  }, [res, codec, kind]);
 
   const load = useCallback(async () => {
-    const held = recall<EraiPage>(eraiPath(page, search, german, res, codec));
+    const held = recall<EraiPage>(eraiPath(page, search, german, res, codec, kind));
     if (held) setData(held);
     else setLoading(true);
     try {
-      setData(await api.eraiReleases(page, search, german, res, codec));
+      setData(await api.eraiReleases(page, search, german, res, codec, kind));
     } catch (error: any) {
       toast.error(error.message);
     } finally {
       setLoading(false);
     }
-  }, [page, search, german, res, codec]);
+  }, [page, search, german, res, codec, kind]);
 
   useEffect(() => {
     void load();
@@ -243,12 +284,23 @@ export default function AnimeErai({
       ) : (
         <>
           <div className='flex flex-wrap items-center gap-3'>
-            <InputGroup className='min-w-64 flex-1 sm:max-w-sm'>
-              <InputGroupAddon>
-                <Search aria-hidden='true' />
-              </InputGroupAddon>
-              <InputGroupInput ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Filter by release name…' aria-label='Filter Erai-raws releases' />
-            </InputGroup>
+            <SuggestField
+              className='min-w-64 flex-1 sm:max-w-sm'
+              inputRef={searchRef}
+              value={query}
+              onValueChange={setQuery}
+              load={suggestShows}
+              placeholder='Filter by show or release name…'
+              label='Filter Erai-raws releases'
+            />
+            <Select items={KINDS} value={kind} onValueChange={(value) => value !== null && setKind(value as EraiKind)}>
+              <SelectTrigger aria-label='Kind of release' className='w-44'><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {KINDS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             <ToggleGroup<EraiResolution> aria-label='Resolution' value={[res]} onValueChange={(values) => values[0] && setRes(values[0])}>
               {RESOLUTIONS.map((value) => (
                 <ToggleGroupItem<EraiResolution> key={value} value={value}>{value === 'all' ? 'All' : value}</ToggleGroupItem>
@@ -276,17 +328,16 @@ export default function AnimeErai({
                   <TableHead numeric>Size</TableHead>
                   <TableHead>Released</TableHead>
                   <TableHead>bankai</TableHead>
-                  <TableHead>{replaceFor ? 'Use' : 'Download'}</TableHead>
-                  <TableHead numeric>Link</TableHead>
+                  <TableHead align='end'>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading && !data && (
-                  <TableRow><TableCell colSpan={8} className='py-8 text-center text-muted-foreground'>Loading…</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={7} className='py-8 text-center text-muted-foreground'>Loading…</TableCell></TableRow>
                 )}
                 {data && data.items.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={8} className='py-8 text-center text-muted-foreground'>
+                    <TableCell colSpan={7} className='py-8 text-center text-muted-foreground'>
                       {data.empty_show ? (
                         <>
                           Erai-raws has a page for this show, but lists no release on it: older shows are often emptied there.
@@ -303,7 +354,7 @@ export default function AnimeErai({
                     <TableRow key={row.info_hash}>
                       <TableCell className='max-w-[30rem] py-2'>
                         <p className='truncate text-foreground' title={row.name}>{row.name}</p>
-                        {row.category && <p className='text-[0.68rem] text-muted-foreground'>{row.category}</p>}
+                        {row.category && <p className='text-[0.68rem] text-muted-foreground'>{row.category.split('][').join(' · ')}</p>}
                       </TableCell>
                       <TableCell className='max-w-[18rem] py-2'><SubtitleChips row={row} languages={data.languages} /></TableCell>
                       <TableCell className='whitespace-nowrap py-2 font-mono text-xs text-muted-foreground'>
@@ -316,33 +367,45 @@ export default function AnimeErai({
                         {status ? <StatusTag variant={status.variant} title={row.reason ?? undefined}>{status.label}</StatusTag> : <span className='text-xs text-muted-foreground'>—</span>}
                       </TableCell>
                       <TableCell className='whitespace-nowrap py-2'>
-                        {row.episodes ? (
-                          <Button
-                            size='sm'
-                            variant={row.german ? 'primary' : 'secondary'}
-                            disabled={TAKEN.has(row.status ?? '') || queueing.has(row.info_hash)}
-                            title={TAKEN.has(row.status ?? '')
-                              ? 'bankai already has this release'
-                              : replaceFor ? 'Take this release in place of what the card holds' : 'Download it for the AniList entry its name says; what it changes is shown first'}
-                            onClick={() => consider(row)}
-                          >
-                            {replaceFor ? <Replace data-icon='inline-start' /> : <Download data-icon='inline-start' />}{' '}
-                            {queueing.has(row.info_hash) ? 'Queueing…' : replaceFor ? replaceLabel(row.episodes) : 'Download'}
-                          </Button>
-                        ) : <span className='text-xs text-muted-foreground' title='Its episode numbers cannot be read from the name'>—</span>}
-                      </TableCell>
-                      <TableCell className='py-2 text-right'>
-                        {row.page && (
-                          <Button
-                            size='icon-sm'
-                            variant='ghost'
-                            title='Open on erai-raws.info'
-                            nativeButton={false}
-                            render={<a href={row.page} target='_blank' rel='noreferrer' aria-label={'Open ' + row.name + ' on erai-raws.info'} />}
-                          >
-                            <ExternalLink />
-                          </Button>
-                        )}
+                        {/* Download (or Use, for a review card) and the release's page, side by side. */}
+                        <div className='flex items-center justify-end gap-1'>
+                          {row.episodes ? (
+                            <Button
+                              size='sm'
+                              variant={row.german ? 'primary' : 'secondary'}
+                              disabled={TAKEN.has(row.status ?? '') || queueing.has(row.info_hash)}
+                              title={TAKEN.has(row.status ?? '')
+                                ? 'bankai already has this release'
+                                : replaceFor ? 'Take this release in place of what the card holds' : 'Download it for the AniList entry its name says; what it changes is shown first'}
+                              onClick={() => consider(row)}
+                            >
+                              {replaceFor ? <Replace data-icon='inline-start' /> : <Download data-icon='inline-start' />}{' '}
+                              {queueing.has(row.info_hash) ? 'Queueing…' : replaceFor ? replaceLabel(row.episodes) : 'Download'}
+                            </Button>
+                          ) : <span className='px-2 text-xs text-muted-foreground' title='Its episode numbers cannot be read from the name'>—</span>}
+                          {row.magnet && (
+                            <Button
+                              size='icon-sm'
+                              variant='ghost'
+                              title='Copy magnet link'
+                              aria-label={'Copy the magnet link of ' + row.name}
+                              onClick={() => void copyMagnet(row)}
+                            >
+                              <Magnet />
+                            </Button>
+                          )}
+                          {row.page && (
+                            <Button
+                              size='icon-sm'
+                              variant='ghost'
+                              title='Open on erai-raws.info'
+                              nativeButton={false}
+                              render={<a href={row.page} target='_blank' rel='noreferrer' aria-label={'Open ' + row.name + ' on erai-raws.info'} />}
+                            >
+                              <ExternalLink />
+                            </Button>
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   );

@@ -118,10 +118,11 @@ async def plan(*, fresh: bool = False, language: str | None = None) -> dict[str,
         # so a click keeps it (Avatar's Fantasy, once its TVDB match was put right).
         jellyfin_raw = (kept.get(key) or {}).get("genres", item["genres"]) if library is None else []
         removed = set((picks.get(key) or {}).get("remove") or [])
-        jellyfin_only = [
-            gid for gid in genres.resolve(rules, genres=jellyfin_raw, tags=item["tags"]).ids
-            if gid not in result.ids and gid not in removed
-        ]
+        from_jellyfin = genres.resolve(rules, genres=jellyfin_raw, tags=item["tags"]).ids
+        jellyfin_only = [gid for gid in from_jellyfin if gid not in result.ids and gid not in removed]
+        # Kept by a click on one of those: Jellyfin's own genre, not one added by hand -- shown as the
+        # rules' (it was shown blue, "added by hand", for a genre the title always had).
+        kept_from_jellyfin = [gid for gid in (picks.get(key) or {}).get("add") or [] if gid in from_jellyfin]
         for raw in result.discarded:
             discarded.setdefault(raw.casefold(), []).append(item["name"])
         for raw in result.unmapped:
@@ -147,6 +148,7 @@ async def plan(*, fresh: bool = False, language: str | None = None) -> dict[str,
             "dropped": {gid: [f"{kind}: {raw}" if raw else kind for kind, raw in why] for gid, why in result.dropped.items()},
             "unmapped": result.unmapped,
             "jellyfin_only": jellyfin_only,
+            "kept_from_jellyfin": kept_from_jellyfin,
             "override": picks.get(key),
             "written": key in written,
             "locked": "Genres" in item.get("locked_fields", []),

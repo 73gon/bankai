@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 from collections.abc import Iterable
 from contextlib import suppress
@@ -280,8 +281,13 @@ def apply(moves: Moves, *, label: str = "layout") -> dict:
 
 def _follow(renamed: dict[str, str]) -> None:
     """What other parts of bankai keep by a file's path follows its rename: the encode queue and
-    history, the track inventory, the probe cache."""
-    from bankai.web import anime_library, encode_library, track_cleanup
+    history, the track inventory, the probe cache, the episode checks."""
+    from bankai.web import anime_library, anime_verify, encode_library, track_cleanup
+
+    try:
+        anime_verify.follow_renames(renamed)
+    except Exception as exc:  # checked again later; the move stands
+        log.warning("layout: episode checks did not follow the renames: %s", exc)
 
     absolute = {}
     for root in (anime_files.anime_root(), anime_files.staging_root()):
@@ -440,7 +446,10 @@ def _show_genres(row: collections.Collection, kept: dict) -> list[str]:
 
 
 def tvshow_nfo(row: collections.Collection, title: str) -> str:
+    from bankai.web import age_ratings
+
     main = row.title if row.title is not None else row.members[0]
+    rating, tmdb_id = age_ratings.nfo_rating(row.id)
     kept = anilist.media(main)
     status = "Continuing" if any(anilist.media(aid).get("status") == "RELEASING" for aid in row.members) else "Ended"
     body = (
@@ -453,7 +462,10 @@ def tvshow_nfo(row: collections.Collection, title: str) -> str:
         # bankai's curated genres where writing them is on (web.genre_sync), else AniList's.
         + "".join(_xml("genre", genre) for genre in _show_genres(row, kept))
         + "".join(_xml("studio", studio) for studio in kept.get("studios") or [])
+        # The FSK rating approved in web.age_ratings (Jellyfin's OfficialRating), and the TMDB show it is from.
+        + _xml("mpaa", rating)
         + f'  <uniqueid type="anilist" default="true">{main}</uniqueid>\n'
+        + (f'  <uniqueid type="tmdb">{tmdb_id}</uniqueid>\n' if tmdb_id else "")
     )
     return f'<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n<tvshow>\n{body}</tvshow>\n'
 
@@ -468,7 +480,7 @@ def season_nfo(season: int, aid: int | None, show: str, *, arc: str | None = Non
     else:
         kept = anilist.media(aid)
         title = arc or collections.short_label(collections.entry_name(aid), show)
-        if title == show:
+        if not title or title == show:
             title = f"Season {season}"
         extra = (
             _xml("plot", _plain(kept.get("description")))
@@ -721,8 +733,22 @@ async def ensure_metadata(aids: Iterable[int]) -> None:
         frontier = {other for aid in frontier for other, kind, _form in anilist.relations(aid) if kind in collections.MAIN_LINE}
 
 
+_RELAYOUT = threading.Lock()
+
+
 async def relayout(cids: set[int] | None = None, *, pictures: bool = True, label: str = "layout") -> dict:
     """Put these collections' files where they belong (all, by default), and write their NFO files."""
+    # One at a time: Shippuden's arcs, set from the drawer, were moving while the
+    # maintenance pass laid the same collection out from its changed fingerprint,
+    # and one of them found a file the other had just moved (Oct 2026).
+    await asyncio.to_thread(_RELAYOUT.acquire)
+    try:
+        return await _relayout_locked(cids, pictures=pictures, label=label)
+    finally:
+        _RELAYOUT.release()
+
+
+async def _relayout_locked(cids: set[int] | None, *, pictures: bool, label: str) -> dict:
     store = await asyncio.to_thread(collections.load)
     rows = await asyncio.to_thread(anime_files.load)
     targets = set(store.collections) if cids is None else {cid for cid in cids if cid in store.collections}

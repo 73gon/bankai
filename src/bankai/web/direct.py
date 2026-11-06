@@ -16,13 +16,16 @@ folder keeps its episodes flat. A file already there is never replaced.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.processor.naming import sanitise
+from bankai.web import library_walk
 
 log = get_logger(__name__)
 
@@ -356,4 +359,220 @@ def placements(
     return placed, left
 
 
-__all__ = ["file_episode", "found", "guess", "placements", "search", "target", "targets"]
+# -- by language: German into the German folder, English-only into the English one --
+
+
+def default_roots(kind: str) -> dict[str, str]:
+    """The first reachable root of each language for this kind: {"German": ..., "English": ...}."""
+    library = "movies" if kind == "movie" else "shows"
+    chosen: dict[str, str] = {}
+    for row in targets():
+        if row["library"] == library and row["exists"]:
+            chosen.setdefault(row["language"], row["root"])
+    return chosen
+
+
+def existing_folder(root: Path, title: str, year: int | None, names: tuple[str, ...] = ()) -> Path | None:
+    """The title's folder in this root if there is one, by its name or another of its names."""
+    for name in (title, *names):
+        if not name:
+            continue
+        folder = root / folder_name(root, name, year)
+        if folder.is_dir():
+            return folder
+    return None
+
+
+def episode_files(show: Path) -> dict[tuple[int, int], list[Path]]:
+    """Every video under a show's folder by (season, episode); a double episode under both numbers."""
+    found: dict[tuple[int, int], list[Path]] = {}
+    try:
+        files = [path for path in show.rglob("*") if path.is_file() and _VIDEO_EXT.search(path.name)]
+    except OSError:
+        return found
+    for path in files:
+        if re.search(r"\bsample\b", path.stem, re.I) or path.name.startswith("."):
+            continue
+        numbers = file_episode(path.name)
+        if numbers is None:
+            continue
+        season, first, last = numbers
+        for episode in range(first, (last or first) + 1):
+            found.setdefault((season, episode), []).append(path)
+    return found
+
+
+def audio_languages(path: Path, *, probe: bool = True) -> list[str] | None:
+    """The audio tracks ("lang|name") of a file, from the track inventory or ffprobe; None when unknown."""
+    from bankai.web import track_cleanup
+
+    entry = track_cleanup.load_inventory().get(str(path))
+    tracks = entry.get("tracks") if entry and not entry.get("unreadable") else None
+    if tracks is None and probe:
+        tracks = track_cleanup.probe(path)
+    if tracks is None:
+        return None
+    return [str(track.get("lang") or "") + "|" + str(track.get("name") or "") for track in tracks if track.get("kind") == "audio"]
+
+
+# Picture classes, lowest first, as the library pages name them (mas_library.quality).
+_QUALITY_RANK = {"SD": 0, "720p": 1, "1080p": 2, "2160p": 3}
+
+
+def picture_rank(path: Path, *, probe: bool = True) -> int | None:
+    """How good a video's picture is (SD 0 .. 2160p 3), from the track inventory or ffprobe; None when unknown."""
+    import json
+    import subprocess
+
+    from bankai.web import mas_library, track_cleanup
+
+    entry = track_cleanup.load_inventory().get(str(path)) or {}
+    video = entry.get("video") if not entry.get("unreadable") else None
+    if not video and probe:
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                 "-of", "json", str(path)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=True,
+            ).stdout
+            streams = json.loads(out).get("streams") or []
+            video = streams[0] if streams else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            video = None
+    found = mas_library.quality(video) if video else None
+    return _QUALITY_RANK.get(found) if found else None
+
+
+# Subtitle files a release may carry beside its videos (the library walk keeps their names).
+SUBTITLE_SUFFIXES = library_walk.SUBTITLE_SUFFIXES
+_ENGLISH_SUB_WORDS = frozenset({"en", "eng", "english"})
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", text.casefold()))
+
+
+def _listed(directory: Path) -> list[str] | None:
+    try:
+        return [entry.name for entry in os.scandir(directory)]
+    except OSError:
+        return None
+
+
+def english_subtitle_file(path: Path, listed: Callable[[Path], list[str] | None] = _listed) -> Path | None:
+    """An English subtitle file a release ships for this video: beside it under its name
+    (``Show.S01E01.en.srt``, or plain ``.srt``), or in a ``Subs`` folder (``Subs/<video>/2_English.srt``,
+    ``Subs/English.srt``). A plain one, naming no language, counts: an English release's subtitles are English.
+
+    ``listed`` gives a directory's names (None: no such directory); the library passes its held
+    tree, so its episode bar reads the same files as a followed show's drawer without a disk read."""
+    def subtitles(directory: Path) -> list[str]:
+        return [name for name in listed(directory) or [] if os.path.splitext(name)[1].casefold() in SUBTITLE_SUFFIXES]
+
+    for name in subtitles(path.parent):
+        stem, suffix = os.path.splitext(name)
+        if not stem.startswith(path.stem):
+            continue
+        qualifier = stem[len(path.stem):]
+        if not qualifier.strip(".") or (qualifier.startswith(".") and _words(qualifier) & _ENGLISH_SUB_WORDS):
+            return path.parent / name
+    for folder in (path.parent / "Subs" / path.stem, path.parent / "Subs", path.parent / "subs"):
+        found = sorted(
+            (name for name in subtitles(folder) if _words(os.path.splitext(name)[0]) & _ENGLISH_SUB_WORDS),
+            # Full subtitles before forced ones and SDH.
+            key=lambda name: ("forced" in name.casefold(), "sdh" in name.casefold(), name),
+        )
+        if found:
+            return folder / found[0]
+    return None
+
+
+def has_english_subtitles(path: Path, *, probe: bool = True) -> bool | None:
+    """Does a video come with English subtitles -- a track in it, or a file the release ships?
+    None when its tracks cannot be read and no file says so."""
+    from bankai.web import track_cleanup
+
+    if english_subtitle_file(path) is not None:
+        return True
+    entry = track_cleanup.load_inventory().get(str(path))
+    tracks = entry.get("tracks") if entry and not entry.get("unreadable") else None
+    if tracks is None and probe:
+        tracks = track_cleanup.probe(path)
+    if tracks is None:
+        return None
+    return any(
+        str(track.get("lang") or "").casefold() in _ENGLISH_SUB_WORDS or "english" in _words(str(track.get("name") or ""))
+        for track in tracks
+        if track.get("kind") == "subtitles"
+    )
+
+
+def has_german(path: Path, release_title: str = "", *, probe: bool = True) -> bool:
+    """Does this video carry German audio? Its tracks say; the release name only when they cannot be read."""
+    from bankai.web.media import _is_german
+
+    found = audio_languages(path, probe=probe)
+    if found is None:
+        return "German" in languages(release_title)
+    return any(_is_german(lang.split("|", 1)[0] or None, lang.split("|", 1)[1] or None) for lang in found)
+
+
+def held(kind: str, title: str, year: int | None, names: tuple[str, ...] = ()) -> dict[str, dict]:
+    """What the library has of a title, per language.
+
+    Shows: ``{"German": {(s, e): [paths]}, "English": {...}}`` -- a file in the English folder
+    that carries German counts as German. Movies: the same with the key ``(0, 0)``.
+    """
+    library = "movies" if kind == "movie" else "shows"
+    out: dict[str, dict] = {"German": {}, "English": {}}
+    for row in targets():
+        if row["library"] != library or not row["exists"]:
+            continue
+        folder = existing_folder(Path(row["root"]), title, year, names)
+        if folder is None:
+            continue
+        if kind == "movie":
+            try:
+                videos = [path for path in folder.rglob("*") if path.is_file() and _VIDEO_EXT.search(path.name)]
+            except OSError:
+                videos = []
+            videos = [path for path in videos if not re.search(r"\bsample\b", path.stem, re.I)]
+            files = {(0, 0): videos} if videos else {}
+        else:
+            files = episode_files(folder)
+        for key, paths in files.items():
+            for path in paths:
+                language = row["language"]
+                # Read from the track inventory only: a page must not wait on ffprobe over 9p.
+                if language == "English" and has_german(path, probe=False):
+                    language = "German"
+                out[language].setdefault(key, []).append(path)
+    return out
+
+
+def remove_with_sidecars(path: Path, *, stop: Path) -> list[Path]:
+    """Delete a video and the files named after it (.nfo, -thumb.jpg, .srt), then folders left empty up to ``stop``."""
+    removed: list[Path] = []
+    stem = path.stem
+    try:
+        siblings = list(path.parent.iterdir())
+    except OSError:
+        siblings = [path]
+    for sibling in siblings:
+        if sibling.is_file() and (sibling == path or sibling.name.startswith((stem + ".", stem + "-"))):
+            sibling.unlink(missing_ok=True)
+            removed.append(sibling)
+    folder = path.parent
+    while folder != stop and stop in folder.parents:
+        try:
+            folder.rmdir()
+        except OSError:
+            break
+        folder = folder.parent
+    return removed
+
+
+__all__ = [
+    "default_roots", "episode_files", "file_episode", "found", "guess", "has_german", "held",
+    "placements", "remove_with_sidecars", "search", "target", "targets",
+]

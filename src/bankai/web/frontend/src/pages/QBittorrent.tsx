@@ -13,6 +13,7 @@ import {
   ListFilter,
   Loader2,
   Play,
+  RotateCcw,
   RefreshCw,
   Search,
   Square,
@@ -187,12 +188,38 @@ function storedHidden(): Set<ColumnKey> {
   }
 }
 
+// The search, the status filter and the order, remembered in this browser like the columns.
+const FILTERS_KEY = 'bankai.qbittorrent.filters';
+
+type StoredFilters = { query: string; statuses: string[]; sort: Sort | null };
+
+function storedFilters(): StoredFilters {
+  try {
+    const saved = JSON.parse(localStorage.getItem(FILTERS_KEY) ?? '{}');
+    return {
+      query: typeof saved.query === 'string' ? saved.query : '',
+      statuses: Array.isArray(saved.statuses) ? saved.statuses.filter((label: unknown) => (STATUSES as readonly unknown[]).includes(label)) : [],
+      sort: saved.sort && typeof saved.sort.key === 'string' && saved.sort.key in SORTERS && (saved.sort.dir === 'asc' || saved.sort.dir === 'desc') ? saved.sort : null,
+    };
+  } catch {
+    return { query: '', statuses: [], sort: null };
+  }
+}
+
 export default function QBittorrent() {
   // Started from the last answer this browser saw, refreshed straight after.
   const [items, setItems] = useState<QBittorrentItem[]>(() => recall<{ items: QBittorrentItem[] }>(pagePaths.qbittorrent)?.items ?? []);
-  const [query, setQuery] = useState('');
-  const [statuses, setStatuses] = useState<Set<string>>(new Set());
-  const [sort, setSort] = useState<Sort | null>(null);
+  const [stored] = useState(storedFilters);
+  const [query, setQuery] = useState(stored.query);
+  const [statuses, setStatuses] = useState<Set<string>>(() => new Set(stored.statuses));
+  const [sort, setSort] = useState<Sort | null>(stored.sort);
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILTERS_KEY, JSON.stringify({ query, statuses: [...statuses], sort }));
+    } catch {
+      /* remembering the filters is a convenience */
+    }
+  }, [query, statuses, sort]);
   // The columns switched off, remembered in this browser.
   const [hidden, setHidden] = useState<Set<ColumnKey>>(storedHidden);
   const shown = (key: ColumnKey) => !hidden.has(key);
@@ -291,6 +318,10 @@ export default function QBittorrent() {
   const totalSize = items.reduce((sum, item) => sum + item.size_bytes, 0);
   const contextState = contextTorrent?.state.toLowerCase() ?? '';
   const contextStopped = contextState.includes('stopped') || contextState.includes('paused');
+  // qBittorrent's error and missing-files states: stuck until checked again and started.
+  const isErrored = (torrent: QBittorrentItem) => /error|missing/.test(torrent.state.toLowerCase());
+  const contextErrored = contextTorrent ? isErrored(contextTorrent) : false;
+  const errored = items.filter(isErrored);
 
   function showContextMenu(event: MouseEvent<HTMLTableRowElement>, torrent: QBittorrentItem) {
     event.preventDefault();
@@ -319,6 +350,24 @@ export default function QBittorrent() {
     } finally {
       setActioning(null);
     }
+  }
+
+  /** Errored torrents run again, one after another: checked on disk, then started. */
+  async function retry(torrents: QBittorrentItem[]) {
+    setContextTorrent(null);
+    let done = 0;
+    for (const torrent of torrents) {
+      setActioning(torrent.hash);
+      try {
+        await api.qbittorrentRetry(torrent.hash);
+        done += 1;
+      } catch (caught: any) {
+        toast.error(torrent.name + ': ' + caught.message);
+      }
+    }
+    setActioning(null);
+    if (done) toast.success(done === 1 && torrents.length === 1 ? `Running ${torrents[0].name} again: checked on disk, then started` : `${done} errored torrents checked on disk and started again`);
+    await refresh();
   }
 
   async function confirmRemove() {
@@ -571,6 +620,32 @@ export default function QBittorrent() {
               <Square data-icon='inline-start' />
               Stop
             </Button>
+            {contextErrored && (
+              <Button
+                variant='ghost'
+                size='sm'
+                className='w-full justify-start'
+                disabled={actioning === contextTorrent.hash}
+                title='Check its pieces on disk again, then start it: what clears an error'
+                onClick={() => void retry([contextTorrent])}
+              >
+                <RotateCcw data-icon='inline-start' />
+                Retry
+              </Button>
+            )}
+            {errored.length > 1 && (
+              <Button
+                variant='ghost'
+                size='sm'
+                className='w-full justify-start'
+                disabled={actioning !== null}
+                title='Every errored torrent checked on disk again and started'
+                onClick={() => void retry(errored)}
+              >
+                <RotateCcw data-icon='inline-start' />
+                Retry all errored ({errored.length})
+              </Button>
+            )}
             <Separator className='my-1' />
             <Button
               variant='ghost'

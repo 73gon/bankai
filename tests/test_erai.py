@@ -18,7 +18,6 @@ from bankai.processor import anime as processor
 from bankai.web import anime_files, erai
 from bankai.web import jobs as webjobs
 from bankai.web.anime import NyaaEntry
-from bankai.web.jobs import PendingJob
 
 
 def show(aid: int = 1, title: str = "Test Show", english_title: str | None = None) -> anilist.Anime:
@@ -1474,56 +1473,30 @@ def test_queue_rows_expose_the_backlog_that_has_no_job(monkeypatch):
     assert all(row["pending"] for row in rows)
 
 
-def _pending(job_id, info_hash, title="Test Show S01E01"):
-    from bankai.web.jobs import PendingJob
-
-    return PendingJob(
-        id=job_id,
-        kind="show",
-        title=title,
-        args=[
-            "anime-download",
-            "--release-title",
-            "[Erai-raws] Test Show - 01 [1080p][HEVC]",
-            "--info-hash",
-            info_hash,
-            "--magnet-uri",
-            "magnet:?xt=urn:btih:" + info_hash,
-        ],
-    )
-
-
-def test_migration_retires_placeholders_and_adopts_untracked_ones(monkeypatch):
-    """A pending job whose release is untracked is that episode's only record."""
-    tracked, untracked, foreign = "a" * 40, "b" * 40, "c" * 40
+def test_downloads_turned_into_release_records_go_back_to_the_job_queue(monkeypatch):
+    """Earlier starts made hand-queued jobs into records nothing starts; they become jobs again."""
+    adopted, automation, done = "a" * 40, "b" * 40, "c" * 40
     state = erai._default_state()
-    state["releases"] = {tracked: _release(tracked, status="queued")}
-    state["releases"][tracked].pop("args")  # an older record, written before args were stored
+    state["releases"] = {
+        adopted: {"status": "queued", "title": "[Ironclad] Dark Summoner to Dekiteiru - S01E01",
+                  "display_title": "Dark Summoner to Dekiteiru - 01",
+                  "args": ["anime-download", "--kind", "show", "--info-hash", adopted, "--anilist-id", "208025"]},
+        automation: _release(automation, status="queued", canonical="anilist:123|1"),
+        done: {**_release(done, status="done"), "canonical": ""},
+    }
     monkeypatch.setattr(erai, "_load_state", lambda: state)
     monkeypatch.setattr(erai, "_save_state", lambda value: None)
-
-    pending = [
-        _pending("j1", tracked),
-        _pending("j2", untracked, title="Other Show S01E02"),
-        PendingJob(id="j3", kind="movie", title="A Movie", args=["run", "--url", "x"]),
-    ]
-    cancelled: list[str] = []
-    monkeypatch.setattr("bankai.web.jobs.list_pending", lambda: list(pending))
+    queued: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        "bankai.web.jobs.cancel_pending", lambda job_id: cancelled.append(job_id) or True
+        "bankai.web.jobs.enqueue", lambda **kw: queued.append((kw["kind"], kw["title"])) or {"status": "queued"}
     )
 
-    result = erai.retire_download_pendings()
-    assert result == {"retired": 2, "adopted": 1, "kept": 1}
-    assert cancelled == ["j1", "j2"]
-    # The untracked release is now tracked rather than lost with its job.
-    assert state["releases"][untracked]["status"] == "queued"
-    assert state["releases"][untracked]["args"][0] == "anime-download"
-    # The older record gains the arguments publishing will need.
-    assert state["releases"][tracked]["args"][0] == "anime-download"
-    assert foreign not in state["releases"]
-    # A non-anime pending job is none of this migration's business.
-    assert "j3" not in cancelled
+    assert erai.return_adopted_downloads() == {"returned": 1, "found": 1}
+    assert queued == [("show", "Dark Summoner to Dekiteiru - 01")]
+    assert adopted not in state["releases"]
+    # The automation's own records carry their canonical key and stay.
+    assert automation in state["releases"] and done in state["releases"]
+    assert erai.return_adopted_downloads() == {"returned": 0, "found": 0}
 
 
 def _admit_as(monkeypatch, tmp_path, anime=None, episode=None):
@@ -2185,6 +2158,13 @@ def test_the_upgrade_is_bounded_per_cycle(monkeypatch, tmp_path):
         erai._ADMISSION.reset(token)
 
 
+def _upgrade(ids: list[int]) -> dict:
+    """An upgrade as the library runs it: look, then approve everything the look showed."""
+    looked = asyncio.run(erai.upgrade_show_to_hevc(ids, queue=False))
+    approved = {plan["info_hash"]: [row["path"] for row in plan["replaces"]] for plan in looked["plans"]}
+    return asyncio.run(erai.upgrade_show_to_hevc(ids, approved=approved))
+
+
 def _published_show(monkeypatch, tmp_path, anilist_data, *, twin_available=True):
     """One AniList entry with two published episodes: E01 HEVC, E02 AVC.
 
@@ -2214,6 +2194,7 @@ def _published_show(monkeypatch, tmp_path, anilist_data, *, twin_available=True)
     monkeypatch.setattr(erai, "_load_mappings", lambda: {})
     # What a search found no HEVC for is kept beside the state: here, not in the real one.
     monkeypatch.setattr(erai, "_hevc_checks_path", lambda: tmp_path / "anime_hevc_checks.json")
+    monkeypatch.setattr(erai, "_hevc_plans_path", lambda: tmp_path / "anime_hevc_plans.json")
     monkeypatch.setattr(
         erai,
         "get_settings",
@@ -2244,7 +2225,7 @@ def _published_show(monkeypatch, tmp_path, anilist_data, *, twin_available=True)
 
 def test_upgrading_a_show_queues_hevc_only_for_its_avc_episodes(monkeypatch, tmp_path, anilist_data):
     state, avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path, anilist_data)
-    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+    result = _upgrade([555])
 
     assert result["queued"] == 1
     assert result["already_hevc"] == 1
@@ -2260,6 +2241,45 @@ def test_upgrading_a_show_queues_hevc_only_for_its_avc_episodes(monkeypatch, tmp
     assert len(qbit.added) == 1
     # The original stays on disk and playable until the replacement lands.
     assert state["releases"][avc_done.info_hash]["status"] == "done"
+
+
+def test_an_upgrade_shows_what_it_replaces_and_queues_nothing_unapproved(monkeypatch, tmp_path, anilist_data):
+    """Re:Zero's second season replaced the first without anyone seeing it first (Nov 2026)."""
+    state, _avc_done, replacement, qbit = _published_show(monkeypatch, tmp_path, anilist_data)
+
+    with pytest.raises(ValueError, match="approve"):
+        asyncio.run(erai.upgrade_show_to_hevc([555]))
+
+    looked = asyncio.run(erai.upgrade_show_to_hevc([555], queue=False))
+    [plan] = looked["plans"]
+    assert plan["info_hash"] == replacement.info_hash
+    # What it is taken for, and each file it would replace.
+    assert (plan["anilist_id"], plan["entry"], plan["episodes"]) == (555, "Show", [2])
+    assert [(row["name"], row["episode"]) for row in plan["replaces"]] == [("Show - S01E02.mkv", 2)]
+    assert qbit.added == [] and replacement.info_hash not in state["releases"]
+    # "Upgrade all" shows it from what the look kept.
+    assert erai.stored_hevc_plans([555]) == [plan]
+
+    # Approved for other files than it would replace now: left out.
+    result = asyncio.run(erai.upgrade_show_to_hevc([555], approved={replacement.info_hash: ["/elsewhere/Show - S01E02.mkv"]}))
+    assert (result["queued"], result["changed"]) == (0, 1) and qbit.added == []
+    # Not ticked: not queued.
+    assert asyncio.run(erai.upgrade_show_to_hevc([555], approved={}))["queued"] == 0
+    assert qbit.added == []
+
+    approved = {plan["info_hash"]: [row["path"] for row in plan["replaces"]]}
+    assert asyncio.run(erai.upgrade_show_to_hevc([555], approved=approved))["queued"] == 1
+    assert len(qbit.added) == 1
+
+
+def test_a_kept_look_is_not_shown_once_a_file_it_replaces_changed(monkeypatch, tmp_path, anilist_data):
+    _published_show(monkeypatch, tmp_path, anilist_data)
+    [plan] = asyncio.run(erai.upgrade_show_to_hevc([555], queue=False))["plans"]
+    Path(plan["replaces"][0]["path"]).write_bytes(b"another file")
+
+    assert erai.stored_hevc_plans([555]) is None
+    # An entry never looked at: looked at again too.
+    assert erai.stored_hevc_plans([555, 999]) is None
 
 
 def test_an_avc_episode_bankai_never_downloaded_is_upgraded_too(monkeypatch, tmp_path, anilist_data):
@@ -2283,7 +2303,7 @@ def test_an_avc_episode_bankai_never_downloaded_is_upgraded_too(monkeypatch, tmp
 
     monkeypatch.setattr(erai.anime_mod, "_fetch_rss", on_nyaa)
 
-    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+    result = _upgrade([555])
 
     assert result["queued"] == 2  # episode 2 from the catalogue, 3 found on Nyaa
     queued = state["releases"][third.info_hash]
@@ -2308,7 +2328,7 @@ def test_a_season_batch_upgrades_every_avc_episode_it_covers_in_one_download(mon
 
     monkeypatch.setattr(erai.anime_mod, "_fetch_rss", on_nyaa)
 
-    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+    result = _upgrade([555])
 
     assert (result["queued"], result["downloads"]) == (2, 1)
     assert len(qbit.added) == 1
@@ -2323,7 +2343,7 @@ def test_a_season_batch_upgrades_every_avc_episode_it_covers_in_one_download(mon
 
 def test_an_episode_with_no_hevc_release_is_left_alone(monkeypatch, tmp_path, anilist_data):
     state, avc_done, _replacement, qbit = _published_show(monkeypatch, tmp_path, anilist_data, twin_available=False)
-    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+    result = _upgrade([555])
 
     assert result["queued"] == 0
     assert result["no_replacement"] == 1
@@ -2337,7 +2357,7 @@ def test_a_german_dubbed_episode_is_never_upgraded(monkeypatch, tmp_path, anilis
     # The episode that would otherwise be replaced carries a German dub.
     monkeypatch.setattr(erai, "_is_german_dub", lambda path: path.name == "Show - S01E02.mkv")
 
-    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+    result = _upgrade([555])
 
     assert result["queued"] == 0
     assert result["german_dub_kept"] == 1
@@ -2353,7 +2373,7 @@ def test_an_undubbed_episode_of_the_same_show_is_still_upgraded(monkeypatch, tmp
     state, _avc_done, replacement, _qbit = _published_show(monkeypatch, tmp_path, anilist_data)
     monkeypatch.setattr(erai, "_is_german_dub", lambda path: path.name == "Show - S01E01.mkv")
 
-    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+    result = _upgrade([555])
     assert result["queued"] == 1
     assert result["german_dub_kept"] == 0
     assert state["releases"][replacement.info_hash]["status"] == "queued"
@@ -2365,7 +2385,7 @@ def test_a_german_dub_filed_in_an_old_folder_is_never_upgraded(monkeypatch, tmp_
     dub = indexed(tmp_path / "shows_anime" / "The Show" / "Season 01" / "The Show - S01E02.mkv", (555, 2))
     monkeypatch.setattr(erai, "_is_german_dub", lambda path: path == dub)
 
-    result = asyncio.run(erai.upgrade_show_to_hevc([555]))
+    result = _upgrade([555])
 
     assert result["german_dub_kept"] == 1
     assert qbit.added == []
@@ -2484,7 +2504,7 @@ def test_the_library_sees_which_episodes_are_upgrading(monkeypatch, tmp_path, an
     state, _avc_done, replacement, _qbit = _published_show(monkeypatch, tmp_path, anilist_data)
     assert erai.upgrading_episodes(state) == set()
 
-    asyncio.run(erai.upgrade_show_to_hevc([555]))
+    _upgrade([555])
     assert erai.upgrading_episodes(state) == {(555, 2)}
 
     # Published: no longer on its way.
@@ -2495,12 +2515,12 @@ def test_the_library_sees_which_episodes_are_upgrading(monkeypatch, tmp_path, an
 def test_a_search_that_finds_no_hevc_is_remembered_until_one_is_queued(monkeypatch, tmp_path, anilist_data):
     state, _avc_done, replacement, _qbit = _published_show(monkeypatch, tmp_path, anilist_data, twin_available=False)
 
-    assert asyncio.run(erai.upgrade_show_to_hevc([555]))["no_replacement"] == 1
+    assert _upgrade([555])["no_replacement"] == 1
     assert set(erai.hevc_checked()) == {(555, 2)}
 
     # Later Erai-raws has one: queued, and no longer "no HEVC".
     state["backfill"]["catalog_1080"][replacement.info_hash] = erai._entry_dict(replacement)
-    assert asyncio.run(erai.upgrade_show_to_hevc([555]))["queued"] == 1
+    assert _upgrade([555])["queued"] == 1
     assert erai.hevc_checked() == {}
 
 

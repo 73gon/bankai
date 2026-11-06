@@ -532,3 +532,91 @@ def test_anime_jobs_asked_for_by_hand_wait_once_the_anime_limit_runs(monkeypatch
     running.pop()
     assert webjobs.reconcile() == 1
     assert [call["title"] for call in spawned] == ["Show 9 - 01"] and pending == []
+
+
+def test_a_pass_interval_changed_on_the_dashboard_is_kept_and_a_shorter_one_runs_sooner(monkeypatch):
+    import time
+
+    from bankai.web import jobs as webjobs
+
+    assert webjobs.interval("mas_follow") == webjobs.default_interval("mas_follow") == 600.0
+    webjobs._PASSES["mas_follow"] = {"last_run": time.time() - 120, "due_at": time.time() + 480}
+    assert webjobs.set_interval("mas_follow", 180) == 180.0
+    assert webjobs.interval("mas_follow") == 180.0
+    # Last run 2 min ago + 3 min: due in about a minute, not in eight.
+    assert webjobs._PASSES["mas_follow"]["due_at"] - time.time() < 70
+    assert not webjobs._due("mas_follow", time.monotonic() + 480)
+    webjobs._SOONER["mas_follow"] = time.monotonic() - 1
+    assert webjobs._due("mas_follow", time.monotonic() + 480)
+    webjobs.set_interval("mas_follow", None)
+    assert webjobs.interval("mas_follow") == 600.0
+    with pytest.raises(ValueError):
+        webjobs.set_interval("mas_follow", 1)
+    with pytest.raises(KeyError):
+        webjobs.set_interval("no_such_pass", 60)
+    webjobs._PASSES.pop("mas_follow", None)
+
+
+def test_failed_anime_downloads_go_when_dead_and_run_again_when_the_failure_was_passing(monkeypatch):
+    from types import SimpleNamespace
+
+    from bankai.cli import bgjobs as bg
+    from bankai.web import anime_files, erai, reasons
+    from bankai.web import jobs as webjobs
+
+    def job(ident, args, reason):
+        row = SimpleNamespace(id=ident, status="failed", args=args, title=ident, kind="show", finished_at=1000.0, reason=reason)
+        row.delete = lambda: deleted.append(ident) or True
+        return row
+
+    deleted, queued = [], []
+    base = ["anime-download", "--anilist-id", "1", "--info-hash", "h"]
+    rows = [
+        job("old", ["anime-download", "--anidb-id", "5", "--episode", "1"], "x"),
+        job("done", [*base, "--episode", "3"], "ReadTimeout"),
+        job("timeout", [*base, "--episode", "4"], "ReadTimeout"),
+        job("broken", [*base, "--episode", "5"], "a manual episode override requires one file"),
+    ]
+    monkeypatch.setattr(bg, "list_jobs", lambda: rows)
+    monkeypatch.setattr(bg, "failure_reason", lambda row: row.reason)
+    monkeypatch.setattr(anime_files, "by_entry", lambda: {1: {3: ["a.mkv"]}})
+    monkeypatch.setattr(erai, "_load_state", lambda: {"releases": {}})
+    monkeypatch.setattr(reasons, "classify_reason", lambda raw: ("timeout", "") if "Timeout" in raw else ("other", raw))
+    monkeypatch.setattr(webjobs, "enqueue", lambda **kw: queued.append(kw["title"]) or {"status": "queued"})
+    monkeypatch.setattr(erai, "_policy_anilist_ids", lambda: set())
+
+    rows.append(job("owned", [*base, "--episode", "3"], "ReadTimeout"))
+    monkeypatch.setattr(erai, "_load_state", lambda: {"releases": {"x": {"status": "transferring", "job_id": "owned"}}})
+    assert webjobs.tidy_failed_anime(now=10_000.0) == {"removed": 2, "retried": 1, "kept": 1}
+    assert "owned" not in deleted  # a release still points at it: the release's to judge
+    assert sorted(deleted) == ["done", "old", "timeout"] and queued == ["timeout"]
+    # Three tries at most: a job that keeps timing out stays for a look.
+    for _ in range(3):
+        rows[2:3] = [job("timeout", [*base, "--episode", "4"], "ReadTimeout")]
+        webjobs.tidy_failed_anime(now=10_000.0)
+    assert queued.count("timeout") == 3
+
+
+def test_a_failed_download_of_a_blacklisted_entry_goes_and_is_never_run_again(monkeypatch):
+    from types import SimpleNamespace
+
+    from bankai.cli import bgjobs as bg
+    from bankai.web import anime_files, erai, reasons
+    from bankai.web import jobs as webjobs
+
+    deleted, queued = [], []
+    row = SimpleNamespace(
+        id="uta", status="failed", title="Utawarerumono Mask of Truth - 22", kind="show", finished_at=1000.0,
+        args=["anime-download", "--anilist-id", "112640", "--info-hash", "h", "--episode", "22"],
+    )
+    row.delete = lambda: deleted.append(row.id) or True
+    monkeypatch.setattr(bg, "list_jobs", lambda: [row])
+    monkeypatch.setattr(bg, "failure_reason", lambda job: "ReadTimeout")
+    monkeypatch.setattr(anime_files, "by_entry", lambda: {})
+    monkeypatch.setattr(erai, "_load_state", lambda: {"releases": {}})
+    monkeypatch.setattr(erai, "_policy_anilist_ids", lambda: {112640})
+    monkeypatch.setattr(reasons, "classify_reason", lambda raw: ("timeout", ""))
+    monkeypatch.setattr(webjobs, "enqueue", lambda **kw: queued.append(kw["title"]) or {"status": "queued"})
+
+    assert webjobs.tidy_failed_anime(now=10_000.0) == {"removed": 1, "retried": 0, "kept": 0}
+    assert deleted == ["uta"] and queued == []

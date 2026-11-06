@@ -394,8 +394,8 @@ def test_queue_cover_comes_from_the_job_s_anilist_entry(
         (2, False, True, "complete", True),
     ],
 )
-def test_show_completion_uses_full_tvdb_roster(downloaded, future, ended, expected, finished):
-    from bankai.metadata.tvdb import TVDBEpisode
+def test_show_completion_uses_full_roster(downloaded, future, ended, expected, finished):
+    from bankai.metadata.tmdb_titles import Episode
     from bankai.web.anime_library import merge_episodes
 
     files = [
@@ -403,8 +403,8 @@ def test_show_completion_uses_full_tvdb_roster(downloaded, future, ended, expect
         for n in range(1, downloaded + 1)
     ]
     roster = [
-        TVDBEpisode(1, 1, aired="2020-01-01"),
-        TVDBEpisode(1, 2, aired="2099-01-01" if future else "2020-01-08"),
+        Episode(1, 1, aired="2020-01-01"),
+        Episode(1, 2, aired="2099-01-01" if future else "2020-01-08"),
     ]
     result = merge_episodes(files, roster, ended=ended)
     assert result["completion_state"] == expected and result["finished"] == finished
@@ -413,8 +413,31 @@ def test_show_completion_uses_full_tvdb_roster(downloaded, future, ended, expect
     assert sum(row.get("missing", False) for row in result["episodes"]) == 2 - downloaded
 
 
+def test_the_episode_strip_says_where_the_library_has_the_show_and_in_what_encode():
+    from bankai.metadata.tmdb_titles import Episode
+    from bankai.web.anime_library import episode_strip, merge_episodes
+
+    files = [
+        {"path": f"/s2e{n}", "season_number": 2, "episode": n, "name": str(n), "staged": n == 3}
+        for n in (1, 2, 3)
+    ] + [{"path": "/s4e1", "season_number": 4, "episode": 1, "name": "sp", "staged": False}]
+    roster = [Episode(season, n, aired="2020-01-01") for season in (1, 2, 3) for n in (1, 2, 3)]
+    roster += [Episode(3, 4, aired="2099-01-01"), Episode(4, 1, aired="2020-01-01"), Episode(4, 2, aired="2020-01-01")]
+    merged = merge_episodes(files, roster, ended=False, codecs={(2, 1): "hevc", (2, 2): "avc"}, german_dubbed={(4, 1)})
+    for row in merged["episodes"]:
+        row["season"] = f"S{row['season_number']}"
+
+    # Season 4 are specials: the one on disk counts, the missing one is no gap.
+    assert episode_strip(merged["episodes"], {4}) == [
+        {"label": "S1", "states": "mmm"},
+        {"label": "S2", "states": "has"},
+        {"label": "S3", "states": "mmmt"},
+        {"label": "S4", "states": "d"},
+    ]
+
+
 def test_staged_and_duplicate_files_do_not_inflate_download_count():
-    from bankai.metadata.tvdb import TVDBEpisode
+    from bankai.metadata.tmdb_titles import Episode
     from bankai.web.anime_library import merge_episodes
 
     files = [
@@ -424,7 +447,7 @@ def test_staged_and_duplicate_files_do_not_inflate_download_count():
     ]
     result = merge_episodes(
         files,
-        [TVDBEpisode(1, 1, aired="2020-01-01"), TVDBEpisode(1, 2, aired="2020-01-08")],
+        [Episode(1, 1, aired="2020-01-01"), Episode(1, 2, aired="2020-01-08")],
         ended=True,
     )
     assert result["downloaded_count"] == 1 and result["completion_state"] == "partial"

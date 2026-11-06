@@ -13,6 +13,12 @@ from bankai.web import encode_library as encode
 from bankai.web import track_cleanup as tracks
 
 
+@pytest.fixture(autouse=True)
+def _tiny_files_count(monkeypatch):
+    # The files these tests write are a few bytes; the size floor is tested on its own.
+    monkeypatch.setattr(encode, "_MIN_SIZE", 0)
+
+
 def entry(codec="hevc", width=3840, mbps=51.0, *, bit_depth=10, dv=None, interlaced=False, scope="shows", size=34 * 2**30, duration=4880.0):
     return {
         "scope": scope,
@@ -28,13 +34,13 @@ def entry(codec="hevc", width=3840, mbps=51.0, *, bit_depth=10, dv=None, interla
     }
 
 
-def test_a_4k_remux_is_encoded_as_hevc_at_22():
+def test_a_4k_remux_is_encoded_as_hevc_at_24():
     change, reason = encode.assess("/m/GoT - S08E03.mkv", entry())
 
     assert reason is None
-    assert (change["codec"], change["quality"], change["mbps"]) == ("hevc", 22, 51.0)
-    # (51 - 22) Mbps for 4880 s, in bytes.
-    assert change["estimate"] == pytest.approx(29e6 / 8 * 4880, rel=0.01)
+    assert (change["codec"], change["quality"], change["mbps"]) == ("hevc", 24, 51.0)
+    # (51 - 18) Mbps for 4880 s, in bytes.
+    assert change["estimate"] == pytest.approx(33e6 / 8 * 4880, rel=0.01)
 
 
 def test_h264_becomes_hevc_whatever_its_bitrate_and_hevc_only_well_above_the_line():
@@ -42,15 +48,15 @@ def test_h264_becomes_hevc_whatever_its_bitrate_and_hevc_only_well_above_the_lin
     small, _ = encode.assess("/m/Gladiator II (2024).mkv", entry("h264", 1920, 4.0, bit_depth=8))
     hevc, _ = encode.assess("/m/Dune (2021).mkv", entry("hevc", 1920, 12.0))
 
-    assert (change["codec"], change["quality"]) == ("hevc", 20)
-    assert (small["codec"], small["quality"]) == ("hevc", 20)
+    assert (change["codec"], change["quality"]) == ("hevc", 22)
+    assert (small["codec"], small["quality"]) == ("hevc", 22)
     assert hevc is None
 
 
 def test_10_bit_h264_becomes_hevc():
     change, _ = encode.assess("/m/Old Anime BD - 01.mkv", entry("h264", 1920, 20.0, bit_depth=10))
 
-    assert (change["codec"], change["quality"]) == ("hevc", 20)
+    assert (change["codec"], change["quality"]) == ("hevc", 22)
 
 
 @pytest.mark.parametrize(
@@ -69,7 +75,7 @@ def test_an_episode_that_is_not_hevc_becomes_hevc_whatever_its_bitrate():
     shows, _ = encode.assess("/s/Show - S01E01.mkv", entry("h264", 1920, 4.0, bit_depth=8, duration=1440.0))
 
     assert reason is None and shows == change
-    assert (change["codec"], change["quality"]) == ("hevc", 20)
+    assert (change["codec"], change["quality"]) == ("hevc", 22)
     # About 45% of its picture's bits.
     assert change["estimate"] == pytest.approx(4e6 / 8 * 1440 * 0.45, rel=0.01)
 
@@ -124,7 +130,7 @@ def test_the_biggest_saving_is_listed_first_and_files_done_are_not_listed_again(
 def fake_shrink(monkeypatch, *, size: int = 400, ssim: float = 0.99, during=None):
     calls: list[dict] = []
 
-    def run(source, destination, *, work, quality, codec, on_progress=None):
+    def run(source, destination, *, work, quality, codec, on_progress=None, min_saving=None):
         calls.append({"source": source, "quality": quality, "codec": codec})
         work.mkdir(parents=True, exist_ok=True)
         if on_progress:
@@ -156,7 +162,7 @@ def test_a_queued_file_is_encoded_and_takes_the_original_s_place(library, monkey
     result = encode.encode_next()
 
     assert path.read_bytes() == b"n" * 400
-    assert (calls[0]["codec"], calls[0]["quality"]) == ("hevc", 22)
+    assert (calls[0]["codec"], calls[0]["quality"]) == ("hevc", 24)
     assert path.stat().st_mtime_ns == before.st_mtime_ns + 1_000_000_000
     assert result["saved"] == 600
     assert encode.queue() == []
@@ -261,7 +267,7 @@ def test_a_step_after_the_encode_failing_keeps_the_encode_to_go_on_from(library,
     path = library("GoT - S01E01.mkv", entry())
     encode.enqueue([str(path)])
 
-    def failed(source, destination, *, work, quality, codec, on_progress=None):
+    def failed(source, destination, *, work, quality, codec, on_progress=None, min_saving=None):
         work.mkdir(parents=True, exist_ok=True)
         (work / "video.hevc").write_bytes(b"an hour of encoding")
         (work / "encode.json").write_text('{"settings": {}, "frames": 88714}', encoding="utf-8")
@@ -296,7 +302,7 @@ def test_an_encode_stopped_by_a_restart_keeps_its_steps_and_its_place(library, m
     path = library("GoT - S08E06.mkv", entry())
     encode.enqueue([str(path)])
 
-    def stopped(source, destination, *, work, quality, codec, on_progress=None):
+    def stopped(source, destination, *, work, quality, codec, on_progress=None, min_saving=None):
         work.mkdir(parents=True, exist_ok=True)
         (work / "video.dv.hevc").write_bytes(b"an hour of encoding")
         raise shrink.ShrinkInterrupted("mkvmerge was stopped")
@@ -353,3 +359,11 @@ def test_files_moved_to_the_front_are_encoded_next_in_the_order_given(library):
     assert encode.to_front([str(third), str(second)]) == 2
 
     assert [row["path"] for row in encode.queue()] == [str(third), str(second), str(first)]
+
+
+def test_a_file_under_800_mb_is_not_listed(monkeypatch):
+    monkeypatch.setattr(encode, "_MIN_SIZE", 800 * 2**20)
+    assert encode.assess("/m/Naruto Shippuden - S01E01.mkv", entry("h264", 1920, 3.0, bit_depth=8, size=700 * 2**20)) == (
+        None, "under 800 MB",
+    )
+    assert encode.assess("/m/Boruto - S01E262.mkv", entry("h264", 1920, 3.0, bit_depth=8, size=1400 * 2**20))[0]

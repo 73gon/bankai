@@ -34,7 +34,10 @@ def test_a_root_listed_for_two_libraries_belongs_to_the_first(monkeypatch, tmp_p
 
 
 def track(kind: str, lang: str, size: int | None = 1000, default: bool = False) -> dict:
-    return {"kind": kind, "lang": lang, "name": None, "codec": "x", "default": default, "forced": False, "bytes": size}
+    row = {"kind": kind, "lang": lang, "name": None, "codec": "x", "default": default, "forced": False, "bytes": size}
+    if kind == "audio":
+        row.update(profile=None, channels=2, bit_rate=None)  # as inspect_file reads audio now
+    return row
 
 
 RULE = {"enabled": True, "audio": ["spa"], "subtitles": ["ara", "por"]}
@@ -384,3 +387,105 @@ def test_a_rewrite_stopped_by_a_restart_is_no_failure(library, mkvmerge, monkeyp
     assert result["interrupted"] is True
     assert path.read_bytes() == b"original" and not list(path.parent.glob(".*"))
     assert tracks._state()["failed"] == {}
+
+
+def test_tracks_that_name_no_language_are_listed_by_title_and_tagged_in_place(tmp_path, monkeypatch):
+    import subprocess
+
+    from bankai.web import jellyfin, track_cleanup
+
+    root = tmp_path / "movies"
+    film = root / "Film (2020)" / "Film (2020).mkv"
+    film.parent.mkdir(parents=True)
+    film.write_bytes(b"x")
+    entry = {"scope": "movies", "size": 1, "mtime": 1.0, "tracks": [
+        {"kind": "audio", "lang": "eng", "name": None},
+        {"kind": "audio", "lang": "und", "name": "Kommentar", "codec": "aac"},
+        {"kind": "subtitles", "lang": "und", "name": None},
+    ]}
+    monkeypatch.setattr(track_cleanup, "roots", lambda scope: [str(root)])
+    inventory = {str(film): entry}
+    monkeypatch.setattr(track_cleanup, "load_inventory", lambda: inventory)
+    monkeypatch.setattr(track_cleanup, "_save_inventory", lambda rows: inventory.update(rows))
+    monkeypatch.setattr(track_cleanup, "inspect_file", lambda path: {"tracks": [{"kind": "audio", "lang": "ger"}]})
+    monkeypatch.setattr(jellyfin, "queue", lambda paths, reprobe=False: 0)
+    assert [(row["title"], row["files"], row["names"]) for row in track_cleanup.unknown_titles("movies", "audio")] == [
+        ("Film (2020)", 1, ["Kommentar"])
+    ]
+    (row,) = track_cleanup.unknown_tracks("movies", "audio", "Film (2020)")
+    assert row["tracks"][0]["position"] == 2 and row["mkv"]
+    ran = []
+    monkeypatch.setattr(track_cleanup.shutil, "which", lambda name: "/usr/bin/mkvpropedit")
+    monkeypatch.setattr(subprocess, "run", lambda args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0, "", ""))
+    result = track_cleanup.set_language([{"path": str(film), "kind": "audio", "position": 2}], "de")
+    assert result["files"] == 1 and result["language"] == "ger"
+    assert ran[0][-4:] == ["--edit", "track:a2", "--set", "language=ger"]
+    # The record follows what was written, without reading the file again.
+    assert [track.get("lang") for track in inventory[str(film)]["tracks"]] == ["eng", "ger", "und"]
+
+
+def test_any_language_opens_its_titles_and_tracks(tmp_path, monkeypatch):
+    from bankai.web import track_cleanup
+
+    root = tmp_path / "shows"
+    first = root / "Show" / "Season 01" / "Show - S01E01.mkv"
+    second = root / "Other" / "Other - S01E01.mkv"
+    monkeypatch.setattr(track_cleanup, "roots", lambda scope: [str(root)])
+    inventory = {
+        str(first): {"scope": "shows", "tracks": [
+            {"kind": "audio", "lang": "eng"}, {"kind": "audio", "lang": "ger", "name": "Deutsch"},
+            {"kind": "subtitles", "lang": "ger"},
+        ]},
+        str(second): {"scope": "shows", "tracks": [{"kind": "audio", "lang": "eng"}]},
+    }
+    monkeypatch.setattr(track_cleanup, "load_inventory", lambda: inventory)
+    assert [(row["title"], row["names"]) for row in track_cleanup.unknown_titles("shows", "audio", "ger")] == [("Show", ["Deutsch"])]
+    assert [row["title"] for row in track_cleanup.unknown_titles("shows", "audio", "eng")] == ["Other", "Show"]
+    (row,) = track_cleanup.unknown_tracks("shows", "audio", "Show", "ger")
+    assert row["relative"] == "Show/Season 01/Show - S01E01.mkv" and row["tracks"][0]["position"] == 2
+
+
+def test_the_preview_reads_the_tracks_picked_by_hand_once(monkeypatch):
+    from bankai.web import track_cleanup
+
+    inventory = {f"/m/{n}.mkv": {"scope": "movies", "tracks": [{"kind": "audio", "lang": "eng"}]} for n in range(50)}
+    monkeypatch.setattr(track_cleanup, "load_inventory", lambda: inventory)
+    reads = []
+    monkeypatch.setattr(track_cleanup, "removals", lambda: reads.append(1) or {})
+    track_cleanup.preview("movies")
+    assert len(reads) == 1
+
+
+def test_a_track_picked_to_be_removed_is_planned_even_with_the_library_cleanup_off(tmp_path, monkeypatch):
+    from bankai.web import track_cleanup
+
+    film = str(tmp_path / "Film.mkv")
+    entry = {"scope": "movies", "tracks": [
+        {"kind": "audio", "lang": "eng"}, {"kind": "audio", "lang": "und", "bytes": 5}, {"kind": "subtitles", "lang": "und"},
+    ]}
+    monkeypatch.setattr(track_cleanup, "load_inventory", lambda: {film: entry})
+    off = {"enabled": False, "audio": [], "subtitles": []}
+    assert track_cleanup.plan(film, entry, off) is None
+    assert track_cleanup.remove_tracks([{"path": film, "kind": "audio", "position": 2}]) == {"queued": 1, "files": 1}
+    change = track_cleanup.plan(film, entry, off)
+    assert change and (change["audio"], change["subtitles"], change["bytes"]) == (1, 0, 5)
+    assert track_cleanup.enabled()
+    # Never the last audio track.
+    track_cleanup.remove_tracks([{"path": film, "kind": "audio", "position": 1}])
+    assert track_cleanup.plan(film, entry, off) is None
+    track_cleanup._forget_removal(film)
+    assert track_cleanup.removals() == {}
+
+
+def test_tracks_queued_by_hand_end_a_failed_files_wait(library, monkeypatch):
+    path = video(library["movies"], "G (1990)/G (1990).mkv")
+    monkeypatch.setattr(tracks, "inspect_file", lambda _path: found(track("audio", "eng"), track("subtitles", "und"), track("subtitles", "und")))
+    tracks.read_tracks()
+    state = tracks._state()
+    state["failed"][str(path)] = {"error": "the original changed while it was being written anew", "at": time.time(), "size": path.stat().st_size, "scope": "movies"}
+    tracks._save_state(state)
+    assert not tracks.candidates("movies")
+
+    tracks.remove_tracks([{"path": str(path), "kind": "subtitles", "position": 2}])
+
+    assert [row[0] for row in tracks.candidates("movies")] == [str(path)]

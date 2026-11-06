@@ -9,6 +9,10 @@ const badgeVariants = {
     "bg-control-surface bg-linear-to-b from-control-inner-edge to-transparent text-foreground shadow-key",
   /** Status only: done, connected, online. Never decoration. */
   success: "bg-success text-background shadow-checked",
+  /** Status only: away, expiring, a count of things that need attention soon. Never decoration. */
+  warning: "bg-warning text-background shadow-checked",
+  /** Status only: new, syncing, an unread count of neutral news. Never decoration. */
+  info: "bg-info text-background shadow-checked",
   /** Status only: failed, offline, an error count. Never decoration. */
   destructive: "bg-destructive text-background shadow-checked",
 } as const;
@@ -51,7 +55,7 @@ export interface BadgeProps extends React.ComponentProps<"span"> {
 /**
  * Badge — a small count or status mark: a notification count on an icon button or avatar,
  * a "New" marker beside a nav item, or a status dot. Mono, tabular numerals; 16 or 20px tall,
- * fully round. Monochrome by default; `success` and `destructive` are status only.
+ * fully round. Monochrome by default; `success`, `warning`, `info` and `destructive` are status only.
  *
  * Wrap the thing it marks in `BadgeAnchor` to pin it to the corner. Not the same as `Tag`:
  * a tag is metadata that names something ("TypeScript", "Draft"); a badge counts or flags

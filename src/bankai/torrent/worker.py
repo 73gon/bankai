@@ -42,6 +42,13 @@ from bankai.torrent.selector import ScoredCandidate, TorrentSelector
 
 log = get_logger(__name__)
 
+# qBittorrent's category for the German-dub pipeline's HQ videos (films and
+# episodes found on filmpalast & co.). Not the anime automation's: while that
+# is off it pauses every unfinished torrent of its own category as backlog, and
+# Spider-Man: Brand New Day sat paused there at 0.7% (Oct 2026), as the
+# Torrents page's downloads had before they got ``bankai-direct``.
+CATEGORY = "bankai-dub"
+
 # Prowlarr Newznab category IDs.
 _CAT_MOVIES = [2000, 2010, 2020, 2030, 2040, 2045, 2050]
 _CAT_TV = [5000, 5010, 5020, 5030, 5040, 5045, 5050, 5060, 5070]
@@ -286,7 +293,8 @@ class TorrentWorker(Worker):
         # exact new torrent (fuzzy name match was unreliable when older
         # torrents in the same category shared release tags like
         # "1080p BluRay" with the new one).
-        before_listing = await self._qbit.list_torrents(category=ctx.job.payload.get("category") or qbit_settings.category)
+        category = ctx.job.payload.get("category") or CATEGORY
+        before_listing = await self._qbit.list_torrents(category=category)
         before_hashes = {t.hash for t in before_listing}
 
         # Extract the info-hash up-front so we can find the torrent even
@@ -322,7 +330,7 @@ class TorrentWorker(Worker):
                 magnet=link if link.startswith("magnet:") else None,
                 torrent_url=None if link.startswith("magnet:") or torrent_file else link,
                 torrent_file=None if link.startswith("magnet:") else torrent_file,
-                category=ctx.job.payload.get("category"),
+                category=category,
                 save_path=Path(save_path_override) if save_path_override else None,
             )
         except QBittorrentError as exc:
@@ -332,6 +340,7 @@ class TorrentWorker(Worker):
             chosen.candidate.title,
             before_hashes=before_hashes,
             known_hash=magnet_hash,
+            category=category,
         )
         if torrent_hash is None:
             raise WorkerError("could not locate just-added torrent in qBittorrent")
@@ -452,6 +461,7 @@ class TorrentWorker(Worker):
         *,
         before_hashes: set[str] | None = None,
         known_hash: str | None = None,
+        category: str = CATEGORY,
     ) -> str | None:
         """Find the just-added torrent.
 
@@ -465,9 +475,6 @@ class TorrentWorker(Worker):
         """
         import asyncio as _asyncio
 
-        from bankai.config import get_settings
-
-        category = get_settings().qbittorrent.category
         before_hashes = before_hashes or set()
 
         for _ in range(20):

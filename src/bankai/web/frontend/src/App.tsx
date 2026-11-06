@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, PanelLeft, PanelLeftClose, Sparkles, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, Clapperboard, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink, BookOpen, Tags, Magnet } from 'lucide-react';
+import { Activity, memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { Link, Navigate, Route, Routes, useLocation, type Location } from 'react-router-dom';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink, BookOpen, Tags, Magnet } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { cn } from '@/zon/lib/cn';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
-import { Button } from '@/zon/ui/button';
 import { Separator } from '@/zon/ui/separator';
+import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarItem, SidebarMenuBadge, SidebarProvider, SidebarRail, SidebarSeparator, SidebarTrigger, useSidebar } from '@/zon/ui/sidebar';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { BankaiMark } from '@/components/bankai-mark';
 import Dashboard from '@/pages/Dashboard';
 import Discover from '@/pages/Discover';
 import Search from '@/pages/Search';
@@ -44,7 +45,7 @@ const MAS_NAV = [
 ];
 
 const ANIME_NAV = [
-  { to: '/a/discover', label: 'Discover', icon: Sparkles },
+  { to: '/a/search', label: 'Search', icon: SearchIcon },
   { to: '/a/queue', label: 'Queue', icon: ListVideo, count: 'anime_queue' },
   { to: '/a/library', label: 'Library', icon: HardDrive },
   { to: '/a/review', label: 'Review', icon: ShieldAlert, count: 'anime_review' },
@@ -149,38 +150,43 @@ function useSidebarCounts(): Record<string, number | null | undefined> {
   }, []);
   return counts;
 }
-const SIDEBAR_KEY = 'bankai:sidebar-collapsed';
+// The old key said collapsed as '1'; zon remembers open as 'true' / 'false'
+// under its own key, and reads the old one only until it has written that.
+const SIDEBAR_KEY = 'bankai:sidebar';
+const OLD_SIDEBAR_KEY = 'bankai:sidebar-collapsed';
 
-function useSidebarState() {
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(SIDEBAR_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
-    } catch {
-      /* ignore */
-    }
-  }, [collapsed]);
-  return [collapsed, setCollapsed] as const;
+function startsOpen(): boolean {
+  try {
+    return localStorage.getItem(OLD_SIDEBAR_KEY) !== '1';
+  } catch {
+    return true;
+  }
 }
 
 function BrandMark() {
   return (
-    <div className='flex items-center gap-2.5'>
-      <span className='flex size-7 shrink-0 items-center justify-center rounded-item border border-field-edge bg-control-surface bg-linear-to-b from-control-inner-edge to-transparent text-foreground shadow-raised' aria-hidden='true'>
-        <Clapperboard className='size-4' strokeWidth={1.7} />
-      </span>
+    <div className='flex items-center gap-1.5'>
+      <BankaiMark className='size-5 shrink-0 text-brand' aria-hidden='true' />
       <span className='font-mono text-sm font-semibold tracking-tight text-foreground'>bankai</span>
     </div>
   );
 }
 
-function UpdateSidebarStatus({ collapsed }: { collapsed: boolean }) {
+/** Brand and toggle; in the icon rail the toggle alone, where the brand would not fit. */
+function BankaiSidebarHeader() {
+  const { state, isMobile } = useSidebar();
+  const rail = state === 'collapsed' && !isMobile;
+  return (
+    <SidebarHeader>
+      <div className={cn('flex min-h-(--control-h) items-center overflow-hidden whitespace-nowrap', rail ? 'justify-center' : 'justify-between pl-[9px]')}>
+        {!rail && <BrandMark />}
+        {!isMobile && <SidebarTrigger size='icon-sm' className='mr-0' aria-label={rail ? 'Expand sidebar' : 'Collapse sidebar'} />}
+      </div>
+    </SidebarHeader>
+  );
+}
+
+function UpdateSidebarStatus() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const wasUpdating = useRef(false);
@@ -233,27 +239,26 @@ function UpdateSidebarStatus({ collapsed }: { collapsed: boolean }) {
     ? status.commits_behind + ' new commits. Click to update without interrupting independent workers.'
     : status?.detail || 'Check for new Bankai commits');
   const icon = busy || updating || status?.checking
-    ? <Loader2 data-icon='inline-start' className='animate-spin' />
-    : status?.available ? <ArrowUpCircle data-icon='inline-start' className='text-success' />
-    : status?.phase === 'failed' ? <AlertCircle data-icon='inline-start' className='text-warning' />
-    : <RefreshCw data-icon='inline-start' />;
+    ? <Loader2 className='animate-spin' />
+    : status?.available ? <ArrowUpCircle className='text-success' />
+    : status?.phase === 'failed' ? <AlertCircle className='text-warning' />
+    : <RefreshCw />;
   return (
     <Tooltip>
       <TooltipTrigger
         render={
-          <Button variant='secondary' size={collapsed ? 'icon' : 'default'} className={cn(!collapsed && 'w-full justify-start')}
-            style={status?.available ? { borderColor: 'var(--success)' } : undefined}
-            onClick={() => void click()} disabled={busy || updating || status?.checking} aria-label={label} />
+          <SidebarItem render={<button type='button' />} tooltip={false}
+            onClick={() => void click()} aria-disabled={busy || updating || status?.checking || undefined} aria-label={label} />
         }
       >
-        {icon}{!collapsed && <span className={status?.available ? 'text-success' : undefined}>{label}</span>}
+        {icon}<span className={status?.available ? 'text-success' : undefined}>{label}</span>
       </TooltipTrigger>
       <TooltipContent side='right' variant='text' className='max-w-72'>{detail}</TooltipContent>
     </Tooltip>
   );
 }
 
-function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
+function VpnSidebarStatus() {
   const [status, setStatus] = useState<VpnStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
 
@@ -308,50 +313,156 @@ function VpnSidebarStatus({ collapsed }: { collapsed: boolean }) {
     />
   );
 
-  if (collapsed) {
-    return (
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            disconnected ? (
-              <Button size='icon' variant='ghost' onClick={() => void connect()} disabled={connecting} aria-label={`${statusLabel}. Reconnect VPN`}>
-                {connecting ? <Loader2 data-icon='inline-start' className='animate-spin' /> : dot}
-              </Button>
-            ) : (
-              <div className='flex size-10 items-center justify-center' aria-label={statusLabel}>{dot}</div>
-            )
-          }
-        />
-        <TooltipContent side='right'>{disconnected ? `${statusLabel} — click to connect` : statusLabel}</TooltipContent>
-      </Tooltip>
-    );
-  }
-
-  // A control, like the update button above it, rather than a line of text
-  // with a button sometimes stuck on the end. Connected it re-checks;
-  // disconnected it connects.
+  // A row like the update one above it. Connected it re-checks; disconnected
+  // it connects.
   return (
-    <Button
-      variant='secondary'
-      className='w-full justify-start'
+    <SidebarItem
+      render={<button type='button' />}
       onClick={() => void (disconnected ? connect() : refresh())}
-      disabled={connecting}
+      aria-disabled={connecting || undefined}
+      tooltip={disconnected ? `${statusLabel}: click to connect` : statusLabel}
       title={status?.detail || statusLabel}
     >
-      {connecting ? (
-        <Loader2 className='animate-spin' aria-hidden='true' />
-      ) : (
-        <ShieldCheck aria-hidden='true' />
-      )}
+      {connecting ? <Loader2 className='animate-spin' aria-hidden='true' /> : <ShieldCheck aria-hidden='true' />}
       <span>{connected ? 'VPN connected' : disconnected ? 'Connect VPN' : 'VPN'}</span>
-      <span className='ml-auto flex items-center'>{dot}</span>
-    </Button>
+      <span className='ml-auto flex items-center group-data-[collapsible=icon]/sidebar:hidden'>{dot}</span>
+    </SidebarItem>
+  );
+}
+
+// Every page, by its address. Two addresses can show one component (Review and
+// Blacklist): keyed apart, each keeps its own state.
+const PAGES: Record<string, ReactNode> = {
+  '/dashboard': <Dashboard />,
+  '/mas/discover': <Discover />,
+  '/mas/search': <Search />,
+  '/mas/filmpalast': <Recent />,
+  '/mas/torrents': <Torrents />,
+  '/mas/queue': <Library />,
+  '/mas/library': <MasLibrary />,
+  '/mas/settings': <Settings scope='mas' />,
+  '/a/search': <Anime />,
+  '/a/queue': <AnimeQueue />,
+  '/a/library': <AnimeLibrary />,
+  '/a/review': <AnimeReview key='review' />,
+  '/a/blacklist': <AnimeReview key='blacklist' blacklist />,
+  '/a/erai': <AnimeErai />,
+  '/a/settings': <AnimeSettings />,
+  '/m/search': <MangaSearch />,
+  '/m/library': <MangaLibrary />,
+  '/m/review': <MangaReview key='review' />,
+  '/m/blacklist': <MangaReview key='blacklist' blacklist />,
+  '/m/settings': <MangaSettings />,
+  '/qbittorrent': <QBittorrent />,
+  '/tracks': <Tracks />,
+  '/encode': <Encode />,
+  '/genres': <Genres />,
+  '/library': <Server />,
+  '/settings': <Settings scope='global' />,
+};
+
+// Where the sections and the old addresses lead. Kept so a bookmark, an open
+// tab or a link in a note still arrives somewhere.
+const REDIRECTS: Record<string, string> = {
+  '/': '/dashboard',
+  '/mas': '/mas/discover',
+  '/a': '/a/search',
+  '/a/discover': '/a/search',
+  '/m': '/m/library',
+  '/discover': '/mas/discover',
+  '/search': '/mas/search',
+  '/filmpalast': '/mas/filmpalast',
+  '/recent': '/mas/filmpalast',
+  '/queue': '/mas/queue',
+  '/server': '/library',
+  '/anime': '/a/search',
+  '/anime/discover': '/a/search',
+  '/anime/queue': '/a/queue',
+  '/anime/library': '/a/library',
+  '/anime/review': '/a/review',
+  '/anime/blacklist': '/a/blacklist',
+  '/anime/settings': '/a/settings',
+};
+
+/**
+ * One kept page. Memoised: a hidden page renders again only when its own address
+ * or visibility changes -- a fresh location object for every page on every click
+ * re-rendered all of them each time.
+ */
+const KeptPage = memo(function KeptPage({ path, at, visible }: { path: string; at: Location; visible: boolean }) {
+  return (
+    <Activity mode={visible ? 'visible' : 'hidden'}>
+      <KeptRoutes path={path} at={at} />
+    </Activity>
+  );
+});
+
+/** Its router, apart from the Activity: showing or hiding a page leaves the page as it is
+ *  (`<Routes location>` hands the page a new context object whenever it renders). */
+const KeptRoutes = memo(function KeptRoutes({ path, at }: { path: string; at: Location }) {
+  return (
+    <Routes location={at}>
+      <Route path={path} element={PAGES[path]} />
+    </Routes>
+  );
+});
+
+/**
+ * The pages, each kept once visited: leaving one hides it (React's Activity)
+ * instead of taking it down, so coming back is instant -- its state, its data,
+ * its scroll position as they were -- while its effects (timers, polling,
+ * fetches) rest until it shows again, when they run and refresh it.
+ *
+ * A hidden page reads the address it was last shown at, not the one shown now:
+ * the anime library must not see the Movies & Shows library's ?show=.
+ */
+function KeptPages() {
+  const location = useLocation();
+  const active = location.pathname in PAGES ? location.pathname : null;
+  // Each visited page and the address it was last shown at, in the order first visited.
+  const shown = useRef(new Map<string, Location>());
+  if (active) {
+    // Back at the same address, the page keeps the location it had: nothing of it renders again.
+    const before = shown.current.get(active);
+    if (!before || before.search !== location.search || before.hash !== location.hash || before.state !== location.state) {
+      shown.current.set(active, location);
+    }
+  }
+  // Each page's own scroll position: the pages share one scrolling area.
+  const scrolls = useRef(new Map<string, number>());
+  const previous = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const area = document.querySelector<HTMLElement>('[data-slot=sidebar-inset]');
+    if (!area || previous.current === active) return;
+    if (previous.current) scrolls.current.set(previous.current, area.scrollTop);
+    area.scrollTop = active ? scrolls.current.get(active) ?? 0 : 0;
+    previous.current = active;
+  }, [active]);
+
+  // How many pages are built, for a look from the browser's console.
+  useEffect(() => {
+    const count = String(shown.current.size);
+    if (document.documentElement.dataset.keptPages !== count) document.documentElement.dataset.keptPages = count;
+  });
+
+  return (
+    <>
+      {[...shown.current].map(([path, at]) => (
+        <KeptPage key={path} path={path} at={at} visible={path === active} />
+      ))}
+      {!active && (
+        <Routes>
+          {Object.entries(REDIRECTS).map(([from, to]) => <Route key={from} path={from} element={<Navigate to={to} replace />} />)}
+          <Route path='*' element={<Navigate to='/dashboard' replace />} />
+        </Routes>
+      )}
+    </>
   );
 }
 
 export default function App() {
-  const [collapsed, setCollapsed] = useSidebarState();
   const counts = useSidebarCounts();
+  const { pathname } = useLocation();
   usePrefetchTabs();
   useEffect(() => {
     const pointer = () => { document.documentElement.dataset.inputMethod = 'pointer'; };
@@ -365,178 +476,62 @@ export default function App() {
   }, []);
 
   return (
-    <>
-      <div className='flex min-h-screen flex-col md:h-screen md:min-h-0 md:flex-row md:overflow-hidden'>
-        {/* Sidebar (desktop) / top bar (mobile) */}
-        <aside
-          className={cn(
-            'sticky top-0 z-30 flex min-w-0 shrink-0 flex-row items-center gap-3 border-b border-border/60 bg-(--secondary) px-3 py-2',
-            'md:h-dvh md:flex-col md:items-stretch md:gap-0 md:border-b-0 md:border-r md:p-0',
-            collapsed ? 'md:w-16' : 'md:w-60',
-          )}
-        >
-          {/* Header row: brand + collapse toggle (desktop) */}
-          <div className={cn('hidden h-16 shrink-0 md:flex md:items-center', collapsed ? 'md:justify-center' : 'md:justify-between md:px-4')}>
-            {collapsed ? (
-              <Button
-                variant='ghost'
-                size='icon'
-                onClick={() => setCollapsed(false)}
-                aria-label='Expand sidebar'
-              >
-                <PanelLeft data-icon='inline-start' />
-              </Button>
-            ) : (
-              <>
-                <BrandMark />
-                <Button
-                  variant='ghost'
-                  size='icon'
-                  onClick={() => setCollapsed(true)}
-                  aria-label='Collapse sidebar'
-                >
-                  <PanelLeftClose data-icon='inline-start' />
-                </Button>
-              </>
-            )}
-          </div>
+    // The page scrolls inside the inset, not the window: sticky bars in the
+    // pages (the queue's selection bar) are sticky to it.
+    <SidebarProvider collapsible='icon' storageKey={SIDEBAR_KEY} defaultOpen={startsOpen()} className='h-svh min-h-0 overflow-hidden'>
+      <Sidebar aria-label='Main navigation' size='sm'>
+        <BankaiSidebarHeader />
+        <SidebarSeparator />
+        <SidebarContent>
+          {NAV_GROUPS.map((group, groupIndex) => (
+            <SidebarGroup key={group.label || groupIndex}>
+              {group.label && <SidebarGroupLabel>{group.label}</SidebarGroupLabel>}
+              {group.items.map(({ to, label, icon: Icon, count }) => {
+                // Zero is the resting state of most of these, and a row of
+                // noughts reads as clutter rather than as information.
+                const badge = count ? counts[count] : undefined;
+                const shown = typeof badge === 'number' && badge > 0;
+                return (
+                  <SidebarItem
+                    key={to}
+                    render={<Link to={to} />}
+                    current={pathname === to || pathname.startsWith(to + '/')}
+                    tooltip={`${group.label ? `${group.label}: ` : ''}${label}${shown ? ` (${badge})` : ''}`}
+                  >
+                    <Icon strokeWidth={1.65} aria-hidden='true' />
+                    {label}
+                    {shown && <SidebarMenuBadge>{badge > 999 ? '999+' : badge}</SidebarMenuBadge>}
+                  </SidebarItem>
+                );
+              })}
+            </SidebarGroup>
+          ))}
+        </SidebarContent>
+        <SidebarSeparator />
+        <SidebarFooter>
+          <UpdateSidebarStatus />
+          <VpnSidebarStatus />
+        </SidebarFooter>
+        <SidebarRail />
+      </Sidebar>
 
-          {/* Brand (mobile top bar) */}
-          <div className='flex items-center px-1 md:hidden'>
-            <BrandMark />
-          </div>
-
-          <Separator className='hidden md:block' />
-
-          <nav aria-label='Main navigation' className={cn('flex min-h-0 min-w-0 flex-1 flex-row gap-1 overflow-x-auto py-1 md:flex-col md:gap-0 md:overflow-y-auto md:overflow-x-hidden md:py-3', collapsed && 'md:items-center')}>
-            {NAV_GROUPS.map((group, groupIndex) => (
-              <div
-                key={group.label || groupIndex}
-                className={cn(
-                  'contents md:flex md:w-full md:flex-col md:gap-0.5 md:px-3',
-                  collapsed && 'md:items-center md:px-2',
-                )}
-              >
-                {groupIndex > 0 && <Separator className='my-3 hidden md:block' />}
-                {!collapsed && group.label && (
-                  <p className='hidden px-2.5 pb-2 pt-1 eyebrow text-[11px] md:block'>
-                    {group.label}
-                  </p>
-                )}
-                {group.items.map(({ to, label, icon: Icon, count }) => {
-                  // Zero is the resting state of most of these, and a row of
-                  // noughts reads as clutter rather than as information.
-                  const badge = count ? counts[count] : undefined;
-                  const link = (
-                    <NavLink
-                      key={to}
-                      to={to}
-                      // A string, not a function: the collapsed row is a tooltip
-                      // trigger's render element, and Base UI merges string class
-                      // names. NavLink still sets aria-current='page' when active,
-                      // which material-row draws as the raised current row.
-                      className={cn(
-                        'group flex min-h-(--control-h-sm) shrink-0 items-center gap-2 whitespace-nowrap rounded-button material-row px-2.5 text-[13px] font-medium focus-ring',
-                        collapsed && 'md:size-9 md:min-h-0 md:justify-center md:gap-0 md:p-0',
-                      )}
-                    >
-                      <Icon className='size-4 shrink-0' strokeWidth={1.65} aria-hidden='true' />
-                      <span className={cn('md:inline', collapsed && 'md:hidden')}>{label}</span>
-                      {typeof badge === 'number' && badge > 0 && (
-                        <span
-                          className={cn(
-                            'ml-auto font-mono text-[11px] leading-none tabular-nums text-muted-foreground',
-                            collapsed && 'md:hidden',
-                          )}
-                        >
-                          {badge > 999 ? '999+' : badge}
-                        </span>
-                      )}
-                    </NavLink>
-                  );
-                  return collapsed ? (
-                    <Tooltip key={to}>
-                      <TooltipTrigger render={link} />
-                      <TooltipContent side='right'>
-                        {group.label ? `${group.label}: ${label}` : label}
-                        {typeof badge === 'number' && badge > 0 ? ` (${badge})` : ''}
-                      </TooltipContent>
-                    </Tooltip>
-                  ) : link;
-                })}
-              </div>
-            ))}
-          </nav>
-
-          <Separator className='hidden md:block' />
-          <div className={cn('hidden p-3 md:flex md:shrink-0 md:flex-col md:gap-2', collapsed && 'md:items-center md:px-2')}>
-            <UpdateSidebarStatus collapsed={collapsed} />
-            <VpnSidebarStatus collapsed={collapsed} />
-          </div>
-        </aside>
-
-        <main className='min-h-0 min-w-0 flex-1 overflow-y-auto px-(--page-gutter) py-6 [--page-gutter:1rem] md:[--page-gutter:1.5rem]'>
+      {/* Opaque, with zon's ground painted in (page-ground, lib/ground.ts): on a screen at 100%
+          scaling Chrome scrolls a see-through scroller by painting all of it again every frame
+          and blending the grain anew (20-30 fps on the manga review), an opaque one on the
+          compositor (60). Scrollers inside it stay see-through, showing this ground. */}
+      <SidebarInset className='overflow-y-auto page-ground'>
+        {/* Mobile: the sidebar is a sheet, opened from this bar. */}
+        <header className='sticky top-0 z-30 flex shrink-0 items-center gap-2 border-b border-border/60 bg-background px-2 py-1.5 md:hidden'>
+          <SidebarTrigger />
+          <Separator orientation='vertical' className='my-auto h-4 min-h-0 self-center' />
+          <BrandMark />
+        </header>
+        <div className='min-h-0 w-full flex-1 px-(--page-gutter) py-6 [--page-gutter:1rem] md:[--page-gutter:1.5rem]'>
           <div className='h-full w-full'>
-            <Routes>
-              <Route path='/' element={<Navigate to='/dashboard' replace />} />
-          <Route path='/dashboard' element={<Dashboard />} />
-
-              {/* Movies & shows. */}
-              <Route path='/mas' element={<Navigate to='/mas/discover' replace />} />
-              <Route path='/mas/discover' element={<Discover />} />
-              <Route path='/mas/search' element={<Search />} />
-              <Route path='/mas/filmpalast' element={<Recent />} />
-              <Route path='/mas/torrents' element={<Torrents />} />
-              <Route path='/mas/queue' element={<Library />} />
-              <Route path='/mas/library' element={<MasLibrary />} />
-              <Route path='/mas/settings' element={<Settings scope='mas' />} />
-
-              {/* Anime. */}
-              <Route path='/a' element={<Navigate to='/a/discover' replace />} />
-              <Route path='/a/discover' element={<Anime />} />
-              <Route path='/a/queue' element={<AnimeQueue />} />
-              <Route path='/a/library' element={<AnimeLibrary />} />
-              {/* Keyed apart: both render AnimeReview, so without this React
-                  reuses the instance and the open releases dialog, the busy
-                  flag and the purge target all follow you between them. */}
-              <Route path='/a/review' element={<AnimeReview key='review' />} />
-              <Route path='/a/blacklist' element={<AnimeReview key='blacklist' blacklist />} />
-              <Route path='/a/erai' element={<AnimeErai />} />
-          <Route path='/a/settings' element={<AnimeSettings />} />
-
-              {/* Neither library's own. */}
-              <Route path='/m' element={<Navigate to='/m/library' replace />} />
-              <Route path='/m/search' element={<MangaSearch />} />
-              <Route path='/m/library' element={<MangaLibrary />} />
-              <Route path='/m/review' element={<MangaReview key='review' />} />
-              <Route path='/m/blacklist' element={<MangaReview key='blacklist' blacklist />} />
-              <Route path='/m/settings' element={<MangaSettings />} />
-              <Route path='/qbittorrent' element={<QBittorrent />} />
-              <Route path='/tracks' element={<Tracks />} />
-              <Route path='/encode' element={<Encode />} />
-              <Route path='/genres' element={<Genres />} />
-              <Route path='/library' element={<Server />} />
-              <Route path='/settings' element={<Settings scope='global' />} />
-
-              {/* The paths these pages used to live at. Kept so a bookmark,
-                  an open tab or a link in a note still arrives somewhere. */}
-              <Route path='/discover' element={<Navigate to='/mas/discover' replace />} />
-              <Route path='/search' element={<Navigate to='/mas/search' replace />} />
-              <Route path='/filmpalast' element={<Navigate to='/mas/filmpalast' replace />} />
-              <Route path='/recent' element={<Navigate to='/mas/filmpalast' replace />} />
-              <Route path='/queue' element={<Navigate to='/mas/queue' replace />} />
-              <Route path='/server' element={<Navigate to='/library' replace />} />
-              <Route path='/anime' element={<Navigate to='/a/discover' replace />} />
-              <Route path='/anime/discover' element={<Navigate to='/a/discover' replace />} />
-              <Route path='/anime/queue' element={<Navigate to='/a/queue' replace />} />
-              <Route path='/anime/library' element={<Navigate to='/a/library' replace />} />
-              <Route path='/anime/review' element={<Navigate to='/a/review' replace />} />
-              <Route path='/anime/blacklist' element={<Navigate to='/a/blacklist' replace />} />
-              <Route path='/anime/settings' element={<Navigate to='/a/settings' replace />} />
-            </Routes>
+            <KeptPages />
           </div>
-        </main>
-      </div>
-    </>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }

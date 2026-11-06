@@ -54,7 +54,7 @@ from bankai.config import (
     user_config_path,
 )
 from bankai.logging import configure_logging, get_logger
-from bankai.metadata.tvdb import TitleAlias, get_title_aliases
+from bankai.metadata.tmdb_titles import TitleAlias, get_title_aliases
 from bankai.queue.models import MediaKind
 from bankai.theme import make_console
 from bankai.web.server import SERVICE_NAME
@@ -80,7 +80,11 @@ anime_app = typer.Typer(name="anime", help="Anime automation.", no_args_is_help=
 shrink_app = typer.Typer(
     name="shrink", help="Encode a video's picture again, smaller, everything else kept.", no_args_is_help=True
 )
+library_app = typer.Typer(
+    name="library", help="The passes that rewrite library files (encode, browser audio, tracks).", no_args_is_help=True
+)
 app.add_typer(anime_app, name="anime")
+app.add_typer(library_app, name="library")
 app.add_typer(shrink_app, name="shrink")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(config_app, name="config")
@@ -278,24 +282,24 @@ def _version_callback(value: bool) -> None:
 
 @dataclass(frozen=True, slots=True)
 class MediaIdentity:
-    """Normalised result of an interactive TheTVDB lookup.
+    """Normalised result of an interactive TMDB lookup.
 
     ``original`` is whatever the user typed at the prompt; the other
-    fields come from TheTVDB and may be empty when an alias is missing
+    fields come from TMDB and may be empty when an alias is missing
     or when the user chose to keep their original query (no internet
-    / TVDB key not configured).
+    / TMDB key not configured).
     """
 
     original: str
     english: str | None = None
     german: str | None = None
     year: int | None = None
-    tvdb_id: int | None = None
+    tmdb_id: int | None = None
     kind: MediaKind | None = None
 
 
 def _format_identity_row(alias: TitleAlias, fallback_query: str) -> list[str]:
-    """Build a row for the TVDB picker table."""
+    """Build a row for the TMDB picker table."""
     en = alias.english_title or alias.name or fallback_query
     de = alias.german_title or "[muted]\u2014[/muted]"
     year = str(alias.year) if alias.year else "[muted]?[/muted]"
@@ -303,14 +307,14 @@ def _format_identity_row(alias: TitleAlias, fallback_query: str) -> list[str]:
     return [en, de, year, kind]
 
 
-def _identify_via_tvdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
-    """Search TheTVDB and let the user pick the correct title.
+def _identify_via_tmdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
+    """Search TMDB and let the user pick the correct title.
 
     The picker shows English title, German title, year and kind. The
     chosen entry is converted into a :class:`MediaIdentity` so callers
     can pre-fill year / German alias without asking the user again.
 
-    Returns ``None`` if the user cancels. If TVDB is unreachable or no
+    Returns ``None`` if the user cancels. If TMDB is unreachable or no
     matches are found the function falls back to a single
     ``MediaIdentity(original=query)`` so the rest of the flow still
     works.
@@ -318,12 +322,12 @@ def _identify_via_tvdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
     try:
         results: list[TitleAlias] = asyncio.run(get_title_aliases(query, kind=kind))
     except Exception as exc:
-        log.warning("tvdb lookup failed: %s", exc)
+        log.warning("TMDB lookup failed: %s", exc)
         results = []
 
     if not results:
         console.print(
-            f"[warn]TheTVDB returned no matches for[/warn] [accent]{query}[/accent] [muted]\u2014 continuing without metadata.[/muted]"
+            f"[warn]TMDB returned no matches for[/warn] [accent]{query}[/accent] [muted]\u2014 continuing without metadata.[/muted]"
         )
         return MediaIdentity(original=query, kind=kind)
 
@@ -331,10 +335,10 @@ def _identify_via_tvdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
     results = results[:10]
     rows = [_format_identity_row(alias, query) for alias in results]
     # Add a "None of these" sentinel so the user can still proceed
-    # when TVDB has the wrong entry.
+    # when TMDB has the wrong entry.
     rows.append([f"[muted]Use my query verbatim:[/muted] [accent]{query}[/accent]", "", "", ""])
     idx = _ask_table_select(
-        "Pick the correct title (TheTVDB):",
+        "Pick the correct title (TMDB):",
         headers=["English", "German", "Year", "Kind"],
         rows=rows,
     )
@@ -348,7 +352,7 @@ def _identify_via_tvdb(query: str, *, kind: MediaKind) -> MediaIdentity | None:
         english=alias.english_title or alias.name,
         german=alias.german_title,
         year=alias.year,
-        tvdb_id=alias.tvdb_id,
+        tmdb_id=alias.tmdb_id,
         kind=alias.kind or kind,
     )
 
@@ -434,7 +438,7 @@ def _menu_run_movie() -> None:
     title = Prompt.ask("[bold]Movie title[/bold] (any language)")
     if not title.strip():
         return
-    identity = _identify_via_tvdb(title, kind=MediaKind.MOVIE)
+    identity = _identify_via_tmdb(title, kind=MediaKind.MOVIE)
     if identity is None:
         # User cancelled the picker.
         return
@@ -510,7 +514,7 @@ def _menu_run_show() -> None:
     query = Prompt.ask("[bold]Show name[/bold]")
     if not query.strip():
         return
-    identity = _identify_via_tvdb(query, kind=MediaKind.EPISODE)
+    identity = _identify_via_tmdb(query, kind=MediaKind.EPISODE)
     if identity is None:
         return
     show = identity.english or identity.german or identity.original
@@ -893,22 +897,10 @@ _QUICK_SETTINGS: list[tuple[str, str, str, str]] = [
         "Ask which result to pick instead of auto-picking #1",
     ),
     (
-        "TVDB Metadata",
-        "metadata.tvdb_enabled",
-        "bool",
-        "Use TVDB aliases when an API key is configured",
-    ),
-    (
-        "TVDB API Key",
-        "metadata.tvdb_api_key",
+        "TMDB API Key",
+        "metadata.tmdb_api_key",
         "str",
-        "TheTVDB v4 API key for title aliases",
-    ),
-    (
-        "TVDB PIN",
-        "metadata.tvdb_pin",
-        "str",
-        "Optional subscriber PIN for user-supported keys",
+        "TMDB API key or read access token: titles, German names, episodes, artwork",
     ),
     (
         "Min Torrent Size (GiB)",
@@ -1279,16 +1271,16 @@ def metadata_search(
     query: str = typer.Argument(..., help="Movie or show title to look up."),
     kind: str = typer.Option("show", "--kind", help="show | movie"),
 ) -> None:
-    """Show TVDB title aliases used by Bankai lookups."""
+    """Show TMDB title aliases used by Bankai lookups."""
     media_kind = _metadata_kind(kind)
     aliases = asyncio.run(get_title_aliases(query, kind=media_kind))
     if not aliases:
         console.print(
-            "[yellow]no metadata results[/yellow]\n[dim]Check `metadata.tvdb_api_key` and `metadata.tvdb_enabled`.[/dim]"
+            "[yellow]no metadata results[/yellow]\n[dim]Check `metadata.tmdb_api_key`.[/dim]"
         )
         return
-    table = Table(title=f"TVDB metadata for {query!r}", show_lines=False)
-    for col in ("#", "TVDB ID", "Name", "English", "German", "Year"):
+    table = Table(title=f"TMDB metadata for {query!r}", show_lines=False)
+    for col in ("#", "TMDB ID", "Name", "English", "German", "Year"):
         if col in {"Name", "English", "German"}:
             table.add_column(col, overflow="fold")
         else:
@@ -1296,7 +1288,7 @@ def metadata_search(
     for index, alias in enumerate(aliases, 1):
         table.add_row(
             f"[cyan]{index}[/cyan]",
-            str(alias.tvdb_id or ""),
+            str(alias.tmdb_id or ""),
             alias.name or "",
             alias.english_title or "",
             alias.german_title or "",
@@ -1316,7 +1308,7 @@ def _metadata_kind(kind: str) -> MediaKind:
 
 
 async def _movie_lookup_queries(query: str, german_title: str | None) -> list[str]:
-    # Even when a caller supplied a title, include TVDB's aliases/translations.
+    # Even when a caller supplied a title, include TMDB's aliases/translations.
     # Web jobs historically always passed --de (falling back to the English
     # title), which prevented titles such as "El Hoyo" from ever trying the
     # Filmpalast name "Der Schacht".
@@ -1496,8 +1488,7 @@ def config_init(
     qbit_pass = Prompt.ask("qBittorrent password", default="adminadmin", password=True)
     prow_url = Prompt.ask("Prowlarr URL", default="http://localhost:9696")
     prow_key = Prompt.ask("Prowlarr API key", default="")
-    tvdb_key = Prompt.ask("TheTVDB API key (blank = disabled)", default="")
-    tvdb_pin = Prompt.ask("TheTVDB PIN (blank = none)", default="", password=True)
+    tmdb_key = Prompt.ask("TMDB API key (blank = disabled)", default="")
     discord = Prompt.ask("Discord webhook URL (blank = none)", default="")
     interactive = Confirm.ask(
         "When you run a movie without --url, ask before picking the search hit?",
@@ -1521,12 +1512,7 @@ def config_init(
         },
         "prowlarr": {"url": prow_url, "api_key": prow_key},
         "scraper": {"interactive_pick": interactive},
-        "metadata": {
-            "tvdb_enabled": bool(tvdb_key),
-            "tvdb_api_key": tvdb_key,
-            "tvdb_pin": tvdb_pin,
-            "tvdb_languages": ["deu", "eng"],
-        },
+        "metadata": {"tmdb_api_key": tmdb_key},
         "transfer": {
             "root": transfer_root,
             "movies_dir": f"{transfer_root.rstrip('/')}/movies",
@@ -1856,6 +1842,30 @@ def anime_worker() -> None:
         await erai.worker()
 
     asyncio.run(main())
+
+
+@library_app.command("worker")
+def library_worker_command() -> None:
+    """Run the encode, browser-audio and track-cleanup passes in the foreground, apart from the web UI.
+
+    For a bankai-web started with BANKAI_LIBRARY_WORKER=external, which then leaves these passes
+    to this process: restarting the web UI no longer cuts an encode off. Exits 3 once bankai's code
+    changed and the running files are done, for systemd to start it again on the new code.
+    """
+    import asyncio
+    import signal
+    from contextlib import suppress
+
+    from bankai.web import library_worker
+
+    async def main() -> int:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with suppress(NotImplementedError):  # Windows
+                loop.add_signal_handler(sig, library_worker.stop)
+        return await library_worker.worker()
+
+    raise typer.Exit(code=asyncio.run(main()))
 
 
 @web_app.command("install-service")
@@ -2473,6 +2483,9 @@ def anime_download(
     cleanup_torrent: bool = typer.Option(False, "--cleanup-torrent"),
     publish: bool = typer.Option(False, "--publish", help="Transfer to the library, not leave it staged"),
     keep_episode: list[int] = typer.Option([], "--keep-episode", help="AniList episode not to publish"),
+    episode_map: list[str] = typer.Option(
+        [], "--episode-map", help="N=AID:EP: the torrent's episode N is AniList AID episode EP; the rest stays out"
+    ),
     german_sub_url: str | None = typer.Option(
         None, "--german-sub-url", help="German subtitles Erai-raws uploaded beside the release"
     ),
@@ -2481,11 +2494,24 @@ def anime_download(
     from bankai.processor.anime import download_anime
     from bankai.web.anime import is_nyaa_url
 
-    if not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url):
-        console.print("[red]anime downloads only accept nyaa.si sources[/red]")
+    # A Nyaa release, or a magnet link pasted by hand (Replace with magnet link): no Nyaa page to it.
+    from_magnet = magnet_uri.strip().casefold().startswith("magnet:") and not torrent_url and not detail_url
+    if not from_magnet and (not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url)):
+        console.print("[red]anime downloads only accept nyaa.si sources, or a magnet link[/red]")
         raise typer.Exit(code=1)
     if media_kind == "show" and not anilist_id:
         console.print("[red]an anime show download needs --anilist-id[/red]")
+        raise typer.Exit(code=1)
+    # Whoever queued it -- a retry, a job waiting since before, a search -- nothing of a
+    # blacklisted entry is downloaded; taken off the blacklist, it can be again.
+    from bankai.web.erai import _policy_anilist_ids
+
+    wanted = {anilist_id} | {int(re.split(r"[=:]", item)[1]) for item in episode_map}
+    blocked = sorted(_policy_anilist_ids() & {aid for aid in wanted if aid})
+    if blocked:
+        reason = "Series blacklisted: AniList " + ", ".join(map(str, blocked))
+        log.error("Anime download refused — %s", reason)
+        print(reason, flush=True)
         raise typer.Exit(code=1)
 
     async def go() -> None:
@@ -2508,6 +2534,10 @@ def anime_download(
                 keep_episodes=frozenset(keep_episode),
                 publish=publish,
                 german_sub_url=german_sub_url,
+                episode_map={
+                    int(raw): (int(aid), int(number))
+                    for raw, aid, number in (re.split(r"[=:]", item) for item in episode_map)
+                } or None,
             )
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"
@@ -2524,7 +2554,7 @@ def anime_download(
 def direct_download(
     release_title: str = typer.Option(..., "--release-title"),
     media_kind: str = typer.Option(..., "--kind", help="movie | show"),
-    root: str = typer.Option(..., "--root", help="The library folder it goes to"),
+    root: str | None = typer.Option(None, "--root", help="The library folder it goes to"),
     title: str = typer.Option(..., "--title"),
     year: int | None = typer.Option(None, "--year"),
     season: int | None = typer.Option(None, "--season"),
@@ -2532,9 +2562,23 @@ def direct_download(
     magnet_uri: str | None = typer.Option(None, "--magnet-uri"),
     info_hash: str | None = typer.Option(None, "--info-hash"),
     info_url: str | None = typer.Option(None, "--info-url"),
+    root_german: str | None = typer.Option(None, "--root-german", help="By language: the folder for files with German"),
+    root_english: str | None = typer.Option(None, "--root-english", help="By language: the folder for English-only files"),
+    episodes: str | None = typer.Option(None, "--episodes", help="Only these, e.g. S01E01,S01E02"),
+    also_named: list[str] = typer.Option([], "--also-named", help="Other names the library may file it under"),
+    _follow: int | None = typer.Option(None, "--follow", help="The followed show (TMDB id) it is for"),
+    replace_path: list[str] = typer.Option([], "--replace-path", help="A library file this release replaces (Replace with magnet link)"),
 ) -> None:
     """Download a release found on Prowlarr and file it as it is: no dub, sync or review."""
     from bankai.processor.direct import download_direct
+
+    roots = {"German": root_german or "", "English": root_english or ""}
+    only = None
+    if episodes:
+        only = {
+            (int(found[1]), int(found[2]))
+            for found in re.finditer(r"S(\d+)E(\d+)", episodes, re.I)
+        }
 
     async def go() -> None:
         try:
@@ -2549,6 +2593,10 @@ def direct_download(
                 title=title,
                 year=year,
                 season=season,
+                roots=roots if any(roots.values()) else None,
+                only=only,
+                names=tuple(also_named),
+                replace_paths=tuple(Path(path) for path in replace_path),
             )
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"

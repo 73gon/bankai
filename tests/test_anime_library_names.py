@@ -51,7 +51,7 @@ def test_a_folder_and_its_title_are_the_same_show(folder_name, title):
         ("86", "86"),
     ],
 )
-def test_the_season_suffix_comes_off_before_the_tvdb_search(source_title, expected):
+def test_the_season_suffix_comes_off_before_the_title_search(source_title, expected):
     """Left on, it went into the query and the name comparison, so nothing
     matched and the Movies & Shows card was left with no cover."""
     from bankai.web.anime_library import _search_title
@@ -121,7 +121,7 @@ def test_an_expired_answer_is_served_while_it_refreshes(metadata_store):
     key = "metadata:v2:all:show:frieren"
     anime_library._PERSISTENT_CACHE[key] = {
         "saved_at": time.time() - anime_library._PERSISTENT_TTL_SECONDS - 60,
-        "value": {"english_title": "Frieren", "tvdb_id": 424536},
+        "value": {"english_title": "Frieren", "tmdb_id": 209867},
     }
 
     async def load():
@@ -130,7 +130,7 @@ def test_an_expired_answer_is_served_while_it_refreshes(metadata_store):
         await asyncio.gather(*anime_library._BACKGROUND)
         return first
 
-    assert asyncio.run(load())["tvdb_id"] == 424536
+    assert asyncio.run(load())["tmdb_id"] == 209867
     assert metadata_store["calls"] == 1
 
 
@@ -149,7 +149,7 @@ def test_a_name_that_is_only_punctuation_does_not_collapse_to_nothing():
 
 
 def test_merge_episodes_marks_each_episode_with_its_codec():
-    from bankai.metadata.tvdb import TVDBEpisode
+    from bankai.metadata.tmdb_titles import Episode
     from bankai.web.anime_library import merge_episodes
 
     files = [
@@ -157,9 +157,9 @@ def test_merge_episodes_marks_each_episode_with_its_codec():
         {"path": "2", "season_number": 1, "episode": 2, "name": "2", "staged": False},
     ]
     roster = [
-        TVDBEpisode(1, 1, aired="2020-01-01"),
-        TVDBEpisode(1, 2, aired="2020-01-08"),
-        TVDBEpisode(1, 3, aired="2020-01-15"),
+        Episode(1, 1, aired="2020-01-01"),
+        Episode(1, 2, aired="2020-01-08"),
+        Episode(1, 3, aired="2020-01-15"),
     ]
     merged = merge_episodes(
         files, roster, ended=True, codecs={(1, 1): "hevc", (1, 2): "avc"}
@@ -179,7 +179,8 @@ def test_a_tab_is_named_without_the_collections_own_name(anilist_data):
     anilist_data.add(2, "Shingeki no Kyojin Season 2", english="Attack on Titan Season 2", start="2017-04-01")
     anilist_data.add(3, "Shingeki no Kyojin OVA", english="Attack on Titan: Lost Girls", format="OVA")
 
-    assert tab_labels([1, 2, 3], "Attack on Titan") == {1: "Attack on Titan", 2: "Season 2", 3: "Lost Girls"}
+    # The first season is the show itself: nothing is left of its name, its tab says "Season 1".
+    assert tab_labels([1, 2, 3], "Attack on Titan") == {1: "", 2: "Season 2", 3: "Lost Girls"}
 
 
 def test_without_a_collection_a_tab_is_its_entrys_whole_name(anilist_data):
@@ -194,11 +195,13 @@ def test_two_tabs_of_one_name_are_told_apart_by_what_they_are(anilist_data):
     anilist_data.add(2, "Shingeki no Kyojin OVA", english="Attack on Titan", format="OVA", start="2013-12-09")
     anilist_data.add(3, "Shingeki no Kyojin Movie", english="Attack on Titan", format="MOVIE", start="2013-12-09")
 
-    assert tab_labels([1, 2, 3], "Attack on Titan") == {
+    assert tab_labels([1, 2, 3], None) == {
         1: "Attack on Titan (TV, 2013)",
         2: "Attack on Titan (OVA, 2013)",
         3: "Attack on Titan (Movie, 2013)",
     }
+    # In the collection of that name each is the show itself: its season's number names it.
+    assert tab_labels([1, 2, 3], "Attack on Titan") == {1: "", 2: "", 3: ""}
 
 
 def test_two_tabs_of_one_name_and_kind_are_told_apart_by_year(anilist_data):

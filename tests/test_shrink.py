@@ -231,6 +231,8 @@ def test_a_length_that_disagrees_with_the_encode_is_settled_by_counting(tmp_path
     # No count in the file, and the container runs 48 frames longer than the encode.
     counts: list[Path] = []
     monkeypatch.setattr(shrink, "count_frames", lambda path: counts.append(path) or counted)
+    # Nor the picture's own length: its frame times are read, and given to it.
+    monkeypatch.setattr(shrink, "frame_times", lambda _path: grid(counted))
     source = got(tmp_path, duration=3702.098)
     settings = shrink._settings(source, shrink.DEFAULT_QUALITY)
     encoded = {"settings": settings, "frames": 88_714}
@@ -241,7 +243,86 @@ def test_a_length_that_disagrees_with_the_encode_is_settled_by_counting(tmp_path
     else:
         ran, _result, _source = run_steps(tmp_path, monkeypatch, encoded=encoded, duration=3702.098)
         assert ran == ["rpu", "inject", "mux"]
+        assert (tmp_path / "work" / "frames.txt").is_file()
     assert len(counts) == 1
+
+
+def naruto(tmp_path: Path, **changes) -> dict:
+    """Naruto Shippuden S12E329 as ffprobe reads it: a stream download, two jumps of 2 s in its frame times."""
+    return {
+        "dv_profile": None, "duration": 1389.597, "video_duration": 1389.597, "frame_count": 33221,
+        "frame_rate": "27187/1134", **changes,
+    }
+
+
+def grid(count: int, *, jump_at: int | None = None, jump: float = 0.0) -> list[float]:
+    step = 1001 / 24000
+    return [index * step + (jump if jump_at is not None and index >= jump_at else 0.0) for index in range(count)]
+
+
+def test_uneven_frames_keep_their_own_times(tmp_path, monkeypatch):
+    times = grid(33221, jump_at=12_000, jump=3.9)
+    monkeypatch.setattr(shrink, "frame_times", lambda _path: times)
+    seen: dict = {}
+    real = shrink.mux_command
+    monkeypatch.setattr(shrink, "mux_command", lambda *args, **kwargs: seen.update(kwargs) or real(*args, **kwargs))
+
+    ran, _result, _source = run_steps(tmp_path, monkeypatch, **naruto(tmp_path))
+
+    assert ran == ["encode", "mux"]
+    written = (tmp_path / "work" / "frames.txt").read_text(encoding="utf-8").splitlines()
+    assert written[0] == "# timestamp format v2"
+    assert len(written) == 1 + 33221
+    # Line 0 is the header: frame k is line k + 1. The jump stays where it was.
+    assert written[12_000 : 12_002] == [f"{times[11_999] * 1000:.3f}", f"{times[12_000] * 1000:.3f}"]
+    assert float(written[12_001]) - float(written[12_000]) > 3900
+    command = " ".join(real(_source, tmp_path / "video.hevc", tmp_path / "out.mkv", timestamps=seen["timestamps"]))
+    assert f"--timestamps 0:{tmp_path / 'work' / 'frames.txt'}" in command
+    assert "--default-duration" not in command
+
+
+def test_even_frames_keep_the_even_grid(tmp_path, monkeypatch):
+    monkeypatch.setattr(shrink, "frame_times", lambda _path: pytest.fail("frame times read for an even picture"))
+    seen: dict = {}
+    real = shrink.mux_command
+    monkeypatch.setattr(shrink, "mux_command", lambda *args, **kwargs: seen.update(kwargs) or real(*args, **kwargs))
+
+    run_steps(tmp_path, monkeypatch, dv_profile=None)
+
+    assert seen["timestamps"] is None
+    assert not (tmp_path / "work" / "frames.txt").exists()
+
+
+def test_frame_times_that_do_not_match_the_encode_are_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(shrink, "frame_times", lambda _path: grid(33220))
+
+    with pytest.raises(shrink.ShrinkError, match="33221 frames, the source's picture has 33220 frame times"):
+        run_steps(tmp_path, monkeypatch, **naruto(tmp_path))
+    assert not (tmp_path / "work" / "frames.txt").exists()
+
+
+def test_frame_times_are_read_in_the_order_shown(tmp_path, monkeypatch):
+    class Done:
+        returncode = 0
+        stdout = "0.000000\n0.083000\n0.042000\nN/A\n0.125000,\n"
+        stderr = ""
+
+    monkeypatch.setattr(shrink.subprocess, "run", lambda *_args, **_kwargs: Done())
+
+    assert shrink.frame_times(tmp_path / "video.mkv") == [0.0, 0.042, 0.083, 0.125]
+
+
+@pytest.mark.parametrize(("picture", "refused"), [(1387.771, True), (1389.597, False), (1389.640, False)])
+def test_a_picture_shorter_than_the_source_s_is_refused(tmp_path, monkeypatch, picture, refused):
+    # S12E326 encoded on an even grid: the audio still ran to 1389.6 s, the picture stopped 1.8 s short.
+    source = got(tmp_path, **naruto(tmp_path))
+    monkeypatch.setattr(shrink, "inspect", lambda _path: got(tmp_path, **naruto(tmp_path, video_duration=picture)))
+
+    if refused:
+        with pytest.raises(shrink.ShrinkError, match=r"new picture runs 1387\.77s, the source's 1389\.60s"):
+            shrink.verify(source, tmp_path / "out.mkv")
+    else:
+        assert shrink.verify(source, tmp_path / "out.mkv").video_duration == picture
 
 
 def test_dolby_vision_can_be_left_out_and_added_later_from_the_same_encode(tmp_path, monkeypatch):
@@ -284,3 +365,28 @@ def test_an_h264_source_stays_h264(tmp_path):
     assert "-c:v h264_nvenc" in joined and "-profile:v high" in joined and "-cq 19" in joined
     assert "main10" not in joined and "-color_range" not in joined
     assert joined.endswith(f"-f h264 {tmp_path / 'video.h264'}")
+
+
+def test_a_trial_that_predicts_too_little_saving_stops_before_the_encode(tmp_path, monkeypatch):
+    """Bleach's compact episodes came out larger; 293 encodes were thrown away whole."""
+    from bankai.processor import shrink
+
+    source = shrink.Source(path=tmp_path / "a.mkv", duration=1440.0, frame_rate="24000/1001", size=900 * 2**20)
+    sizes = iter([150, 100] * 3)  # each new stretch half again as large as the source's
+    monkeypatch.setattr(shrink, "_sample_bytes", lambda command, output: next(sizes))
+    monkeypatch.setattr(shrink, "_tool", lambda name: name)
+    predicted = shrink.trial(source, tmp_path / "work", quality=20, codec="hevc")
+    assert predicted is not None and predicted < 0
+    short = shrink.Source(path=tmp_path / "b.mkv", duration=60.0, frame_rate="24", size=10)
+    assert shrink.trial(short, tmp_path / "work", quality=20, codec="hevc") is None
+
+
+@pytest.mark.parametrize("returncode", [-15, -9, 255])
+def test_a_program_stopped_by_a_service_stop_is_an_interruption_not_a_failure(returncode):
+    # ffmpeg catches SIGTERM and exits with 255; a program killed outright has a negative code.
+    with pytest.raises(shrink.ShrinkInterrupted):
+        shrink._stopped(returncode, "the encode")
+
+
+def test_a_program_that_failed_on_its_own_is_no_interruption():
+    shrink._stopped(1, "the encode")

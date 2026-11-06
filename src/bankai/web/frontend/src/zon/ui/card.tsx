@@ -3,34 +3,56 @@ import * as React from "react";
 import { cn } from "@/zon/lib/cn";
 
 /*
- * Region or object? Ask whether the thing could be picked up and moved somewhere else on
- * its own. A quote card, a pricing card, a data table could: that is an object → `Card`
- * (20px, padding, the one soft drop shadow). A section panel, a specimen sheet, a page cover
- * could not: that is a region → `Surface` (square, no shadow). When unsure, prefer the
- * region — and before either, ask whether a hairline rule and whitespace would do
- * (`FeatureCard`, `Separator`). Boxing every group flattens the hierarchy.
+ * Which kind? Ask first whether a hairline rule and whitespace would do: that is `plain`. Then
+ * whether the thing could be picked up and moved somewhere else on its own — a quote, a pricing
+ * option, a form panel: that is a card, `default` (20px, the one soft drop shadow). A section
+ * panel, a specimen sheet, a page cover could not: it is part of the page, `square` (no radius,
+ * no shadow). When unsure, prefer square — and before either, plain. Boxing every group
+ * flattens the hierarchy.
  */
 
-export type CardProps = useRender.ComponentProps<"div">;
+const cardVariants = {
+  /** An object on the page: the card material, 20px corners, the system's only drop shadow. */
+  default: "surface-card",
+  /** A part of the page: the same material, square, no shadow, the card's padding. */
+  square:
+    "rounded-none surface-container p-[var(--card-padding,24px)] sm:p-[var(--card-padding,32px)] md:p-[var(--card-padding,40px)]",
+  /** No box: no border, no ground, no shadow — a top hairline and whitespace. */
+  plain: "border-t border-border/60 pt-6 pb-8",
+} as const;
+
+export type CardVariant = keyof typeof cardVariants;
+
+export interface CardProps extends useRender.ComponentProps<"div"> {
+  /**
+   * `default`: an object, a 20px card with the soft shadow. `square`: a part of the page, the same
+   * material with square corners and no shadow. `plain`: no box at all, a top hairline and space.
+   */
+  variant?: CardVariant;
+}
 
 /**
- * Card — an **object**: a discrete thing sitting *on* the page (a quote, a pricing option,
- * a form panel). `surface-card` material, 20px radius, the system's only drop shadow, and
- * responsive 24/32/40px padding that belongs to the card — never pad it at the call site.
+ * Card — a group of content in one of three kinds. `default` is an **object** sitting *on* the
+ * page (a quote, a pricing option, a form panel): `surface-card` material, 20px radius, the
+ * system's only drop shadow, and responsive 24/32/40px padding that belongs to the card — never
+ * pad it at the call site. `square` is a **part of** the page (a section panel, a specimen sheet,
+ * a cover): the same material, square, no shadow. `plain` is **no box**: a top hairline and
+ * whitespace, for features, steps and principles laid out in a grid.
  *
- * Region vs object: could it be picked up and moved somewhere else on its own? Yes → `Card`.
- * No (it *is* that part of the page) → `Surface`. Unsure → `Surface`, or better, no box at
- * all. The rule people break: wrapping content in a card because it feels tidier.
+ * Could it be picked up and moved somewhere else on its own? Yes → `default`. No → `square`.
+ * Would a rule and whitespace do? → `plain`, before either. The rule people break: wrapping
+ * content in a card because it feels tidier, or rounding a part of the page.
  */
-export function Card({ render, ref, className, ...props }: CardProps) {
+export function Card({ variant = "default", render, ref, className, ...props }: CardProps) {
   return useRender({
     defaultTagName: "div",
     render,
     ref,
     props: {
       "data-slot": "card",
+      "data-variant": variant,
       ...props,
-      className: cn("flex flex-col gap-6 surface-card text-card-foreground", className),
+      className: cn("flex flex-col gap-6 text-card-foreground", cardVariants[variant], className),
     },
   });
 }
@@ -84,84 +106,5 @@ export function CardFooter({ className, ...props }: React.ComponentProps<"div">)
       className={cn("mt-auto flex flex-wrap items-center gap-3", className)}
       {...props}
     />
-  );
-}
-
-type SurfaceTag = "div" | "section" | "aside" | "article" | "header" | "footer" | "figure" | "main";
-
-export interface SurfaceProps extends useRender.ComponentProps<"div"> {
-  /** The element to render. Defaults to `div`. Use `render` to compose another component. */
-  as?: SurfaceTag;
-  /** Apply the responsive 24/32/40px padding. Defaults to `true`. */
-  padded?: boolean;
-}
-
-/**
- * Surface — a **region**: part of the page (a section panel, a specimen sheet, a cover,
- * a grid). The shared `surface-container` material — `--field-edge` border, 160° gradient,
- * inset highlight — with square corners and no shadow. Comes with 24/32/40px padding;
- * set `padded={false}` for full-bleed contents.
- *
- * Region vs object: could it be picked up and moved somewhere else on its own? No → `Surface`.
- * Yes → `Card`. The rule people break: rounding a region or giving it a shadow, which makes
- * it look detachable when it is not.
- */
-export function Surface({ as = "div", padded = true, render, ref, className, ...props }: SurfaceProps) {
-  return useRender({
-    defaultTagName: as,
-    render,
-    ref,
-    props: {
-      "data-slot": "surface",
-      "data-padded": padded ? "" : undefined,
-      ...props,
-      className: cn(
-        padded && "p-6 sm:p-8 md:p-10",
-        "rounded-none text-foreground surface-container",
-        className,
-      ),
-    },
-  });
-}
-
-export interface FeatureCardProps extends Omit<React.ComponentProps<"div">, "title"> {
-  /** A mono index or eyebrow above the title, e.g. `"01"` or `"Automation"`. */
-  index?: React.ReactNode;
-  /** Optional 20px lucide icon, shown above the title. */
-  icon?: React.ReactNode;
-  /** The feature's name, set in Licht. */
-  title?: React.ReactNode;
-}
-
-/**
- * FeatureCard — despite the name, **not a box**: a top hairline rule and padding, with no
- * background, no border around it and no radius. Lay several out in a grid to describe
- * services, process steps or principles.
- *
- * The rule people break: "upgrading" it to a `Card`. The rule and the whitespace carry the
- * structure; boxing each feature flattens the hierarchy instead of clarifying it.
- */
-export function FeatureCard({ index, icon, title, className, children, ...props }: FeatureCardProps) {
-  return (
-    <div
-      data-slot="feature-card"
-      className={cn("flex flex-col gap-3 border-t border-border/60 pt-6 pb-8", className)}
-      {...props}
-    >
-      {index != null && (
-        <span data-slot="feature-card-index" className="eyebrow tabular-nums">
-          {index}
-        </span>
-      )}
-      {icon != null && (
-        <span aria-hidden className="text-foreground [&_svg]:size-5">
-          {icon}
-        </span>
-      )}
-      {title != null && <h3 className="m-0 display text-[24px] leading-[1.1] text-foreground">{title}</h3>}
-      {children != null && (
-        <div className="max-w-[48ch] text-[15px] leading-relaxed text-foreground-soft">{children}</div>
-      )}
-    </div>
   );
 }

@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
+import { POSTER_IMG, posterSources } from '@/lib/posters';
 import { Button } from '@/zon/ui/button';
 import { Input } from '@/zon/ui/input';
 import { Badge } from '@/zon/ui/badge';
@@ -1330,7 +1331,7 @@ export default function Library() {
   }
 
   function Poster({ r }: { r: TitleRow }) {
-    if (r.poster) return <img src={r.poster} alt='' loading='lazy' className='h-14 w-10 shrink-0 rounded object-cover' />;
+    if (r.poster) return <img {...posterSources(r.poster)} {...POSTER_IMG} alt='' className='h-14 w-10 shrink-0 rounded object-cover' />;
     return (
       <div className='flex h-14 w-10 shrink-0 items-center justify-center rounded bg-secondary/60'>
         {r.kind === 'episode' ? <LibraryIcon className='h-4 w-4 text-muted-foreground' /> : <Film className='h-4 w-4 text-muted-foreground' />}

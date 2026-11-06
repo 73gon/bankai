@@ -626,6 +626,20 @@ def _release_capture_lease(handle: Any) -> None:
         handle.close()
 
 
+# Media requests a player page makes that are never the film: placeholders,
+# trailers, and ad clips. voe's page served Spider-Man: Brand New Day's
+# (Oct 2026) as ".../gambling/default/custom-banner/8-1/img/icon.mp4" -- the
+# only clip seen, so it was taken as the German audio.
+_NOT_THE_FEATURE = (
+    "blank.mp4", "/dummy", "preview", "trailer", "intro",
+    "banner", "gambling", "casino", "/ads/", "/ad/", "advert",
+)
+# Every clip known to be shorter than this is an ad or a placeholder: none of
+# them is taken, so the pipeline tries the next source instead of downloading
+# the HQ video for a German track of a few seconds.
+_SHORTEST_FEATURE_SECONDS = 120.0
+
+
 class PlaywrightRunner:
     """Headless Chromium fallback that intercepts media URLs.
 
@@ -690,6 +704,11 @@ class PlaywrightRunner:
         # ``captured``; pick the one with the longest duration via a yt-dlp
         # metadata-only probe (cheap; no download).
         chosen, expected_duration = await self._pick_longest(captured, runner)
+        if 0 < expected_duration < _SHORTEST_FEATURE_SECONDS:
+            raise PlaywrightError(
+                f"only short clips captured at {normalized_url} (longest {expected_duration:.0f} s, "
+                f"likely ads): {chosen}"
+            )
         log.info("[playwright] selected media URL (longest of %d candidates): %s", len(captured), chosen)
         # Use the final (post-redirect) player URL as the Referer/Origin
         # source — for hosters like voe the manifest CDN validates against
@@ -741,9 +760,8 @@ class PlaywrightRunner:
         results.sort(key=lambda t: t[1], reverse=True)
         for href, dur in results:
             log.debug("[playwright] candidate dur=%.1fs %s", dur, href)
-        # If even the longest is < 60 s, the page probably hasn't yielded
-        # the real stream yet \u2014 prefer it anyway, the sync stage will
-        # bail out with a clear error if it really is a placeholder.
+        # A longest one known to be short is refused by the caller
+        # (_SHORTEST_FEATURE_SECONDS); an unknown length (0) is kept.
         return results[0] if results else (urls[0], 0.0)
 
     async def _capture(self, url: str) -> tuple[list[str], str]:
@@ -761,7 +779,7 @@ class PlaywrightRunner:
         def _consider(href: str, ct: str = "") -> None:
             lower = href.lower()
             path = urlsplit(href).path.lower()
-            if any(bad in lower for bad in ("blank.mp4", "/dummy", "preview", "trailer", "intro")):
+            if any(bad in lower for bad in _NOT_THE_FEATURE):
                 return
             if (
                 path.endswith(".m3u8")

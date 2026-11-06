@@ -235,28 +235,32 @@
     }
   }
 
-  /* crescent — the shadow crosses the moon: new → waxing → full, then back in from the
-   * other side: full → waning → new. Still: a waxing crescent. */
+  /* crescent — the shadow crosses the moon, up along the zon mark's 14° tilt (the moon is
+   * rotated, so "up" is the mark's axis): new → waxing from the lower rim → full, then back in
+   * from below: full → waning → new. Still: the zon crescent, its cut 0.776 of the moon's radius
+   * and moved 0.234 of it toward the opening. */
   [data-slot="spinner"] [data-part="shadow"] {
-    transform: translateX(-6px);
+    transform: translateY(-2.109px) scale(0.7352);
+    transform-box: fill-box;
+    transform-origin: center;
     animation: ep-spinner-moon 2.4s linear infinite;
   }
 
   @keyframes ep-spinner-moon {
     0% {
-      transform: translateX(0);
+      transform: translateY(0);
       animation-timing-function: cubic-bezier(0.3, 0, 0.6, 1);
     }
     50% {
-      transform: translateX(-20px);
+      transform: translateY(-20px);
       animation-timing-function: steps(1, end);
     }
     50.01% {
-      transform: translateX(20px);
+      transform: translateY(20px);
       animation-timing-function: cubic-bezier(0.4, 0, 0.7, 1);
     }
     100% {
-      transform: translateX(0);
+      transform: translateY(0);
     }
   }
 

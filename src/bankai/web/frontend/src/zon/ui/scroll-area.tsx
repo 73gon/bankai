@@ -15,6 +15,12 @@ export interface ScrollAreaProps extends BaseScrollArea.Root.Props {
   viewportClassName?: string;
   /** Class for the content wrapper inside the viewport. */
   contentClassName?: string;
+  /**
+   * Render the viewport as another part, so that part is the element that scrolls: a Select,
+   * Combobox or Autocomplete list, which scrolls its highlighted item into view itself. Give it
+   * `data-has-overflow-y:pr-3` so its rows stop beside the bar instead of running under it.
+   */
+  viewportRender?: BaseScrollArea.Viewport.Props["render"];
 }
 
 function ScrollAreaScrollbar({ orientation }: { orientation: "vertical" | "horizontal" }) {
@@ -25,7 +31,7 @@ function ScrollAreaScrollbar({ orientation }: { orientation: "vertical" | "horiz
       className={cn(
         "m-1 flex touch-none rounded-full opacity-0 transition-opacity duration-(--duration) ease-(--ease) select-none",
         "pointer-events-none data-hovering:pointer-events-auto data-hovering:opacity-100 data-scrolling:pointer-events-auto data-scrolling:opacity-100",
-        "data-[orientation=horizontal]:h-1.5 data-[orientation=vertical]:w-1.5",
+        "data-[orientation=horizontal]:h-1 data-[orientation=vertical]:w-1",
       )}
     >
       <BaseScrollArea.Thumb
@@ -39,7 +45,7 @@ function ScrollAreaScrollbar({ orientation }: { orientation: "vertical" | "horiz
 /**
  * ScrollArea — a scrolling region with a thin, quiet scrollbar.
  *
- * The thumb is a 6px round bar in `--field-edge` that appears while the pointer is over the
+ * The thumb is a 4px round bar in `--field-edge` that appears while the pointer is over the
  * area or while scrolling. Edges with more content fade out using Base UI's overflow CSS
  * variables, so the fade grows as you scroll away from an edge. The rule people break:
  * nesting scroll areas or putting the main page in one. Let the page scroll natively; use
@@ -52,6 +58,7 @@ export function ScrollArea({
   scrollbar = true,
   viewportClassName,
   contentClassName,
+  viewportRender,
   className,
   children,
   ...props
@@ -71,7 +78,9 @@ export function ScrollArea({
     >
       <BaseScrollArea.Viewport
         data-slot="scroll-area-viewport"
+        data-scroll-viewport=""
         data-fade={fadeAxis}
+        render={viewportRender}
         className={cn("size-full max-h-[inherit] overscroll-contain focus-ring", viewportClassName)}
       >
         <BaseScrollArea.Content

@@ -198,8 +198,11 @@ function Art({ variant, maskId }: { variant: SpinnerVariant; maskId: string }) {
               <circle data-part="shadow" cx="12" cy="12" r="9.5" fill="black" />
             </mask>
           </defs>
-          <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3" />
-          <circle cx="12" cy="12" r="9" mask={`url(#${maskId})`} />
+          {/* Tilted like the zon mark, so the shadow leaves through its opening. */}
+          <g transform="rotate(-14 12 12)">
+            <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3" />
+            <circle cx="12" cy="12" r="9" mask={`url(#${maskId})`} />
+          </g>
         </Svg>
       );
     default:

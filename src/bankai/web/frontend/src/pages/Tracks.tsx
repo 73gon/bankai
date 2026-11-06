@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { AudioLines, Captions, Clock, Loader2, Lock } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type TrackLanguage, type TrackRules, type TrackScope, type TrackScopeName } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
+import { UnknownTracksDialog } from '@/components/UnknownTracksDialog';
+import { BrowserAudioCard } from '@/components/browser-audio-card';
 import { Button } from '@/zon/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
@@ -38,7 +40,7 @@ function since(seconds: number) {
 }
 
 /** One kind of track in a library: each language, how much of it there is, kept or taken out. */
-function LanguageTable({ title, icon: Icon, rows, off, locked, onToggle, busy }: {
+function LanguageTable({ title, icon: Icon, rows, off, locked, onToggle, onOpen }: {
   title: string;
   icon: typeof AudioLines;
   rows: TrackLanguage[];
@@ -46,7 +48,8 @@ function LanguageTable({ title, icon: Icon, rows, off, locked, onToggle, busy }:
   /** Always kept: shown without a switch. */
   locked: string[];
   onToggle: (code: string, keep: boolean) => void;
-  busy: boolean;
+  /** A language opens its tracks, title by title ("Unknown" ones to be given a language). */
+  onOpen: (row: TrackLanguage) => void;
 }) {
   return (
     <Card className='gap-0 overflow-hidden [--card-padding:0]'>
@@ -71,7 +74,14 @@ function LanguageTable({ title, icon: Icon, rows, off, locked, onToggle, busy }:
               return (
                 <TableRow key={row.code} data-selected={keep ? undefined : ''}>
                   <TableCell>
-                    <span className={keep ? 'text-foreground' : 'text-muted-foreground line-through'}>{row.name}</span>
+                    <button
+                      type='button'
+                      onClick={() => onOpen(row)}
+                      className={'link focus-ring' + (keep ? '' : ' text-muted-foreground line-through')}
+                      title={row.code === 'und' ? 'See these tracks by title, and tell their language' : `See every title with ${row.name} ${title.toLowerCase()}`}
+                    >
+                      {row.name}
+                    </button>
                     <span className='ml-2 font-mono text-[0.65rem] text-muted-foreground'>{row.code}</span>
                   </TableCell>
                   <TableCell numeric className='font-mono text-xs tabular-nums' title={count(row.tracks) + ' tracks'}>{count(row.files)}</TableCell>
@@ -84,7 +94,6 @@ function LanguageTable({ title, icon: Icon, rows, off, locked, onToggle, busy }:
                     ) : (
                       <Switch
                         checked={keep}
-                        disabled={busy}
                         aria-label={(keep ? 'Take out ' : 'Keep ') + row.name + ' ' + title.toLowerCase()}
                         onCheckedChange={(value) => onToggle(row.code, value)}
                       />
@@ -101,36 +110,71 @@ function LanguageTable({ title, icon: Icon, rows, off, locked, onToggle, busy }:
 }
 
 /** One library's cleanup: on or off, what the switched-off languages change, what was done. */
-function ScopePanel({ library, name, scope, onChange }: {
+function ScopePanel({ library, name, scope, update, held, reload }: {
   library: TrackScopeName;
   name: string;
   scope: TrackScope;
-  onChange: (next: TrackScope) => void;
+  update: (change: (current: TrackScope) => TrackScope) => void;
+  /** Libraries with changes not saved yet: the page's polling leaves their rules alone. */
+  held: MutableRefObject<Set<TrackScopeName>>;
+  reload: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  // Shown, never blocking: every switch stays usable while a change is saved.
+  const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [opened, setOpened] = useState<{ kind: 'audio' | 'subtitles'; code: string; name: string } | null>(null);
+  const pending = useRef<Partial<TrackRules>>({});
+  const timer = useRef<number | undefined>(undefined);
+  const inFlight = useRef(false);
   const { rules, preview } = scope;
   const reading = scope.read < scope.files;
   const off = [...rules.audio, ...rules.subtitles];
 
-  async function save(changes: Partial<TrackRules>) {
-    setBusy(true);
-    const before = scope;
-    onChange({ ...scope, rules: { ...rules, ...changes } });
+  // Leaving the page within the wait still saves what was switched.
+  useEffect(() => () => {
+    window.clearTimeout(timer.current);
+    if (Object.keys(pending.current).length) void api.setTrackRules(library, pending.current).catch(() => undefined);
+  }, [library]);
+
+  /** Shown at once; saved a moment later, several quick switches in one request, one request at a time. */
+  function save(changes: Partial<TrackRules>, delay = 400) {
+    pending.current = { ...pending.current, ...changes };
+    update((current) => ({ ...current, rules: { ...current.rules, ...changes } }));
+    held.current.add(library);
+    setSaving(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => void flush(), delay);
+  }
+
+  async function flush() {
+    if (inFlight.current) return; // the save under way sends the rest when it is done
+    const changes = pending.current;
+    pending.current = {};
+    if (!Object.keys(changes).length) return;
+    inFlight.current = true;
+    let failed = false;
     try {
       const result = await api.setTrackRules(library, changes);
-      onChange({ ...before, rules: result.rules, preview: result.preview });
+      const more = Object.keys(pending.current).length > 0;
+      update((current) => ({ ...current, rules: more ? current.rules : result.rules, preview: result.preview }));
     } catch (error: any) {
-      onChange(before);
+      failed = true;
+      pending.current = {};
       toast.error(error.message);
     } finally {
-      setBusy(false);
+      inFlight.current = false;
+      if (Object.keys(pending.current).length) void flush();
+      else {
+        held.current.delete(library);
+        setSaving(false);
+        if (failed) reload(); // the rules as saved, not as switched
+      }
     }
   }
 
   function toggle(kind: 'audio' | 'subtitles', code: string, keep: boolean) {
     const current = rules[kind];
-    void save({ [kind]: keep ? current.filter((item) => item !== code) : [...current, code] });
+    save({ [kind]: keep ? current.filter((item) => item !== code) : [...current, code] });
   }
 
   const nameOf = (code: string) =>
@@ -151,9 +195,8 @@ function ScopePanel({ library, name, scope, onChange }: {
           </div>
           <Switch
             checked={rules.enabled}
-            disabled={busy}
             aria-label={'Clean up the ' + name + ' library'}
-            onCheckedChange={(value) => { if (value) setConfirming(true); else void save({ enabled: false }); }}
+            onCheckedChange={(value) => { if (value) setConfirming(true); else save({ enabled: false }, 0); }}
           />
         </CardHeader>
         <CardContent className='flex flex-col gap-2 text-sm'>
@@ -163,6 +206,7 @@ function ScopePanel({ library, name, scope, onChange }: {
               : <>Tracks of all {count(scope.files)} files read.</>}
           </p>
           <p>
+            {saving && <Loader2 className='mr-1.5 inline size-3.5 animate-spin text-muted-foreground' aria-label='Saving' />}
             {preview.files
               ? <>Switched off: <b>{count(preview.tracks)}</b> track{preview.tracks === 1 ? '' : 's'} in <b>{count(preview.files)}</b> file{preview.files === 1 ? '' : 's'}{preview.bytes ? <> · about <b>{formatBytes(preview.bytes)}</b></> : null}.</>
               : <span className='text-muted-foreground'>Nothing switched off in this library{off.length ? ' that is in any file' : ''}.</span>}
@@ -200,16 +244,25 @@ function ScopePanel({ library, name, scope, onChange }: {
         </CardContent>
       </Card>
 
+      <BrowserAudioCard scope={library} label={name} />
+
       <div className='grid gap-4 lg:grid-cols-2'>
-        <LanguageTable title='Audio' icon={AudioLines} rows={scope.languages.audio} off={rules.audio} locked={scope.protected} busy={busy} onToggle={(code, keep) => toggle('audio', code, keep)} />
-        <LanguageTable title='Subtitles' icon={Captions} rows={scope.languages.subtitles} off={rules.subtitles} locked={scope.protected} busy={busy} onToggle={(code, keep) => toggle('subtitles', code, keep)} />
+        <LanguageTable title='Audio' icon={AudioLines} rows={scope.languages.audio} off={rules.audio} locked={scope.protected} onToggle={(code, keep) => toggle('audio', code, keep)} onOpen={(row) => setOpened({ kind: 'audio', code: row.code, name: row.name })} />
+        <LanguageTable title='Subtitles' icon={Captions} rows={scope.languages.subtitles} off={rules.subtitles} locked={scope.protected} onToggle={(code, keep) => toggle('subtitles', code, keep)} onOpen={(row) => setOpened({ kind: 'subtitles', code: row.code, name: row.name })} />
+        <UnknownTracksDialog
+          scope={opened ? library : null}
+          kind={opened?.kind ?? 'audio'}
+          language={opened ? { code: opened.code, name: opened.name } : undefined}
+          onClose={() => setOpened(null)}
+          onChanged={reload}
+        />
       </div>
       <p className='text-xs text-muted-foreground'>
         {scope.protected.map(nameOf).join(', ').replace(/, ([^,]*)$/, ' and $1')} are always kept. A file never loses its last audio track. Files still seeding in qBittorrent wait until the torrent is gone (written anew, their space
         would be taken twice), and so do files changed in the last hour. Jellyfin reads the new tracks on its own.
       </p>
 
-      <Dialog open={confirming} onOpenChange={(open) => { if (!open && !busy) setConfirming(false); }}>
+      <Dialog open={confirming} onOpenChange={(open) => { if (!open) setConfirming(false); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Clean up the {name.toLowerCase()} library?</DialogTitle>
@@ -222,8 +275,8 @@ function ScopePanel({ library, name, scope, onChange }: {
             <p><span className='text-muted-foreground'>Subtitles taken out:</span> {rules.subtitles.length ? rules.subtitles.map(nameOf).join(', ') : 'none'}</p>
           </DialogBody>
           <DialogFooter>
-            <Button variant='secondary' onClick={() => setConfirming(false)} disabled={busy}>Cancel</Button>
-            <Button onClick={() => { setConfirming(false); void save({ enabled: true }); }} disabled={busy}>Start</Button>
+            <Button variant='secondary' onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button onClick={() => { setConfirming(false); save({ enabled: true }, 0); }}>Start</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -235,10 +288,18 @@ function ScopePanel({ library, name, scope, onChange }: {
 export default function Tracks() {
   const [scopes, setScopes] = useState<Record<TrackScopeName, TrackScope> | null>(null);
   const [tab, setTab] = useState<TrackScopeName>('anime');
+  const held = useRef(new Set<TrackScopeName>());
 
   async function load() {
     try {
-      setScopes((await api.tracks()).scopes);
+      const fresh = (await api.tracks()).scopes;
+      // A library with a switch not saved yet keeps the rules as switched, not as the server had them.
+      setScopes((current) => {
+        if (!current) return fresh;
+        const next = { ...fresh };
+        for (const key of held.current) next[key] = { ...fresh[key], rules: current[key].rules };
+        return next;
+      });
     } catch (error: any) {
       toast.error(error.message);
     }
@@ -275,7 +336,9 @@ export default function Tracks() {
                 library={item.key}
                 name={item.label}
                 scope={scopes[item.key]}
-                onChange={(next) => setScopes((current) => (current ? { ...current, [item.key]: next } : current))}
+                update={(change) => setScopes((current) => (current ? { ...current, [item.key]: change(current[item.key]) } : current))}
+                held={held}
+                reload={() => void load()}
               />
             </TabsPanel>
           ))}

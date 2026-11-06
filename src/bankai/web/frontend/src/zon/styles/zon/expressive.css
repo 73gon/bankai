@@ -1,7 +1,7 @@
 /*
  * Expressive layer — the drawing-board vocabulary shared by zon.sh and zon.sh:
- * grain, blueprint grids, dot fields, rails, crosshair marks, marquees, and the
- * motion that drives scroll-linked illustrations.
+ * grain, blueprint grids, dot fields, rails, crosshair marks, and the motion that
+ * drives scroll-linked illustrations.
  *
  * Everything here is decorative: pointer-events none, aria-hidden at the call site,
  * and static under prefers-reduced-motion.
@@ -76,6 +76,11 @@
     mix-blend-mode: screen;
     opacity: calc(var(--grain-opacity) * 0.35);
     animation-delay: -0.4s;
+  }
+  /* Still grain, for a picture rather than a region: a sheet in a carousel or a grid. */
+  &[data-still]::before,
+  &[data-still]::after {
+    animation: none;
   }
   @media (prefers-reduced-motion: reduce) {
     &::before,
@@ -161,23 +166,6 @@
   }
   &::after {
     right: 0;
-  }
-}
-
-/* ── Marquee ───────────────────────────────────────────────────────────────── */
-
-@keyframes ep-marquee {
-  from { transform: translateX(0); }
-  to { transform: translateX(-50%); }
-}
-
-@utility marquee-track {
-  display: flex;
-  width: max-content;
-  animation: ep-marquee var(--marquee-duration, 40s) linear infinite;
-
-  @media (prefers-reduced-motion: reduce) {
-    animation: none;
   }
 }
 

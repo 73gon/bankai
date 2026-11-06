@@ -87,6 +87,10 @@ class Collection:
     # An entry that is a season of its own, split into arcs by hand: each arc's first episode
     # and name, a season each (Bleach's 366 episodes as its 16 arcs). Episodes keep their numbers.
     arcs: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
+    # Seasons named by hand, by the entry each opens with (so a new arrangement keeps the name
+    # with its season): the library's tab and Jellyfin's season.nfo show it. An entry split
+    # into arcs has its arcs' names instead.
+    season_names: dict[int, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -96,6 +100,7 @@ class Collection:
             "specials": self.specials,
             "arrangement": self.arrangement,
             **({"arcs": {str(aid): [{"from": first, "name": name} for first, name in arcs] for aid, arcs in sorted(self.arcs.items())}} if self.arcs else {}),
+            **({"season_names": {str(aid): name for aid, name in sorted(self.season_names.items())}} if self.season_names else {}),
         }
 
 
@@ -178,6 +183,11 @@ def _read() -> Store:
                 int(aid): [(int(arc["from"]), str(arc["name"])) for arc in arcs if str(arc.get("from", "")).isdigit() and arc.get("name")]
                 for aid, arcs in (row.get("arcs") or {}).items()
                 if str(aid).isdigit() and int(aid) in members and isinstance(arcs, list)
+            },
+            {
+                int(aid): str(name)
+                for aid, name in (row.get("season_names") or {}).items()
+                if str(aid).isdigit() and int(aid) in members and str(name or "").strip()
             },
         )
     store.next = max([store.next, *(cid + 1 for cid in store.collections)])
@@ -377,13 +387,36 @@ def sequel_order(aids: list[int], relations: list[tuple[int, int, str]], aired: 
     return ordered + [aid for aid in by_date if aid not in ordered]
 
 
-def short_label(title: str, collection: str | None) -> str:
-    """An entry's tab name without the collection's own: "Attack on Titan Season 2" -> "Season 2"."""
-    if collection and title.casefold().startswith(collection.casefold()):
-        rest = title[len(collection):].lstrip(" :-–~,.")
-        if rest:
-            return rest
-    return title
+def _after(title: str, base: str) -> str | None:
+    """What a title says after a base it starts with, letters and digits compared alone:
+    "Re:ZERO -Starting Life in Another World- Season 2" after "ReZero - Starting Life in Another
+    World" is "Season 2" (a collection's name is often its folder's, without the ":"). None when
+    it does not start with it, or the base ends inside a word."""
+    want = "".join(ch for ch in base.casefold() if ch.isalnum())
+    if not want:
+        return None
+    at, matched = 0, 0
+    while matched < len(want) and at < len(title):
+        folded = "".join(ch for ch in title[at].casefold() if ch.isalnum())
+        if folded:
+            if want[matched:matched + len(folded)] != folded:
+                return None
+            matched += len(folded)
+        at += 1
+    if matched < len(want) or (at < len(title) and title[at].isalnum() and title[at - 1].isalnum()):
+        return None
+    return title[at:].lstrip(" :-–~,.").strip()
+
+
+def short_label(title: str, collection: str | None, *, also: str | None = None) -> str:
+    """An entry's tab name without the collection's own: "Attack on Titan Season 2" -> "Season 2".
+
+    ``also`` is another name the entries start with (the collection's title entry, when the
+    collection was named otherwise); the longer match wins. Empty when nothing is left: the
+    entry is the show itself.
+    """
+    rests = [rest for base in (collection, also) if base and (rest := _after(title, base)) is not None]
+    return min(rests, key=len) if rests else title
 
 
 # -- Joining -----------------------------------------------------------------------
@@ -488,7 +521,7 @@ class Plan:
     custom: bool = False
     # An entry split into arcs: (first episode, season, name) each, in order.
     arcs: dict[int, list[tuple[int, int, str]]] = field(default_factory=dict)
-    # Season -> its arc's name.
+    # Season -> its arc's name, or the name it was given by hand.
     names: dict[int, str] = field(default_factory=dict)
 
     def place(self, aid: int, episode: int) -> tuple[int, int] | None:
@@ -609,6 +642,9 @@ def plan(row: Collection, *, episodes_on_disk: Callable[[int], int] = lambda aid
             if offset:
                 result.offsets[aid] = offset
             offset += length(aid)
+        # A season named by hand, by the entry it opens with.
+        if season and row.season_names.get(season[0]) and not (len(season) == 1 and row.arcs.get(season[0])):
+            result.names[number] = row.season_names[season[0]]
         # An entry that is a season alone, split into arcs: a season each, the seasons after
         # it moving up.
         if len(season) == 1 and row.arcs.get(season[0]):
@@ -777,6 +813,20 @@ def set_name(store: Store, cid: int, value: str | None) -> None:
     if row is None:
         raise ValueError("there is no such collection")
     row.name = (value or "").strip() or None
+
+
+def name_season(store: Store, cid: int, aid: int, value: str | None) -> None:
+    """Name the season an entry opens by hand, or (None, empty) by its entry again."""
+    row = store.collections.get(cid)
+    if row is None:
+        raise ValueError("there is no such collection")
+    if aid not in row.members:
+        raise ValueError("that entry is not in this collection")
+    text = " ".join((value or "").split())[:120]
+    if text:
+        row.season_names[aid] = text
+    else:
+        row.season_names.pop(aid, None)
 
 
 # -- The relation graph of one collection --------------------------------------------

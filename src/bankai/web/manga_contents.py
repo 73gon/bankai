@@ -205,6 +205,13 @@ def _books(folder: Path) -> list[Path]:
     return sorted(found, key=lambda path: path.name)
 
 
+def forget(folder: Path) -> None:
+    """A folder bankai just changed: read again next time, whatever its time says -- a book filed and
+    the chapter files it replaced gone within one tick of the clock leave the folder's time as it was."""
+    for key in [key for key in _HOLDINGS if key[0] == str(folder)]:
+        _HOLDINGS.pop(key, None)
+
+
 def holdings(folder: Path | None, *, complete: bool, whole_series: int) -> Holdings:
     """Which chapters a series' folder holds (manga_views.breakdown shows them).
 

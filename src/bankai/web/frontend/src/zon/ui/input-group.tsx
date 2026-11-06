@@ -1,8 +1,11 @@
 import { Button as BaseButton } from "@base-ui/react/button";
 import { Field as BaseField } from "@base-ui/react/field";
 import { Input as BaseInput } from "@base-ui/react/input";
-import type * as React from "react";
+import { XIcon } from "lucide-react";
+import * as React from "react";
 import { cn, sx } from "@/zon/lib/cn";
+import { mergeRefs } from "@/zon/lib/merge-refs";
+import { cssDuration } from "@/zon/lib/motion";
 
 const groupSizes = {
   sm: "min-h-(--control-h-sm) text-[13px]",
@@ -18,7 +21,7 @@ export interface InputGroupProps extends React.ComponentProps<"div"> {
  * InputGroup — one recessed field that holds an input (or textarea) together with addons:
  * an icon, a prefix like `https://`, a keyboard hint, a small button, or a toolbar under a
  * textarea. The group wears the field material (10px corners, 38px or 30px dense); the control
- * inside is borderless, and the group's border turns `--control-focus` while it has focus.
+ * inside is borderless, and like any text field the group takes a softer edge on focus, no ring.
  *
  * Use it when the extra part belongs to the value: a search icon, a unit, a copy button. The
  * rule people break: putting a separate action (Submit, Save) inside — that is a `Button`
@@ -33,9 +36,6 @@ export function InputGroup({ size = "default", className, ...props }: InputGroup
       className={cn(
         "group/input-group relative flex w-full min-w-0 material-field items-center rounded-control font-body",
         groupSizes[size],
-        // Focus on the inner control reads as one solid edge on the whole group.
-        "has-[[data-slot=input-group-control]:focus-visible]:border-control-focus",
-        "has-[[data-slot=input-group-control]:focus-visible]:outline-2 has-[[data-slot=input-group-control]:focus-visible]:outline-offset-0 has-[[data-slot=input-group-control]:focus-visible]:outline-control-focus",
         // Validation and disabled state come from the control (Field sets them there).
         "has-[[data-slot=input-group-control][aria-invalid=true]]:border-destructive has-[[data-slot=input-group-control][data-invalid]]:border-destructive",
         "has-[[data-slot=input-group-control][aria-invalid=true]]:shadow-invalid has-[[data-slot=input-group-control][data-invalid]]:shadow-invalid",
@@ -232,5 +232,267 @@ export function InputGroupButton({
       )}
       {...props}
     />
+  );
+}
+
+export interface InputGroupPasswordToggleProps extends Omit<
+  InputGroupButtonProps,
+  "variant" | "size" | "children"
+> {
+  /** The password is shown (the input is `type="text"`). */
+  visible: boolean;
+  onVisibleChange: (visible: boolean) => void;
+  /** The button's names for each state. Default: "Show password" / "Hide password". */
+  labels?: { show?: string; hide?: string };
+}
+
+/*
+ * The reveal sweeps: on a press, the field's new text — or its dots — is uncovered left to right
+ * behind a soft 32px edge, across the text itself rather than the whole field, on 2.2 × --duration
+ * with the press's ease-out (the brand ease spends most of its way in a frame or two, too soon to
+ * see). The value is there at once and the field stays usable, so revealing a password many times
+ * a day never means waiting. Only a press of the toggle plays it; reduced motion skips it.
+ */
+let measurer: CanvasRenderingContext2D | null = null;
+
+/** Where the field's text runs, in the input's own pixels: from its left padding to its end. */
+function textSpan(input: HTMLInputElement) {
+  const style = getComputedStyle(input);
+  measurer ??= document.createElement("canvas").getContext("2d");
+  const text = input.type === "password" ? "•".repeat(input.value.length) : input.value;
+  let width = 0;
+  if (measurer) {
+    measurer.font = style.font;
+    measurer.letterSpacing = style.letterSpacing;
+    width = measurer.measureText(text).width;
+  }
+  const left = parseFloat(style.paddingLeft) - input.scrollLeft;
+  return { left, right: Math.min(input.clientWidth, left + width), width: input.clientWidth };
+}
+
+/**
+ * A mask twice the field's width with a soft edge at its middle, slid so the edge travels from
+ * just before the text's start to just past its end — or back, to erase it (`out`).
+ */
+function sweepFrames(input: HTMLInputElement, out = false): Keyframe[] {
+  const { left, right, width } = textSpan(input);
+  const soft = 16;
+  const mask = {
+    maskImage: `linear-gradient(90deg, #000 calc(50% - ${soft}px), transparent calc(50% + ${soft}px))`,
+    maskSize: `${width * 2}px 100%`,
+    maskRepeat: "no-repeat",
+  };
+  const frames = [
+    { ...mask, maskPosition: `${left - soft - width}px 0` },
+    { ...mask, maskPosition: `${right + soft - width}px 0` },
+  ];
+  return out ? frames.reverse() : frames;
+}
+
+/** The input this part shares an InputGroup with. */
+const groupInput = (el: Element | null) =>
+  el
+    ?.closest('[data-slot="input-group"]')
+    ?.querySelector<HTMLInputElement>('input[data-slot="input-group-control"]') ?? null;
+
+/**
+ * InputGroupPasswordToggle — the show/hide button for a password: a ghost icon button with an
+ * eye whose slash draws across it when the password is shown and draws back when it is hidden,
+ * the eye opening a gap along the slash as it passes, while the field's text sweeps into its
+ * new form behind a soft edge. It names what it will do and carries `aria-pressed`. Switch the input's `type` with
+ * `visible`.
+ */
+export function InputGroupPasswordToggle({
+  visible,
+  onVisibleChange,
+  labels,
+  ref,
+  onClick,
+  ...props
+}: InputGroupPasswordToggleProps) {
+  const own = React.useRef<HTMLButtonElement>(null);
+  const pressed = React.useRef(false);
+  const refs = React.useMemo(() => mergeRefs(own, ref), [ref]);
+
+  // After the press re-renders the input with its new type — and before that is painted, so the
+  // first frame seen is the animation's first frame, not the finished text — its text arrives.
+  React.useLayoutEffect(() => {
+    if (!pressed.current) return;
+    pressed.current = false;
+    const input = groupInput(own.current);
+    if (!input) return;
+    const duration = cssDuration(input) * 2.2;
+    if (!duration) return;
+    input.animate(sweepFrames(input), { duration, easing: "cubic-bezier(0.33, 1, 0.68, 1)" });
+  }, [visible]);
+
+  return (
+    <InputGroupButton
+      ref={refs}
+      // Still an input-group-button (the addon insets it 3px, like any button), marked as the toggle.
+      data-password-toggle=""
+      variant="ghost"
+      size="icon"
+      aria-label={visible ? (labels?.hide ?? "Hide password") : (labels?.show ?? "Show password")}
+      aria-pressed={visible}
+      onClick={(event) => {
+        pressed.current = true;
+        onVisibleChange(!visible);
+        onClick?.(event);
+      }}
+      {...props}
+    >
+      <EyeSlashIcon slashed={visible} />
+    </InputGroupButton>
+  );
+}
+
+/*
+ * The eye from lucide, with its slash drawn rather than swapped: the slash and the gap it cuts in
+ * the eye (a mask stroke along the same line) share one dash, from just past 1 (not drawn) to 0
+ * (drawn), on 1.4 × --duration like the text's settle — instant under reduced motion.
+ */
+const slash = "m2 2 20 20";
+const drawn = "transition-[stroke-dashoffset] duration-[calc(var(--duration)*1.4)] ease-(--ease)";
+
+function EyeSlashIcon({ slashed }: { slashed: boolean }) {
+  const mask = React.useId().replace(/[^a-zA-Z0-9]/g, "");
+  // Hidden, the dash sits just before the line's start, so not even a round cap shows.
+  const offset = slashed ? 0 : 1.02;
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      data-slashed={slashed ? "" : undefined}
+    >
+      <mask id={mask} maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+        <rect width="24" height="24" fill="white" />
+        <path
+          d={slash}
+          stroke="black"
+          strokeWidth={5}
+          pathLength={1}
+          strokeDasharray="1 2"
+          strokeDashoffset={offset}
+          className={drawn}
+        />
+      </mask>
+      <g mask={`url(#${mask})`}>
+        <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+        <circle cx="12" cy="12" r="3" />
+      </g>
+      <path d={slash} pathLength={1} strokeDasharray="1 2" strokeDashoffset={offset} className={drawn} />
+    </svg>
+  );
+}
+
+export interface InputGroupClearButtonProps extends Omit<
+  InputGroupButtonProps,
+  "variant" | "size" | "children" | "onClick"
+> {
+  /**
+   * Clear your state (`setQuery("")`). Without it, the button empties the field itself and fires
+   * its change event, for an uncontrolled input.
+   */
+  onClear?: () => void;
+  /** The button's name. Default "Clear". Say what it clears: "Clear search". */
+  label?: string;
+}
+
+/**
+ * InputGroupClearButton — empties the field it sits in, smoothly: the text is erased right to
+ * left behind a soft edge, as if typed away, then the value clears and focus returns to the
+ * field. The button fades out while the field is empty and back in when there is text, instead of
+ * popping in and out. Reduced motion clears at once.
+ */
+export function InputGroupClearButton({
+  onClear,
+  label = "Clear",
+  ref,
+  className,
+  ...props
+}: InputGroupClearButtonProps) {
+  const own = React.useRef<HTMLButtonElement>(null);
+  const refs = React.useMemo(() => mergeRefs(own, ref), [ref]);
+  const [empty, setEmpty] = React.useState(true);
+  const clearing = React.useRef(false);
+
+  // Whether there is anything to clear: after every render (a controlled value) and on input.
+  React.useLayoutEffect(() => {
+    const input = groupInput(own.current);
+    if (input && !clearing.current) setEmpty(input.value === "");
+  });
+  React.useEffect(() => {
+    const input = groupInput(own.current);
+    if (!input) return;
+    const sync = () => {
+      if (!clearing.current) setEmpty(input.value === "");
+    };
+    input.addEventListener("input", sync);
+    return () => input.removeEventListener("input", sync);
+  }, []);
+
+  const clear = () => {
+    const input = groupInput(own.current);
+    if (!input || clearing.current) return;
+    const done = () => {
+      if (onClear) onClear();
+      else {
+        // An uncontrolled input: set its value as a person would, so React and Base UI hear it.
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, "");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      input.focus();
+    };
+    const duration = cssDuration(input) * 1.6;
+    if (!duration || input.value === "") {
+      done();
+      return;
+    }
+    clearing.current = true;
+    setEmpty(true);
+    // Held at its end until the value is really gone, so the text never flashes back.
+    const erase = input.animate(sweepFrames(input, true), {
+      duration,
+      easing: "cubic-bezier(0.33, 1, 0.68, 1)",
+      fill: "forwards",
+    });
+    erase.onfinish = () => {
+      done();
+      const release = () => {
+        if (input.value !== "" && input.isConnected) return void requestAnimationFrame(release);
+        erase.cancel();
+        clearing.current = false;
+      };
+      release();
+    };
+  };
+
+  return (
+    <InputGroupButton
+      ref={refs}
+      data-clear-button=""
+      data-empty={empty ? "" : undefined}
+      variant="ghost"
+      size="icon"
+      aria-label={label}
+      aria-hidden={empty || undefined}
+      tabIndex={empty ? -1 : undefined}
+      onClick={clear}
+      className={cn(
+        // The fade rides the material's own transition list (--material-motion), which a transition
+        // utility would replace.
+        "[--material-motion:opacity_var(--duration)_var(--ease),scale_var(--duration)_var(--ease)] data-empty:pointer-events-none data-empty:scale-75 data-empty:opacity-0",
+        className,
+      )}
+      {...props}
+    >
+      <XIcon />
+    </InputGroupButton>
   );
 }

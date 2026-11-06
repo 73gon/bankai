@@ -67,6 +67,8 @@ echo "==> systemd unit"
 install -m 644 "$REPO/deploy/seireitei/bankai-web.service" "$UNIT"
 # The anime automation worker, which bankai-web leaves the cycle to.
 install -m 644 "$REPO/deploy/seireitei/bankai-automation.service" /etc/systemd/system/bankai-automation.service
+# The library worker: encode, browser audio and track cleanup, which a restart of bankai-web leaves running.
+install -m 644 "$REPO/deploy/seireitei/bankai-library-worker.service" /etc/systemd/system/bankai-library-worker.service
 systemctl daemon-reload
 echo "    installed $UNIT (not enabled, not started)"
 

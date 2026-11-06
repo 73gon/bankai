@@ -8,7 +8,7 @@ from typing import Any
 
 from bankai import scraper as scraper_registry
 from bankai.logging import get_logger
-from bankai.metadata.tvdb import TitleAlias, get_title_aliases
+from bankai.metadata.tmdb_titles import TitleAlias, get_title_aliases
 from bankai.queue.models import MediaKind
 from bankai.scraper.base import EpisodeRef, SearchResult
 

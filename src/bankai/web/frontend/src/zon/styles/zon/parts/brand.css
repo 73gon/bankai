@@ -73,36 +73,3 @@
     animation: ep-orb-breathe 16s var(--ease) infinite;
   }
 }
-
-/* ── Footer: a revealed backdrop rises and fades in by --p (0 → 1 as the footer enters) ── */
-
-[data-slot="footer-backdrop"][data-reveal] {
-  transform: translateY(calc((1 - var(--p, 1)) * var(--footer-reveal-distance, 240px)));
-  opacity: clamp(0, calc(var(--p, 1) * 1.4 - 0.2), 1);
-  will-change: transform, opacity;
-}
-
-/* FooterHorizon: the word arrives late, after the rim. */
-[data-slot="footer-horizon"] [data-part="word"] {
-  opacity: clamp(0, calc(var(--p, 1) * 1.8 - 0.7), 1);
-}
-
-[data-slot="footer-horizon"] [data-part="tagline"] {
-  font-size: 10.5px;
-  letter-spacing: 4px;
-  text-transform: uppercase;
-}
-
-/* The drawing shrinks with the viewport; keep the tagline legible on phones. */
-@media (width < 40rem) {
-  [data-slot="footer-horizon"] [data-part="tagline"] {
-    font-size: 19px;
-    letter-spacing: 6px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-slot="footer"] {
-    --p: 1 !important;
-  }
-}

@@ -2,7 +2,8 @@ import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Search as SearchIcon, Loader2, Plus, Film, Tv, Link2, Check, UserRound } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type DiscoverItem, type DiscoverSearchBy, type PagedDiscover, type PersonSuggestion, type SearchResult, type EpisodeItem } from '@/lib/api';
-import { Tabs, TabsList, TabsTab } from '@/zon/ui/tabs';
+import { POSTER_IMG, posterSources } from '@/lib/posters';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
 import { Button } from '@/zon/ui/button';
 import { Input } from '@/zon/ui/input';
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
@@ -16,6 +17,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Separator } from '@/zon/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
 import { GermanRelease } from '@/components/GermanRelease';
+import { FollowPanel, MovieTorrentPanel } from '@/components/EnglishTorrent';
 import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
 
 const SEARCH_HIDE_LIBRARY_KEY = 'bankai:search-hide-library';
@@ -95,7 +97,7 @@ function uniqueShowSources(results: SearchResult[]): SearchResult[] {
   });
 }
 
-function Poster({ item, onClick, priority = false, eager = false }: { item: DiscoverItem; onClick: () => void; priority?: boolean; eager?: boolean }) {
+function Poster({ item, onClick, priority = false, eager = false, showKind = false }: { item: DiscoverItem; onClick: () => void; priority?: boolean; eager?: boolean; showKind?: boolean }) {
   const [err, setErr] = useState(false);
   return (
     <button
@@ -104,7 +106,8 @@ function Poster({ item, onClick, priority = false, eager = false }: { item: Disc
     >
       {item.poster_url && !err ? (
         <img
-          src={api.posterUrl(item.poster_url)}
+          {...posterSources(item.poster_url)}
+          sizes={eager ? '240px' : POSTER_IMG.sizes}
           onError={() => setErr(true)}
           className='h-full w-full object-cover'
           loading={eager ? 'eager' : 'lazy'}
@@ -127,14 +130,20 @@ function Poster({ item, onClick, priority = false, eager = false }: { item: Disc
       )}
       <div className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black/90 to-transparent p-2.5 pt-8'>
         <div className='line-clamp-2 text-xs font-medium text-foreground'>{item.name}</div>
-        {item.year && <div className='font-mono text-[10px] tabular-nums text-muted-foreground'>{item.year}</div>}
+        {(item.year || showKind) && (
+          <div className='font-mono text-[10px] tabular-nums text-muted-foreground'>
+            {/* Films and shows in one grid: each says which it is. */}
+            {[showKind ? (item.kind === 'movie' ? 'Movie' : 'Show') : null, item.year].filter(Boolean).join(' · ')}
+          </div>
+        )}
       </div>
     </button>
   );
 }
 
 export default function Search() {
-  const [kind, setKind] = useState<'movie' | 'show'>('movie');
+  // Films and shows together by default; Movie or Show narrows it (Person and Studio search are films only).
+  const [kind, setKind] = useState<'all' | 'movie' | 'show'>('all');
   const [searchBy, setSearchBy] = useState<DiscoverSearchBy>('title');
   const [q, setQ] = useState('');
   const [items, setItems] = useState<DiscoverItem[]>([]);
@@ -161,7 +170,7 @@ export default function Search() {
   const [personSelection, setPersonSelection] = useState<string | null>(null);
   const [activePersonIndex, setActivePersonIndex] = useState(-1);
 
-  // selected TVDB title -> resolve German name -> matching stream sources
+  // selected TMDB title -> resolve German name -> matching stream sources
   const [selected, setSelected] = useState<DiscoverItem | null>(null);
   const [german, setGerman] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -182,7 +191,7 @@ export default function Search() {
   const [customMode, setCustomMode] = useState(false);
   const [customUrls, setCustomUrls] = useState<Record<number, string>>({});
 
-  // Live filter from TVDB as the user types (debounced).
+  // Live filter from TMDB as the user types (debounced).
   useEffect(() => {
     window.clearTimeout(debounce.current);
     let cancelled = false;
@@ -343,8 +352,8 @@ export default function Search() {
     setLoadingFilm(true);
     try {
       let name = item.name;
-      if (item.tvdb_id) {
-        const g = await api.discoverGerman(item.tvdb_id, item.kind);
+      if (item.tmdb_id) {
+        const g = await api.discoverGerman(item.tmdb_id, item.kind);
         setSelected((current) =>
           current
             ? {
@@ -563,13 +572,15 @@ export default function Search() {
       <header className='flex items-baseline gap-2'>
         <h1 className='shrink-0 font-heading text-3xl font-light'>Search</h1>
         <span className='text-sm text-muted-foreground'>—{' '}
-          {kind === 'show'
-            ? 'Find a show on TheTVDB, then match it to a German stream source.'
+          {kind === 'all'
+            ? 'Find a movie or show on TMDB, then match it to a German stream source.'
+            : kind === 'show'
+            ? 'Find a show on TMDB, then match it to a German stream source.'
             : searchBy === 'person'
-              ? 'Find movies by cast or crew on TheTVDB, then match one to a German stream source.'
+              ? 'Find movies by cast or crew on TMDB, then match one to a German stream source.'
               : searchBy === 'studio'
-                ? 'Find movies from a studio or production company on TheTVDB.'
-                : 'Find a movie on TheTVDB, then match it to a German stream source.'}
+                ? 'Find movies from a studio or production company on TMDB.'
+                : 'Find a movie on TMDB, then match it to a German stream source.'}
         </span>
       </header>
 
@@ -578,14 +589,15 @@ export default function Search() {
           className='w-auto'
           value={kind}
           onValueChange={(v) => {
-            setKind(v as 'movie' | 'show');
-            if (v === 'show') setSearchBy('title');
+            setKind(v as 'all' | 'movie' | 'show');
+            if (v !== 'movie') setSearchBy('title');
             setItems([]);
             setSelected(null);
             setPage(0);
           }}
         >
           <TabsList>
+            <TabsTab value='all'>All</TabsTab>
             <TabsTab value='movie'>Movie</TabsTab>
             <TabsTab value='show'>Show</TabsTab>
           </TabsList>
@@ -642,7 +654,9 @@ export default function Search() {
                 aria-controls={searchBy === 'person' ? 'person-suggestions' : undefined}
                 aria-activedescendant={activePersonIndex >= 0 ? `person-suggestion-${activePersonIndex}` : undefined}
                 placeholder={
-                  kind === 'show'
+                  kind === 'all'
+                    ? 'Start typing a movie or show…'
+                    : kind === 'show'
                     ? 'Start typing a show…'
                     : searchBy === 'person'
                       ? 'Start typing a person’s name…'
@@ -670,7 +684,7 @@ export default function Search() {
               <div id='person-suggestions' role='listbox' aria-label='Person suggestions' className='flex flex-col gap-1'>
                 {personSuggestions.map((suggestion, index) => (
                   <Button
-                    key={`${suggestion.tvdb_id ?? 'name'}-${suggestion.name}`}
+                    key={`${suggestion.tmdb_id ?? 'name'}-${suggestion.name}`}
                     id={`person-suggestion-${index}`}
                     role='option'
                     aria-selected={index === activePersonIndex}
@@ -719,8 +733,8 @@ export default function Search() {
       {!configured ? (
         <Empty>
           <EmptyMedia><SearchIcon /></EmptyMedia>
-          <EmptyTitle>TheTVDB key not configured</EmptyTitle>
-          <EmptyDescription>Add your TVDB API key in Settings to search.</EmptyDescription>
+          <EmptyTitle>TMDB key not configured</EmptyTitle>
+          <EmptyDescription>Add your TMDB API key in Settings to search.</EmptyDescription>
         </Empty>
       ) : loading ? (
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
@@ -744,11 +758,12 @@ export default function Search() {
         <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
           {visibleItems.map((it, index) => (
             <Poster
-              key={`${it.kind}-${it.tvdb_id}-${it.name}`}
+              key={`${it.kind}-${it.tmdb_id}-${it.name}`}
               item={it}
               onClick={() => openTitle(it)}
               priority={index === 0}
               eager={index < 6}
+              showKind={kind === 'all'}
             />
           ))}
         </div>
@@ -800,6 +815,19 @@ export default function Search() {
               {loadingFilm ? 'Searching German stream sources…' : 'Pick a matching result or use your own German source link below.'}
             </DialogDescription>
           </DialogHeader>
+
+          {/* Two ways to get a title: the German dub fused onto an English picture, or a torrent as it is. */}
+          <Tabs defaultValue='dub' key={selected ? `${selected.kind}-${selected.tmdb_id}` : 'none'} className='flex flex-col gap-4'>
+          <TabsList>
+            <TabsTab value='dub'>German dub</TabsTab>
+            <TabsTab value='torrent' disabled={!selected?.tmdb_id}>Torrent</TabsTab>
+          </TabsList>
+          <TabsPanel value='torrent'>
+            {selected?.tmdb_id && (selected.kind === 'movie'
+              ? <MovieTorrentPanel tmdbId={selected.tmdb_id} />
+              : <FollowPanel tmdbId={selected.tmdb_id} />)}
+          </TabsPanel>
+          <TabsPanel value='dub' className='flex flex-col gap-4'>
 
           <div className='flex flex-col gap-1'>
             <label className='text-xs text-muted-foreground'>Search German source title</label>
@@ -1068,6 +1096,8 @@ export default function Search() {
               </div>
             </div>
           )}
+          </TabsPanel>
+          </Tabs>
         </DialogContent>
       </Dialog>
     </div>

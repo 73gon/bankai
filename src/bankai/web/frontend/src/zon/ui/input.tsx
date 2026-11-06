@@ -2,8 +2,9 @@ import { Input as BaseInput } from "@base-ui/react/input";
 import { sx } from "@/zon/lib/cn";
 
 const sizes = {
-  sm: "min-h-(--control-h-sm) px-2.5 text-[13px]",
-  default: "min-h-(--control-h) px-3.5 text-base sm:text-[15px]",
+  sm: "min-h-(--control-h-sm) px-2.5 text-[13px] [&[type=file]]:p-0.5 file:h-6",
+  default:
+    "min-h-(--control-h) px-3.5 text-base sm:text-[15px] [&[type=file]]:p-[3px] file:h-(--control-h-sm)",
 } as const;
 
 export interface InputProps extends Omit<BaseInput.Props, "size"> {
@@ -24,7 +25,12 @@ export function Input({ size = "default", className, ...props }: InputProps) {
       className={sx(
         [
           "w-full min-w-0 material-field rounded-control font-body outline-none",
-          "file:mr-3 file:border-0 file:bg-transparent file:text-sm file:font-medium",
+          // A file input's "Choose file" is a small raised button inside the field, inset like an
+          // InputGroup button (30px in 38, 24px in 30, 7px corners); the file name stays quiet.
+          "[&[type=file]]:cursor-pointer [&[type=file]]:text-muted-foreground",
+          "file:mr-3 file:cursor-pointer file:rounded-item file:border-0 file:bg-control-surface file:bg-linear-to-b file:from-control-inner-edge file:to-transparent file:px-3 file:font-body file:text-[13px] file:font-medium file:text-foreground file:shadow-raised file:hover:bg-control-hover",
+          // The search field's clear button (×) is a button: it takes the pointer.
+          "[&::-webkit-search-cancel-button]:cursor-pointer",
           sizes[size],
         ],
         className,

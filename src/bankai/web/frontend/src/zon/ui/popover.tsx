@@ -1,5 +1,8 @@
 import { Popover as BasePopover } from "@base-ui/react/popover";
+import * as React from "react";
 import { sx, triggerSlot } from "@/zon/lib/cn";
+import { mergeRefs } from "@/zon/lib/merge-refs";
+import { roomBounds, TriggerRoomContext, useTriggerRoom } from "@/zon/lib/room";
 import { overlayArrow, overlayPopup } from "@/zon/ui/_overlay";
 
 /**
@@ -9,14 +12,24 @@ import { overlayArrow, overlayPopup } from "@/zon/ui/_overlay";
  * The rule people break: putting a whole task in it. If it needs a heading, a scroll and a
  * footer, it is a `Dialog`. If it only lists actions, it is a `Menu`.
  */
-export const Popover = BasePopover.Root;
+export function Popover(props: BasePopover.Root.Props) {
+  // The trigger registers here, so the content can keep inside the trigger's room.
+  const room = useTriggerRoom();
+  return (
+    <TriggerRoomContext.Provider value={room}>
+      <BasePopover.Root {...props} />
+    </TriggerRoomContext.Provider>
+  );
+}
 
 /**
  * Opens the popover. Compose with a button: `render={<Button variant="secondary" />}`.
  * Pass `openOnHover` (with `delay`) for hover-intent popovers.
  */
-export function PopoverTrigger(props: BasePopover.Trigger.Props) {
-  return <BasePopover.Trigger {...triggerSlot("popover-trigger", props.render)} {...props} />;
+export function PopoverTrigger({ ref, ...props }: BasePopover.Trigger.Props) {
+  const setTrigger = React.useContext(TriggerRoomContext)?.setTrigger;
+  const refs = React.useMemo(() => mergeRefs(setTrigger, ref), [setTrigger, ref]);
+  return <BasePopover.Trigger ref={refs} {...triggerSlot("popover-trigger", props.render)} {...props} />;
 }
 
 export interface PopoverContentProps extends BasePopover.Popup.Props {
@@ -45,6 +58,8 @@ export function PopoverContent({
   children,
   ...props
 }: PopoverContentProps) {
+  // Across, keep inside the trigger's room (a narrow panel), not only the window.
+  const trigger = React.useContext(TriggerRoomContext)?.trigger ?? null;
   return (
     <BasePopover.Portal {...portal}>
       <BasePopover.Positioner
@@ -54,6 +69,7 @@ export function PopoverContent({
         alignOffset={alignOffset}
         arrowPadding={14}
         collisionPadding={16}
+        collisionBoundary={roomBounds(trigger)}
         {...positioner}
         className="z-50 outline-none"
       >

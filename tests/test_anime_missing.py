@@ -199,14 +199,18 @@ def test_upgrade_all_lists_the_episodes_an_upgrade_was_found_for(client, show, t
 
     asked: list[list[int]] = []
 
-    async def upgrade(anilist_ids, *, queue=True):
-        asked.append(anilist_ids)
+    async def upgrade(anilist_ids, *, queue=True, approved=None):
+        asked.append((anilist_ids, approved))
         return {"ok": True, "queued": 1, "downloads": 1, "no_replacement": 0}
 
     monkeypatch.setattr(erai, "upgrade_show_to_hevc", upgrade)
-    response = client.post("/api/anime/library/bulk", json={"kind": "upgrade", "keys": ["Show"]})
+    # An upgrade replaces files: never queued without the approval of what it replaces.
+    refused = client.post("/api/anime/library/bulk", json={"kind": "upgrade", "keys": ["Show"]})
+    assert refused.status_code == 422 and asked == []
+    approved = {"abc": ["/library/Show - S01E01.mkv"]}
+    response = client.post("/api/anime/library/bulk", json={"kind": "upgrade", "keys": ["Show"], "approved": approved})
 
     assert response.status_code == 200
     assert response.json()["queued"] == 1 and response.json()["failed"] == []
-    assert asked == [[555]]
+    assert asked == [([555], approved)]
     assert client.get("/api/anime/library/bulk", params={"kind": "nope"}).status_code == 422

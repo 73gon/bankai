@@ -27,6 +27,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,8 @@ from bankai.logging import get_logger
 log = get_logger(__name__)
 
 VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts"}
+# Kept by name beside the videos: whether an episode has English subtitles reads them (`direct.english_subtitle_file`).
+SUBTITLE_SUFFIXES = frozenset({".srt", ".ass", ".ssa", ".vtt", ".sub", ".sup"})
 FULL_WALK_SECONDS = 3600.0
 # A root no page has asked about for this long -- a path since removed from
 # the settings -- stops being refreshed and is dropped.
@@ -44,7 +47,7 @@ UNUSED_SECONDS = 24 * 3600.0
 # and Windows, whose clock stamps the files on /mnt/*.
 _RACY_NS = 2_000_000_000
 
-# root -> {"validated_at", "full_at", "dirs": {dir: {"mtime_ns", "files", "subdirs"}}}
+# root -> {"validated_at", "full_at", "dirs": {dir: {"mtime_ns", "files", "subtitles", "subdirs"}}}
 _TREES: dict[str, dict[str, Any]] = {}
 _LOCK = threading.RLock()
 # One refresh of a given root at a time; a second caller waits for it.
@@ -116,12 +119,14 @@ def _trusted(node: dict[str, Any], mtime_ns: int) -> bool:
     """
     return (
         node.get("mtime_ns") == mtime_ns
+        # Listed before subtitle names were kept: listed again, once.
+        and "subtitles" in node
         and node.get("listed_at_ns", 0) - mtime_ns > _RACY_NS
     )
 
 
 def _list(directory: str) -> dict[str, Any] | None:
-    """One directory's video files and subdirectories, as it is now."""
+    """One directory's video files, subtitle file names and subdirectories, as it is now."""
     listed_at_ns = time.time_ns()
     try:
         mtime_ns = os.stat(directory).st_mtime_ns
@@ -129,18 +134,22 @@ def _list(directory: str) -> dict[str, Any] | None:
     except OSError:
         return None
     files: list[list] = []
+    subtitles: list[str] = []
     subdirs: list[str] = []
     with entries:
         for entry in entries:
             try:
+                suffix = os.path.splitext(entry.name)[1].casefold()
                 if entry.is_dir(follow_symlinks=False):
                     subdirs.append(entry.name)
-                elif os.path.splitext(entry.name)[1].casefold() in VIDEO_SUFFIXES:
+                elif suffix in VIDEO_SUFFIXES:
                     stat = entry.stat()
                     files.append([entry.name, stat.st_size, stat.st_mtime])
+                elif suffix in SUBTITLE_SUFFIXES:
+                    subtitles.append(entry.name)
             except OSError:
                 continue
-    return {"mtime_ns": mtime_ns, "listed_at_ns": listed_at_ns, "files": files, "subdirs": subdirs}
+    return {"mtime_ns": mtime_ns, "listed_at_ns": listed_at_ns, "files": files, "subtitles": subtitles, "subdirs": subdirs}
 
 
 def _refresh(root: str, *, full: bool) -> dict[str, Any]:
@@ -220,8 +229,24 @@ def mark_stale() -> None:
 
 
 def directories(root: str | Path, *, rescan: bool = False) -> dict[str, dict]:
-    """The held tree of one root: directory -> its video files and subdirectories."""
+    """The held tree of one root: directory -> its video files, subtitle names and subdirectories."""
     return _tree(str(root), rescan=rescan)["dirs"]
+
+
+def lister(roots: list[str | Path]) -> Callable[[Path], list[str] | None]:
+    """A directory's names as the held trees of ``roots`` have them (None: no such directory),
+    for questions asked of many files at once without listing the disk for each."""
+    dirs: dict[str, dict] = {}
+    for root in roots:
+        dirs.update(directories(root))
+
+    def listed(directory: Path) -> list[str] | None:
+        node = dirs.get(str(directory))
+        if node is None:
+            return None
+        return [row[0] for row in node["files"]] + list(node.get("subtitles") or ()) + list(node["subdirs"])
+
+    return listed
 
 
 # The rows built from each held tree, by root, with the tree they came from:
@@ -284,11 +309,20 @@ def _contents(tree: dict[str, Any] | None) -> frozenset:
     )
 
 
+def _subtitles(tree: dict[str, Any] | None) -> frozenset:
+    """Every subtitle file a tree holds: one added beside an episode changes what the library says of it."""
+    return frozenset(
+        (directory, name)
+        for directory, node in ((tree or {}).get("dirs") or {}).items()
+        for name in node.get("subtitles") or ()
+    )
+
+
 def refresh_all() -> set[str]:
     """Check every root in use against the disk; for the scheduler.
 
     Returns the roots whose videos changed -- added, removed, renamed, moved
-    or rewritten -- since the last look. A re-listing that finds the same
+    or rewritten -- or whose subtitle files did, since the last look. A re-listing that finds the same
     files, like the hourly full walk, is not a change. Roots nobody has asked
     for are not walked: which ones matter is decided by the pages in use.
     """
@@ -299,14 +333,29 @@ def refresh_all() -> set[str]:
             _TREES.pop(stale)
         roots = list(_TREES)
     changed: set[str] = set()
+    added: list[Path] = []
     for root in roots:
         with _root_lock(root):
             with _LOCK:
                 before = _TREES.get(root)
                 full_at = (before or {}).get("full_at", 0.0)
             after = _refresh(root, full=now - full_at >= FULL_WALK_SECONDS)
+            if _subtitles(before) != _subtitles(after):
+                changed.add(root)
             if _contents(before) != _contents(after):
                 changed.add(root)
+                if before is not None:
+                    seen = {(directory, name) for directory, name, _size, _mtime in _contents(before)}
+                    added.extend(
+                        Path(directory) / name for directory, name, _size, _mtime in _contents(after)
+                        if (directory, name) not in seen
+                    )
+    if added:
+        # Jellyfin's own watcher misses files written over /mnt/g: told here, whoever wrote them
+        # (a transfer, a download, the layout). Spider-Man: Brand New Day waited for a scan.
+        from bankai.web import jellyfin
+
+        jellyfin.queue(added)
     if changed:
         _bump()
     if roots:

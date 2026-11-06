@@ -132,3 +132,29 @@
     }
   }
 }
+
+/*
+ * CodeBlock's syntax colours (with `highlight`, inside CodeHighlightProvider). The zon code theme
+ * names these properties instead of colours, so it follows light, dark and a forced local theme:
+ * they are set on the block (and on Shiki's own `pre.shiki` output), where the tones resolve. One tone per kind of token; comments and
+ * punctuation recede to the greys; added and removed diff lines take the status colours. Each is
+ * mixed 18% toward the ink, so 13px code clears 4.5:1 on the card in light and dark alike.
+ * Override any of them on a block or an ancestor.
+ */
+@layer components {
+  :is([data-slot="code-block"], pre.shiki) {
+    --code-foreground: var(--foreground);
+    --code-comment: color-mix(in oklab, var(--muted-foreground) 82%, var(--foreground));
+    --code-punctuation: var(--foreground-soft);
+    --code-keyword: color-mix(in oklab, var(--tone-violet) 82%, var(--foreground));
+    --code-string: color-mix(in oklab, var(--tone-lime) 82%, var(--foreground));
+    --code-string-expression: color-mix(in oklab, var(--tone-aqua) 82%, var(--foreground));
+    --code-constant: color-mix(in oklab, var(--tone-orange) 82%, var(--foreground));
+    --code-function: color-mix(in oklab, var(--tone-blue) 82%, var(--foreground));
+    --code-type: color-mix(in oklab, var(--tone-aqua) 82%, var(--foreground));
+    --code-tag: color-mix(in oklab, var(--tone-magenta) 82%, var(--foreground));
+    --code-attribute: color-mix(in oklab, var(--tone-blue) 82%, var(--foreground));
+    --code-inserted: color-mix(in oklab, var(--success) 82%, var(--foreground));
+    --code-deleted: color-mix(in oklab, var(--destructive) 82%, var(--foreground));
+  }
+}

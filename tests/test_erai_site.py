@@ -258,3 +258,21 @@ def test_a_history_page_past_the_end_ends_the_backfill_instead_of_being_asked_ag
 
     asyncio.run(erai_site.refresh())
     assert erai_site.load()["complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("category", "expected"),
+    [
+        ("Airing", {"airing"}),
+        ("Finale", {"airing"}),
+        ("Encoded", {"encoded"}),
+        ("Batch", {"batch"}),
+        ("Batch][Encoded", {"batch", "encoded"}),
+        ("[Batch][Movie or Special Episode]", {"batch", "special"}),
+        ("Finale][Movie or Special Episode", {"airing", "special"}),
+        ("Movie or Special Episode", {"special"}),
+        ("", set()),
+    ],
+)
+def test_the_listing_filter_reads_what_a_release_is_from_its_category(category, expected):
+    assert erai_site.kinds(category) == expected

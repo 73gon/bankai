@@ -218,6 +218,7 @@ export default function Torrents() {
   const [view, setView] = useState<View | null>(() => (draft.query.trim() ? draft : null));
   const [result, setResult] = useState<DirectSearch | null>(() => (lastResult && view && lastResult.key === viewKey(view) ? lastResult.result : null));
   const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   const [targets, setTargets] = useState<DirectTarget[]>([]);
   const [picked, setPicked] = useState<DirectRelease | null>(null);
 
@@ -237,6 +238,9 @@ export default function Torrents() {
       return;
     }
     let cancelled = false;
+    // Another search's rows (or its "found nothing") must not stand for this one while it runs.
+    setResult(null);
+    setFailed(null);
     setLoading(true);
     api.directSearch(view.query.trim(), view.kind, {
       quality: view.quality,
@@ -249,9 +253,13 @@ export default function Torrents() {
         lastResult = { key, result: answer };
         setResult(answer);
       })
-      .catch((error: any) => !cancelled && toast.error(error.message))
+      .catch((error: any) => !cancelled && setFailed(error.message))
       .finally(() => !cancelled && setLoading(false));
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      // A hidden page's search is asked again when it is shown; no spinner is left behind.
+      setLoading(false);
+    };
   }, [view]);
 
   function search() {
@@ -323,9 +331,21 @@ export default function Torrents() {
         </TableHeader>
         <TableBody>
           {loading && !result && (
-            <TableRow><TableCell colSpan={7} className='py-8 text-center text-muted-foreground'>Searching Prowlarr…</TableCell></TableRow>
+            <TableRow>
+              <TableCell colSpan={7} className='py-8 text-center text-muted-foreground'>
+                Searching Prowlarr… it answers once every indexer has, up to a minute when one is slow.
+              </TableCell>
+            </TableRow>
           )}
-          {!loading && !result && (
+          {!loading && failed && (
+            <TableRow>
+              <TableCell colSpan={7} className='py-8 text-center'>
+                <p className='text-destructive'>{failed}</p>
+                <Button className='mt-3' size='sm' variant='secondary' onClick={search}>Search again</Button>
+              </TableCell>
+            </TableRow>
+          )}
+          {!loading && !failed && !result && (
             <TableRow><TableCell colSpan={7} className='py-8 text-center text-muted-foreground'>Search for a movie or a show, a season with S01.</TableCell></TableRow>
           )}
           {result && result.items.length === 0 && (

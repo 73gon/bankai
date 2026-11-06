@@ -168,7 +168,7 @@ def test_the_dashboard_endpoint_answers(tmp_path, monkeypatch):
         body = client.get("/api/dashboard").json()
     assert {lane["key"] for lane in body["lanes"]} >= {"pipelines", "publishing", "automation"}
     assert body["summary"]["workers_total"] >= 3
-    assert set(body["recent"]) == {"mas", "anime", "anime_episodes"}
+    assert set(body["recent"]) == {"mas", "mas_episodes", "anime", "anime_episodes", "manga"}
     reset_settings_cache()
 
 
@@ -285,3 +285,18 @@ def test_a_failing_pass_keeps_its_error(monkeypatch):
     with jobs._pass_running("release_reconcile"):
         pass
     assert {row["name"]: row for row in jobs.scheduled_passes()}["release_reconcile"]["error"] is None
+
+
+def test_a_file_tracks_were_taken_out_of_is_a_remuxed_row_dated_when_that_was_done():
+    from bankai.web import dashboard
+
+    files = [{"path": "/m/Arrival (2016)/Arrival (2016).mkv", "series": "Arrival (2016)", "name": "Arrival (2016).mkv",
+              "root": "/m", "mtime": 1000.0}]
+    rows = dashboard.recent_additions(
+        dashboard.remuxes(files, {"/m/Arrival (2016)/Arrival (2016).mkv": {"at": 5000.0}}),
+        {}, kind="movie", href="/mas/library", change="remuxed",
+    )
+    assert [(row["change"], row["added_at"], row["encoded"]) for row in rows] == [("remuxed", 5000.0, False)]
+    assert rows[0]["key"].startswith("remuxed:")
+    added = dashboard.recent_additions(files, {}, kind="movie", href="/mas/library")
+    assert added[0]["change"] == "added" and not added[0]["key"].startswith("added:")

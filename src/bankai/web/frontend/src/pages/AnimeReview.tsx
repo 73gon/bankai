@@ -376,7 +376,7 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
             const batch = reasons.some((reason) => reason.startsWith('Whole-season batch'));
             const count = item.release_count || 1;
             return (
-              <Card key={item.key} className='gap-0 overflow-hidden [--card-padding:0]'>
+              <Card key={item.key} className='offscreen-skip gap-0 overflow-hidden [--card-padding:0]'>
                 {/* The cover carries the name, so the card is mostly poster. */}
                 <div className='relative'>
                   <AnimePoster url={item.poster_url} title={item.title} />

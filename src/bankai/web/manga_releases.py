@@ -61,6 +61,7 @@ ACTIVE = frozenset({QUEUED, DOWNLOADING, PUBLISHING})
 _NYAA = "https://nyaa.si"
 CATEGORY = "3_1"  # Literature - English-translated
 _BLACKLISTED = "series blacklisted"
+_REMOVED = "series removed from the library"
 _HAVE_IT = "the library has all of it"
 # Why a book of a download stays out of the library.
 _HAS = "the library has it"
@@ -99,10 +100,27 @@ def _write(state: dict[str, Any]) -> None:
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     tmp.replace(path)
+    # Two writes within one tick of the clock can leave the file's time as it was.
+    global _RELEASES
+    _RELEASES = None
+
+
+# The releases as last read, by the file's stamp: the review asked for them 357 times a request
+# (a megabyte of JSON each), 4 s a page. Read only -- changes go through ``_read``/``_write``.
+_RELEASES: tuple[tuple[int, int], dict[str, dict[str, Any]]] | None = None
 
 
 def releases() -> dict[str, dict[str, Any]]:
-    return _read()["releases"]
+    """Every release, read only: read again when the file changed."""
+    global _RELEASES
+    try:
+        stat = _path().stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {}
+    if _RELEASES is None or _RELEASES[0] != stamp:
+        _RELEASES = (stamp, _read()["releases"])
+    return _RELEASES[1]
 
 
 def has_work() -> bool:
@@ -110,12 +128,16 @@ def has_work() -> bool:
     return any(row.get("status") in (QUEUED, DOWNLOADING) for row in releases().values())
 
 
-def _change(info_hash: str, **changes: Any) -> dict[str, Any]:
+def _change(info_hash: str, *, only: frozenset[str] | None = None, **changes: Any) -> dict[str, Any]:
+    """A release's row changed; with ``only``, just while its status is one of those (the downloads
+    pass, which must not bring back a download stopped meanwhile)."""
     with _LOCK:
         state = _read()
         row = state["releases"].get(info_hash)
         if row is None:
             raise KeyError(info_hash)
+        if only is not None and row.get("status") not in only:
+            return row
         row.update(changes, updated_at=time.time())
         _write(state)
         return row
@@ -237,6 +259,8 @@ def adds(row: dict[str, Any], found: manga_contents.Holdings | None = None) -> O
     if not row.get("volumes") and not row.get("chapters"):
         return (set(), set()) if found.complete else None
     away = {manga_names.file_number(name) for name in manga_library.moved_away(aid)}
+    # A volume the folder holds as chapter files is still wanted: volumes where they exist, chapters
+    # only past the last one -- filed, it replaces those chapter files (``file_release``).
     volumes = {volume for volume in _numbers(row.get("volumes")) - found.volumes() if ("volume", volume) not in away}
     if found.complete:
         # A finished series has no volume past its last: such a name is another series'.
@@ -246,6 +270,24 @@ def adds(row: dict[str, Any], found: manga_contents.Holdings | None = None) -> O
         if chapter == int(chapter) and found.lacks(int(chapter)) and ("chapter", chapter) not in away
     }
     return volumes, chapters
+
+
+def as_chapter_files(found: manga_contents.Holdings) -> set[float]:
+    """The volumes a folder holds as chapter files: their pages name the volume."""
+    return {float(volume) for _name, volume in found.chapter_files.values() if volume is not None}
+
+
+def replaced_by(found: manga_contents.Holdings, volume: float, chapters: set[int]) -> list[str]:
+    """The chapter files a volume replaces: those of the chapters its pages name, and those whose
+    pages name it."""
+    out = []
+    for name, number in found.numbers.items():
+        if not number or number[0] != "chapter" or number[1] != int(number[1]):
+            continue
+        named = (found.chapter_files.get(int(number[1])) or (None, None))
+        if int(number[1]) in chapters or (named[0] == name and named[1] is not None and float(named[1]) == volume):
+            out.append(name)
+    return sorted(out)
 
 
 def library_name(filename: str) -> str:
@@ -261,8 +303,9 @@ def wanted(anilist_id: int, names: list[str], *, pages: dict[str, list[float]] |
     """Each of a download's books: None when it goes into the library, else why it stays out.
 
     Only what fills a gap goes in: a volume the folder has no book of -- unless
-    its pages (``pages``, read once downloaded) name only chapters the library
-    holds -- and a chapter the library lacks (``Holdings.lacks``).
+    its pages (``pages``, read once downloaded) name only chapters other volumes
+    hold; chapters held as chapter files it replaces -- and a chapter the library
+    lacks (``Holdings.lacks``).
     Out besides: a book of a name the folder has, one moved from the folder to
     another series, an in-between number, a second copy, and a book without a
     number beside numbered ones; a release of books without numbers (a one-shot)
@@ -294,7 +337,11 @@ def wanted(anilist_id: int, names: list[str], *, pages: dict[str, list[float]] |
             named = set(manga_contents.own_chapters({int(chapter) for chapter in (pages or {}).get(name, []) if chapter == int(chapter)}))
             if number[1] in volumes:
                 verdicts[name] = _HAS
-            elif named and not any(found.lacks(chapter) and chapter not in taken for chapter in named):
+            elif named and not any(
+                (found.lacks(chapter) or (found.covered.get(chapter) or {}).get("kind") == "chapter") and chapter not in taken
+                for chapter in named
+            ):
+                # Its chapters are in other volumes: a second copy. Held as chapter files, it replaces them.
                 verdicts[name] = _HAS_CHAPTERS
             else:
                 verdicts[name] = None
@@ -436,6 +483,13 @@ async def discover() -> dict[str, Any]:
 async def _discover(settings: Any) -> dict[str, Any]:
     progress.update(step="series")
     await manga_library.adopt()
+    # Entries the library has or follows joined into their collections; nothing moves on disk.
+    try:
+        from bankai.web import manga_collections
+
+        manga_collections.refresh(manga_collections.present())
+    except Exception as exc:
+        log.warning("[manga] collections could not be updated: %s", exc)
     from bankai.web import manga_views
 
     # The chapters in the library's volumes, read a few hundred archives a pass.
@@ -555,6 +609,8 @@ def release_view(info_hash: str, row: dict[str, Any], found: manga_contents.Hold
         "error": row.get("error"),
         "progress": row.get("progress"),
         "adds": None if new is None else manga_names.describe(*new),
+        # Of those volumes, the ones the folder holds as chapter files: they replace them.
+        "replaces": None if not new or found is None else (manga_names.describe(new[0] & as_chapter_files(found), set()) or None),
         "found_at": float(row.get("found_at") or 0),
         "copied": row.get("copied"),
         "left": row.get("left"),
@@ -568,6 +624,95 @@ def anime_names(anilist_id: int, links: dict[int, list[tuple[int, str, str | Non
     for anime_id, relation, _format in rows:
         seen.setdefault(anime_id, {"anilist_id": anime_id, "name": anilist.name(anime_id), "relation": relation})
     return list(seen.values())
+
+
+# Chapters a volume holds where nothing says: low on purpose. A chapter taken for one inside a
+# volume only waits among the other versions until the volume's own pages say otherwise.
+_CHAPTERS_PER_VOLUME = 6
+# What a release is to its series' plan (``plan``), in the order the card shows them.
+PLAN, EXTRA, UNSURE, COVERED = "plan", "extra", "unsure", "covered"
+_ROLE_ORDER = {PLAN: 0, EXTRA: 1, UNSURE: 2, COVERED: 3}
+
+
+def _coming(anilist_id: int) -> tuple[set[float], set[float]]:
+    """The volumes and whole chapters a series' downloads under way bring."""
+    volumes: set[float] = set()
+    chapters: set[float] = set()
+    for row in releases().values():
+        if int(row.get("anilist_id") or 0) == int(anilist_id) and row.get("status") in ACTIVE:
+            volumes |= _numbers(row.get("volumes"))
+            chapters |= {chapter for chapter in _numbers(row.get("chapters")) if chapter == int(chapter)}
+    return volumes, chapters
+
+
+def plan(anilist_id: int, offers: list[tuple[str, dict[str, Any]]], found: manga_contents.Holdings) -> dict[str, dict[str, Any]]:
+    """What to download of a series: the fewest of its waiting releases that bring everything they
+    offer -- volumes before chapters, one pack before its pieces, then trusted, then seeded -- where
+    what downloads under way bring counts as had. A release none of whose books the plan lacks is
+    another version of them ("covered", by the plan release it shares most with); one that brings
+    something no release the plan may take does -- a guessed match is never taken -- stays beside
+    it ("extra"); one whose name says nothing is "unsure". bankai downloads only the files of a
+    torrent the library lacks, so a plan taking one volume of a pack downloads that volume.
+
+    Chapters inside volumes are no gap: a name holding both ("v01-14 + 138-147") says those before
+    its first loose chapter are in its volumes, else a low estimate per volume -- either only where
+    every volume up to there is had or offered."""
+    coming_volumes, coming_chapters = _coming(anilist_id)
+    units: dict[str, set[tuple[str, float]]] = {}
+    roles: dict[str, dict[str, Any]] = {}
+    for info_hash, row in offers:
+        new = adds(row, found)
+        if new is None:
+            roles[info_hash] = {"role": UNSURE}
+            continue
+        units[info_hash] = {("volume", v) for v in new[0] - coming_volumes} | {("chapter", c) for c in new[1] - coming_chapters}
+    had = found.volumes() | coming_volumes | {number for held in units.values() for kind, number in held if kind == "volume"}
+    whole = 0
+    while float(whole + 1) in had:
+        whole += 1
+    frontier = max(
+        [int(row["chapters"][0]) - 1 for _hash, row in offers
+         if row.get("volumes") and row.get("chapters") and float(row["volumes"][1]) <= whole]
+        + [whole * _CHAPTERS_PER_VOLUME]
+    )
+    for held in units.values():
+        held -= {unit for unit in held if unit[0] == "chapter" and unit[1] <= frontier}
+    weight = lambda held: sum(10 if kind == "volume" else 1 for kind, _number in held)  # noqa: E731
+    rows = dict(offers)
+    takeable = {key: held for key, held in units.items() if held and not rows[key].get("guess")}
+    need = set().union(*units.values()) if units else set()
+    chosen: list[str] = []
+    while need and takeable:
+        def rank(key: str) -> tuple:
+            entry = rows[key].get("entry") or {}
+            return (weight(takeable[key] & need), bool(entry.get("trusted")), int(entry.get("seeders") or 0), -int(entry.get("size_bytes") or 0))
+        best = max(takeable, key=rank)
+        if not takeable[best] & need:
+            break
+        chosen.append(best)
+        need -= takeable.pop(best)
+    brought = set().union(*(units[key] for key in chosen)) if chosen else set()
+    for info_hash, held in units.items():
+        if info_hash in chosen:
+            roles[info_hash] = {"role": PLAN, "order": chosen.index(info_hash)}
+        elif held <= brought:
+            # Nothing the plan lacks, or nothing at all (inside volumes, or under way).
+            sharing = max(chosen, key=lambda key: len(units[key] & held), default=None) if held else None
+            roles[info_hash] = {"role": COVERED, "covered_by": sharing}
+        else:
+            roles[info_hash] = {"role": EXTRA}
+    return roles
+
+
+def take_plan(anilist_id: int) -> list[str]:
+    """Download a series' plan as it stands now: each of its releases approved."""
+    aid = int(anilist_id)
+    offers = [(key, row) for key, row in releases().items() if int(row.get("anilist_id") or 0) == aid and row.get("status") == REVIEW]
+    roles = plan(aid, offers, holdings(aid))
+    chosen = sorted((key for key, role in roles.items() if role["role"] == PLAN), key=lambda key: roles[key]["order"])
+    for key in chosen:
+        approve(key)
+    return chosen
 
 
 def series_card(anilist_id: int, *, followed: dict[int, list[str]], links: dict) -> dict[str, Any]:
@@ -592,7 +737,10 @@ def review() -> list[dict[str, Any]]:
     cards = []
     for aid, rows in groups.items():
         found = holdings(aid)
-        views = sorted((release_view(info_hash, row, found) for info_hash, row in rows), key=_rank)
+        roles = plan(aid, rows, found)
+        views = [{**release_view(info_hash, row, found), **roles[info_hash]} for info_hash, row in rows]
+        # The plan first, in the order it was put together; then each group as before.
+        views.sort(key=lambda view: (_ROLE_ORDER[view["role"]], view.get("order", 0), _rank(view)))
         cards.append({**series_card(aid, followed=followed, links=links), "releases": views})
     cards.sort(key=lambda card: -max(view["found_at"] for view in card["releases"]))
     return cards
@@ -677,6 +825,38 @@ def blacklist(anilist_id: int) -> int:
     return changed
 
 
+async def remove_series(anilist_id: int, *, blacklisting: bool = True) -> dict[str, Any]:
+    """A series out of the library: its downloads stopped (their torrents removed), its folder
+    deleted, and -- unless ``blacklisting`` is false -- never looked for again. Refused while one of
+    its downloads is being filed into the folder."""
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    aid = int(anilist_id)
+    with _LOCK:
+        state = _read()
+        rows = {key: row for key, row in state["releases"].items() if int(row.get("anilist_id") or 0) == aid}
+        if any(row.get("status") == PUBLISHING for row in rows.values()):
+            raise ValueError("one of its downloads is being filed right now: try again in a minute")
+        stopped = [key for key, row in rows.items() if row.get("status") in (QUEUED, DOWNLOADING)]
+        for key in stopped:
+            rows[key].update(status=DISCARDED, reason=_REMOVED, updated_at=time.time())
+        _write(state)
+    if stopped:
+        try:
+            async with QBittorrentClient() as qbit:
+                for key in stopped:
+                    try:
+                        await qbit.remove(key, delete_files=True)
+                    except Exception as exc:
+                        log.warning("[manga] torrent %s could not be removed: %s", key[:8], exc)
+        except Exception as exc:
+            log.warning("[manga] qBittorrent unreachable, %d torrent(s) left: %s", len(stopped), exc)
+    discarded = await asyncio.to_thread(blacklist, aid) if blacklisting else 0
+    result = await asyncio.to_thread(manga_library.remove, aid)
+    await openpanel.scan()
+    return {**result, "stopped": len(stopped), "discarded": discarded}
+
+
 def restore(anilist_id: int) -> int:
     """Off the blacklist: the releases it discarded wait for review again."""
     manga_series.clear_policy(anilist_id)
@@ -759,8 +939,10 @@ def file_release(row: dict[str, Any], content: Path, *, finished: set[str] | Non
     verdicts = wanted(aid, [path.name for path in books], pages=pages)
     left = [[path.name, verdicts[path.name]] for path in books if verdicts[path.name]]
     going = [path for path in books if not verdicts[path.name]]
+    found = holdings(aid)
     folder = manga_library.ensure_folder(aid, row.get("kind") or "manga") if going else manga_library.folder_of(aid)
-    copied = []
+    copied: list[str] = []
+    replaced: list[str] = []
     for source in going:
         name = library_name(source.name)
         target = folder / name
@@ -771,7 +953,19 @@ def file_release(row: dict[str, Any], content: Path, *, finished: set[str] | Non
         shutil.copyfile(source, part)
         part.replace(target)
         copied.append(name)
-    return {"folder": folder.name if folder else None, "copied": copied, "left": left}
+        number = manga_names.file_number(source.name)
+        if number and number[0] == "volume":
+            # Volumes where they exist: the chapter files it holds go, now that it is on disk.
+            chapters = {int(chapter) for chapter in pages.get(source.name, []) if chapter == int(chapter)}
+            for old in replaced_by(found, number[1], set(manga_contents.own_chapters(chapters)) if chapters else set()):
+                if old not in copied and (folder / old).is_file():
+                    (folder / old).unlink()
+                    replaced.append(old)
+    if replaced:
+        log.info("[manga] %s: %d chapter file(s) replaced by their volumes", folder.name, len(replaced))
+    if folder is not None and copied:
+        manga_library.forget(folder)
+    return {"folder": folder.name if folder else None, "copied": copied, "left": left, "replaced": replaced}
 
 
 async def _pick(qbit: Any, info_hash: str, row: dict[str, Any]) -> bool:
@@ -809,6 +1003,9 @@ async def reconcile() -> dict[str, Any]:
         # By hash among all of them: one qBittorrent put in another category is still found.
         torrents = {torrent.hash.lower(): torrent for torrent in await qbit.list_torrents()}
         for info_hash, row in active.items():
+            # Stopped since the pass began (its series removed): left alone, and never brought back.
+            if (releases().get(info_hash) or {}).get("status") not in (QUEUED, DOWNLOADING):
+                continue
             entry = row.get("entry") or {}
             torrent = torrents.get(info_hash)
             if torrent is None:
@@ -819,13 +1016,13 @@ async def reconcile() -> dict[str, Any]:
                         category=settings.qbittorrent_category,
                         save_path=save_path(),
                     )
-                    _change(info_hash, status=DOWNLOADING, progress=0.0, error=None)
+                    _change(info_hash, only=ACTIVE, status=DOWNLOADING, progress=0.0, error=None)
                 except Exception as exc:
-                    _change(info_hash, error=f"qBittorrent: {exc}")
+                    _change(info_hash, only=ACTIVE, error=f"qBittorrent: {exc}")
                 continue
             phase = _phase(torrent)
             if phase == "error":
-                _change(info_hash, status=FAILED, error=f"qBittorrent: {torrent.state}")
+                _change(info_hash, only=ACTIVE, status=FAILED, error=f"qBittorrent: {torrent.state}")
             elif phase == "downloading":
                 if not row.get("picked"):
                     try:
@@ -833,9 +1030,9 @@ async def reconcile() -> dict[str, Any]:
                             continue
                     except Exception as exc:
                         log.warning("[manga] the files of %s could not be picked: %s", info_hash[:8], exc)
-                _change(info_hash, status=DOWNLOADING, progress=round(float(torrent.progress), 3))
+                _change(info_hash, only=ACTIVE, status=DOWNLOADING, progress=round(float(torrent.progress), 3))
             else:
-                _change(info_hash, status=PUBLISHING, progress=1.0)
+                _change(info_hash, only=ACTIVE, status=PUBLISHING, progress=1.0)
                 progress.update(step="filing", series=manga_meta.name(row["anilist_id"]))
                 try:
                     listed = await qbit.files(info_hash)
@@ -850,7 +1047,7 @@ async def reconcile() -> dict[str, Any]:
                 try:
                     result = await asyncio.to_thread(file_release, row, Path(torrent.content_path), finished=finished)
                 except (OSError, ValueError) as exc:
-                    _change(info_hash, status=FAILED, error=str(exc))
+                    _change(info_hash, only=ACTIVE, status=FAILED, error=str(exc))
                     continue
                 finally:
                     progress.clear()
@@ -858,7 +1055,7 @@ async def reconcile() -> dict[str, Any]:
                     await qbit.remove(info_hash, delete_files=True)
                 except Exception as exc:
                     log.warning("[manga] torrent %s could not be removed: %s", info_hash[:8], exc)
-                _change(info_hash, status=DONE, error=None, done_at=time.time(), **result)
+                _change(info_hash, only=ACTIVE, status=DONE, error=None, done_at=time.time(), **result)
                 log.info("[manga] %s: %d file(s) into %s, %d left out", entry.get("title"), len(result["copied"]), result["folder"], len(result["left"]))
                 filed += 1
     if filed:

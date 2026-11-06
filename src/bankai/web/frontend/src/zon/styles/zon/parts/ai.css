@@ -14,7 +14,11 @@
        quote or a loose list, whose paragraphs' margins would collapse through them. */
     & > [data-slot="response-markdown"]:first-child > :first-child,
     & > [data-slot="response-markdown"]:first-child > blockquote:first-child > :first-child,
-    & > [data-slot="response-markdown"]:first-child > :is(ul, ol):first-child > li:first-child > :first-child {
+    &
+      > [data-slot="response-markdown"]:first-child
+      > :is(ul, ol):first-child
+      > li:first-child
+      > :first-child {
       margin-top: 0;
     }
     & > [data-slot="response-markdown"]:last-child > :last-child,
@@ -163,6 +167,23 @@
       border-collapse: collapse;
       font-size: 14px;
     }
+    /* The block a table sits in takes its spacing and scrolls it sideways when it is wider than the
+       reply; the cells wrap between words, never inside one. */
+    & > [data-slot="response-markdown"][data-table] {
+      margin-block: 0.875rem;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+
+      &:first-child {
+        margin-top: 0;
+      }
+      &:last-child {
+        margin-bottom: 0;
+      }
+      & > table {
+        margin-block: 0;
+      }
+    }
     & th {
       color: var(--muted-foreground);
       font-family: var(--font-mono);
@@ -173,6 +194,7 @@
       text-transform: uppercase;
     }
     & :is(th, td) {
+      overflow-wrap: normal;
       padding: 0.5rem 0.75rem;
       border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
       &:first-child {
@@ -215,25 +237,30 @@
 }
 
 /* ── PromptInput: one line, or stacked ───────────────────────────────────────
- * The bar is a grid. On one line: tools · text · send, all 38px tall — one 24px line of text with
- * 6px above and below, inside the 1px border; the 30px buttons sit 3px in, like any button in a
- * field. Stacked: the text takes the full width above, and tools and send form the row under it,
- * 7px from the edge. prompt-input.tsx animates between the two (FLIP).
+ * The bar is a grid. On one line: tools · text · end tools · send, all 38px tall — one 24px line
+ * of text with 6px above and below, inside the 1px border; the 30px buttons sit 3px in, like any
+ * button in a field. Stacked: the text takes the full width above, and the tools and send form
+ * the row under it, still 3px in. prompt-input.tsx animates between the two (FLIP).
  * Unlayered, and only these: the grid and the text's padding replace InputGroup's flex and its
  * textarea's utilities, which a layered rule could not. */
 [data-slot="prompt-input"] > [data-slot="input-group"] {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   grid-template-areas:
-    "header header header"
-    "tools input submit";
+    "header header header header"
+    "tools input aside submit";
   align-items: center;
+}
+/* While the morph plays (prompt-input.tsx), the rows keep their final heights at the top, and the
+ * animated height only opens or clips the bar below them. */
+[data-slot="prompt-input"] > [data-slot="input-group"][data-morphing] {
+  align-content: start;
 }
 [data-slot="prompt-input"] > [data-slot="input-group"][data-layout="stacked"] {
   grid-template-areas:
-    "header header header"
-    "input input input"
-    "tools . submit";
+    "header header header header"
+    "input input input input"
+    "tools . aside submit";
 }
 [data-slot="prompt-input"] [data-slot="input-group-control"] {
   grid-area: input;
@@ -270,16 +297,20 @@
     grid-area: tools;
     padding-inline-start: 3px;
   }
+  /* Tools at the end sit beside the send button, a tool's gap from it. */
+  [data-slot="prompt-input-tools"][data-side="end"] {
+    grid-area: aside;
+    padding-inline: 0 4px;
+  }
   [data-slot="prompt-input-submit"] {
     grid-area: submit;
     padding-inline-end: 3px;
   }
-  [data-slot="prompt-input"] > [data-layout="stacked"] [data-slot="prompt-input-tools"] {
-    padding-block: 2px 7px;
-    padding-inline-start: 7px;
-  }
-  [data-slot="prompt-input"] > [data-layout="stacked"] [data-slot="prompt-input-submit"] {
-    padding-block: 2px 7px;
-    padding-inline-end: 7px;
+  /* Stacked, the buttons keep the inset they have on one line — 3px from the edge — so the
+   * morph only moves them up or down. */
+  [data-slot="prompt-input"]
+    > [data-layout="stacked"]
+    :is([data-slot="prompt-input-tools"], [data-slot="prompt-input-submit"]) {
+    padding-block: 2px 3px;
   }
 }

@@ -1,5 +1,14 @@
 @import 'tailwindcss';
 @import './zon/styles/zon/index.css';
+/* After every @import (an @import after any other rule is dropped -- the whole of zon was, once). */
+/* zon components copied but used nowhere: their classes would be generated all the same
+   (button-group's :nth-child(… of …) selectors were matched against every element). */
+@source not "./zon/ui/button-group.tsx";
+@source not "./zon/ui/collapsible.tsx";
+@source not "./zon/ui/field.tsx";
+@source not "./zon/ui/kbd.tsx";
+@source not "./zon/ui/label.tsx";
+@source not "./zon/ui/number-field.tsx";
 
 /* ---------------------------------------------------------------------------
    bankai on zon/ui. Everything visual comes from zon: its tokens, the
@@ -22,6 +31,9 @@
   --extract: oklch(0.78 0.13 225);
   --torrent: oklch(0.74 0.21 330);
   --repack: oklch(0.78 0.14 190);
+  /* bankai's mark: crimson, deeper than --destructive so the logo never reads as an error (Nov 2026).
+     The app is always dark; favicon.svg keeps #b3122e for a light tab. */
+  --brand: #e0283f;
 }
 
 @theme inline {
@@ -32,6 +44,7 @@
   --color-extract: var(--extract);
   --color-torrent: var(--torrent);
   --color-repack: var(--repack);
+  --color-brand: var(--brand);
 }
 
 @layer utilities {
@@ -68,7 +81,29 @@
     background-color: var(--control-hover);
   }
 
+  /* bankai: zon's page ground, painted by the app's scrolling area itself (lib/ground.ts bakes
+     the grain into --page-ground-tile): opaque, the area scrolls on the compositor instead of
+     being painted again every frame. It scrolls with the page; at the top it is body's exactly,
+     the light lined up with the window (100vw, from the right edge) as body's fixed one is. */
+  .page-ground {
+    background-color: var(--background);
+    background-image: radial-gradient(110% 65% at 50% -10%, var(--page-glow), transparent 60%), var(--page-ground-tile, none);
+    background-size: 100vw 100vh, 200px 200px;
+    background-position: right top, left top;
+    background-repeat: no-repeat, repeat;
+    background-attachment: local;
+  }
+
   /* Poster cards lift rather than scale: a poster growing crops its own art. */
+  /* A card scrolled out of view is not styled, laid out or painted -- nor its poster
+     decoded -- until it comes near; its last size holds its place. Hundreds of covers
+     (the blacklist, the libraries) were all decoded on opening. */
+  .poster-card,
+  .offscreen-skip {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 340px;
+  }
+
   .poster-card {
     transition:
       border-color var(--duration) var(--ease),

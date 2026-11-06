@@ -1,0 +1,21 @@
+[Unit]
+Description=bankai library worker (encode, browser audio, track cleanup)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=malik
+WorkingDirectory=/home/malik/projects/bankai
+Environment=HOME=/home/malik
+Environment=PATH=/home/malik/projects/bankai/.venv/bin:/home/malik/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/malik/projects/bankai/.venv/bin/bankai library worker
+# Always: it exits 3 by itself once bankai's code changed and its files are done, to come back on the new code.
+Restart=always
+RestartSec=5
+# A stop sends ffmpeg the signal too; it ends and the encode goes on from its last finished step next time.
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

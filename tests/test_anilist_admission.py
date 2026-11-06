@@ -287,6 +287,20 @@ def test_a_batch_file_past_its_entry_s_end_goes_to_the_sequel(world, copies, tmp
     ]
 
 
+def test_a_replacement_never_writes_another_entry_s_file_over_this_one(world, copies, tmp_path):
+    """Re:Zero's second season, its batch taken for the first season, replaced the first (Nov 2026)."""
+    left: list = []
+    files = sources(tmp_path, "Dr. Stone Science Future Dai 2 Cour", [1, 2])
+
+    placed = organize(files, 1001, replace_existing=True, leftover=left)
+
+    assert placed == []
+    assert [(path.name, "Dai 2 Cour" in reason) for path, reason in left] == [(path.name, True) for path in files]
+    # The entry's own files replace as before, and a cour numbered straight on settles into its sequel.
+    placed = organize(sources(tmp_path, "Dr. Stone Science Future", [5, 13]), 1001, replace_existing=True)
+    assert [(aid, episode) for _path, aid, episode in placed] == [(1001, 5), (1002, 1)]
+
+
 def test_an_episode_override_is_taken_as_it_is(world, copies, tmp_path):
     placed = organize(sources(tmp_path, "Some Name", [1]), FRIEREN, episode_override=7)
 
@@ -312,6 +326,22 @@ class _Qbit:
     def __init__(self, folder: Path) -> None:
         self.folder = folder
         self.removed: list[str] = []
+        # Files set to "do not download", by name.
+        self.left_out: set[str] = set()
+
+    def _names(self) -> list[str]:
+        return sorted(path.name for path in self.folder.iterdir())
+
+    async def files(self, _hash):
+        return [
+            {"index": index, "name": f"{self.folder.name}/{name}", "priority": 0 if name in self.left_out else 1}
+            for index, name in enumerate(self._names())
+        ]
+
+    async def file_priority(self, _hash, indexes, priority):
+        assert priority == 0
+        names = self._names()
+        self.left_out |= {names[index] for index in indexes}
 
     async def login(self): ...
 
@@ -343,6 +373,7 @@ def download(monkeypatch, tmp_path, files: dict[str, bytes], **kwargs):
     for name, data in files.items():
         (folder / name).write_bytes(data)
     qbit = _Qbit(folder)
+    download.qbit = qbit
 
     async def locate(*_args, **_kwargs):
         return "a" * 40
@@ -399,6 +430,119 @@ def test_an_upgrade_is_published_over_the_episode_it_replaces(world, monkeypatch
 
     assert old.read_bytes() == b"new hevc"
     assert not list(world["staging"].rglob("*.mkv"))
+
+
+def test_only_the_library_s_own_copy_counts_as_in_the_library(world):
+    show = "Frieren Beyond Journey's End"
+    filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+    # Staged, not published: a download of it again carries on with it.
+    filed(world["staging"], f"{show}/Season 01/{show} - S01E06.mkv", [(FRIEREN, 6)])
+
+    assert anime_files.in_library([FRIEREN, 1001]) == {FRIEREN: {5}, 1001: set()}
+
+
+def test_an_episode_the_library_has_is_left_out_while_filing(world, copies, tmp_path):
+    show = "Frieren Beyond Journey's End"
+    filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+    owned_left: list[Path] = []
+
+    placed = organize(sources(tmp_path, "Sousou no Frieren", [5, 6]), FRIEREN, skip_owned=True, owned_left=owned_left)
+
+    assert [episode for _path, _aid, episode in placed] == [6]
+    assert [path.name for path in owned_left] == ["[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].mkv"]
+    # Nothing staged beside the library's copy.
+    assert not list(world["staging"].rglob("*S01E05*"))
+
+
+def test_a_batch_downloads_only_the_episodes_the_library_lacks(world, monkeypatch, tmp_path):
+    show = "Frieren Beyond Journey's End"
+    old = filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+    old.write_bytes(b"library copy")
+
+    result = download(
+        monkeypatch, tmp_path, {
+            "[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].mkv": b"other encode",
+            "[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].en.ass": b"subs",
+            "[Erai-raws] Sousou no Frieren - 06 [1080p][HEVC].mkv": b"six",
+        },
+        release_title="[Erai-raws] Sousou no Frieren - 05 ~ 06 [1080p][HEVC]", publish=True,
+    )
+
+    # qBittorrent was told to leave out episode 5 and its subtitle.
+    assert download.qbit.left_out == {
+        "[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].mkv",
+        "[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].en.ass",
+    }
+    assert result["paths"] == [str(world["library"] / show / "Season 01" / f"{show} - S01E06.mkv")]
+    assert old.read_bytes() == b"library copy"
+    assert not list(world["staging"].rglob("*.mkv"))
+
+
+def test_a_release_the_library_has_whole_is_not_downloaded(world, monkeypatch, tmp_path):
+    show = "Frieren Beyond Journey's End"
+    filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+
+    result = download(
+        monkeypatch, tmp_path, {"[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].mkv": b"again"},
+        episode_override=5, publish=True,
+    )
+
+    assert result["already_in_library"] == 1
+    assert result["paths"] == []
+    assert download.qbit.removed == ["a" * 40]
+
+
+def test_a_replacement_still_downloads_the_episode_the_library_has(world, monkeypatch, tmp_path):
+    show = "Frieren Beyond Journey's End"
+    old = filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+
+    download(
+        monkeypatch, tmp_path, {"[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].mkv": b"new"},
+        episode_override=5, publish=True, replace_existing=True,
+    )
+
+    assert download.qbit.left_out == set()
+    assert old.read_bytes() == b"new"
+
+
+def test_discover_rows_say_which_episodes_the_library_has(world):
+    from bankai.web import anime as anime_mod
+
+    show = "Frieren Beyond Journey's End"
+    filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+    rows = [{"anilist": {"anilist_id": FRIEREN, "episode": None}}, {"anilist": None}]
+
+    anime_mod.mark_owned(rows)
+
+    assert rows[0]["anilist"]["owned"] == [5]
+    assert rows[0]["anilist"]["episodes"] == 28
+    assert rows[1]["anilist"] is None
+
+
+def test_rows_say_which_languages_the_library_s_episodes_have_and_what_german_a_release_adds(world, monkeypatch):
+    from bankai.web import anime as anime_mod
+    from bankai.web import track_cleanup
+
+    show = "Frieren Beyond Journey's End"
+    five = filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+    six = filed(world["library"], f"{show}/Season 01/{show} - S01E06.mkv", [(FRIEREN, 6)])
+    # German Erai-raws uploaded later, beside episode 6.
+    six.with_name(six.stem + ".de.ass").write_text("subs")
+    tracks = [{"kind": "audio", "lang": "jpn"}, {"kind": "subtitles", "lang": "eng"}]
+    monkeypatch.setattr(track_cleanup, "load_inventory", lambda: {str(five): {"tracks": tracks}, str(six): {"tracks": tracks}})
+    batch = {"anilist": {"anilist_id": FRIEREN, "episode": None}, "audio_langs": ["ja", "de"], "sub_langs": ["en", "de"]}
+    single = {"anilist": {"anilist_id": FRIEREN, "episode": 6}, "sub_langs": ["de"], "fansub_langs": []}
+
+    anime_mod.mark_owned([batch, single])
+
+    assert batch["anilist"]["languages"] == {"read": 2, "audio": {"jpn": 2}, "subtitles": {"eng": 2, "ger": 1}}
+    assert batch["anilist"]["gains"] == [
+        {"kind": "audio", "language": "ger", "episodes": 2, "of": 2},
+        {"kind": "subtitles", "language": "ger", "episodes": 1, "of": 2},
+    ]
+    # Episode 6 has German subtitles already: nothing gained.
+    assert single["anilist"]["languages"]["subtitles"] == {"eng": 1, "ger": 1}
+    assert single["anilist"]["gains"] == []
 
 
 def test_without_the_subtitle_step_the_episode_waits_in_staging(world, monkeypatch, tmp_path):
@@ -632,3 +776,14 @@ def test_matching_over_an_episode_the_library_has_asks_first(world, monkeypatch,
     asyncio.run(anime_unsorted.file_into([kept["id"]], FRIEREN, [5], replace=True))
     [only] = anime_files.on_disk(FRIEREN)[5]
     assert only.read_bytes() == b"fiv2"
+
+
+def test_an_episode_map_files_each_number_as_the_ticked_entry_and_leaves_the_rest_out(world, copies, tmp_path):
+    """Replace with magnet link: the torrent's episode 13 is the ticked S01E13, of the sequel entry."""
+    left: list = []
+    placed = organize(
+        sources(tmp_path, "Dr. Stone Science Future", [12, 13, 14]), 1001,
+        episode_map={12: (1001, 12), 13: (1002, 1)}, leftover=left,
+    )
+    assert [(aid, episode) for _path, aid, episode in placed] == [(1001, 12), (1002, 1)]
+    assert [reason for _source, reason in left] == ["not ticked to be replaced"]

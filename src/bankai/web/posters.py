@@ -1,8 +1,8 @@
-"""Best-effort poster-URL cache for library/queue titles (TVDB-backed).
+"""Best-effort poster-URL cache for library/queue titles (TMDB-backed).
 
-Poster lookups hit TVDB, which is slow, so we never block the ``/api/titles``
+Poster lookups hit TMDB, which is slow, so we never block the ``/api/titles``
 response on them: we return whatever is already cached and kick off a
-background thread to resolve any misses. TVDB artwork URLs are public CDN
+background thread to resolve any misses. TMDB artwork URLs are public CDN
 links the browser can load directly, so we only cache the URL (a ``null`` is
 cached too, to avoid re-querying titles with no artwork).
 """
@@ -101,8 +101,8 @@ def ensure(key: str, query: str, kind: str, *, known: dict | None = None) -> Non
         url: str | None = None
         year: int | None = None
         try:
-            tvdb_kind = "movie" if kind == "movie" else "series"
-            items = asyncio.run(discover.search(query, kind=tvdb_kind, limit=1))
+            search_kind = "movie" if kind == "movie" else "show"
+            items = asyncio.run(discover.search(query, kind=search_kind, limit=1))
             if items:
                 url = items[0].poster_url
                 year = items[0].year

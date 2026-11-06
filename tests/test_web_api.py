@@ -100,6 +100,16 @@ def test_anime_download_accepts_only_nyaa_and_queues_direct_job(
     rejected = client.post("/api/anime/download", json=body)
     assert rejected.status_code == 422
 
+    # From nekobt.to: by its magnet alone, the CLI's magnet-only path (no .torrent link to give).
+    nekobt = client.post(
+        "/api/anime/download",
+        json={**body, "source": "nekobt", "torrent_url": "", "detail_url": "https://nekobt.to/torrents/13161015825677"},
+    )
+    assert nekobt.status_code == 200
+    args = queued[-1]["args"]
+    assert args[args.index("--torrent-url") + 1] == "" and args[args.index("--detail-url") + 1] == ""
+    assert args[args.index("--magnet-uri") + 1].startswith("magnet:?xt=urn:btih:0123456789abcdef")
+
 
 def test_nyaa_anime_review_routes_to_anime_transfer_kind() -> None:
     path = Path("C:/bankai/library/Shows/Frieren/Season 01/Frieren - S01E01.mkv")
@@ -348,7 +358,7 @@ def test_discover_backfills_filtered_movies_to_requested_page_size(
             DiscoverItem(
                 name=f"Movie {index}",
                 kind="movie",
-                tvdb_id=index,
+                tmdb_id=index,
                 year=2024,
                 status="Released",
             )
@@ -484,8 +494,8 @@ def test_discover_people_suggest_returns_names(
         assert query == "chris"
         assert limit == 5
         return [
-            PersonSuggestion(name="Christopher Nolan", tvdb_id=101),
-            PersonSuggestion(name="Chris Evans", tvdb_id=102),
+            PersonSuggestion(name="Christopher Nolan", tmdb_id=101),
+            PersonSuggestion(name="Chris Evans", tmdb_id=102),
         ]
 
     monkeypatch.setattr("bankai.web.discover.person_suggestions", fake_suggestions)
@@ -500,8 +510,8 @@ def test_discover_people_suggest_returns_names(
     assert response.json() == {
         "configured": True,
         "items": [
-            {"name": "Christopher Nolan", "tvdb_id": 101},
-            {"name": "Chris Evans", "tvdb_id": 102},
+            {"name": "Christopher Nolan", "tmdb_id": 101},
+            {"name": "Chris Evans", "tmdb_id": 102},
         ],
     }
 
@@ -1371,8 +1381,8 @@ def test_settings_get_masks_secrets(client: TestClient) -> None:
     r = client.get("/api/settings")
     assert r.status_code == 200
     rows = {row["key"]: row for row in r.json()["settings"]}
-    assert "metadata.tvdb_api_key" in rows
-    assert rows["metadata.tvdb_api_key"]["secret"] is True
+    assert "metadata.tmdb_api_key" in rows
+    assert rows["metadata.tmdb_api_key"]["secret"] is True
     assert "transfer.anime_shows_dir" in rows
 
 

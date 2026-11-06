@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Check, ImageOff, RefreshCw, RotateCcw } from 'lucide-react';
+import { Check, ImageOff, MoreHorizontal, RefreshCw, RotateCcw } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type ArtworkCandidate, type ArtworkSlot } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
@@ -7,6 +7,7 @@ import { cn } from '@/zon/lib/cn';
 import { Button } from '@/zon/ui/button';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
 import { Input } from '@/zon/ui/input';
+import { Menu, MenuContent, MenuGroup, MenuGroupLabel, MenuItem, MenuTrigger } from '@/zon/ui/menu';
 import { Spinner } from '@/zon/ui/spinner';
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
 
@@ -39,9 +40,17 @@ function caption(item: ArtworkCandidate) {
   return [item.source === 'tmdb' ? item.label : 'AniList · ' + item.label, lang, size].filter(Boolean).join(' · ');
 }
 
-/** A collection's artwork, slot by slot: what Jellyfin shows now, and every picture it could show instead. */
-export function ArtworkDialog({ collectionId, title, onClose, onChanged }: {
-  collectionId: number | null;
+/** A film or show of the Movies & Shows library, by its card. */
+export type MasArtworkTarget = { kind: 'show' | 'movie'; key: string };
+
+/**
+ * Artwork, slot by slot: what Jellyfin shows now, and every picture it could show instead.
+ * An anime collection (``collectionId``), or a Movies & Shows title (``mas``), where a slot
+ * not chosen here is Jellyfin's own picture.
+ */
+export function ArtworkDialog({ collectionId = null, mas = null, title, onClose, onChanged }: {
+  collectionId?: number | null;
+  mas?: MasArtworkTarget | null;
   title: string;
   onClose: () => void;
   onChanged: () => void;
@@ -54,9 +63,9 @@ export function ArtworkDialog({ collectionId, title, onClose, onChanged }: {
   const [refreshing, setRefreshing] = useState(false);
 
   async function load(refresh = false) {
-    if (collectionId == null) return;
+    if (collectionId == null && mas == null) return;
     try {
-      const result = await api.collectionArtwork(collectionId, refresh);
+      const result = mas ? await api.masArtwork(mas.kind, mas.key, refresh) : await api.collectionArtwork(collectionId!, refresh);
       setSlots(result.slots);
       setTmdbOn(result.tmdb);
       if (result.tmdb_error?.error) toast.warning('TMDB: ' + result.tmdb_error.error);
@@ -72,14 +81,15 @@ export function ArtworkDialog({ collectionId, title, onClose, onChanged }: {
     setPasted('');
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectionId]);
+  }, [collectionId, mas?.kind, mas?.key]);
 
   async function choose(slot: ArtworkSlot, url: string | null) {
-    if (collectionId == null) return;
+    if (collectionId == null && mas == null) return;
     setSaving(url ?? 'automatic');
     try {
-      await api.chooseArtwork(collectionId, slot.slot, url);
-      toast.success(slot.label + (url ? ' changed' : ' back to automatic') + '; Jellyfin picks it up on its next refresh');
+      if (mas) await api.chooseMasArtwork(mas.kind, mas.key, slot.slot, url);
+      else await api.chooseArtwork(collectionId!, slot.slot, url);
+      toast.success(slot.label + (url ? ' changed' : mas ? ' back to Jellyfin\'s own' : ' back to automatic') + '; Jellyfin picks it up on its next refresh');
       setPasted('');
       await load();
       onChanged();
@@ -99,40 +109,80 @@ export function ArtworkDialog({ collectionId, title, onClose, onChanged }: {
     }
   }
 
-  const open = collectionId != null;
+  const open = collectionId != null || mas != null;
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !saving) onClose(); }}>
       <DialogContent size='xl' className='max-h-[90dvh]'>
         <DialogHeader>
           <DialogTitle>Artwork of {title}</DialogTitle>
           <DialogDescription>
-            What Jellyfin shows for the show and each season. Click a picture to use it, or paste any image&apos;s address. Automatic takes
-            AniList&apos;s poster and banner{tmdbOn ? ', and TMDB\'s backdrop, thumb, logo and Specials poster' : ''}.
+            {mas ? (
+              <>What Jellyfin shows for the {mas.kind === 'show' ? 'show and each season' : 'film'}. Click a picture to use it, or paste any image&apos;s
+              address: it is written beside the files and Jellyfin takes it over its own. A picture not chosen here stays Jellyfin&apos;s.</>
+            ) : (
+              <>What Jellyfin shows for the show and each season. Click a picture to use it, or paste any image&apos;s address. Automatic takes
+              AniList&apos;s poster and banner{tmdbOn ? ', and TMDB\'s backdrop, thumb, logo and Specials poster' : ''}.</>
+            )}
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
           {slots === null ? <div className='flex h-60 items-center justify-center'><Spinner label='Loading the artwork' /></div> : (
             <Tabs value={tab} onValueChange={(value) => { setTab(String(value)); setPasted(''); }} className='gap-4'>
-              <TabsList className='h-auto max-w-full flex-wrap'>
-                {slots.map((slot) => <TabsTab key={slot.slot} value={slot.slot}>{slot.label}</TabsTab>)}
-              </TabsList>
+              <div className='flex items-center gap-2'>
+                {/* Season posters behind the menu: ZonTV shows none, so they are rarely wanted. One
+                    picked there opens as a tab of its own beside the rest. */}
+                <TabsList className='h-auto max-w-full flex-wrap'>
+                  {slots.filter((slot) => !slot.slot.startsWith('season:') || slot.slot === tab).map((slot) => (
+                    <TabsTab key={slot.slot} value={slot.slot}>{slot.label}</TabsTab>
+                  ))}
+                </TabsList>
+                {slots.some((slot) => slot.slot.startsWith('season:')) && (
+                  <Menu>
+                    <MenuTrigger render={<Button size='icon-sm' variant='ghost' aria-label='Season posters' title='Season posters' />}>
+                      <MoreHorizontal />
+                    </MenuTrigger>
+                    <MenuContent align='end' className='max-h-80 overflow-y-auto'>
+                      <MenuGroup>
+                        <MenuGroupLabel>Season posters</MenuGroupLabel>
+                        {slots.filter((slot) => slot.slot.startsWith('season:')).map((slot) => (
+                          <MenuItem key={slot.slot} onClick={() => { setTab(slot.slot); setPasted(''); }}>
+                            {slot.label}
+                            {slot.chosen && <Check className='ml-auto size-3.5 text-muted-foreground' aria-label='chosen by hand' />}
+                          </MenuItem>
+                        ))}
+                      </MenuGroup>
+                    </MenuContent>
+                  </Menu>
+                )}
+              </div>
               {slots.map((slot) => {
                 const { grid } = shape(slot.slot);
+                // A Movies & Shows slot not chosen here shows what Jellyfin shows now: the
+                // picture it fetched itself, which has no TMDB address to find among these.
+                const now = slot.url ?? slot.jellyfin_url ?? null;
                 return (
                   <TabsPanel key={slot.slot} value={slot.slot} className='flex flex-col gap-4'>
                     <div className='flex flex-wrap items-start gap-4'>
                       <div className={cn(slot.slot === 'poster' || slot.slot.startsWith('season:') ? 'w-36' : 'w-full max-w-md')}>
-                        <Picture url={slot.url} slot={slot.slot} alt={slot.label + ' now'} />
+                        <Picture url={now} slot={slot.slot} alt={slot.label + ' now'} />
                       </div>
                       <div className='flex min-w-0 flex-1 flex-col gap-3'>
                         <div className='flex flex-wrap items-center gap-2'>
                           <span className='eyebrow'>Now</span>
                           {slot.url
                             ? <StatusTag variant={slot.chosen ? 'info' : 'success'}>{slot.chosen ? 'Chosen by hand' : 'Automatic'}</StatusTag>
-                            : <StatusTag variant='warning'>None</StatusTag>}
+                            : <StatusTag variant={mas ? 'muted' : 'warning'} title={mas && !slot.jellyfin_url ? 'Jellyfin could not be asked which picture it shows' : undefined}>{mas ? 'Jellyfin\'s own' : 'None'}</StatusTag>}
+                          {mas && slot.chosen && slot.jellyfin_own && (
+                            <StatusTag
+                              variant='warning'
+                              title={'Jellyfin still shows the ' + slot.label.toLowerCase() + ' it fetched itself before this one. Delete that one in Jellyfin (Edit images), and this one is shown.'}
+                            >
+                              Jellyfin shows its own first
+                            </StatusTag>
+                          )}
                           {slot.chosen && (
                             <Button size='sm' variant='secondary' onClick={() => void choose(slot, null)} disabled={saving !== null}>
-                              <RotateCcw data-icon='inline-start' /> Automatic
+                              <RotateCcw data-icon='inline-start' /> {mas ? 'Jellyfin\'s own' : 'Automatic'}
                             </Button>
                           )}
                         </div>
@@ -172,7 +222,7 @@ export function ArtworkDialog({ collectionId, title, onClose, onChanged }: {
                       </div>
                     ) : (
                       <p className='text-sm text-muted-foreground'>
-                        Nothing to choose from{tmdbOn ? ': neither AniList nor TMDB has this picture for the show' : ': AniList has none, and TMDB is off in the anime settings'}. Paste an image address above.
+                        Nothing to choose from{mas ? (tmdbOn ? ': TMDB has no such picture for this title' : ': TMDB is not set up') : tmdbOn ? ': neither AniList nor TMDB has this picture for the show' : ': AniList has none, and TMDB is off in the anime settings'}. Paste an image address above.
                       </p>
                     )}
                   </TabsPanel>

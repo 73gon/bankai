@@ -6,13 +6,13 @@ import {
   type ToastManagerUpdateOptions,
   type ToastObject,
 } from "@base-ui/react/toast";
-import { CircleAlertIcon, CircleCheckIcon, LoaderCircleIcon, XIcon } from "lucide-react";
+import { CircleAlertIcon, CircleCheckIcon, InfoIcon, LoaderCircleIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import * as React from "react";
 import { cn } from "@/zon/lib/cn";
 
-export type ToastType = "default" | "success" | "error" | "loading";
+export type ToastType = "default" | "success" | "warning" | "info" | "error" | "loading";
 
-/** A button inside the toast: "Undo", "View invoice". */
+/** A button inside the toast: "Undo", "View". */
 export interface ToastActionOptions {
   label: React.ReactNode;
   onClick: () => void;
@@ -29,8 +29,12 @@ type ToastManagerLike = Pick<ToastManager<object>, "add" | "close" | "update" | 
 /** The `toast` API: call it for a default toast, or use a typed shortcut. */
 export interface ToastApi {
   (title: React.ReactNode, options?: ToastOptions): string;
-  /** A green check, a green leading bar and a green-tinted edge. The surface stays the menu material. */
+  /** A green check. The surface stays the menu material. */
   success: (title: React.ReactNode, options?: ToastOptions) => string;
+  /** An amber triangle: done, but something needs a look ("Saved, 2 images were too large"). */
+  warning: (title: React.ReactNode, options?: ToastOptions) => string;
+  /** A blue info mark: neutral news ("A new version is available"). */
+  info: (title: React.ReactNode, options?: ToastOptions) => string;
   /** The same treatment in `--destructive`, announced urgently. */
   error: (title: React.ReactNode, options?: ToastOptions) => string;
   /** Spinner, no auto-dismiss. Update it with `toast.update(id, { type: "success", … })`. */
@@ -58,6 +62,8 @@ function createToastApi(manager: ToastManagerLike): ToastApi {
   const show = (title: React.ReactNode, options?: ToastOptions) => manager.add(toAddOptions(title, options));
   return Object.assign(show, {
     success: (title: React.ReactNode, options?: ToastOptions) => show(title, { ...options, type: "success" }),
+    warning: (title: React.ReactNode, options?: ToastOptions) => show(title, { ...options, type: "warning" }),
+    info: (title: React.ReactNode, options?: ToastOptions) => show(title, { ...options, type: "info" }),
     error: (title: React.ReactNode, options?: ToastOptions) =>
       show(title, { priority: "high", ...options, type: "error" }),
     loading: (title: React.ReactNode, options?: ToastOptions) =>
@@ -138,8 +144,10 @@ function useIsPrimaryToaster(manager: object) {
 
 const icons: Record<ToastType, React.ReactNode> = {
   default: null,
-  /* The one place status colour shows: a green check for success, red for errors. */
+  /* Status colour shows on the icon only: the title says what happened. */
   success: <CircleCheckIcon aria-hidden className="size-4 text-success" />,
+  warning: <TriangleAlertIcon aria-hidden className="size-4 text-warning" />,
+  info: <InfoIcon aria-hidden className="size-4 text-info" />,
   error: <CircleAlertIcon aria-hidden className="size-4 text-destructive" />,
   loading: <LoaderCircleIcon aria-hidden className="size-4 text-muted-foreground motion-safe:animate-spin" />,
 };

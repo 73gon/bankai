@@ -2,13 +2,14 @@
 
 /* ── ScrollArea: edge fades driven by Base UI's overflow distances ─────────────
  * The fade grows from 0 to --scroll-fade as the user scrolls away from an edge.
- * The end-side fallbacks keep the bottom/right fade visible before hydration.  */
+ * The end-side fallbacks keep the bottom/right fade visible before hydration. Keyed on
+ * data-scroll-viewport, not the slot, so a list rendered as the viewport keeps its own slot. */
 
-[data-slot="scroll-area-viewport"] {
+[data-scroll-viewport] {
   --scroll-fade: 24px;
 }
 
-[data-slot="scroll-area-viewport"][data-fade="y"] {
+[data-scroll-viewport][data-fade="y"] {
   mask-image: linear-gradient(
     to bottom,
     transparent 0,
@@ -19,7 +20,7 @@
   mask-repeat: no-repeat;
 }
 
-[data-slot="scroll-area-viewport"][data-fade="x"] {
+[data-scroll-viewport][data-fade="x"] {
   mask-image: linear-gradient(
     to right,
     transparent 0,
@@ -30,7 +31,7 @@
   mask-repeat: no-repeat;
 }
 
-[data-slot="scroll-area-viewport"][data-fade="both"] {
+[data-scroll-viewport][data-fade="both"] {
   mask-image:
     linear-gradient(
       to bottom,
@@ -75,13 +76,15 @@
 }
 
 /* ── Sidebar: scrolls, never shows a scrollbar ─────────────────────────────────
- * Covers a Sidebar that scrolls itself and the element that directly wraps it.  */
+ * Covers a Sidebar that scrolls itself and the element that directly wraps it. bankai: that
+ * element named (the shell, the sheet's body) rather than found with :has(), which was checked
+ * on every element at every style recalculation. */
 
-:where([data-slot="sidebar"], :has(> [data-slot="sidebar"])) {
+:where([data-slot="sidebar"], [data-slot="sidebar-shell"], [data-slot="sidebar-sheet"] [data-slot="drawer-body"]) {
   scrollbar-width: none;
 }
 
-:where([data-slot="sidebar"], :has(> [data-slot="sidebar"]))::-webkit-scrollbar {
+:where([data-slot="sidebar"], [data-slot="sidebar-shell"], [data-slot="sidebar-sheet"] [data-slot="drawer-body"])::-webkit-scrollbar {
   display: none;
 }
 

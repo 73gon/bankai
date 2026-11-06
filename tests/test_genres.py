@@ -167,6 +167,40 @@ def test_tmdb_s_genres_are_the_raw_source_and_jellyfin_s_stand_in_where_it_has_n
     assert (rows["Chappie"]["raw_source"], rows["Chappie"]["after"]) == ("Jellyfin", ["Crime", "Action"])
 
 
+def test_a_genre_jellyfin_had_and_a_click_kept_is_jellyfin_s_own_not_added_by_hand(tmp_path, monkeypatch):
+    """Clicked back from the struck-through list, Avatar's Documentary was shown blue, "added by hand"."""
+    import asyncio
+
+    from bankai.metadata import tmdb
+    from bankai.web import genre_sync, jellyfin
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    catalog = [
+        {"item_id": "a", "type": "Movie", "name": "Avatar: The Way of Water", "year": 2022, "library": "Filme",
+         "genres": ["Documentary"], "tags": [], "provider_ids": {"Tmdb": "76600"}, "locked_fields": [], "path": None},
+    ]
+
+    async def listing():
+        return catalog
+
+    async def ensure(items, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(jellyfin, "catalog", listing)
+    monkeypatch.setattr(genre_sync, "_CATALOG", None)
+    monkeypatch.setattr(genre_sync, "_anime_titles", lambda: [])
+    monkeypatch.setattr(tmdb, "ensure_genres", ensure)
+    monkeypatch.setattr(tmdb, "genres", lambda kind, tmdb_id: ["Science Fiction", "Adventure"])
+
+    row = asyncio.run(genre_sync.plan())["titles"][0]
+    assert (row["jellyfin_only"], row["kept_from_jellyfin"]) == (["documentary"], [])
+    genres.save_override("tmdb:movie:76600", ["documentary", "action"], [])
+    monkeypatch.setattr(genre_sync, "_CATALOG", None)
+    row = asyncio.run(genre_sync.plan())["titles"][0]
+    # Action is added by hand; Documentary is the title's own, kept.
+    assert (row["jellyfin_only"], row["kept_from_jellyfin"]) == ([], ["documentary"])
+
+
 def _jellyfin(monkeypatch, items):
     """A Jellyfin answering /Users, GET /Items/{id} and POST /Items/{id}; posts are kept."""
     import json as jsonlib

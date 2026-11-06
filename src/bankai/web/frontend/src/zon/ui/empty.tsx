@@ -11,7 +11,7 @@ const raisedWell = "bg-control-surface bg-linear-to-b from-control-inner-edge to
  * that say what goes here and how to add it, and the actions that fix it.
  *
  * Empty has no box of its own; it sits inside whatever was going to hold the content (a
- * `Card`, a `Surface`, a table, a panel). The rule people break: a cheerful headline with no
+ * `Card`, a table, a panel). The rule people break: a cheerful headline with no
  * next step. Say what is missing and offer the one action that fills it.
  */
 export function Empty({ className, ...props }: React.ComponentProps<"div">) {
@@ -62,7 +62,11 @@ export function EmptyTitle({ render, ref, className, ...props }: useRender.Compo
     props: {
       "data-slot": "empty-title",
       ...props,
-      className: cn("m-0 display text-[24px] leading-[1.1] text-foreground sm:text-[28px]", className),
+      // A long word with no break (a pasted query, a URL) wraps instead of running past the card.
+      className: cn(
+        "m-0 max-w-full display text-[24px] leading-[1.1] [overflow-wrap:anywhere] text-foreground sm:text-[28px]",
+        className,
+      ),
     },
   });
 }
@@ -73,7 +77,7 @@ export function EmptyDescription({ className, ...props }: React.ComponentProps<"
     <div
       data-slot="empty-description"
       className={cn(
-        "max-w-[46ch] text-[15px] leading-relaxed text-muted-foreground [&_a]:link [&_p]:m-0 [&_p+p]:mt-2",
+        "max-w-[min(46ch,100%)] text-[15px] leading-relaxed [overflow-wrap:anywhere] text-muted-foreground [&_a]:link [&_p]:m-0 [&_p+p]:mt-2",
         className,
       )}
       {...props}

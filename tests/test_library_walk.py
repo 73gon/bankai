@@ -167,3 +167,39 @@ def test_a_full_relisting_that_finds_the_same_files_is_not_a_change(tmp_path, mo
     monkeypatch.setattr(library_walk, "FULL_WALK_SECONDS", 0)
 
     assert library_walk.refresh_all() == set()
+
+
+def test_a_video_new_since_the_last_look_is_told_to_jellyfin(tmp_path, monkeypatch):
+    """Jellyfin's watcher misses files written over /mnt/g; the walk tells it, whoever wrote them."""
+    from bankai.web import jellyfin
+
+    told = []
+    monkeypatch.setattr(jellyfin, "queue", lambda paths, reprobe=False: told.extend(paths))
+    season = _library(tmp_path)
+    _age(tmp_path)
+    library_walk.files([tmp_path])
+    library_walk.refresh_all()
+    assert told == []  # what was there already is no news
+    (season / "Frieren - S01E02.mkv").write_bytes(b"x")
+    _bump(season)
+    library_walk.refresh_all()
+    assert told == [season / "Frieren - S01E02.mkv"]
+
+
+def test_subtitle_names_are_held_and_a_tree_listed_without_them_is_listed_again(tmp_path):
+    season = _library(tmp_path)
+    _age(tmp_path)
+    listed = library_walk.lister([tmp_path])
+    assert "Frieren - S01E01.ass" in listed(season)
+    assert listed(tmp_path / "nowhere") is None
+
+    # A tree saved before subtitle names were kept: its directories are listed again, once.
+    for node in library_walk.directories(tmp_path).values():
+        node.pop("subtitles")
+    library_walk.mark_stale()
+    assert library_walk.directories(tmp_path)[str(season)]["subtitles"] == ["Frieren - S01E01.ass"]
+
+    # A subtitle file added is a change of the library, though no video is.
+    (season / "Frieren - S01E01.en.srt").write_text("subs")
+    _bump(season)
+    assert library_walk.refresh_all() == {str(tmp_path)}

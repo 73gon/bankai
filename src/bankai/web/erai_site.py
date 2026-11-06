@@ -64,6 +64,26 @@ LANGUAGES = {
     "ph": "Filipino", "in": "Hindi",
 }
 
+# What a release is, from Erai's category ("Airing", "Batch][Encoded", ...): the
+# listing's filter. A finale is the last airing episode; a batch of encodes is both.
+KINDS = ("airing", "encoded", "batch", "special")
+
+
+def kinds(category: str) -> set[str]:
+    """The kinds a release's category names: ``"Batch][Encoded"`` -> ``{"batch", "encoded"}``."""
+    parts = {part.strip().casefold() for part in category.strip("[]").split("][") if part.strip()}
+    found = set()
+    if "encoded" in parts:
+        found.add("encoded")
+    if "batch" in parts:
+        found.add("batch")
+    if "movie or special episode" in parts:
+        found.add("special")
+    # A weekly single: not a batch, not an encode.
+    if parts & {"airing", "finale"} and not found & {"encoded", "batch"}:
+        found.add("airing")
+    return found
+
 _LOADED: tuple[float, dict] | None = None
 _LOCK = asyncio.Lock()
 
@@ -425,3 +445,98 @@ def summary() -> dict[str, Any]:
         "updated_at": index.get("updated_at") or None,
         "error": index.get("last_error"),
     }
+
+
+# -- Show names, for the search's suggestions ---------------------------------------
+
+_SHOWS: tuple[tuple[int, int], dict[str, Any]] | None = None
+
+
+def words(text: str) -> str:
+    """A name as its words alone: "Kokurasetai: Ultra" and "Kokurasetai - Ultra" match."""
+    return " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+
+
+def show_name(title: str) -> str:
+    """Erai's title of a release without its episodes and marks: "Kaguya 3 - 01 ~ 13 (HEVC)" -> "Kaguya 3"."""
+    name = re.sub(r"\s+-\s+(?:\d|S\d|Movie\b|OVA\b|ONA\b|Special\b|SP\b).*$", "", title.strip(), flags=re.I)
+    return re.sub(r"\s*\((?:HEVC|V\d|AV1)\)\s*$", "", name, flags=re.I).strip()
+
+
+def _shows() -> dict[str, Any]:
+    """{"shows": {words: {name, releases, newest}}, "aliases": [(words, alias, show words)]}, built again
+    when the index changed: Erai's show names, and every name the anime-offline-database
+    gives an anime whose own title or synonym is one of them (English names lead to Erai's romaji)."""
+    global _SHOWS
+    try:
+        stat = _store().stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {"shows": {}, "aliases": []}
+    if _SHOWS is not None and _SHOWS[0] == stamp:
+        return _SHOWS[1]
+    shows: dict[str, dict[str, Any]] = {}
+    for row in load()["releases"].values():
+        name = show_name(str(row.get("title") or ""))
+        key = words(name)
+        if len(key) < 2:
+            continue
+        show = shows.setdefault(key, {"name": name, "releases": 0, "newest": 0.0})
+        show["releases"] += 1
+        show["newest"] = max(show["newest"], float(row.get("published") or 0))
+    aliases: list[tuple[str, str, str]] = []
+    from bankai.metadata import offline
+
+    for entry in offline.entries().values():
+        names = [str(entry.get("title") or ""), *(str(n) for n in entry.get("synonyms") or [])]
+        keys = {words(name): name for name in names if name}
+        own = next((key for key in keys if key in shows), None)
+        if own is None:
+            continue
+        for key, name in keys.items():
+            if key != own and len(key) >= 3 and key not in shows:
+                aliases.append((key, name, own))
+    built = {"shows": shows, "aliases": aliases}
+    _SHOWS = (stamp, built)
+    return built
+
+
+def suggest(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Erai's shows whose names (or another name of theirs) the query starts, has a word starting
+    with, or holds -- in that order, the most recent first. Each: {name, releases, newest, via?}."""
+    term = words(query)
+    if len(term) < 2:
+        return []
+    built = _shows()
+    shows = built["shows"]
+
+    def rank(key: str) -> int | None:
+        if key.startswith(term):
+            return 0
+        if f" {term}" in f" {key}":
+            return 1
+        if term in key:
+            return 2
+        return None
+
+    found: dict[str, tuple[int, str | None]] = {}
+    for key in shows:
+        where = rank(key)
+        if where is not None:
+            found[key] = (where, None)
+    for key, alias, own in built["aliases"]:
+        where = rank(key)
+        if where is None:
+            continue
+        # Its own name matching beats another; of other names, the closer match, then the shortest.
+        held = found.get(own)
+        if held is None or (held[1] is not None and (where, len(alias)) < (held[0], len(held[1]))) or (held[1] is None and held[0] > where):
+            found[own] = (where, alias)
+    ordered = sorted(found.items(), key=lambda item: (item[1][0], -shows[item[0]]["newest"], shows[item[0]]["name"]))
+    out = []
+    for key, (_, via) in ordered[:limit]:
+        row = {**shows[key]}
+        if via:
+            row["via"] = via
+        out.append(row)
+    return out

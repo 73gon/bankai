@@ -1,7 +1,7 @@
 """Show-level Anime library presentation: collections of AniList entries.
 
-Also the TVDB metadata cache and episode lists of the Movies & Shows library
-(mas_library), which keeps TVDB; nothing on the anime side asks TVDB.
+Also the metadata cache and episode lists of the Movies & Shows library
+(mas_library), from TMDB; nothing on the anime side asks it.
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ from typing import Any
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata.tvdb import TVDBClient, TVDBEpisode
+from bankai.metadata import tmdb_titles
+from bankai.metadata.tmdb_titles import Episode
 from bankai.processor.naming import sanitise
 from bankai.torrent.matcher import parse_se
 from bankai.web import anime, anime_collections, discover, erai
@@ -35,7 +36,7 @@ _PERSISTENT_CACHE: dict | None = None
 _PERSISTENT_DIRTY = False
 _PERSISTENT_LOCK = threading.RLock()
 _PERSISTENT_TTL_SECONDS = 24 * 60 * 60
-# How long "TVDB has no such title" is believed. Without it, every title that
+# How long "TMDB has no such title" is believed. Without it, every title that
 # does not match -- most films on the Movies & Shows page -- was searched for
 # again on every restart, one provider round trip each.
 _MISS_TTL_SECONDS = 12 * 60 * 60
@@ -44,7 +45,8 @@ _BACKGROUND: set[asyncio.Task] = set()
 
 
 def _persistent_path() -> Path:
-    return erai._state_path().with_name("anime_tvdb_cache.json")
+    # TheTVDB's answers stayed behind in anime_tvdb_cache.json (Oct 2026).
+    return erai._state_path().with_name("mas_metadata_cache.json")
 
 
 def _persistent_data() -> dict:
@@ -124,7 +126,7 @@ def flush_persistent_cache() -> None:
 def _name(value: str) -> str:
     """Identity of a show for grouping, however its name was written down.
 
-    One side of a comparison is a folder name and the other is a TVDB title,
+    One side of a comparison is a folder name and the other is a TMDB title,
     and the folder has been through :func:`sanitise`, which drops characters
     Windows forbids. Comparing the two raw meant "Jaadugar: A Witch in
     Mongolia" never matched its own folder "Jaadugar A Witch in Mongolia", and
@@ -145,7 +147,7 @@ _MULTISPACE = re.compile(r"\s+")
 
 
 # " S3", " Season 3", " 3rd Season" -- how Erai distinguishes a season, and
-# not part of the show's name as TVDB knows it.
+# not part of the show's name as TMDB knows it.
 _SEASON_SUFFIX = re.compile(
     r"\s+(?:S\d{1,2}|Season\s+\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s+Season)$",
     re.IGNORECASE,
@@ -172,7 +174,7 @@ def _search_title(title: str) -> str:
 
 
 async def show_metadata(title: str, kind: str = "show") -> dict:
-    """TVDB's film or series of this name, for the Movies & Shows library."""
+    """TMDB's film or series of this name, for the Movies & Shows library."""
     # The kind is part of the key: a film and a series can share a name, and
     # the movie library must not be handed the series' artwork.
     key = f"all:{kind}:{_name(title)}"
@@ -198,7 +200,7 @@ async def _fetch_metadata(key: str, title: str, kind: str) -> dict:
     """Ask the provider, and remember the answer -- but never an outage."""
     try:
         if not discover.is_configured():
-            raise RuntimeError("TVDB is not configured")
+            raise RuntimeError("TMDB is not configured")
         metadata = await _lookup_any_title(title, kind)
     except Exception:
         # Library browsing remains available during provider outages, on
@@ -231,7 +233,7 @@ _FOLDER_YEAR = re.compile(r"\((\d{4})\)\s*$")
 async def _lookup_any_title(title: str, kind: str) -> dict:
     """A film or series of any genre, for the Movies & Shows library.
 
-    One TVDB search, the one the Discover page makes, which brings the cover
+    One TMDB search, the one the Discover page makes, which brings the cover
     with it. A folder's year tells remakes apart: "Passengers (2016)", not
     the 2008 film.
     """
@@ -250,7 +252,7 @@ async def _lookup_any_title(title: str, kind: str) -> dict:
         return {}
     item = exact[0]
     return {
-        "tvdb_id": item.tvdb_id,
+        "tmdb_id": item.tmdb_id,
         "english_title": item.name,
         "year": item.year,
         "poster_url": item.poster_url,
@@ -259,39 +261,38 @@ async def _lookup_any_title(title: str, kind: str) -> dict:
     }
 
 
-async def _tvdb_series_episodes(tvdb_id: int) -> list[TVDBEpisode]:
-    settings = get_settings().metadata
-    if not settings.tvdb_enabled or not settings.tvdb_api_key:
-        return []
-    client = TVDBClient(api_key=settings.tvdb_api_key, pin=settings.tvdb_pin, languages=["eng", "jpn"])
-    try:
-        return await client.series_episodes(tvdb_id)
-    finally:
-        await client.aclose()
-
-
-async def episode_roster(tvdb_id: int) -> list:
-    """A TVDB series' episodes, for the Movies & Shows library."""
-    key = f"episodes:{tvdb_id}"
+async def show_info(tmdb_id: int) -> dict:
+    """A TMDB show with its episodes as dicts, kept a day; empty when TMDB has none."""
+    key = f"show:tmdb:{tmdb_id}"
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < 900:
         return hit[1]
     saved = _persistent_entry(key)
-    if saved is not None and isinstance(saved[0], list):
-        rows = [TVDBEpisode(**row) for row in saved[0] if isinstance(row, dict)]
-        _CACHE[key] = (time.time(), rows)
+    if saved is not None and isinstance(saved[0], dict):
+        _CACHE[key] = (time.time(), saved[0])
         if saved[1] >= _PERSISTENT_TTL_SECONDS:
-            _refresh_later(key, lambda: _fetch_roster(tvdb_id))
-        return rows
-    return await _fetch_roster(tvdb_id)
+            _refresh_later(key, lambda: _fetch_show(tmdb_id))
+        return saved[0]
+    return await _fetch_show(tmdb_id)
 
 
-async def _fetch_roster(tvdb_id: int) -> list:
-    key = f"episodes:{tvdb_id}"
-    rows = await _tvdb_series_episodes(tvdb_id)
-    _CACHE[key] = (time.time(), rows)
-    _persistent_put(key, [asdict(row) for row in rows])
-    return rows
+async def _fetch_show(tmdb_id: int) -> dict:
+    key = f"show:tmdb:{tmdb_id}"
+    found = await tmdb_titles.show(tmdb_id)
+    if found is None:
+        # An outage or no such show: what was saved stays.
+        hit = _CACHE.get(key)
+        return hit[1] if hit else {}
+    value = {**found, "episodes": [asdict(row) for row in found["episodes"]]}
+    _CACHE[key] = (time.time(), value)
+    _persistent_put(key, value)
+    return value
+
+
+async def episode_roster(tmdb_id: int) -> list[Episode]:
+    """A TMDB show's episodes, for the Movies & Shows library."""
+    info = await show_info(tmdb_id)
+    return [Episode(**row) for row in info.get("episodes") or [] if isinstance(row, dict)]
 
 
 # Probing is cheap per file -- ffprobe reads headers, not the stream -- but the
@@ -486,6 +487,17 @@ def note_german_sidecar(path: Path, qualifier: str) -> bool:
     return True
 
 
+_PROBE_RETRY_SECONDS = 6 * 3600
+
+
+def _probe_due_again(cached: dict) -> bool:
+    """Whether a cached probe failed and is due again (a good answer never is)."""
+    if cached.get("codec") or cached.get("audio") or cached.get("subs") is not None:
+        return False
+    # Failures saved before ``failed_at`` existed are due at once.
+    return time.time() - float(cached.get("failed_at") or 0) >= _PROBE_RETRY_SECONDS
+
+
 def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
     """Probe up to ``limit`` library files that have not been identified yet.
 
@@ -515,6 +527,9 @@ def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
             and cached.get("mtime") == identity[1]
             # Probed before subtitles were read: once more for them.
             and "subs" in cached
+            # A probe that failed (a timeout over 9p, the file held while it was written) is asked
+            # again later: noted as an answer, Re:Zero's S02E01-15 showed no encode for weeks.
+            and not _probe_due_again(cached)
         ):
             continue
         if probed >= limit:
@@ -532,6 +547,8 @@ def sweep_codecs(root: Path, *, limit: int) -> dict[str, int]:
             # None when the probe failed: unknown, never "no German".
             "subs": subs,
         }
+        if not streams:
+            cache[key]["failed_at"] = time.time()
         probed += 1
     if probed:
         with _CODEC_CACHE_LOCK:
@@ -601,6 +618,13 @@ def merge_episodes(
             others.append(row)
         elif key not in by_number or by_number[key]["staged"]:
             by_number[key] = row
+    # A file holding several episodes ("S03E18-E21", ``episode_last``) has the rest too: each is
+    # listed as part of it, never as missing.
+    for row in [row for row in files if row.get("episode_last") and None not in (row["season_number"], row["episode"])]:
+        for number in range(row["episode"] + 1, int(row["episode_last"]) + 1):
+            key = (row["season_number"], number)
+            if key not in by_number:
+                by_number[key] = {**row, "episode": number, "size": 0, "part_of": row["name"]}
     today = date.today().isoformat()
     for item in roster:
         key = (item.season, item.episode)
@@ -653,7 +677,7 @@ def merge_episodes(
         if outstanding
         else "complete"
     )
-    # Do not imply full TVDB completeness when metadata is unavailable.
+    # Do not imply full completeness when metadata is unavailable.
     if not roster and downloaded:
         state = "unknown"
     return {
@@ -761,7 +785,7 @@ def _display_title(titles: list[str], english: str = "") -> str:
 
 @dataclass(frozen=True)
 class _Episode:
-    """One episode as merge_episodes reads it; TVDB's episodes have the same shape."""
+    """One episode as merge_episodes reads it; TMDB's episodes have the same shape."""
 
     season: int
     episode: int
@@ -881,28 +905,64 @@ def merge_season_episodes(
     return merged
 
 
+def episode_strip(rows: list[dict], optional: frozenset[int] | set[int] = frozenset()) -> list[dict]:
+    """Each season's episodes in order, a letter each, for the library's episode bar.
+
+    The episodes the show's count reads (a missing special is no gap), so the
+    bar lights where the library has the show: one season of three is its
+    middle third. ``d`` German dub, ``h`` HEVC, ``a`` AVC, ``u`` on disk, codec
+    not read yet (or another), ``s`` staged, ``m`` missing, ``t`` not aired.
+    """
+    seasons: dict[int, dict] = {}
+    for row in rows:
+        number = row.get("season_number")
+        if number is None or number < 1 or (row.get("missing") and number in optional):
+            continue
+        if row.get("missing"):
+            state = "t" if row.get("tba") else "m"
+        elif row.get("staged"):
+            state = "s"
+        elif row.get("german_dub"):
+            state = "d"
+        else:
+            state = {"hevc": "h", "avc": "a"}.get(row.get("codec") or "", "u")
+        season = seasons.setdefault(number, {"label": row.get("season") or f"Season {number}", "states": ""})
+        season["states"] += state
+    return [seasons[number] for number in sorted(seasons)]
+
+
 _KINDS = {"TV": "TV", "MOVIE": "Movie", "OVA": "OVA", "ONA": "ONA", "SPECIAL": "Special", "MUSIC": "Music"}
 
 
-def tab_labels(order: list[int], collection: str | None) -> dict[int, str]:
+def tab_labels(order: list[int], collection: str | None, main: int | None = None) -> dict[int, str]:
     """Each entry's tab name, without the collection's own: "Attack on Titan Season 2" -> "Season 2".
 
-    Two tabs of one name -- a show and its OVA both "Attack on Titan" -- are
-    told apart by what they are and when.
+    Also without its title entry's name (``main``), for a collection named
+    otherwise. Empty for the entry that is the show itself. Two tabs of one
+    name -- a show and its OVA both "Attack on Titan" -- are told apart by what
+    they are and when.
     """
     from collections import Counter
 
     from bankai.metadata import anilist
 
+    also = anime_collections.entry_name(main) if main is not None and collection else None
     labels = {
-        aid: anime_collections.short_label(anime_collections.entry_name(aid), collection) for aid in order
+        aid: anime_collections.short_label(anime_collections.entry_name(aid), collection, also=also) for aid in order
     }
     counts = Counter(labels.values())
     for aid, label in labels.items():
-        if counts[label] > 1:
+        if label and counts[label] > 1:
             extra = ", ".join(str(part) for part in (_KINDS.get(anilist.kind(aid) or ""), anilist.year(aid)) if part)
             labels[aid] = f"{label} ({extra or aid})"
     return labels
+
+
+def season_tab(number: int, name: str) -> str:
+    """A season's tab: "Season 2" where that is all its name says (or it has none), else "S3 · Final Season"."""
+    if not name or re.fullmatch(rf"season\s*0*{number}", name.strip(), flags=re.IGNORECASE):
+        return f"Season {number}"
+    return f"S{number} · {name}"
 
 
 def _unique(key: str, taken: set[str]) -> str:
@@ -1017,10 +1077,14 @@ async def group_shows(
             "hevc_checked_at": max((checked[key][0] for key in looked), default=None),
         }
 
+    from bankai.web import anime_verify
+
     def counts(rows: list[dict]) -> dict:
         episodes = rows
         return {
             **upgrade_counts(episodes),
+            # Each file's check (see anime_verify), on its row as ``verify``.
+            **anime_verify.annotate(episodes),
             "missing_available_count": sum(
                 1 for row in episodes
                 if row.get("missing") and not row.get("tba")
@@ -1079,6 +1143,7 @@ async def group_shows(
                 "season_count": len({row["season_number"] for row in merged["episodes"] if row["season_number"] is not None}),
                 **counts(merged["episodes"]),
                 **merged,
+                "strip": episode_strip(merged["episodes"]),
                 "season_anilist": {},
             }
         else:
@@ -1098,7 +1163,7 @@ async def group_shows(
                 order = list(slot["aids"])
                 main = order[0]
                 seasons = {}
-            labels = tab_labels(order, slot["title"] if row is not None else None)
+            labels = tab_labels(order, slot["title"] if row is not None else None, main if row is not None else None)
 
             def part(aid: int, offset: int) -> tuple:
                 return (aid, offset, roster(aid), anilist.finished(aid))
@@ -1108,7 +1173,8 @@ async def group_shows(
                 # hand or by the sequel chain, the specials last.
                 tabs = []
                 for number, ids in enumerate(placing.season_lists(), start=1):
-                    label = f"S{number} · {labels[ids[0]]}" + (f" +{len(ids) - 1}" if len(ids) > 1 else "")
+                    # Named by hand, or by its first entry without the show's name: "Season 2".
+                    label = season_tab(number, row.season_names.get(ids[0]) or labels[ids[0]])
                     tabs.append({"label": label, "parts": [part(aid, placing.offsets.get(aid, 0)) for aid in ids]})
                 specials = sorted(placing.specials, key=placing.specials.__getitem__)
                 if specials:
@@ -1149,6 +1215,12 @@ async def group_shows(
                 "season_count": len({r["season_number"] for r in merged["episodes"] if r["season_number"] is not None}),
                 **counts(merged["episodes"]),
                 **merged,
+                "strip": episode_strip(
+                    merged["episodes"],
+                    {number for number, tab in enumerate(tabs, start=1) if tab.get("optional")},
+                ),
+                # Seasons named by hand, by the entry each opens with.
+                "season_names": {str(aid): name for aid, name in row.season_names.items()} if row is not None else {},
                 "season_anilist": {
                     str(tab): [
                         {"anilist_id": aid, "title": anime_collections.entry_name(aid)} for aid, *_rest in spec["parts"]

@@ -658,7 +658,9 @@ async def review_action(info_hash: str, action: str) -> dict[str, Any]:
     await anilist.index()  # the review card is an AniList entry; make sure it can be told
     result = await asyncio.to_thread(_review_action, info_hash, action)
     if result["requested"]:
-        _start_retry_cycle()
+        # With the automation off, its cycle never comes: the card's own releases are checked
+        # now, and nothing else (My Hero Academia's four cards sat "ready for a fresh check").
+        _start_retry_cycle(only=result.get("only") or None)
     return result
 
 
@@ -686,8 +688,13 @@ def _review_action(info_hash: str, action: str) -> dict[str, Any]:
         policies = _load_policies()
         requested = 0
         blacklisted = 0
+        only: list[str] = []
         if action == "recheck":
             requested = sum(_request_series_retries(state, member) for member in titles)
+            only = [
+                row_hash for row_hash, row in state.get("releases", {}).items()
+                if row.get("status") == "held" and _mapping_key(str(row.get("title") or "")) in titles
+            ]
         elif action == "allow_german":
             for member, member_title in titles.items():
                 policies[member] = {
@@ -744,6 +751,7 @@ def _review_action(info_hash: str, action: str) -> dict[str, Any]:
         "key": key,
         "card": card,
         "keys": sorted(titles),
+        "only": only,
     }
 
 
@@ -2549,8 +2557,10 @@ async def _hevc_releases(
             continue
         aid = int(match["anilist_id"])
         first, last = span
-        if first == last and match.get("episode") is not None:
-            first = last = int(match["episode"])  # settled into the right part of a split season
+        if match.get("episode") is not None:
+            # Settled into the right part of a split season: a "14 ~ 25" batch is Part 2's 1-12.
+            shift = int(match["episode"]) - first
+            first, last = first + shift, last + shift
         covered = [episode for episode in range(first, min(last, SEASON_PACK_LAST - 1) + 1) if (aid, episode) in wanted]
         for episode in covered:
             key = (aid, episode)
@@ -2626,11 +2636,99 @@ def upgrading_episodes(state: dict[str, Any] | None = None) -> set[tuple[int, in
     return found
 
 
-async def upgrade_show_to_hevc(anilist_ids: list[int], *, queue: bool = True) -> dict[str, Any]:
-    """Queue HEVC replacements for the AVC episodes on disk of a card's AniList entries.
+def _hevc_plans_path() -> Path:
+    return _state_path().with_name("anime_hevc_plans.json")
 
-    With ``queue=False`` it only looks: what an upgrade would find is
-    recorded for the library's tags, and nothing is downloaded.
+
+def _plan_view(plan: dict[str, Any], anime: anilist.Anime | None, keep: list[int]) -> dict[str, Any]:
+    """An upgrade as the approval shows it: the release, what it is, and every file it replaces."""
+    item = plan["item"]
+    return {
+        "info_hash": item.info_hash,
+        "title": item.title,
+        "detail_url": item.detail_url or None,
+        "size_bytes": item.size_bytes,
+        "anilist_id": plan["aid"],
+        # What bankai takes the release for: a wrong entry here is a wrong replacement.
+        "entry": anime.name if anime else str(plan["aid"]),
+        "first": plan["first"],
+        "last": plan["last"],
+        "episodes": sorted(plan["episodes"]),
+        "keeps": keep,
+        "replaces": sorted(
+            (
+                {
+                    "path": row["path"],
+                    "name": Path(row["path"]).name,
+                    "folder": Path(row["path"]).parent.name,
+                    "episode": row["episode"],
+                    "size": row["size"],
+                }
+                for row in plan["rows"]
+            ),
+            key=lambda row: (row["episode"], row["path"]),
+        ),
+    }
+
+
+def _store_hevc_plans(anilist_ids: list[int], plans: list[dict[str, Any]]) -> None:
+    """Keep what a look found per entry, so "Upgrade all" can show it without asking Nyaa again."""
+    try:
+        rows = json.loads(_hevc_plans_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        rows = {}
+    now = time.time()
+    for aid in anilist_ids:
+        rows[str(aid)] = {"at": now, "plans": [plan for plan in plans if plan["anilist_id"] == aid]}
+    path = _hevc_plans_path()
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(rows), encoding="utf-8")
+    tmp.replace(path)
+
+
+def stored_hevc_plans(anilist_ids: list[int]) -> list[dict[str, Any]] | None:
+    """The upgrades a look found for these entries, while every file they replace is as it was.
+
+    None when one of them was not looked at lately or a file changed since: then
+    the approval has to look again before it can show what would be replaced.
+    """
+    try:
+        rows = json.loads(_hevc_plans_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    out: list[dict[str, Any]] = []
+    for aid in anilist_ids:
+        row = rows.get(str(aid))
+        if not row or time.time() - float(row.get("at") or 0) > _HEVC_CHECK_MAX_AGE:
+            return None
+        for plan in row.get("plans") or []:
+            for file in plan.get("replaces") or []:
+                try:
+                    if os.stat(file["path"]).st_size != file["size"]:
+                        return None
+                except OSError:
+                    return None
+            out.append(plan)
+    return out
+
+
+async def upgrade_show_to_hevc(
+    anilist_ids: list[int],
+    *,
+    queue: bool = True,
+    approved: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Look for, or queue, HEVC replacements for the AVC episodes on disk of a card's AniList entries.
+
+    With ``queue=False`` it only looks: ``plans`` says per release what it is
+    taken for and every file it would replace, recorded for the library's tags
+    and the approval; nothing is downloaded.
+
+    Queueing takes only what was approved (``approved``: info hash -> the paths
+    the approval showed it replacing), worked out afresh: a release whose files
+    are not exactly those approved is left out (``changed``). Re:Zero's second
+    season, its batch taken for the first season, replaced the first season's
+    episodes without anyone seeing it first (Nov 2026).
 
     Unlike the backlog upgrade, these episodes are on disk and watchable. The
     replacement is downloaded first; once it is published the AVC files it
@@ -2639,6 +2737,8 @@ async def upgrade_show_to_hevc(anilist_ids: list[int], *, queue: bool = True) ->
     covering several episodes is one download. An episode with no HEVC
     release carrying German subtitles is left as it is.
     """
+    if queue and approved is None:
+        raise ValueError("An upgrade replaces files: approve what it replaces first")
     settings = get_settings()
     entries: dict[int, anilist.Anime] = {}
     for aid in dict.fromkeys(int(aid) for aid in anilist_ids):
@@ -2649,7 +2749,7 @@ async def upgrade_show_to_hevc(anilist_ids: list[int], *, queue: bool = True) ->
         raise ValueError("None of these AniList entries is known")
     found = await asyncio.to_thread(_upgrade_targets, entries)
     targets = found["targets"]
-    result = {
+    result: dict[str, Any] = {
         "ok": True,
         "queued": 0,
         "downloads": 0,
@@ -2658,7 +2758,13 @@ async def upgrade_show_to_hevc(anilist_ids: list[int], *, queue: bool = True) ->
         "german_dub_kept": found["dubbed"],
         "not_probed": found["unprobed"],
     }
+    if not queue:
+        result["plans"] = []
+    else:
+        result["changed"] = 0
     if not targets:
+        if not queue:
+            await asyncio.to_thread(_store_hevc_plans, list(entries), [])
         return result
     from bankai.torrent.qbittorrent import QBittorrentClient
 
@@ -2681,18 +2787,39 @@ async def upgrade_show_to_hevc(anilist_ids: list[int], *, queue: bool = True) ->
         )
         plan["episodes"].append(episode)
         plan["rows"].extend(rows)
+
+    def kept(plan: dict[str, Any]) -> list[int]:
+        # A German dub in a batch's range is kept as it is.
+        return [episode for episode in sorted(found["dubs"].get(plan["aid"], ())) if plan["first"] <= episode <= plan["last"]]
+
     if not queue:
         available: list[tuple[int, int]] = []
+        views: list[dict[str, Any]] = []
         async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
             for plan in plans.values():
                 keys = [(plan["aid"], episode) for episode in plan["episodes"]]
                 if await _carries_german(plan["item"], client):
                     available.extend(keys)
+                    views.append(_plan_view(plan, entries.get(plan["aid"]), kept(plan)))
                 else:
                     missing.extend(keys)
         _record_hevc_checks(missing, [], available)
+        await asyncio.to_thread(_store_hevc_plans, list(entries), views)
+        result["plans"] = views
         result["available"] = len(available)
         result["no_replacement"] = len(missing)
+        return result
+    approved = {str(key): {str(path) for path in paths} for key, paths in (approved or {}).items()}
+    picked_plans: list[dict[str, Any]] = []
+    for info_hash, plan in plans.items():
+        if info_hash not in approved:
+            continue
+        if {row["path"] for row in plan["rows"]} != approved[info_hash]:
+            log.warning("HEVC upgrade %s left out: the files it would replace are not the ones approved", plan["item"].title)
+            result["changed"] += len(plan["episodes"])
+            continue
+        picked_plans.append(plan)
+    if not picked_plans:
         return result
     qbit = QBittorrentClient()
     try:
@@ -2702,19 +2829,17 @@ async def upgrade_show_to_hevc(anilist_ids: list[int], *, queue: bool = True) ->
         raise RuntimeError(f"qBittorrent is unavailable: {exc}") from exc
     try:
         async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
-            for plan in plans.values():
+            for plan in picked_plans:
                 twin, aid, episodes = plan["item"], plan["aid"], sorted(plan["episodes"])
                 if not await _carries_german(twin, client):
                     result["no_replacement"] += len(episodes)
                     missing.extend((aid, episode) for episode in episodes)
                     continue
                 anime = entries[aid]
-                # Publishing has to overwrite an episode filed where the new one
-                # goes; a German dub in a batch's range is kept as it is.
+                # Publishing has to overwrite an episode filed where the new one goes.
                 args = [*_entry_args(twin, anime, episodes[0]), "--replace-existing"]
-                for episode in sorted(found["dubs"].get(aid, ())):
-                    if plan["first"] <= episode <= plan["last"]:
-                        args.extend(["--keep-episode", str(episode)])
+                for episode in kept(plan):
+                    args.extend(["--keep-episode", str(episode)])
                 try:
                     await qbit.add(
                         magnet=twin.magnet_uri or None,
@@ -3134,6 +3259,120 @@ async def replace_from_erai(key: str, info_hash: str, *, lose_german: bool = Fal
     }
 
 
+def magnet_parts(magnet: str) -> tuple[str, str]:
+    """A magnet link's info hash and display name; ValueError when it is not one."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from bankai.torrent.worker import torrent_info_hash
+
+    magnet = magnet.strip()
+    if not magnet.casefold().startswith("magnet:?"):
+        raise ValueError("that is not a magnet link (magnet:?xt=urn:btih:...)")
+    info_hash = torrent_info_hash(magnet, None)
+    if not info_hash:
+        raise ValueError("the magnet link carries no info hash")
+    name = (parse_qs(urlsplit(magnet).query).get("dn") or [""])[0].strip()
+    return info_hash.casefold(), name or info_hash
+
+
+async def replace_from_magnet(paths: list[str], magnet: str, *, lose_german: bool = False) -> dict[str, Any]:
+    """Replace library episodes picked by hand with a magnet link's torrent (Replace with magnet link).
+
+    The ticked files are of one library season, which may be several AniList entries (Attack on
+    Titan's Season 4: two parts and two specials, S04E01-E30) while a pack is one torrent numbered
+    as the library numbers them. So the torrent's episode N replaces the ticked file SxxE<N>, of
+    whichever entry that is (``--episode-map``); its other files stay out. Taken as it is, without
+    the German check -- but files that can be watched in German go only when that is confirmed
+    (``lose_german``). The old files go once the new ones are published, as with Replace.
+    """
+    from bankai.torrent.matcher import parse_se
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    info_hash, name = magnet_parts(magnet)
+    mapping: dict[int, tuple[int, int]] = {}
+    seasons: set[int] = set()
+    files: list[dict[str, Any]] = []
+    for raw in paths:
+        path = Path(raw)
+        pairs = sorted(anime_files.of(path), key=lambda pair: (pair[0], pair[1]))
+        if not pairs:
+            raise ValueError(f"{path.name} is matched to no AniList entry")
+        found = parse_se(path.name)
+        if found is None:
+            raise ValueError(f"{path.name} names no episode (SxxEyy)")
+        seasons.add(found[0])
+        # A file of two episodes ("S01E01-E02") is two numbers, in order.
+        for offset, pair in enumerate(pairs):
+            mapping[found[1] + offset] = (int(pair[0]), int(pair[1]))
+        with suppress(OSError):
+            stat = path.stat()
+            files.append({
+                "path": str(path), "anilist_id": int(pairs[0][0]), "episode": int(pairs[0][1]),
+                "size": stat.st_size, "mtime": stat.st_mtime,
+            })
+    if len(seasons) != 1:
+        raise ValueError("pick episodes of one season at a time: a season pack is one torrent")
+    german = sum(1 for row in files if _has_german(Path(row["path"])))
+    if german and not lose_german:
+        raise ValueError(f"{german} of the files can be watched in German; confirm to replace them anyway")
+    await anilist.index()
+    entries = sorted({aid for aid, _number in mapping.values()})
+    anime = await anilist.anime(mapping[min(mapping)][0])
+    if anime is None:
+        raise ValueError("the ticked files' AniList entry is not known")
+    names = [((await anilist.anime(aid)) or anime).name for aid in entries]
+    first, last = min(mapping), max(mapping)
+    entry = anime_mod.NyaaEntry(
+        id=0, title=name, download_url="", detail_url="", magnet_uri=magnet.strip(), info_hash=info_hash,
+        category_id="", category="", size="", size_bytes=0, seeders=0, leechers=0, downloads=0,
+        comments=0, trusted=False, remake=False, published_at=None, publisher=None, quality=None,
+    )
+    args = _without_german_check(_entry_args(entry, anime, first))
+    args.append("--replace-existing")
+    for number, (aid, episode) in sorted(mapping.items()):
+        args.extend(["--episode-map", f"{number}={aid}:{episode}"])
+    settings = get_settings()
+    qbit = QBittorrentClient()
+    try:
+        await qbit.login()
+        await qbit.add(
+            magnet=magnet.strip(),
+            category=settings.qbittorrent.category,
+            save_path=Path(settings.qbittorrent.save_path) if settings.qbittorrent.save_path else None,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"qBittorrent did not take the magnet: {exc}") from exc
+    finally:
+        await qbit.aclose()
+
+    def record() -> None:
+        with _STATE_LOCK:
+            state = _load_state()
+            span = f"S{next(iter(seasons)):02d}E{first:02d}" + (f"-E{last:02d}" if last != first else "")
+            state["releases"][info_hash] = {
+                "status": "queued",
+                "title": name,
+                "display_title": f"{anime.name} - {span}",
+                "canonical": f"anilist:{anime.id}|{mapping[first][1]}",
+                "resolution": _resolution(entry),
+                "size_bytes": 0,
+                "args": args,
+                "anilist_id": anime.id,
+                "replace_files": files,
+                "replaced_holds": [],
+                "updated_at": time.time(),
+            }
+            for aid, episode in mapping.values():
+                state["canonical"][f"anilist:{aid}|{episode}"] = {"info_hash": info_hash, "resolution": _resolution(entry)}
+            _save_state(state)
+
+    await asyncio.to_thread(record)
+    return {
+        "ok": True, "queued": name, "anilist_title": " + ".join(names),
+        "episodes": sorted(mapping), "files_to_replace": len(files),
+    }
+
+
 def _finish_replacement(release: dict[str, Any]) -> int:
     """Once the replacement is published: remove the files it took the place of.
 
@@ -3145,22 +3384,29 @@ def _finish_replacement(release: dict[str, Any]) -> int:
     release.pop("replaced_holds", None)
     if not old:
         return 0
-    now = _entry_episode_files(int(release["anilist_id"]))
+    # A row says its own entry when the replacement spans several (Replace with magnet link).
+    files_of: dict[int, dict[int, list[Path]]] = {}
     recorded = {row["path"] for row in old}
     roots = _series_roots()
     removed = 0
     gone: list[Path] = []
+    came_in: list[Path] = []
     for row in old:
         path = Path(row["path"])
+        aid = int(row.get("anilist_id") or release["anilist_id"])
+        if aid not in files_of:
+            files_of[aid] = _entry_episode_files(aid)
         try:
             stat = path.stat()
         except OSError:
             continue
         if stat.st_size != row["size"] or stat.st_mtime != row["mtime"]:
+            came_in.append(path)  # written over at its own name
             continue
-        newer = [p for p in now.get(int(row["episode"])) or [] if str(p) not in recorded]
+        newer = [p for p in files_of[aid].get(int(row["episode"])) or [] if str(p) not in recorded]
         if not newer or not _contained_by(path, roots):
             continue
+        came_in.append(newer[0])
         try:
             path.unlink()
             removed += 1
@@ -3168,6 +3414,10 @@ def _finish_replacement(release: dict[str, Any]) -> int:
             log.info("Replaced %s by %s", path.name, newer[0].name)
         except OSError as exc:
             log.warning("Could not remove replaced file %s: %s", path, exc)
+    if came_in:
+        from bankai.web import replaced
+
+        replaced.record(came_in, str(release.get("title") or ""))
     if removed:
         from bankai.web import library_walk
 
@@ -3598,8 +3848,12 @@ async def _ordered_candidates(
     return sorted(by_hash.values(), key=order)
 
 
-async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dict[str, Any]:
-    """Run one RSS poll/backfill slice. Safe to call from the API or scheduler."""
+async def run_cycle(*, prefill: bool = False, retries_only: bool = False, only: set[str] | None = None) -> dict[str, Any]:
+    """Run one RSS poll/backfill slice. Safe to call from the API or scheduler.
+
+    ``only``: check just these held releases (a review card's Restore and recheck), even with
+    the automation off; what they queue counts as asked for by hand, so the hold leaves it be.
+    """
 
     async with _CYCLE_LOCK:
         settings = get_settings()
@@ -3610,9 +3864,11 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
             _prune_holds(state)
             state["last_poll"] = time.time()
             state["last_enqueued"] = 0
-            if not policy.enabled or updates.maintenance_active():
+            if (not policy.enabled and not only) or updates.maintenance_active():
                 _save_state(state)
                 return status(state=state, running=False)
+            if only:
+                retries_only = True
             free = free_space_gib()
             if free is None:
                 state["last_error"] = "Anime destination is unavailable"
@@ -3684,6 +3940,8 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                         await _recheck_german_holds(state)
                     _set_activity("Gathering held releases to check again")
                     retries = await _retry_candidates(state, client)
+                    if only:
+                        retries = [item for item in retries if item.info_hash in only]
                     if not retries_only:
                         _set_activity("Reading the Erai-raws feed")
                     rss = [] if retries_only else await _fetch_rss(client)
@@ -3714,16 +3972,16 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                     normal = [] if retries_only else await _ordered_candidates(state, fresh, client)
                     candidates = list({item.info_hash: item for item in [*retries, *normal]}.values())
                     inspected = 0
+                    # Releases named by hand (a review card) are all checked, whatever the cap.
+                    cap = max(policy.max_enqueues_per_cycle, len(only or ()))
                     # The loop stops at this many checks, or earlier at its enqueue cap.
-                    budget = min(len(candidates), max(100, policy.max_enqueues_per_cycle * 3))
+                    budget = min(len(candidates), max(100, cap * 3))
                     for entry in candidates:
-                        if enqueued >= policy.max_enqueues_per_cycle or inspected >= max(
-                            100, policy.max_enqueues_per_cycle * 3
-                        ):
+                        if enqueued >= cap or inspected >= max(100, cap * 3):
                             break
                         if not _needs_consideration(state, entry):
                             continue
-                        if not get_settings().anime.enabled or updates.maintenance_active():
+                        if (not get_settings().anime.enabled and not only) or updates.maintenance_active():
                             break
                         admission = _ADMISSION.get()
                         if admission is not None and admission["remaining"] <= 0:
@@ -3773,6 +4031,11 @@ async def run_cycle(*, prefill: bool = False, retries_only: bool = False) -> dic
                 _DISK_INDEX.reset(disk_token)
                 if qbit is not None:
                     await qbit.aclose()
+            for info_hash in only or ():
+                # Asked for from a review card: the hold for an automation that is off leaves it running.
+                release = state["releases"].get(info_hash)
+                if release and release.get("status") in _ACTIVE_RELEASE_STATES:
+                    release["by_hand"] = True
             _save_state(state)
             return status(state=state, running=False)
         finally:
@@ -3925,52 +4188,43 @@ def reconcile_stale_holds() -> dict[str, int]:
     return {"reopened": reopened, "filtered": filtered}
 
 
-def retire_download_pendings() -> dict[str, int]:
-    """Drop pending jobs that only existed to wait for a download.
+def return_adopted_downloads() -> dict[str, int]:
+    """Give downloads queued by hand back to the job queue, from release records.
 
-    Releases used to be pushed into the worker queue at discovery time, where
-    they sat behind the pipeline slot limit for as long as the download took.
-    The reconciler now spawns a job only when there are bytes to copy, so those
-    entries are redundant -- but a pending job whose release is untracked is
-    the only remaining record of that episode, so it is adopted rather than
-    dropped.
+    Until Oct 2026 every start turned anime download jobs waiting in the queue
+    into "queued" release records (a one-off for builds that queued the
+    automation's releases as jobs, run at each start): with the automation off
+    nothing ever starts those, and 28 downloads -- Dark Summoner to Dekiteiru's
+    among them, picked by hand -- sat "queued" without a job or a torrent. Only
+    that step wrote a record without its canonical key, so those are the ones.
     """
     from bankai.web import jobs as webjobs
 
-    retired = 0
-    adopted = 0
-    kept = 0
     with _STATE_LOCK:
-        state = _load_state()
-        releases = state["releases"]
-        by_hash = {key.casefold(): value for key, value in releases.items()}
-        for item in webjobs.list_pending():
-            if not item.args or item.args[0] != "anime-download":
-                kept += 1
-                continue
-            info_hash = (_args_value(item.args, "--info-hash") or "").casefold()
-            release = by_hash.get(info_hash) if info_hash else None
-            if release is None:
-                if not info_hash:
-                    kept += 1
-                    continue
-                releases[info_hash] = {
-                    "status": "queued",
-                    "title": _args_value(item.args, "--release-title") or item.title,
-                    "display_title": item.title,
-                    "args": list(item.args),
-                    "updated_at": time.time(),
-                }
-                adopted += 1
-            elif not release.get("args"):
-                # Older records predate storing the arguments, and without them
-                # the reconciler could never publish the release.
-                release["args"] = list(item.args)
-                release.setdefault("display_title", item.title)
-            webjobs.cancel_pending(item.id)
-            retired += 1
-        _save_state(state)
-    return {"retired": retired, "adopted": adopted, "kept": kept}
+        adopted = {
+            info_hash: dict(release)
+            for info_hash, release in (_load_state().get("releases") or {}).items()
+            if isinstance(release, dict)
+            and release.get("status") == "queued"
+            and not release.get("canonical")
+            and (release.get("args") or [None])[0] == "anime-download"
+        }
+    returned: list[str] = []
+    for info_hash, release in adopted.items():
+        queued = webjobs.enqueue(
+            kind=_args_value(release["args"], "--kind") or "show",
+            title=str(release.get("display_title") or release.get("title") or info_hash),
+            args=list(release["args"]),
+        )
+        if queued.get("status") in {"running", "queued", "duplicate"}:
+            returned.append(info_hash)
+    if returned:
+        with _STATE_LOCK:
+            state = _load_state()
+            for info_hash in returned:
+                state["releases"].pop(info_hash, None)
+            _save_state(state)
+    return {"returned": len(returned), "found": len(adopted)}
 
 
 def _rebuilt_args(
@@ -4091,6 +4345,84 @@ async def _readd_torrent(qbit: Any, info_hash: str, release: dict[str, Any]) -> 
     return True
 
 
+def _tie_orphans(state: dict[str, Any], torrents: list[Any], *, now: float | None = None) -> list[Any]:
+    """The category's torrents no job and no driven release has, and what becomes of each.
+
+    See web/torrent_ties. A release is named by its canonical key where it has
+    one -- a single episode -- and by its name otherwise: a batch's key names
+    only its first episode.
+    """
+    from bankai.web import anime_files, torrent_ties
+
+    table = anilist.cached_index()
+    mappings = _load_mappings()
+
+    def identify(title: str, release: dict[str, Any]) -> list[tuple[int, int]] | None:
+        canonical = str(release.get("canonical") or "")
+        span = _release_range(title)
+        if canonical.startswith("anilist:") and (span is None or span[0] == span[1]):
+            head, _, number = canonical.partition("|")
+            aid = head.split(":", 1)[1]
+            if aid.isdigit() and number.isdigit():
+                return [(int(aid), int(number))]
+        return _release_pairs(title, table=table, mappings=mappings) if table is not None else None
+
+    return torrent_ties.plan(
+        torrents,
+        {str(key).casefold(): row for key, row in state["releases"].items() if isinstance(row, dict)},
+        torrent_ties.job_hashes(),
+        identify=identify,
+        in_library=anime_files.in_library,
+        blocked=_policy_anilist_ids(),
+        cleanup=get_settings().paths.cleanup_after_success,
+        now=now,
+    )
+
+
+def _adopt_orphan(state: dict[str, Any], tie: Any) -> bool:
+    """Take a finished torrent nobody has into the release table, to be filed by this pass.
+
+    Its record's own arguments where they still name an AniList entry, else a
+    job filing it as a download picked by hand would (torrent_ties.publishing_args).
+    False when it holds two entries' episodes: one job files one entry.
+    """
+    from bankai.web import anime_collections, torrent_ties
+
+    aids = {aid for aid, _episode in tie.pairs}
+    if len(aids) != 1:
+        return False
+    aid = next(iter(aids))
+    episode = tie.pairs[0][1] if len(tie.pairs) == 1 else None
+    key = next((name for name in state["releases"] if str(name).casefold() == tie.info_hash), tie.info_hash)
+    release = state["releases"].setdefault(key, {})
+    record = (state.get("anime") or {}).get(str(aid)) or {}
+    name = str(record.get("name") or record.get("romaji") or anime_collections.entry_name(aid))
+    args = release.get("args")
+    if not (args and args[0] == "anime-download" and _args_value(args, "--anilist-id")):
+        args = torrent_ties.publishing_args(
+            key, str(release.get("title") or tie.title), anilist_id=aid, name=name, episode=episode
+        )
+    now = time.time()
+    release.update(
+        status="complete",
+        title=str(release.get("title") or tie.title),
+        display_title=str(release.get("display_title") or (f"{name} - {episode:02d}" if episode is not None else name)),
+        args=list(args),
+        anilist_id=aid,
+        adopted_at=now,
+        updated_at=now,
+    )
+    if episode is not None:
+        release["episode"] = episode
+        release.setdefault("canonical", f"anilist:{aid}|{episode}")
+    for stale in ("reason", "job_id", "publish_attempts", "publish_retry_after"):
+        release.pop(stale, None)
+    return True
+
+
+_UNOWNED_LOGGED: set[str] = set()
+
+
 async def reconcile_releases() -> dict[str, int]:
     """Advance every tracked release one step. Safe to call on a timer.
 
@@ -4127,7 +4459,7 @@ def _asked_for_hashes() -> dict[str, int]:
     asked = {
         info_hash.casefold(): int(release.get("size_bytes") or 0)
         for info_hash, release in _load_state()["releases"].items()
-        if release.get("replace_files") is not None
+        if (release.get("replace_files") is not None or release.get("by_hand"))
         and release.get("status") in _ACTIVE_RELEASE_STATES
     }
     for job in bgjobs.list_jobs():
@@ -4289,6 +4621,30 @@ async def _reconcile_releases() -> dict[str, int]:
             running = _running_transfer_count(state)
             published: dict[str, set[tuple[int, int]]] = {}
 
+            # Every torrent of the category is some job's until it is filed (web/torrent_ties):
+            # one nobody has is taken up here and filed by the loop below, or cleared, or counted.
+            unowned: list[str] = []
+            for tie in _tie_orphans(state, torrents):
+                if tie.action == "adopt" and _adopt_orphan(state, tie):
+                    log.info("Taken up to be filed (%s): %s", tie.why, tie.title[:90])
+                    tally("adopted")
+                elif tie.action == "remove":
+                    try:
+                        await qbit.remove(tie.info_hash, delete_files=True)
+                        log.info("Removed a leftover torrent (%s): %s", tie.why, tie.title[:90])
+                        tally("leftover_removed")
+                    except Exception as exc:
+                        log.warning("Could not remove leftover torrent %s: %s", tie.info_hash[:8], exc)
+                else:
+                    unowned.append(f"{tie.title} ({tie.why})")
+                    tally("unowned")
+            if set(unowned) != _UNOWNED_LOGGED:
+                # Said once, not every 20 s: what is in qBittorrent with no job, left for a look.
+                for line in sorted(set(unowned) - _UNOWNED_LOGGED):
+                    log.info("In qBittorrent with no job to file it: %s", line[:160])
+                _UNOWNED_LOGGED.clear()
+                _UNOWNED_LOGGED.update(unowned)
+
             for info_hash, release in list(state["releases"].items()):
                 status = str(release.get("status") or "")
                 if status == "running":
@@ -4338,6 +4694,16 @@ async def _reconcile_releases() -> dict[str, int]:
                 if status in {"transferring", "deleting"}:
                     job_id = release.get("job_id")
                     job = bgjobs.get_job(str(job_id)) if job_id else None
+                    if job is None and status == "transferring" and torrent is not None:
+                        # Its job is gone (removed, or lost to a restart): never "running" again.
+                        # Published anew from the finished download, without counting an attempt
+                        # -- Mushoku Tensei S02 sat "transferring" with no job (Oct 2026).
+                        release["status"] = "failed"
+                        release["reason"] = "Publishing job is gone"
+                        release["publish_retry_after"] = 0
+                        release["updated_at"] = time.time()
+                        tally("failed")
+                        continue
                     if job is None or job.status in {"running", "stopped"}:
                         tally(status)
                         continue
@@ -4509,19 +4875,47 @@ async def remove_release(row_id: str) -> dict[str, Any] | None:
     return {"deleted": True, "release": True, "title": title, "torrent_removed": removed}
 
 
-def release_queue_rows(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def release_queue_rows(state: dict[str, Any] | None = None, torrents: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Queue rows for releases that have no worker of their own yet.
 
     Most releases are waiting on qBittorrent and deliberately have no bankai
     job, so without these the queue would show only the handful of active
-    publishes and none of the backlog.
+    publishes and none of the backlog. ``torrents`` (qBittorrent's, by info
+    hash) gives each its real progress, speed and time left, and why it waits:
+    every row said 0%, and a paused one "Waiting for qBittorrent".
     """
     state = _load_state() if state is None else state
+    try:
+        held = {str(item).casefold() for item in json.loads(_held_path().read_text(encoding="utf-8"))}
+    except (OSError, ValueError, TypeError):
+        held = set()
     rows: list[dict[str, Any]] = []
     for info_hash, release in state["releases"].items():
         status = str(release.get("status") or "")
         if status not in _PUBLISHABLE:
             continue
+        torrent = (torrents or {}).get(info_hash.casefold())
+        label = {
+            "downloading": "Downloading in qBittorrent",
+            "complete": "Downloaded, waiting to publish",
+            "deleting": "Removing the torrent",
+        }.get(status, "Waiting for qBittorrent")
+        percent = 100.0 if status in {"complete", "deleting"} else 0.0
+        speed = eta = None
+        if torrent is not None and status not in {"complete", "deleting"}:
+            percent = round(float(torrent.progress) * 100, 1)
+            paused = str(torrent.state).startswith(("paused", "stopped"))
+            if paused and info_hash.casefold() in held:
+                label = "Paused: anime automation is off"
+            elif paused:
+                label = "Paused in qBittorrent"
+            elif str(torrent.state).startswith(("queued",)):
+                label = "Queued in qBittorrent"
+            elif str(torrent.state).startswith("stalled"):
+                label = "Stalled: no peers"
+            else:
+                label = "Downloading in qBittorrent"
+                speed, eta = int(torrent.dlspeed or 0) or None, int(torrent.eta or 0) or None
         rows.append(
             {
                 "id": info_hash[:8],
@@ -4537,13 +4931,11 @@ def release_queue_rows(state: dict[str, Any] | None = None) -> list[dict[str, An
                 "step": None,
                 "total_steps": None,
                 "step_key": None,
-                "step_label": {
-                    "downloading": "Downloading in qBittorrent",
-                    "complete": "Downloaded, waiting to publish",
-                    "deleting": "Removing the torrent",
-                }.get(status, "Waiting for qBittorrent"),
-                "overall_percent": 100.0 if status in {"complete", "deleting"} else 0.0,
+                "step_label": label,
+                "overall_percent": percent,
                 "transfer_percent": None,
+                "download_speed": speed,
+                "download_eta": eta,
                 "pending": True,
                 "action_required": False,
                 "reason": None,
@@ -4781,14 +5173,18 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _request_cycle(*, retries_only: bool) -> None:
-    """Ask the worker for a cycle. A full one wins over a retries-only one."""
+def _request_cycle(*, retries_only: bool, only: list[str] | None = None) -> None:
+    """Ask the worker for a cycle. A full one wins over a retries-only one; releases named
+    (``only``) add up, and are checked even with the automation off."""
     with _STATE_LOCK:
         pending = _read_json(_cycle_request_path())
+        named = list(only or [])
         if pending is not None:
             retries_only = retries_only and bool(pending.get("retries_only", True))
+            named = list(dict.fromkeys([*(pending.get("only") or []), *named]))
         _write_json(
-            _cycle_request_path(), {"retries_only": retries_only, "requested_at": time.time()}
+            _cycle_request_path(),
+            {"retries_only": retries_only, "requested_at": time.time(), **({"only": named} if named else {})},
         )
 
 
@@ -4817,12 +5213,14 @@ def _cycle_running() -> bool:
     return _CYCLE_LOCK.locked()
 
 
-def _start_retry_cycle() -> None:
+def _start_retry_cycle(only: list[str] | None = None) -> None:
+    """Check held releases again. ``only``: just these, and even with the automation off."""
     global _RETRY_TASK
     if _delegated():
-        _request_cycle(retries_only=True)
+        _request_cycle(retries_only=True, only=only)
     elif _RETRY_TASK is None or _RETRY_TASK.done():
-        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True))
+        named = {"only": set(only)} if only else {}
+        _RETRY_TASK = asyncio.create_task(run_cycle(prefill=True, retries_only=True, **named))
 
 
 def trigger_cycle() -> dict:
@@ -4900,9 +5298,11 @@ async def worker(*, poll_seconds: float = 2.0) -> None:
                     not scheduled and request is not None and bool(request.get("retries_only"))
                 )
                 beat_task = asyncio.get_running_loop().call_later(0.5, beat)
-                _WORKER_CYCLE = asyncio.create_task(
-                    run_cycle(prefill=True, retries_only=retries_only)
-                )
+                named = set((request or {}).get("only") or [])
+                if named and not scheduled:
+                    _WORKER_CYCLE = asyncio.create_task(run_cycle(prefill=True, retries_only=True, only=named))
+                else:
+                    _WORKER_CYCLE = asyncio.create_task(run_cycle(prefill=True, retries_only=retries_only))
                 try:
                     await _WORKER_CYCLE
                 except asyncio.CancelledError:

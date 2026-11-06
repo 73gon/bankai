@@ -243,4 +243,106 @@ async def ensure_genres(items: list[tuple[str, int | str]], *, at_once: int = 8)
     return len(found)
 
 
-__all__ = ["configured", "due", "ensure", "ensure_genres", "genres", "images", "url"]
+# -- age ratings ------------------------------------------------------------------
+# Each show's content ratings by country (``/tv/{id}/content_ratings``: "DE" -> "16", "US" -> "TV-MA"),
+# kept a month: web.age_ratings makes the FSK rating of anime and shows from them.
+
+_RATINGS_LOADED: tuple[float, dict[str, dict]] | None = None
+
+
+def _ratings_store() -> Path:
+    return bgjobs.jobs_root().parent / "anime_metadata" / "tmdb_ratings.json"
+
+
+def _ratings_rows() -> dict[str, dict]:
+    global _RATINGS_LOADED
+    path = _ratings_store()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _RATINGS_LOADED is None or _RATINGS_LOADED[0] != mtime:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        _RATINGS_LOADED = (mtime, raw if isinstance(raw, dict) else {})
+    return _RATINGS_LOADED[1]
+
+
+def content_ratings(tmdb_id: int | str) -> dict[str, str] | None:
+    """A show's ratings by country code; None when TMDB was not asked yet (empty: it has none)."""
+    row = _ratings_rows().get(f"tv:{tmdb_id}")
+    return dict(row["ratings"]) if row is not None else None
+
+
+async def ensure_content_ratings(ids: list[int | str], *, at_once: int = 8) -> int:
+    """Ask TMDB for the content ratings of the shows not kept, or kept longer than a month. How many were asked."""
+    global _RATINGS_LOADED
+    if not configured():
+        return 0
+    rows = _ratings_rows()
+    now = time.time()
+    due_ids = list(dict.fromkeys(
+        str(tmdb_id) for tmdb_id in ids if now - float((rows.get(f"tv:{tmdb_id}") or {}).get("at") or 0) >= _TTL
+    ))
+    if not due_ids:
+        return 0
+    headers, params = _auth()
+    found: dict[str, dict] = {}
+    gate = asyncio.Semaphore(at_once)
+
+    async def ask(client: httpx.AsyncClient, tmdb_id: str) -> None:
+        async with gate:
+            try:
+                response = await client.get(f"{_API}/tv/{tmdb_id}/content_ratings", params=params)
+                if response.status_code == 404:
+                    found[f"tv:{tmdb_id}"] = {"ratings": {}, "at": time.time()}
+                    return
+                response.raise_for_status()
+                ratings = {
+                    str(row["iso_3166_1"]): str(row["rating"]).strip()
+                    for row in response.json().get("results") or []
+                    if row.get("iso_3166_1") and str(row.get("rating") or "").strip()
+                }
+                found[f"tv:{tmdb_id}"] = {"ratings": ratings, "at": time.time()}
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error.update(source="TMDB", error=str(exc))
+                log.warning("TMDB content ratings of tv %s: %s", tmdb_id, exc)
+
+    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+        await asyncio.gather(*(ask(client, tmdb_id) for tmdb_id in due_ids))
+    if found:
+        merged = {**_ratings_rows(), **found}
+        path = _ratings_store()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        _RATINGS_LOADED = None
+    return len(found)
+
+
+async def search_tv(query: str, year: int | None = None) -> list[dict[str, Any]]:
+    """TMDB's shows of a name (and first-air year): id, name, first_air_date, genre_ids. Empty on failure."""
+    if not configured() or not query.strip():
+        return []
+    headers, params = _auth()
+    try:
+        async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+            response = await client.get(
+                f"{_API}/search/tv",
+                params={**params, "query": query, **({"first_air_date_year": year} if year else {})},
+            )
+            response.raise_for_status()
+            return list(response.json().get("results") or [])
+    except (httpx.HTTPError, ValueError) as exc:
+        last_error.update(source="TMDB", error=str(exc))
+        log.warning("TMDB search for %r: %s", query, exc)
+        return []
+
+
+__all__ = [
+    "configured", "content_ratings", "due", "ensure", "ensure_content_ratings", "ensure_genres", "genres", "images",
+    "search_tv", "url",
+]

@@ -295,3 +295,15 @@ def test_the_cache_is_read_again_when_another_process_wrote_it(tmp_path):
     os.utime(tmp_path / "anime_codecs.json", (later, later))
 
     assert anime_library._load_codec_cache()[path]["subs"] == ["eng", ".de.ass"]
+
+
+def test_a_failed_probe_is_asked_again_later_not_kept_as_the_answer(tmp_path, monkeypatch):
+    root = _library(tmp_path, count=1)
+    monkeypatch.setattr(anime_library, "probe_streams", lambda path: None)
+    assert anime_library.sweep_codecs(root, limit=10)["probed"] == 1
+    monkeypatch.setattr(anime_library, "probe_streams", lambda path: {"codec": "hevc", "audio": ["jpn"], "subs": []})
+    # Fresh: left alone a while.
+    assert anime_library.sweep_codecs(root, limit=10)["probed"] == 0
+    monkeypatch.setattr(anime_library, "_PROBE_RETRY_SECONDS", 0)
+    assert anime_library.sweep_codecs(root, limit=10)["probed"] == 1
+    assert anime_library.probed_codecs([_row(_episode(root))]) == {(1, 1): "hevc"}

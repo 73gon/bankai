@@ -236,6 +236,27 @@ def test_an_episode_past_the_season_s_end_is_the_sequel_s(frieren) -> None:
     assert (match["anilist_id"], match["episode"]) == (182255, 2)
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        # Re:Zero's second season batch was taken for the first season and replaced it (Nov 2026).
+        "[Erai-raws] Sousou no Frieren 2nd Season - 01 ~ 10 [1080p][HEVC][BATCH][Multiple Subtitle]",
+        "[Group] Sousou no Frieren S2 - 01 ~ 10 (1080p)",
+        "[Group] Sousou no Frieren S2 - 03 (1080p)",
+    ],
+)
+def test_a_later_season_s_batch_is_that_season_not_the_first(frieren, title) -> None:
+    match = anime.anilist_match(title, table=frieren, mappings={})
+
+    assert match is not None and match["anilist_id"] == 182255
+
+
+def test_a_first_season_batch_stays_the_first_season(frieren) -> None:
+    match = anime.anilist_match("[Erai-raws] Sousou no Frieren - 01 ~ 28 [1080p][Multiple Subtitle]", table=frieren, mappings={})
+
+    assert (match["anilist_id"], match["episode"]) == (154587, 1)
+
+
 def test_a_name_anilist_does_not_know_is_left_for_the_user_to_place(frieren) -> None:
     assert anime.anilist_match("[Group] Not An Anime - 01 [1080p]", table=frieren, mappings={}) is None
 
@@ -286,7 +307,7 @@ def test_a_search_also_asks_nyaa_under_the_anime_s_other_anilist_names(
 
     asked: list[str] = []
 
-    async def fake_fetch(client, term, category, page) -> list[anime.NyaaEntry]:
+    async def fake_fetch(client, term, category, page, *, user=None) -> list[anime.NyaaEntry]:
         asked.append(term)
         return [_rss_row("[Erai-raws] Sousou no Frieren - 02 [1080p]")]
 
@@ -298,6 +319,12 @@ def test_a_search_also_asks_nyaa_under_the_anime_s_other_anilist_names(
     assert sorted(asked) == sorted(["Frieren: Beyond Journey's End", "Sousou no Frieren"])
     assert page.aliases == ["Frieren: Beyond Journey's End", "Sousou no Frieren"]
     assert page.items[0].anilist["episode"] == 2
+    # What was asked is shown under the filters, one address per search.
+    assert sorted(page.sent) == sorted(
+        anime.feed_url(term, "1_0", 0) for term in ["Frieren: Beyond Journey's End", "Sousou no Frieren"]
+    )
+    assert page.sent[0].startswith("https://nyaa.si/?page=rss&q=")
+    assert anime.entry_to_dict(page.items[0])["source"] == "nyaa"
 
 
 def test_erai_suffix_deconstruction_keeps_numbers_inside_the_title() -> None:
@@ -305,3 +332,66 @@ def test_erai_suffix_deconstruction_keeps_numbers_inside_the_title() -> None:
     assert anime.deconstruct_release(title) == ("Anime Name - 2", 1)
     assert anime.clean_release_title(title) == "Anime Name - 2"
     assert anime.release_episode_info(title) == (None, 1)
+
+
+def test_a_scene_style_season_pack_is_read_by_its_season_not_the_bracket():
+    title = "My Hero Academia S02 1080p NF WEB-DL MULTi AAC2.0 H 264-VARYG (Boku no Hero Academia 4, Multi-Audio, Multi-Subs)"
+    assert anime.season_pack_name(title) == "My Hero Academia Season 2"
+    assert anime.season_pack_name("[Grp] Some.Show.S01.1080p.BluRay") == "Some Show Season 1"
+    assert anime.season_pack_name("Frieren.S01E05.1080p.WEB") is None
+    assert anime.season_pack_name("[Erai-raws] Sousou no Frieren - 05 [1080p]") is None
+
+
+def test_a_publisher_is_asked_of_nyaa_and_matched_without_spaces(monkeypatch):
+    """PHT Mini publishes as "[PHTMini]" and is no uploader account; the newest uploads hold few of its releases."""
+    import asyncio
+
+    from bankai.web import anime as anime_web
+
+    asked = []
+
+    def entry(title, info_hash):
+        return anime_web.NyaaEntry(
+            id=1, title=title, download_url="", detail_url="", magnet_uri="", info_hash=info_hash, category_id="1_2",
+            category="", size="1 GiB", size_bytes=2**30, seeders=5, leechers=0, downloads=0, comments=0, trusted=False,
+            remake=False, published_at=None, publisher=anime_web._publisher(title), quality="1080p",
+        )
+
+    async def fake_rss(client, query, category, page, *, user=None):
+        asked.append((query, user))
+        if user:
+            return []
+        if "PHTMini" in query:
+            return [entry("[PHTMini] Chainsaw Man - S01 (BD 1080p) (German/Deutsch)", "a" * 40)]
+        return [entry("[SubsPlease] Chainsaw Man - 01 (1080p)", "b" * 40)]
+
+    async def no_index():
+        return None
+
+    monkeypatch.setattr(anime_web, "_fetch_rss", fake_rss)
+    monkeypatch.setattr("bankai.metadata.anilist.index", no_index)
+    page = asyncio.run(anime_web.search("", publisher="PHT Mini"))
+    assert [item.title[:9] for item in page.items] == ["[PHTMini]"]
+    assert ("PHT Mini", None) in asked and ("PHTMini", None) in asked and ("", "PHT Mini") in asked
+
+
+def test_the_publishers_setting_takes_a_list_or_one_per_line():
+    from bankai.web.app import _validate_setting_value
+
+    assert _validate_setting_value("anime.publishers", "Ironclad\nPHT Mini\n\nIronclad, Erai-raws") == ["Ironclad", "PHT Mini", "Erai-raws"]
+    assert _validate_setting_value("anime.publishers", ["A", " B "]) == ["A", "B"]
+
+
+def test_a_nyaa_listing_page_is_read_as_the_feed_is():
+    """Nyaa's feed ignores the page: from page 2 on the web listing is read."""
+    from bankai.web import anime as anime_web
+
+    page = """<table class="torrent-list"><tbody><tr class="success">
+      <td><a href="/?c=1_2" title="Anime - English-translated"></a></td>
+      <td colspan="2"><a href="/view/9#comments" class="comments">1</a><a href="/view/9" title="[Ironclad] Show - S01E02 [WEB.1080p.AV1]">x</a></td>
+      <td><a href="/download/9.torrent"></a><a href="magnet:?xt=urn:btih:BB59A98AB3A9BFF821567F88208C445739B0FC2D&amp;dn=x"></a></td>
+      <td>296.5 MiB</td><td data-timestamp="1789244333">2026-09-12</td><td>45</td><td>0</td><td>1641</td></tr></tbody></table>"""
+    (entry,) = anime_web.parse_listing(page)
+    assert (entry.id, entry.publisher, entry.category_id, entry.seeders, entry.downloads) == (9, "Ironclad", "1_2", 45, 1641)
+    assert entry.info_hash == "bb59a98ab3a9bff821567f88208c445739b0fc2d" and entry.trusted and not entry.remake
+    assert entry.download_url == "https://nyaa.si/download/9.torrent" and entry.quality == "1080p"

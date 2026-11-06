@@ -14,11 +14,14 @@ from the step it got to:
 2. ``rpu.bin``        Dolby Vision's per-frame metadata from the source,
                       converted to profile 8.1 (``dovi_tool -m 2``)
 3. ``video.dv.hevc``  the new picture with that metadata put back in
-4. the destination    the new picture and every other track of the source
+4. ``frames.txt``     the source's frame times, when its frames are not evenly
+                      spaced (a stream download with gaps): the raw encode has
+                      none, and an even grid would move them
+5. the destination    the new picture and every other track of the source
                       (mkvmerge), HDR10's mastering metadata on the track
 
-and the result is checked -- as many frames, as long, every track there --
-before it is called done. Dolby Vision profile 5 (streaming releases) is
+and the result is checked -- as many frames, as long, the picture as long as
+the source's, every track there -- before it is called done. Dolby Vision profile 5 (streaming releases) is
 refused: its picture is not HDR10 underneath, and encoded again its colours
 would be wrong.
 """
@@ -54,13 +57,27 @@ class ShrinkError(RuntimeError):
     pass
 
 
+class NotWorthIt(ShrinkError):
+    """The trial encode says the result would not be smaller enough: nothing more is encoded."""
+
+    def __init__(self, saving: float) -> None:
+        super().__init__(f"the trial encode predicts only {saving:.0%} smaller")
+        self.saving = saving
+
+
 class ShrinkInterrupted(ShrinkError):
     """A step's program was stopped from outside (a restart): no failure, the steps done stay."""
 
 
+# ffmpeg catches the signal a service stop sends, finishes and exits with 255
+# (its "received signal" exit); E293 of Boruto, stopped so by a restart, was
+# taken for a failed encode and left the queue (Oct 2026).
+_FFMPEG_SIGNALLED = 255
+
+
 def _stopped(returncode: int, what: str) -> None:
     # A negative return code: killed by a signal, as a service restart does.
-    if returncode < 0:
+    if returncode < 0 or returncode == _FFMPEG_SIGNALLED:
         raise ShrinkInterrupted(f"{what} was stopped")
 
 
@@ -221,6 +238,55 @@ def count_frames(path: Path) -> int:
     return int(streams[0].get("nb_read_packets") or 0)
 
 
+def frame_times(path: Path) -> list[float]:
+    """The picture's frame times in seconds, in the order they are shown: every packet's, the whole file read through."""
+    result = subprocess.run(
+        [_tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=3600,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ShrinkError(f"ffprobe failed: {result.stderr.strip()[:300]}")
+    times = []
+    for line in result.stdout.splitlines():
+        value = line.split(",")[0].strip()
+        if value and value != "N/A":
+            times.append(float(value))
+    # Packets come in decoding order; B-frames are shown after the frames they lean on.
+    return sorted(times)
+
+
+def _even(source: Source, frames: int) -> bool:
+    """Whether the picture's frames lie evenly at its frame rate, as far as its length says.
+
+    Then an even grid gives them their own times. Naruto Shippuden's stream
+    downloads hold a jump or two of seconds each: 94 frames fewer than their
+    length at their rate, each laid on the grid moved up to 4 s ahead of its
+    sound (Oct 2026). Without the picture's own length the container's is
+    taken, which can run longer (an audio track starting late): the frame
+    times are read then, and are right either way.
+    """
+    length = source.video_duration or source.duration
+    return abs(frames - length * source.fps) <= 2
+
+
+def _write_frame_times(times: list[float], frames: int, output: Path) -> None:
+    """mkvmerge's timestamp file (format v2): one time per frame, in milliseconds, in the order shown.
+
+    The times as the source has them, not moved to start at 0: from Matroska
+    (the libraries hold nothing else, track cleanup puts every other container
+    into MKV) mkvmerge keeps the source's other tracks at their own times too.
+    """
+    if len(times) != frames:
+        raise ShrinkError(f"the encode wrote {frames} frames, the source's picture has {len(times)} frame times")
+    partial = output.with_name(output.name + ".part")
+    partial.write_text("# timestamp format v2\n" + "".join(f"{time * 1000:.3f}\n" for time in times), encoding="utf-8")
+    partial.replace(output)
+
+
 def encode_command(
     source: Source,
     output: Path,
@@ -264,6 +330,54 @@ def encode_command(
     if source.hdr:
         command += ["-color_range", "tv"]
     return [*command, "-f", codec, str(output)]
+
+
+def _sample_bytes(command: list[str], output: Path) -> int:
+    result = subprocess.run(command, capture_output=True, encoding="utf-8", errors="replace", timeout=900, check=False)
+    _stopped(result.returncode, "the trial")
+    if result.returncode != 0 or not output.is_file():
+        raise ShrinkError(f"the trial failed: {(result.stderr or '').strip()[-300:]}")
+    return output.stat().st_size
+
+
+def trial(
+    source: Source, work: Path, *, quality: int, codec: str, points: tuple[float, ...] = (0.2, 0.5, 0.8), seconds: float = 20.0
+) -> float | None:
+    """How much smaller the whole file would get, from a few short stretches encoded as the full
+    encode would, each against the same stretch of the source's picture copied as it is.
+
+    A minute of the GPU instead of twenty: Bleach's compact episodes came out up to 67% larger,
+    and 293 encodes were thrown away whole (Oct 2026). None for a video too short to sample.
+    """
+    length = source.video_duration or source.duration
+    if not length or length < seconds * len(points) * 2 or not source.size:
+        return None
+    work.mkdir(parents=True, exist_ok=True)
+    new_bytes = old_bytes = 0
+    for index, point in enumerate(points):
+        start = f"{length * point:.3f}"
+        encoded_sample = work / f"trial{index}.{codec}"
+        command = encode_command(source, encoded_sample, quality=quality, codec=codec, progress="pipe:2")
+        at = command.index("-i")
+        command[at:at] = ["-ss", start]
+        after = command.index(str(source.path)) + 1
+        command[after:after] = ["-t", f"{seconds:g}"]
+        copied_sample = work / f"trial{index}.mkv"
+        copy = [
+            _tool("ffmpeg"), "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-ss", start, "-i", str(source.path),
+            "-t", f"{seconds:g}", "-map", "0:v:0", "-c", "copy", "-f", "matroska", str(copied_sample),
+        ]
+        try:
+            new_bytes += _sample_bytes(command, encoded_sample)
+            old_bytes += _sample_bytes(copy, copied_sample)
+        finally:
+            encoded_sample.unlink(missing_ok=True)
+            copied_sample.unlink(missing_ok=True)
+    if not old_bytes:
+        return None
+    # The picture's share of the file, from the stretches; the rest (audio, subtitles) stays as it is.
+    picture = min(source.size, old_bytes / (seconds * len(points)) * length)
+    return picture * (1 - new_bytes / old_bytes) / source.size
 
 
 def _run_encode(
@@ -331,9 +445,21 @@ def _decimal(value: float) -> str:
     return f"{value:.6f}".rstrip("0").rstrip(".") or "0"
 
 
-def mux_command(source: Source, video: Path, output: Path, *, drop_audio: list[int] = ()) -> list[str]:  # type: ignore[assignment]
-    """mkvmerge: the new picture first, then every other track of the source but the audio ``drop_audio`` (mkvmerge ids)."""
-    track = ["--language", f"0:{source.language or 'und'}", "--default-duration", f"0:{source.frame_rate}p"]
+def mux_command(
+    source: Source,
+    video: Path,
+    output: Path,
+    *,
+    drop_audio: list[int] = (),  # type: ignore[assignment]
+    timestamps: Path | None = None,
+) -> list[str]:
+    """mkvmerge: the new picture first, then every other track of the source but the audio ``drop_audio`` (mkvmerge ids).
+
+    A raw stream has no times: its frames get the source's (``timestamps``,
+    format v2) or, evenly spaced, the source's frame rate.
+    """
+    timing = ["--timestamps", f"0:{timestamps}"] if timestamps else ["--default-duration", f"0:{source.frame_rate}p"]
+    track = ["--language", f"0:{source.language or 'und'}", *timing]
     codes = {
         # Matroska's numbers, as ISO/IEC 23091-4 has them.
         "primaries": {"bt709": 1, "bt2020": 9},
@@ -383,6 +509,10 @@ def verify(source: Source, output: Path, *, dropped_audio: int = 0, dolby_vision
     frame = 1 / source.fps
     if abs(result.duration - source.duration) > max(1.0, 2 * frame):
         raise ShrinkError(f"the result runs {result.duration:.2f}s, the source {source.duration:.2f}s")
+    # The container is as long as its longest track: a picture that came out shorter
+    # passed above, running ahead of its sound (see _even).
+    if source.video_duration and result.video_duration and abs(result.video_duration - source.video_duration) > 3 * frame:
+        raise ShrinkError(f"the new picture runs {result.video_duration:.2f}s, the source's {source.video_duration:.2f}s")
     for kind, missing in (("audio", dropped_audio), ("subtitle", 0)):
         expected = _stream_count(source.streams, kind) - missing
         if _stream_count(result.streams, kind) != expected:
@@ -398,7 +528,7 @@ def _settings(source: Source, quality: int, codec: str = "hevc") -> dict[str, An
     return {"codec": codec, "quality": int(quality), "maxrate": _MAXRATE, "gop": _GOP, "source_size": source.size, "version": 2}
 
 
-_WORK_FILES = ("video.hevc", "video.h264", "rpu.bin", "video.dv.hevc")
+_WORK_FILES = ("video.hevc", "video.h264", "rpu.bin", "video.dv.hevc", "frames.txt")
 
 
 def encoded(work: Path) -> bool:
@@ -430,6 +560,7 @@ def shrink(
     drop_audio: list[int] = (),  # type: ignore[assignment]
     dolby_vision: bool = True,
     on_progress: Callable[[str, float | None], None] | None = None,
+    min_saving: float | None = None,
 ) -> dict[str, Any]:
     """Encode ``source_path``'s picture again into ``destination``, every other track kept.
 
@@ -437,7 +568,8 @@ def shrink(
     settings is not done again, and other settings start it over. The source
     is never touched. ``dolby_vision`` False leaves Dolby Vision out (HDR10
     alone). ``on_progress(step, fraction)`` hears where it is: "encode" with
-    the share done, then "dolby_vision" and "mux".
+    the share done, then "dolby_vision" and "mux". ``min_saving``: a trial
+    encode first, and NotWorthIt when it predicts less than that (with room).
     """
     def report(step: str, fraction: float | None = None) -> None:
         if on_progress is not None:
@@ -465,6 +597,14 @@ def shrink(
             free = shutil.disk_usage(work).free
             if free < source.size:
                 raise ShrinkError(f"{free / 2**30:.0f} GiB free in {work}: the steps need up to the source's size")
+            if min_saving is not None:
+                report("trial", None)
+                predicted = trial(source, work, quality=quality, codec=codec)
+                if predicted is not None:
+                    log.info("[shrink] %s: the trial predicts %.0f%% smaller", source_path.name, predicted * 100)
+                    # A little room: the stretches are not the whole film.
+                    if predicted < min_saving + 0.05:
+                        raise NotWorthIt(predicted)
             log.info('BANKAI_STAGE step=1 total=3 key=encode label="Encode the picture"')
             report("encode", 0.0)
             frames = _run_encode(
@@ -490,12 +630,16 @@ def shrink(
             video.unlink(missing_ok=True)
     frames = int(done.get("frames") or 0)
     _check_frames(source, frames)
+    timestamps = work / "frames.txt"
+    if not timestamps.is_file() and not _even(source, frames):
+        report("frame_times")
+        _write_frame_times(frame_times(source.path), frames, timestamps)
     log.info('BANKAI_STAGE step=3 total=3 key=mux label="Put the tracks together"')
     report("mux")
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(f".{destination.name}.part")
     result = subprocess.run(
-        mux_command(source, picture, partial, drop_audio=list(drop_audio)),
+        mux_command(source, picture, partial, drop_audio=list(drop_audio), timestamps=timestamps if timestamps.is_file() else None),
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -567,11 +711,13 @@ def quality_check(source_path: Path, output: Path, *, points: tuple[float, ...] 
 
 __all__ = [
     "DEFAULT_QUALITY",
+    "NotWorthIt",
     "ShrinkError",
     "ShrinkInterrupted",
     "Source",
     "dovi_tool_bin",
     "encode_command",
+    "frame_times",
     "inspect",
     "mux_command",
     "quality_check",

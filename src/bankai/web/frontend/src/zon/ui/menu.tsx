@@ -1,7 +1,10 @@
 import { Menu as BaseMenu } from "@base-ui/react/menu";
 import { CheckIcon, ChevronRightIcon } from "lucide-react";
-import type * as React from "react";
+import * as React from "react";
 import { cn, sx, triggerSlot } from "@/zon/lib/cn";
+import { mergeRefs } from "@/zon/lib/merge-refs";
+import { formatShortcut, useShortcutKeys } from "@/zon/lib/platform";
+import { TriggerRoomContext, useTriggerRoom } from "@/zon/lib/room";
 import { MenuFrame, type MenuFrameProps } from "@/zon/ui/_overlay";
 
 /**
@@ -11,11 +14,21 @@ import { MenuFrame, type MenuFrameProps } from "@/zon/ui/_overlay";
  * The rule people break: using a menu to pick a value. A menu *does* things; to choose a value
  * use `Select` (or `MenuRadioGroup` when the choice is a view setting next to other actions).
  */
-export const Menu = BaseMenu.Root;
+export function Menu(props: BaseMenu.Root.Props) {
+  // The trigger registers here, so the menu and its submenus keep inside the trigger's room.
+  const room = useTriggerRoom();
+  return (
+    <TriggerRoomContext.Provider value={room}>
+      <BaseMenu.Root {...props} />
+    </TriggerRoomContext.Provider>
+  );
+}
 
 /** Opens the menu. Compose with a button: `render={<Button variant="secondary" />}`. */
-export function MenuTrigger(props: BaseMenu.Trigger.Props) {
-  return <BaseMenu.Trigger {...triggerSlot("menu-trigger", props.render)} {...props} />;
+export function MenuTrigger({ ref, ...props }: BaseMenu.Trigger.Props) {
+  const setTrigger = React.useContext(TriggerRoomContext)?.setTrigger;
+  const refs = React.useMemo(() => mergeRefs(setTrigger, ref), [setTrigger, ref]);
+  return <BaseMenu.Trigger ref={refs} {...triggerSlot("menu-trigger", props.render)} {...props} />;
 }
 
 export type MenuContentProps = Omit<MenuFrameProps, "slot">;
@@ -74,19 +87,76 @@ export function MenuCheckboxItem({ className, children, ...props }: BaseMenu.Che
       {...props}
     >
       <span className="flex min-w-0 flex-1 items-center gap-2.5">{children}</span>
-      <BaseMenu.CheckboxItemIndicator className="flex text-foreground">
+      <BaseMenu.CheckboxItemIndicator data-slot="menu-checkbox-indicator" className="flex text-foreground">
         <CheckIcon className="size-4" />
       </BaseMenu.CheckboxItemIndicator>
     </BaseMenu.CheckboxItem>
   );
 }
 
-/** Groups `MenuRadioItem`s that share one value (`value` / `onValueChange`). */
-export function MenuRadioGroup(props: BaseMenu.RadioGroup.Props) {
-  return <BaseMenu.RadioGroup data-slot="menu-radio-group" {...props} />;
+/**
+ * Groups `MenuRadioItem`s that share one value (`value` / `onValueChange`). The group draws one
+ * dot, which glides up or down to the option picked; it appears in place when the menu opens.
+ */
+export function MenuRadioGroup({ className, children, ref, ...props }: BaseMenu.RadioGroup.Props) {
+  const own = React.useRef<HTMLDivElement>(null);
+  const refs = React.useMemo(() => mergeRefs(own, ref), [ref]);
+  const [dot, setDot] = React.useState<{ x: number; y: number; glide: boolean } | null>(null);
+
+  React.useLayoutEffect(() => {
+    const group = own.current;
+    if (!group) return;
+    const place = () => {
+      // Any checked option: a menubar re-slots its items, the mark stays the same.
+      const mark = group.querySelector<HTMLElement>('[data-checked] > [data-slot="menu-radio-mark"]');
+      if (!mark) return setDot(null);
+      // Layout offsets, not client rects: the popup opens with a scale (popup-motion), and a rect
+      // measured mid-open would put the dot off sideways. Offsets ignore transforms, so x stays put
+      // and only y moves between options.
+      let x = mark.offsetWidth / 2;
+      let y = mark.offsetHeight / 2;
+      for (
+        let el: HTMLElement | null = mark;
+        el && el !== group;
+        el = el.offsetParent as HTMLElement | null
+      ) {
+        x += el.offsetLeft;
+        y += el.offsetTop;
+      }
+      // The first placement lands in place; later ones glide.
+      setDot((prev) => (prev && prev.x === x && prev.y === y ? prev : { x, y, glide: prev != null }));
+    };
+    place();
+    // A pick changes the items' data-checked; uncontrolled groups re-render only inside Base UI.
+    const observer = new MutationObserver(place);
+    observer.observe(group, { subtree: true, attributeFilter: ["data-checked"] });
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <BaseMenu.RadioGroup
+      ref={refs}
+      data-slot="menu-radio-group"
+      className={sx("relative", className)}
+      {...props}
+    >
+      {children}
+      {dot && (
+        <span
+          aria-hidden
+          data-slot="menu-radio-dot"
+          className={cn(
+            "pointer-events-none absolute top-0 left-0 -mt-[3px] -ml-[3px] size-1.5 rounded-full bg-foreground",
+            dot.glide && "transition-transform duration-[calc(var(--duration)*1.6)] ease-(--ease)",
+          )}
+          style={{ transform: `translate(${dot.x}px, ${dot.y}px)` }}
+        />
+      )}
+    </BaseMenu.RadioGroup>
+  );
 }
 
-/** One option of a `MenuRadioGroup`. The current option shows a small dot at the trailing edge. */
+/** One option of a `MenuRadioGroup`. The group's dot sits at the current option's trailing edge. */
 export function MenuRadioItem({ className, children, ...props }: BaseMenu.RadioItem.Props) {
   return (
     <BaseMenu.RadioItem
@@ -95,9 +165,8 @@ export function MenuRadioItem({ className, children, ...props }: BaseMenu.RadioI
       {...props}
     >
       <span className="flex min-w-0 flex-1 items-center gap-2.5">{children}</span>
-      <BaseMenu.RadioItemIndicator className="flex size-4 items-center justify-center">
-        <span className="size-1.5 rounded-full bg-foreground" />
-      </BaseMenu.RadioItemIndicator>
+      {/* Where the group's dot sits for this option. */}
+      <span data-slot="menu-radio-mark" aria-hidden className="flex size-4 shrink-0" />
     </BaseMenu.RadioItem>
   );
 }
@@ -130,14 +199,26 @@ export function MenuSeparator({ className, ...props }: BaseMenu.Separator.Props)
 }
 
 /** A keyboard hint at the trailing edge of an item: mono, muted. Decorative — wire the keys yourself. */
-export function MenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
+export interface MenuShortcutProps extends React.ComponentProps<"span"> {
+  /**
+   * The shortcut as keys, written for the device: `["mod", "D"]` reads ⌘D on Apple devices and
+   * Ctrl+D elsewhere, and is hidden on a touch-only phone or tablet. Or pass the text as children.
+   */
+  keys?: string[];
+}
+
+export function MenuShortcut({ keys, className, children, ...props }: MenuShortcutProps) {
+  const { mod, hasKeyboard } = useShortcutKeys();
+  if (keys && !hasKeyboard) return null;
   return (
     <span
       data-slot="menu-shortcut"
       aria-hidden
       className={cn("ml-auto pl-4 font-mono text-xs tracking-normal text-muted-foreground", className)}
       {...props}
-    />
+    >
+      {keys ? formatShortcut(keys, mod) : children}
+    </span>
   );
 }
 

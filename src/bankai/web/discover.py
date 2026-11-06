@@ -1,8 +1,8 @@
-"""Discover page data: TVDB-backed browse + search with posters.
+"""Discover page data: TMDB-backed browse + search with posters.
 
-Fail-soft like the rest of the TVDB integration: when no API key is
-configured the endpoints return an empty list and ``configured=False`` so
-the UI can show a friendly "configure TVDB" empty state.
+Fail-soft: when no TMDB key is configured the endpoints return an empty list
+and ``configured=False`` so the UI can show a friendly empty state. TheTVDB did
+this until Oct 2026 (see metadata.tmdb_titles).
 """
 
 from __future__ import annotations
@@ -11,25 +11,23 @@ import asyncio
 import datetime
 import threading
 import time
-import unicodedata
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 import httpx
 
 from bankai.config import get_settings
 from bankai.logging import get_logger
-from bankai.metadata.tvdb import worldwide_release_date
+from bankai.metadata import tmdb_titles as titles
 
 log = get_logger(__name__)
 
-_BASE_URL = "https://api4.thetvdb.com/v4"
-_ARTWORK_BASE = "https://artworks.thetvdb.com"
+# TMDB's lists come 20 to a page, and no list goes past page 500.
+_TMDB_PAGE = 20
+_TMDB_LAST_PAGE = 500
 _CACHE: dict[str, tuple[float, list[DiscoverItem]]] = {}
 _PERSON_CACHE: dict[str, tuple[float, list[PersonSuggestion]]] = {}
 _DETAIL_CACHE: dict[str, tuple[float, TitleDetails]] = {}
-_ENGLISH_TITLE_CACHE: dict[tuple[str, int], tuple[float, str | None]] = {}
-_BROWSE_META: dict[str, dict] = {}
-_TOKEN_CACHE: tuple[str, str, float, str] | None = None
+_TOTALS: dict[str, int | None] = {}
 # Keys currently being refreshed in the background (stale-while-revalidate),
 # so we never launch duplicate refreshes for the same key.
 _REFRESHING: set[str] = set()
@@ -41,19 +39,19 @@ _REFRESH_TASKS: set[asyncio.Task[None]] = set()
 class DiscoverItem:
     name: str
     kind: str  # "movie" | "show"
-    tvdb_id: int | None = None
+    tmdb_id: int | None = None
     year: int | None = None
     poster_url: str | None = None
     overview: str | None = None
     is_new: bool = False
     release_date: str | None = None  # ISO date (YYYY-MM-DD) when known
-    status: str | None = None  # TVDB status name e.g. "Released", "Announced"
+    status: str | None = None  # e.g. "Released", "Ended", "Planned" where TMDB says
 
 
 @dataclass(frozen=True, slots=True)
 class PersonSuggestion:
     name: str
-    tvdb_id: int | None = None
+    tmdb_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,37 +71,11 @@ class TitleDetails:
 
     @property
     def worldwide_year(self) -> int | None:
-        return _to_int((self.worldwide_release_date or "")[:4])
+        return titles.year(self.worldwide_release_date)
 
 
 def is_configured() -> bool:
-    m = get_settings().metadata
-    return bool(m.tvdb_enabled and m.tvdb_api_key)
-
-
-async def _login(client: httpx.AsyncClient) -> str | None:
-    global _TOKEN_CACHE
-    m = get_settings().metadata
-    api_key = m.tvdb_api_key
-    pin = m.tvdb_pin or ""
-    cached = _TOKEN_CACHE
-    if cached and cached[0] == api_key and cached[1] == pin and cached[2] > time.time():
-        return cached[3]
-    req: dict[str, str] = {"apikey": api_key}
-    if m.tvdb_pin:
-        req["pin"] = m.tvdb_pin
-    try:
-        r = await client.post("login", json=req)
-        r.raise_for_status()
-        token = (r.json().get("data") or {}).get("token")
-        if token:
-            # TVDB tokens live longer than this; a conservative local TTL keeps
-            # catalogue navigation fast without risking a long-lived stale JWT.
-            _TOKEN_CACHE = (api_key, pin, time.time() + 30 * 60, token)
-        return token
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("TVDB login failed: %s", exc)
-        return None
+    return titles.configured()
 
 
 def _cache_get(key: str) -> list[DiscoverItem] | None:
@@ -118,409 +90,139 @@ def _cache_put(key: str, items: list[DiscoverItem]) -> None:
     _CACHE[key] = (time.time(), items)
 
 
+def _item(record: dict, kind: str, *, is_new: bool = False) -> DiscoverItem:
+    date = titles.date_of(record)
+    return DiscoverItem(
+        name=titles.name_of(record) or "Untitled",
+        kind=kind,
+        tmdb_id=int(record["id"]) if str(record.get("id") or "").isdigit() else None,
+        year=titles.year(date),
+        poster_url=titles.poster(record.get("poster_path")),
+        overview=record.get("overview") or None,
+        is_new=is_new,
+        release_date=date,
+        status=record.get("status") or None,
+    )
+
+
+# TMDB's search/multi says per row what it is; people are left out.
+_MULTI_KINDS = {"movie": "movie", "tv": "show"}
+
+
+def _items(records: object, kind: str, *, is_new: bool = False) -> list[DiscoverItem]:
+    """TMDB rows as items of ``kind``; ``"all"`` (search/multi) takes each row's own kind, films and shows only."""
+    rows = [row for row in records or [] if isinstance(row, dict) and row.get("id")]  # type: ignore[union-attr]
+    if kind == "all":
+        return [_item(row, _MULTI_KINDS[row.get("media_type")], is_new=is_new) for row in rows if row.get("media_type") in _MULTI_KINDS]
+    return [_item(row, kind, is_new=is_new) for row in rows]
+
+
+def _search_path(kind: str) -> str:
+    """Films, shows, or both ("all": TMDB's search/multi, which ranks them together)."""
+    return "search/multi" if kind == "all" else f"search/{titles.section(kind)}"
+
+
+def _dedupe_items(items: list[DiscoverItem], limit: int) -> list[DiscoverItem]:
+    seen: set[tuple] = set()
+    out: list[DiscoverItem] = []
+    for item in items:
+        key = (item.kind, item.tmdb_id) if item.tmdb_id is not None else (item.kind, item.name.casefold(), item.year)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _pages(
+    http: httpx.AsyncClient, path: str, kind: str, *, first: int, last: int, **params: object
+) -> tuple[list[DiscoverItem], int | None]:
+    """TMDB pages ``first``..``last`` (1-based) of a list, in order, and the list's total."""
+    last = min(last, _TMDB_LAST_PAGE)
+    answers = await asyncio.gather(*(titles.get(http, path, page=number, **params) for number in range(first, last + 1)))
+    items: list[DiscoverItem] = []
+    total: int | None = None
+    for answer in answers:
+        if not answer:
+            continue
+        if total is None and isinstance(answer.get("total_results"), int):
+            total = min(int(answer["total_results"]), _TMDB_LAST_PAGE * _TMDB_PAGE)
+        items.extend(_items(answer.get("results"), kind))
+    return items, total
+
+
+async def _rows(http: httpx.AsyncClient, path: str, kind: str, start: int, count: int, **params: object) -> tuple[list[DiscoverItem], int | None]:
+    """Rows ``start`` .. ``start + count`` of a TMDB list, whatever its own page size."""
+    first = start // _TMDB_PAGE + 1
+    last = (start + count - 1) // _TMDB_PAGE + 1
+    items, total = await _pages(http, path, kind, first=first, last=last, **params)
+    offset = start - (first - 1) * _TMDB_PAGE
+    return items[offset : offset + count], total
+
+
 async def person_suggestions(query: str, *, limit: int = 8) -> list[PersonSuggestion]:
-    """Return lightweight TVDB person matches for search autocomplete."""
+    """TMDB's people of a name, for search autocomplete."""
     clean = " ".join(query.split())
     if not is_configured() or len(clean) < 2:
         return []
     capped_limit = max(1, min(15, int(limit)))
     cache_key = f"{clean.casefold()}:{capped_limit}"
-    ttl = get_settings().web.cache_ttl_seconds
     cached = _PERSON_CACHE.get(cache_key)
-    if cached and time.time() - cached[0] < ttl:
+    if cached and time.time() - cached[0] < get_settings().web.cache_ttl_seconds:
         return cached[1]
-
+    async with titles.client() as http:
+        answer = await titles.get(http, "search/person", query=clean, include_adult="false")
     suggestions: list[PersonSuggestion] = []
-    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
-        token = await _login(client)
-        if not token:
-            return []
-        data = await _request_data(
-            client,
-            "search",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"query": clean, "type": "person", "limit": capped_limit},
-        )
-        seen: set[str] = set()
-        for record in data if isinstance(data, list) else []:
-            if not isinstance(record, dict):
-                continue
-            name = str(record.get("name") or record.get("title") or "").strip()
-            key = " ".join(name.casefold().split())
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            suggestions.append(
-                PersonSuggestion(
-                    name=name,
-                    tvdb_id=_to_int(record.get("tvdb_id") or record.get("id")),
-                )
-            )
-            if len(suggestions) >= capped_limit:
-                break
+    seen: set[str] = set()
+    for record in (answer or {}).get("results") or []:
+        name = str(record.get("name") or "").strip()
+        key = " ".join(name.casefold().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        suggestions.append(PersonSuggestion(name=name, tmdb_id=record.get("id")))
+        if len(suggestions) >= capped_limit:
+            break
     _PERSON_CACHE[cache_key] = (time.time(), suggestions)
     return suggestions
 
 
-def _to_int(value: object) -> int | None:
-    try:
-        return int(str(value))
-    except (TypeError, ValueError):
-        return None
+# A person's films are the ones they acted in, directed or wrote.
+_CREW_JOBS = {"Director", "Writer", "Screenplay", "Story", "Novel"}
 
 
-def _abs_image(url: object) -> str | None:
-    """TVDB returns some image paths as absolute URLs and others as
-    site-relative paths (``/banners/...``). Normalise to absolute so the
-    poster proxy (which only accepts http/https) can fetch them."""
-    if not url:
-        return None
-    s = str(url)
-    if s.startswith("http://") or s.startswith("https://"):
-        return s
-    if s.startswith("/"):
-        return _ARTWORK_BASE + s
-    return _ARTWORK_BASE + "/" + s
+async def _person_movies(http: httpx.AsyncClient, query: str, limit: int) -> list[DiscoverItem]:
+    """Films of the people of that name: an exact name first, else TMDB's first match."""
+    answer = await titles.get(http, "search/person", query=query, include_adult="false")
+    people = [row for row in (answer or {}).get("results") or [] if row.get("id")]
+    wanted = " ".join(query.casefold().split())
+    exact = [row for row in people if " ".join(str(row.get("name") or "").casefold().split()) == wanted]
+    chosen = (exact or people)[:2]
+    credits = await asyncio.gather(*(titles.get(http, f"person/{row['id']}/movie_credits", language="en-US") for row in chosen))
+    records: list[dict] = []
+    for block in credits:
+        records.extend((block or {}).get("cast") or [])
+        records.extend(row for row in (block or {}).get("crew") or [] if row.get("job") in _CREW_JOBS)
+    records.sort(key=lambda row: float(row.get("popularity") or 0), reverse=True)
+    return _dedupe_items(_items(records, "movie"), limit)
 
 
-def _item_from_record(rec: dict, kind: str) -> DiscoverItem:
-    name = _inline_english_title(rec) or rec.get("name") or rec.get("title") or rec.get("slug") or "Untitled"
-    worldwide_date = worldwide_release_date(rec) if kind == "movie" else None
-    date = worldwide_date or rec.get("first_air_time") or rec.get("release_date") or rec.get("firstAired") or rec.get("date")
-    date_s = str(date)[:10] if date else None
-    year = _to_int((worldwide_date or "")[:4]) or _to_int(rec.get("year")) or _to_int((date_s or "")[:4])
-    poster = rec.get("image_url") or rec.get("image") or rec.get("thumbnail")
-    status_raw = rec.get("status")
-    if isinstance(status_raw, dict):
-        status = status_raw.get("name")
-    elif isinstance(status_raw, str):
-        status = status_raw
-    else:
-        status = None
-    return DiscoverItem(
-        name=str(name),
-        kind=kind,
-        tvdb_id=_to_int(rec.get("tvdb_id") or rec.get("id")),
-        year=year,
-        poster_url=_abs_image(poster),
-        overview=rec.get("overview"),
-        release_date=date_s,
-        status=str(status) if status else None,
+async def _studio_movies(http: httpx.AsyncClient, query: str, limit: int) -> list[DiscoverItem]:
+    """Films of the companies of that name, most popular first."""
+    answer = await titles.get(http, "search/company", query=query)
+    companies = [row for row in (answer or {}).get("results") or [] if row.get("id")]
+    wanted = query.casefold().strip()
+    companies.sort(key=lambda row: (str(row.get("name") or "").casefold() != wanted, wanted not in str(row.get("name") or "").casefold()))
+    chosen = "|".join(str(row["id"]) for row in companies[:5])
+    if not chosen:
+        return []
+    items, _total = await _rows(
+        http, "discover/movie", "movie", 0, limit,
+        with_companies=chosen, sort_by="popularity.desc", language="en-US", include_adult="false",
     )
-
-
-def _inline_english_title(rec: dict) -> str | None:
-    """Read an English title already embedded in a TVDB response.
-
-    Search records and base movie records use slightly different shapes. Keep
-    this deliberately tolerant so an API response that already contains the
-    translation does not require a second request.
-    """
-    for key in ("name_translated", "title_translated", "englishName", "english_name"):
-        value = rec.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    translations = rec.get("translations")
-    if isinstance(translations, dict):
-        for key in ("eng", "en", "English"):
-            value = translations.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            if isinstance(value, dict):
-                name = value.get("name") or value.get("title")
-                if isinstance(name, str) and name.strip():
-                    return name.strip()
-    elif isinstance(translations, list):
-        for translation in translations:
-            if not isinstance(translation, dict):
-                continue
-            language = str(
-                translation.get("language")
-                or translation.get("languageCode")
-                or translation.get("language_code")
-                or ""
-            ).casefold()
-            if language not in {"eng", "en", "english"}:
-                continue
-            name = translation.get("name") or translation.get("title")
-            if isinstance(name, str) and name.strip():
-                return name.strip()
-
-    aliases = rec.get("aliases")
-    if isinstance(aliases, list):
-        for alias in aliases:
-            if not isinstance(alias, dict):
-                continue
-            language = str(
-                alias.get("language")
-                or alias.get("languageCode")
-                or alias.get("language_code")
-                or ""
-            ).casefold()
-            if language not in {"eng", "en", "english"}:
-                continue
-            name = alias.get("name") or alias.get("title")
-            if isinstance(name, str) and name.strip():
-                return name.strip()
-    return None
-
-
-def _needs_english_lookup(rec: dict) -> bool:
-    language = str(
-        rec.get("originalLanguage")
-        or rec.get("original_language")
-        or rec.get("primaryLanguage")
-        or rec.get("primary_language")
-        or ""
-    ).casefold()
-    if language:
-        return language not in {"eng", "en", "english"}
-    name = str(rec.get("name") or rec.get("title") or "")
-    # TVDB does not consistently include originalLanguage on old base records.
-    # A title without any Latin letters (Japanese, Korean, Cyrillic, etc.) must
-    # be resolved before it is safe to expose as the catalogue title.
-    return bool(name) and not any("LATIN" in unicodedata.name(ch, "") for ch in name)
-
-
-async def _english_translation(
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    *,
-    kind: str,
-    tvdb_id: int,
-) -> str | None:
-    key = (kind, tvdb_id)
-    ttl = get_settings().web.cache_ttl_seconds
-    hit = _ENGLISH_TITLE_CACHE.get(key)
-    if hit and time.time() - hit[0] < ttl:
-        return hit[1]
-    entity = "movies" if kind == "movie" else "series"
-    data = await _request_data(
-        client,
-        f"{entity}/{tvdb_id}/translations/eng",
-        headers=headers,
-    )
-    title = None
-    if isinstance(data, dict):
-        value = data.get("name") or data.get("title")
-        if isinstance(value, str) and value.strip():
-            title = value.strip()
-    _ENGLISH_TITLE_CACHE[key] = (time.time(), title)
-    return title
-
-
-async def _items_from_records(
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    records: list[dict],
-    kind: str,
-) -> list[DiscoverItem]:
-    """Convert TVDB records while guaranteeing canonical English titles."""
-    semaphore = asyncio.Semaphore(8)
-
-    async def convert(rec: dict) -> DiscoverItem | None:
-        item = _item_from_record(rec, kind)
-        inline = _inline_english_title(rec)
-        if inline:
-            return replace(item, name=inline)
-        if not _needs_english_lookup(rec):
-            return item
-        if item.tvdb_id is None:
-            return None
-        async with semaphore:
-            english = await _english_translation(
-                client,
-                headers,
-                kind=kind,
-                tvdb_id=item.tvdb_id,
-            )
-        # Never expose a known foreign/original-script title as the canonical
-        # UI identity. Apart from presentation, that caused every unresolved
-        # non-Latin title to normalise to the same empty membership key.
-        return replace(item, name=english) if english else None
-
-    converted = await asyncio.gather(*(convert(record) for record in records))
-    return [item for item in converted if item is not None]
-
-
-async def _request_data(
-    client: httpx.AsyncClient,
-    endpoint: str,
-    *,
-    headers: dict[str, str],
-    params: dict[str, object] | None = None,
-) -> object:
-    """Fetch one TVDB data payload without making search fail as a whole."""
-    try:
-        response = await client.get(endpoint, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json().get("data")
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("TVDB request failed for %s: %s", endpoint, exc)
-        return None
-
-
-def _dedupe_items(items: list[DiscoverItem], limit: int) -> list[DiscoverItem]:
-    unique: list[DiscoverItem] = []
-    seen: set[tuple[object, ...]] = set()
-    for item in items:
-        key: tuple[object, ...]
-        if item.tvdb_id is not None:
-            key = ("tvdb", item.tvdb_id)
-        else:
-            key = ("title", item.name.casefold(), item.year)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-        if len(unique) >= limit:
-            break
-    return unique
-
-
-async def _person_movies(
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    query: str,
-    limit: int,
-) -> list[DiscoverItem]:
-    """Return movies linked to matching TVDB people (cast or crew)."""
-    people_data = await _request_data(
-        client,
-        "search",
-        headers=headers,
-        params={"query": query, "type": "person", "limit": 5},
-    )
-    people = [record for record in people_data if isinstance(record, dict)] if isinstance(people_data, list) else []
-
-    # Prefer exact full-name hits, but keep fuzzy TVDB matches useful for partial
-    # names. Limiting extended lookups keeps a broad name from fanning out into
-    # dozens of API calls.
-    normalized_query = " ".join(query.casefold().split())
-    exact = [
-        record
-        for record in people
-        if " ".join(str(record.get("name") or record.get("title") or "").casefold().split())
-        == normalized_query
-    ]
-    candidates = (exact or people)[:3]
-    person_ids = [
-        person_id
-        for record in candidates
-        if (person_id := _to_int(record.get("tvdb_id") or record.get("id"))) is not None
-    ]
-    extended_data = await asyncio.gather(
-        *(
-            _request_data(client, f"people/{person_id}/extended", headers=headers)
-            for person_id in person_ids
-        )
-    )
-
-    credit_records: list[dict] = []
-    for person in extended_data:
-        if not isinstance(person, dict):
-            continue
-        characters = person.get("characters") or []
-        if not isinstance(characters, list):
-            continue
-        for character in characters:
-            if not isinstance(character, dict):
-                continue
-            movie_id = _to_int(character.get("movieId"))
-            movie = character.get("movie")
-            if movie_id is None or not isinstance(movie, dict) or not movie.get("name"):
-                continue
-            record = {**movie, "tvdb_id": movie_id}
-            credit_records.append(record)
-
-    credits = await _items_from_records(client, headers, credit_records, "movie")
-    return _dedupe_items(credits, limit)
-
-
-_STUDIO_HINTS = ("studio", "picture", "animation", "film", "production")
-_NON_STUDIO_HINTS = ("channel", "television", "network", "junior", "kids", "cinemagic", "xd")
-
-
-def _company_rank(record: dict, query: str, index: int) -> tuple[int, int, int, int]:
-    name = " ".join(str(record.get("name") or record.get("title") or "").casefold().split())
-    normalized_query = " ".join(query.casefold().split())
-    exact = int(name == normalized_query)
-    studio_hint = 2 if any(hint in name for hint in _STUDIO_HINTS) else int("company" in name)
-    penalty = int(any(hint in name for hint in _NON_STUDIO_HINTS) or "+" in name or "(" in name)
-    return (exact, studio_hint, -penalty, -index)
-
-
-async def _studio_movies(
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    query: str,
-    limit: int,
-) -> list[DiscoverItem]:
-    """Resolve matching TVDB companies, then fetch their linked movies."""
-    company_data = await _request_data(
-        client,
-        "search",
-        headers=headers,
-        params={"query": query, "type": "company", "limit": 30},
-    )
-    companies = (
-        [record for record in company_data if isinstance(record, dict)]
-        if isinstance(company_data, list)
-        else []
-    )
-    normalized_query = " ".join(query.casefold().split())
-    exact = [
-        record
-        for record in companies
-        if " ".join(str(record.get("name") or record.get("title") or "").casefold().split())
-        == normalized_query
-    ]
-    if exact:
-        candidates = exact[:3]
-    else:
-        candidates = [
-            record
-            for index, record in sorted(
-                enumerate(companies),
-                key=lambda pair: _company_rank(pair[1], query, pair[0]),
-                reverse=True,
-            )[:3]
-        ]
-    company_ids = [
-        company_id
-        for record in candidates
-        if (company_id := _to_int(record.get("tvdb_id") or record.get("id"))) is not None
-    ]
-    movie_data = await asyncio.gather(
-        *(
-            _request_data(
-                client,
-                "movies/filter",
-                headers=headers,
-                params={"company": company_id, "sort": "score"},
-            )
-            for company_id in company_ids
-        )
-    )
-    record_buckets = [
-        [record for record in data if isinstance(record, dict)]
-        for data in movie_data
-        if isinstance(data, list)
-    ]
-    buckets = await asyncio.gather(
-        *(_items_from_records(client, headers, records, "movie") for records in record_buckets)
-    )
-    # Round-robin avoids one broad parent company crowding out more specific
-    # matching studios while preserving TVDB's score order within each list.
-    merged: list[DiscoverItem] = []
-    for position in range(max((len(bucket) for bucket in buckets), default=0)):
-        for bucket in buckets:
-            if position < len(bucket):
-                merged.append(bucket[position])
-        if len(merged) >= limit * 2:
-            break
-    return _dedupe_items(merged, limit)
+    return _dedupe_items(items, limit)
 
 
 async def search(
@@ -541,27 +243,16 @@ async def search(
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    tvdb_type = "movie" if kind == "movie" else "series"
-    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
-        token = await _login(client)
-        if not token:
-            return []
-        headers = {"Authorization": f"Bearer {token}"}
+    async with titles.client() as http:
         if mode == "person":
-            items = await _person_movies(client, headers, query.strip(), limit)
+            items = await _person_movies(http, query.strip(), limit)
         elif mode == "studio":
-            items = await _studio_movies(client, headers, query.strip(), limit)
+            items = await _studio_movies(http, query.strip(), limit)
         else:
-            params: dict[str, object] = {"type": tvdb_type, "limit": limit}
-            params["query"] = query.strip()
-            data = await _request_data(
-                client,
-                "search",
-                headers=headers,
-                params=params,
+            items, _total = await _rows(
+                http, _search_path(kind), kind, 0, limit,
+                query=query.strip(), language="en-US", include_adult="false",
             )
-            records = [record for record in data if isinstance(record, dict)] if isinstance(data, list) else []
-            items = await _items_from_records(client, headers, records, kind)
     _cache_put(cache_key, items)
     return items
 
@@ -574,12 +265,7 @@ async def search_page(
     page_size: int = 50,
     search_by: str = "title",
 ) -> DiscoverPage:
-    """Return one UI page without imposing an application-level page cap.
-
-    TVDB's title search supports ``offset`` + ``limit``. Person/studio searches
-    are assembled from related records, so those are sliced after resolution
-    instead. Bankai never imposes its own maximum page number.
-    """
+    """One UI page of a search; TMDB's own pages of 20 are joined to fit."""
     page = max(0, int(page))
     page_size = max(10, min(100, int(page_size)))
     mode = search_by.strip().casefold()
@@ -587,288 +273,118 @@ async def search_page(
         return DiscoverPage([], page, page_size, 0, False)
     if kind != "movie" and mode != "title":
         return DiscoverPage([], page, page_size, 0, False)
-
+    start, end = page * page_size, (page + 1) * page_size
     if mode != "title":
-        # Credits/company filter responses are not offset-paginated by TVDB.
-        # Resolve enough rows for this UI page, then slice deterministically.
-        end = (page + 1) * page_size
-        if page == 0:
-            items = await search(query, kind=kind, limit=page_size + 1, search_by=mode)
-        else:
-            items = await search(query, kind=kind, limit=end + 1, search_by=mode)
+        # Credits and company films are assembled, then sliced.
+        items = await search(query, kind=kind, limit=end + 1, search_by=mode)
         return DiscoverPage(
-            items=items[page * page_size : end],
+            items=items[start:end],
             page=page,
             page_size=page_size,
             total=len(items) if len(items) <= end else None,
             has_next=len(items) > end,
         )
-
     if page == 0:
-        # Reuse the regular search path for the first page (and its cache).
-        # Fetch one look-ahead row so has_next remains accurate without an
-        # arbitrary UI cap.
+        # The first page is the plain search (and its cache), with one row more to tell a next page.
         items = await search(query, kind=kind, limit=page_size + 1, search_by=mode)
         return DiscoverPage(items[:page_size], page, page_size, None, len(items) > page_size)
-
     cache_key = f"search-page:{kind}:{query.strip().casefold()}:{page}:{page_size}"
     cached = _cache_get(cache_key)
     if cached is not None:
-        # A full page means there may be another page. The live response below
-        # carries an exact total when TVDB supplies links metadata.
-        return DiscoverPage(cached, page, page_size, None, len(cached) == page_size)
-
-    tvdb_type = "movie" if kind == "movie" else "series"
-    items: list[DiscoverItem] = []
-    total: int | None = None
-    has_next = False
-    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
-        token = await _login(client)
-        if not token:
-            return DiscoverPage([], page, page_size, 0, False)
-        try:
-            response = await client.get(
-                "search",
-                headers={"Authorization": f"Bearer {token}"},
-                params={
-                    "query": query.strip(),
-                    "type": tvdb_type,
-                    "offset": page * page_size,
-                    "limit": page_size,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-            data = payload.get("data") or []
-            links = payload.get("links") or {}
-            records = [record for record in data if isinstance(record, dict)]
-            items = await _items_from_records(client, {"Authorization": f"Bearer {token}"}, records, kind)
-            total = _to_int(links.get("total_items"))
-            if total is not None:
-                has_next = (page + 1) * page_size < total
-            else:
-                has_next = len(items) == page_size
-        except (httpx.HTTPError, ValueError) as exc:
-            log.warning("TVDB paginated search failed: %s", exc)
+        total = _TOTALS.get(cache_key)
+        return DiscoverPage(cached, page, page_size, total, end < total if total is not None else len(cached) == page_size)
+    async with titles.client() as http:
+        items, total = await _rows(
+            http, _search_path(kind), kind, start, page_size,
+            query=query.strip(), language="en-US", include_adult="false",
+        )
     _cache_put(cache_key, items)
-    return DiscoverPage(items, page, page_size, total, has_next)
+    _TOTALS[cache_key] = total
+    return DiscoverPage(items, page, page_size, total, end < total if total is not None else len(items) == page_size)
 
 
 async def browse_page(kind: str, *, page: int, page_size: int = 50) -> DiscoverPage:
-    """Slice the complete TVDB movies/series catalogue into UI-sized pages.
-
-    TVDB's catalogue endpoints use their own (larger) provider page size. We
-    translate the UI page index to that provider page, using
-    the response ``links.page_size`` rather than assuming it is always 500.
-    """
+    """The most popular films or shows, a UI page at a time (TMDB stops after 10,000)."""
     page = max(0, int(page))
     page_size = max(10, min(100, int(page_size)))
     if not is_configured():
         return DiscoverPage([], page, page_size, 0, False)
-    endpoint = "movies" if kind == "movie" else "series"
-    start = page * page_size
-    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
-        token = await _login(client)
-        if not token:
-            return DiscoverPage([], page, page_size, 0, False)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async def provider_page(number: int) -> tuple[list[DiscoverItem], dict]:
-            key = f"browse-provider:{kind}:{number}"
-            cached_items = _cache_get(key)
-            meta_hit = _BROWSE_META.get(key)
-            if cached_items is not None and meta_hit is not None:
-                return cached_items, meta_hit
-            try:
-                response = await client.get(endpoint, headers=headers, params={"page": number})
-                response.raise_for_status()
-                payload = response.json()
-                data = payload.get("data") or []
-                links = payload.get("links") or {}
-                records = [record for record in data if isinstance(record, dict)]
-                converted = await _items_from_records(client, headers, records, kind)
-            except (httpx.HTTPError, ValueError) as exc:
-                log.warning("TVDB browse page %s failed: %s", number, exc)
-                return [], {}
-            _cache_put(key, converted)
-            _BROWSE_META[key] = dict(links) if isinstance(links, dict) else {}
-            return converted, _BROWSE_META[key]
-
-        first, first_links = await provider_page(0)
-        provider_size = _to_int(first_links.get("page_size")) or len(first) or page_size
-        total = _to_int(first_links.get("total_items"))
-        source_page = start // provider_size
-        source_offset = start % provider_size
-        source_items, source_links = (first, first_links) if source_page == 0 else await provider_page(source_page)
-        combined = list(source_items[source_offset:])
-        next_page = source_page + 1
-        while len(combined) < page_size and source_items:
-            source_items, _ = await provider_page(next_page)
-            if not source_items:
-                break
-            combined.extend(source_items)
-            next_page += 1
-        items = combined[:page_size]
-        if total is None:
-            total = _to_int(source_links.get("total_items"))
-        has_next = start + len(items) < total if total is not None else len(items) == page_size
-        return DiscoverPage(items, page, page_size, total, has_next)
+    start, end = page * page_size, (page + 1) * page_size
+    cache_key = f"browse:{kind}:{page}:{page_size}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        total = _TOTALS.get(cache_key)
+        return DiscoverPage(cached, page, page_size, total, end < total if total is not None else bool(cached))
+    async with titles.client() as http:
+        items, total = await _rows(
+            http, f"discover/{titles.section(kind)}", kind, start, page_size,
+            sort_by="popularity.desc", language="en-US", include_adult="false", **{"vote_count.gte": 200},
+        )
+    _cache_put(cache_key, items)
+    _TOTALS[cache_key] = total
+    return DiscoverPage(items, page, page_size, total, end < total if total is not None else len(items) == page_size)
 
 
 async def trending(kind: str, *, limit: int = 60) -> list[DiscoverItem]:
-    """Browse feed. TVDB has no true trending endpoint on the free tier,
-    so we page the movies/series list as a "popular" browse surface."""
+    """What is watched this week."""
     if not is_configured():
         return []
     cache_key = f"trending:{kind}:{limit}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    endpoint = "movies" if kind == "movie" else "series"
-    items: list[DiscoverItem] = []
-    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
-        token = await _login(client)
-        if not token:
-            return []
-        headers = {"Authorization": f"Bearer {token}"}
-        page = 0
-        # Each TVDB list page returns ~500 records; one page is plenty, but
-        # loop defensively in case a page comes back short.
-        while len(items) < limit and page < 4:
-            try:
-                r = await client.get(endpoint, headers=headers, params={"page": page})
-                r.raise_for_status()
-                data = r.json().get("data") or []
-            except (httpx.HTTPError, ValueError) as exc:
-                log.warning("TVDB browse failed: %s", exc)
-                break
-            if not data:
-                break
-            records = [rec for rec in data if isinstance(rec, dict)]
-            items.extend(await _items_from_records(client, headers, records, kind))
-            page += 1
-    items = items[:limit]
+    async with titles.client() as http:
+        items, _total = await _rows(http, f"trending/{titles.section(kind)}/week", kind, 0, limit, language="en-US")
     _cache_put(cache_key, items)
     return items
 
 
 async def new_releases(kind: str, *, limit: int = 24) -> list[DiscoverItem]:
-    """Recent releases via TVDB's filter endpoint, sorted by score.
-
-    Pulls the current and previous calendar year so the Discover page can
-    surface (and tag) genuinely new titles. Fail-soft like the rest of the
-    TVDB integration."""
+    """Popular titles first released in the last four months."""
     if not is_configured():
         return []
     cache_key = f"new:{kind}:{limit}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    endpoint = "movies/filter" if kind == "movie" else "series/filter"
-    year = datetime.date.today().year
-    items: list[DiscoverItem] = []
-    seen: set[int | None] = set()
-    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
-        token = await _login(client)
-        if not token:
-            return []
-        headers = {"Authorization": f"Bearer {token}"}
-        for yr in (year, year - 1):
-            if len(items) >= limit:
-                break
-            try:
-                r = await client.get(
-                    endpoint,
-                    headers=headers,
-                    params={"country": "usa", "lang": "eng", "year": yr, "sort": "score"},
-                )
-                r.raise_for_status()
-                data = r.json().get("data") or []
-            except (httpx.HTTPError, ValueError) as exc:
-                log.warning("TVDB new releases failed: %s", exc)
-                break
-            records = [rec for rec in data if isinstance(rec, dict)]
-            for base in await _items_from_records(client, headers, records, kind):
-                if base.tvdb_id in seen:
-                    continue
-                seen.add(base.tvdb_id)
-                items.append(
-                    DiscoverItem(
-                        name=base.name,
-                        kind=base.kind,
-                        tvdb_id=base.tvdb_id,
-                        year=base.year,
-                        poster_url=base.poster_url,
-                        overview=base.overview,
-                        is_new=True,
-                        release_date=base.release_date,
-                        status=base.status,
-                    )
-                )
-                if len(items) >= limit:
-                    break
-    items = items[:limit]
+    today = datetime.date.today()
+    since = (today - datetime.timedelta(days=120)).isoformat()
+    field = "primary_release_date" if kind == "movie" else "first_air_date"
+    async with titles.client() as http:
+        items, _total = await _rows(
+            http, f"discover/{titles.section(kind)}", kind, 0, limit,
+            sort_by="popularity.desc", language="en-US", include_adult="false",
+            **{f"{field}.gte": since, f"{field}.lte": today.isoformat(), "vote_count.gte": 10},
+        )
+    items = [DiscoverItem(**{**asdict(item), "is_new": True}) for item in items]
     _cache_put(cache_key, items)
     return items
 
 
-async def title_details(tvdb_id: int, *, kind: str) -> TitleDetails:
-    """Resolve localized title details with TVDB's worldwide movie date.
-
-    The regular search result's generic year may be an earlier country or
-    festival release. Only the extended movie record exposes an explicit
-    Worldwide release row, so it is resolved when the user opens a title and
-    cached with its German translation.
-    """
-    if not is_configured() or not tvdb_id:
+async def title_details(tmdb_id: int, *, kind: str) -> TitleDetails:
+    """A title's English and German names and its release date (a show's first airing)."""
+    if not is_configured() or not tmdb_id:
         return TitleDetails()
-    cache_key = f"details:{kind}:{tvdb_id}"
+    cache_key = f"details:{kind}:{tmdb_id}"
     hit = _DETAIL_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < get_settings().web.cache_ttl_seconds:
         return hit[1]
-    entity = "movies" if kind == "movie" else "series"
-    async with httpx.AsyncClient(base_url=_BASE_URL + "/", timeout=10.0) as client:
-        token = await _login(client)
-        if not token:
-            return TitleDetails()
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async def translation(languages: tuple[str, ...]) -> str | None:
-            for lang in languages:
-                try:
-                    response = await client.get(f"{entity}/{tvdb_id}/translations/{lang}", headers=headers)
-                    if response.status_code != 200:
-                        continue
-                    name = (response.json().get("data") or {}).get("name")
-                except (httpx.HTTPError, ValueError):
-                    continue
-                if name:
-                    return str(name)
-            return None
-
-        async def worldwide_date() -> str | None:
-            if kind != "movie":
-                return None
-            data = await _request_data(client, f"movies/{tvdb_id}/extended", headers=headers)
-            return worldwide_release_date(data) if isinstance(data, dict) else None
-
-        english, german, release_date = await asyncio.gather(
-            translation(("eng",)),
-            translation(("deu", "ger")),
-            worldwide_date(),
-        )
+    record = await titles.details(kind, tmdb_id)
+    if not record:
+        return TitleDetails()
     details = TitleDetails(
-        english=english,
-        german=german,
-        worldwide_release_date=release_date,
+        english=titles.name_of(record) or None,
+        german=titles.german_name(record),
+        worldwide_release_date=titles.date_of(record),
     )
     _DETAIL_CACHE[cache_key] = (time.time(), details)
     return details
 
 
-async def german_title(tvdb_id: int, *, kind: str) -> str | None:
+async def german_title(tmdb_id: int, *, kind: str) -> str | None:
     """Backward-compatible German-title-only lookup."""
-    return (await title_details(tvdb_id, kind=kind)).german
+    return (await title_details(tmdb_id, kind=kind)).german
+
 
 
 def to_dict(item: DiscoverItem) -> dict:
@@ -881,8 +397,8 @@ def is_released(item: DiscoverItem, *, today: datetime.date | None = None) -> bo
     The release *date* is authoritative: anything dated in the future is hidden.
     When no date is available a future year is likewise treated as unreleased,
     and a past year as released. Only for the ambiguous current-year-without-date
-    case do we consult TVDB's status hint as a last resort. This keeps upcoming
-    titles out of Discover even when TVDB's ``status`` is stale or missing.
+    case do we consult the status hint as a last resort. This keeps upcoming
+    titles out of Discover even when ``status`` is stale or missing.
     """
     today = today or datetime.date.today()
     if item.release_date:
@@ -929,7 +445,7 @@ async def _build_feed(kind: str) -> list[DiscoverItem]:
     merged: list[DiscoverItem] = []
     seen: set = set()
     for it in [*new, *browse]:
-        key = (it.tvdb_id, it.name.casefold())
+        key = (it.tmdb_id, it.name.casefold())
         if key in seen:
             continue
         seen.add(key)

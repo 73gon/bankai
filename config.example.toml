@@ -39,14 +39,10 @@ request_timeout_seconds = 30
 interactive_pick = false
 
 [metadata]
-# Optional TheTVDB v4 metadata. When configured, Bankai can expand searches
-# with English/German aliases and find shows without you knowing the year.
-tvdb_enabled = true
-tvdb_api_key = ""
-tvdb_pin = ""
-tvdb_languages = ["deu", "eng"]
-# Optional TMDB v3 API key or v4 read access token. The anime library takes
-# show artwork from it: backdrops, logos, landscape thumbs, season posters.
+# TMDB v3 API key or v4 read access token. Movies & Shows: Discover, Search,
+# the English/German names streams are searched by, the library's episode
+# lists. The anime library takes show artwork from it too: backdrops, logos,
+# landscape thumbs, season posters.
 tmdb_api_key = ""
 
 [transfer]
@@ -100,6 +96,10 @@ thumb_time_seconds = 600
 thumb_width = 960
 # Backdrops, logos, thumbs and season posters from TMDB (metadata.tmdb_api_key).
 artwork_tmdb = true
+# Release groups Discover's publisher filter offers; matched without spaces or punctuation.
+publishers = ["Ironclad", "PHT Mini", "Erai-raws"]
+# Languages Discover's nekobt.to subtitle and audio filters offer (nekobt's codes: de, en, ja, pt-br, es-419).
+nekobt_languages = ["de", "en", "ja"]
 
 [manga]
 # Manga and light novels from nyaa's English literature category, matched to

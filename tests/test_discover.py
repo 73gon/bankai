@@ -1,3 +1,5 @@
+"""Discover and Search on TMDB: titles, people, studios, pages, German names."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
@@ -6,361 +8,178 @@ import httpx
 import pytest
 
 from bankai.config import reset_settings_cache
+from bankai.metadata import tmdb_titles
 from bankai.web import discover
 
 
 @pytest.fixture(autouse=True)
-def _configured_tvdb(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setenv("BANKAI_METADATA__TVDB_ENABLED", "true")
-    monkeypatch.setenv("BANKAI_METADATA__TVDB_API_KEY", "test-key")
+def _configured_tmdb(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("BANKAI_METADATA__TMDB_API_KEY", "test-key")
     reset_settings_cache()
-    discover._CACHE.clear()
-    discover._PERSON_CACHE.clear()
-    discover._DETAIL_CACHE.clear()
-    discover._ENGLISH_TITLE_CACHE.clear()
-    discover._BROWSE_META.clear()
+    for cache in (discover._CACHE, discover._PERSON_CACHE, discover._DETAIL_CACHE, discover._TOTALS):
+        cache.clear()
     yield
-    discover._CACHE.clear()
-    discover._PERSON_CACHE.clear()
-    discover._DETAIL_CACHE.clear()
-    discover._ENGLISH_TITLE_CACHE.clear()
-    discover._BROWSE_META.clear()
+    for cache in (discover._CACHE, discover._PERSON_CACHE, discover._DETAIL_CACHE, discover._TOTALS):
+        cache.clear()
     reset_settings_cache()
 
 
-def _mock_tvdb(
-    monkeypatch: pytest.MonkeyPatch,
-    handler: Callable[[httpx.Request], httpx.Response],
-) -> None:
+def _mock_tmdb(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]) -> None:
     async_client = httpx.AsyncClient
     transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        discover.httpx,
-        "AsyncClient",
-        lambda **kwargs: async_client(transport=transport, **kwargs),
-    )
+    monkeypatch.setattr(tmdb_titles.httpx, "AsyncClient", lambda **kwargs: async_client(transport=transport, **kwargs))
+
+
+def _page(results: list[dict], total: int | None = None) -> httpx.Response:
+    return httpx.Response(200, json={"results": results, "total_results": len(results) if total is None else total})
 
 
 @pytest.mark.asyncio
-async def test_person_suggestions_return_partial_name_matches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_title_search_reads_tmdb_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        assert request.url.path == "/v4/search"
-        assert request.url.params["query"] == "christo"
-        assert request.url.params["type"] == "person"
-        assert request.url.params["limit"] == "8"
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {"tvdb_id": "101", "name": "Christopher Nolan"},
-                    {"tvdb_id": "102", "name": "Christopher Walken"},
-                    {"tvdb_id": "101", "name": "Christopher Nolan"},
-                ]
-            },
+        assert request.url.path == "/3/search/tv"
+        assert request.url.params["query"] == "Modern Family"
+        assert request.url.params["api_key"] == "test-key"
+        return _page([{"id": 1421, "name": "Modern Family", "first_air_date": "2009-09-23", "poster_path": "/p.jpg"}])
+
+    _mock_tmdb(monkeypatch, handler)
+    items = await discover.search("Modern Family", kind="show", limit=10)
+    assert items == [
+        discover.DiscoverItem(
+            name="Modern Family", kind="show", tmdb_id=1421, year=2009,
+            poster_url="https://image.tmdb.org/t/p/w342/p.jpg", release_date="2009-09-23",
         )
-
-    _mock_tvdb(monkeypatch, handler)
-
-    suggestions = await discover.person_suggestions("  christo  ")
-
-    assert [(item.tvdb_id, item.name) for item in suggestions] == [
-        (101, "Christopher Nolan"),
-        (102, "Christopher Walken"),
     ]
 
 
 @pytest.mark.asyncio
-async def test_title_details_prefers_explicit_worldwide_release_year(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_search_page_of_50_joins_tmdb_pages_of_20(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[int] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/movies/123/translations/deu":
-            return httpx.Response(200, json={"data": {"name": "300"}})
-        if request.url.path == "/v4/movies/123/translations/eng":
-            return httpx.Response(200, json={"data": {"name": "Three Hundred"}})
-        if request.url.path == "/v4/movies/123/extended":
-            return httpx.Response(
-                200,
-                json={
-                    "data": {
-                        "year": "2006",
-                        "releases": [
-                            {"country": "United States of America", "date": "2006-12-09", "detail": "Festival"},
-                            {"country": "Worldwide", "date": "2007-03-09", "detail": "Theatrical"},
-                        ],
-                    }
-                },
-            )
-        return httpx.Response(404)
+        number = int(request.url.params["page"])
+        asked.append(number)
+        start = (number - 1) * 20
+        return _page([{"id": i, "title": f"Movie {i}"} for i in range(start, start + 20)], total=1000)
 
-    _mock_tvdb(monkeypatch, handler)
-
-    details = await discover.title_details(123, kind="movie")
-
-    assert details.english == "Three Hundred"
-    assert details.german == "300"
-    assert details.worldwide_release_date == "2007-03-09"
-    assert details.worldwide_year == 2007
+    _mock_tmdb(monkeypatch, handler)
+    result = await discover.search_page("Movie", kind="movie", page=2)
+    # Rows 100..149 are TMDB pages 6, 7 and 8.
+    assert sorted(asked) == [6, 7, 8]
+    assert [item.tmdb_id for item in result.items] == list(range(100, 150))
+    assert result.total == 1000
+    assert result.has_next is True
 
 
 @pytest.mark.asyncio
-async def test_studio_search_uses_tvdb_company_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_browse_stops_at_tmdbs_last_page(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/search":
-            assert request.url.params["type"] == "company"
-            assert request.url.params["query"] == "Disney"
-            return httpx.Response(
-                200,
-                json={"data": [{"tvdb_id": "123", "name": "Walt Disney Studios"}]},
-            )
-        assert request.url.path == "/v4/movies/filter"
-        assert request.url.params["company"] == "123"
-        assert request.url.params["sort"] == "score"
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": 789,
-                        "name": "Inside Out",
-                        "year": "2015",
-                        "image": "https://artworks.thetvdb.com/posters/inside-out.jpg",
-                    }
-                ]
-            },
-        )
+        assert request.url.path == "/3/discover/movie"
+        assert request.url.params["sort_by"] == "popularity.desc"
+        number = int(request.url.params["page"])
+        return _page([{"id": number * 100 + i, "title": "x"} for i in range(20)], total=900_000)
 
-    _mock_tvdb(monkeypatch, handler)
-
-    items = await discover.search("Disney", kind="movie", search_by="studio")
-
-    assert [(item.name, item.tvdb_id, item.year) for item in items] == [("Inside Out", 789, 2015)]
-
-
-@pytest.mark.asyncio
-async def test_studio_search_resolves_original_script_to_english(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/search":
-            return httpx.Response(
-                200,
-                json={"data": [{"tvdb_id": "123", "name": "Studio Ghibli"}]},
-            )
-        if request.url.path == "/v4/movies/filter":
-            return httpx.Response(
-                200,
-                json={
-                    "data": [
-                        {
-                            "id": 276,
-                            "name": "千と千尋の神隠し",
-                            "originalLanguage": "jpn",
-                            "year": "2001",
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/v4/movies/276/translations/eng":
-            return httpx.Response(200, json={"data": {"name": "Spirited Away"}})
-        return httpx.Response(404)
-
-    _mock_tvdb(monkeypatch, handler)
-
-    items = await discover.search("Studio Ghibli", kind="movie", search_by="studio")
-
-    assert [(item.name, item.tvdb_id, item.year) for item in items] == [
-        ("Spirited Away", 276, 2001)
-    ]
-
-
-@pytest.mark.asyncio
-async def test_title_search_prefers_inline_english_translation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/search":
-            return httpx.Response(
-                200,
-                json={
-                    "data": [
-                        {
-                            "id": 573,
-                            "name": "ハウルの動く城",
-                            "name_translated": "Howl's Moving Castle",
-                            "originalLanguage": "jpn",
-                            "year": "2004",
-                        }
-                    ]
-                },
-            )
-        return httpx.Response(404)
-
-    _mock_tvdb(monkeypatch, handler)
-
-    items = await discover.search("Howl", kind="movie")
-
-    assert [item.name for item in items] == ["Howl's Moving Castle"]
-
-
-@pytest.mark.asyncio
-async def test_person_search_combines_cast_and_director_movies(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/search":
-            assert request.url.params["type"] == "person"
-            assert request.url.params["query"] == "Anne Hathaway"
-            return httpx.Response(
-                200,
-                json={"data": [{"tvdb_id": "456", "name": "Anne Hathaway"}]},
-            )
-        if request.url.path == "/v4/people/456/extended":
-            return httpx.Response(
-                200,
-                json={
-                    "data": {
-                        "characters": [
-                            {
-                                "movieId": 790,
-                                "peopleType": "Actor",
-                                "movie": {"name": "The Dark Knight Rises", "year": "2012"},
-                            },
-                            {
-                                "movieId": 789,
-                                "peopleType": "Actor",
-                                "movie": {"name": "Interstellar", "year": "2014", "image": "/posters/interstellar.jpg"},
-                            },
-                        ]
-                    }
-                },
-            )
-        return httpx.Response(404)
-
-    _mock_tvdb(monkeypatch, handler)
-
-    items = await discover.search("Anne Hathaway", kind="movie", search_by="person")
-
-    assert [item.name for item in items] == ["The Dark Knight Rises", "Interstellar"]
-    assert items[1].tvdb_id == 789
-    assert items[1].poster_url == "https://artworks.thetvdb.com/posters/interstellar.jpg"
-
-
-@pytest.mark.asyncio
-async def test_person_search_deduplicates_multiple_credits_for_one_movie(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        if request.url.path == "/v4/search":
-            return httpx.Response(
-                200,
-                json={"data": [{"tvdb_id": "200", "name": "Christopher Nolan"}]},
-            )
-        if request.url.path == "/v4/people/200/extended":
-            return httpx.Response(
-                200,
-                json={
-                    "data": {
-                        "characters": [
-                            {"movieId": 100, "movie": {"name": "Oppenheimer", "year": "2023"}},
-                            {"movieId": 100, "movie": {"name": "Oppenheimer", "year": "2023"}},
-                            {"movieId": 101, "movie": {"name": "Tenet", "year": "2020"}},
-                        ]
-                    }
-                },
-            )
-        return httpx.Response(404)
-
-    _mock_tvdb(monkeypatch, handler)
-
-    items = await discover.search("Christopher Nolan", kind="movie", search_by="person")
-
-    assert [(item.tvdb_id, item.name) for item in items] == [(100, "Oppenheimer"), (101, "Tenet")]
-
-
-@pytest.mark.asyncio
-async def test_title_search_page_uses_fixed_50_row_offset(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        assert request.url.path == "/v4/search"
-        assert request.url.params["offset"] == "100"
-        assert request.url.params["limit"] == "50"
-        return httpx.Response(
-            200,
-            json={
-                "data": [{"id": 101, "name": "Result 101", "year": "2024"}],
-                "links": {"total_items": 10_000},
-            },
-        )
-
-    _mock_tvdb(monkeypatch, handler)
-
-    result = await discover.search_page("Result", kind="movie", page=2)
-
-    assert result.page_size == 50
-    assert [item.name for item in result.items] == ["Result 101"]
+    _mock_tmdb(monkeypatch, handler)
+    result = await discover.browse_page("movie", page=0, page_size=50)
+    assert len(result.items) == 50
     assert result.total == 10_000
-    assert result.has_next is True
 
 
 @pytest.mark.asyncio
-async def test_browse_page_translates_fixed_ui_page_to_provider_page(monkeypatch: pytest.MonkeyPatch) -> None:
-    def records(start: int, count: int) -> list[dict[str, object]]:
-        return [{"id": i, "name": f"Movie {i}", "year": "2024"} for i in range(start, start + count)]
-
+async def test_person_search_combines_cast_and_directing_most_popular_first(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        assert request.url.path == "/v4/movies"
-        provider_page = int(request.url.params["page"])
-        start = provider_page * 500
-        return httpx.Response(
-            200,
-            json={
-                "data": records(start, 500),
-                "links": {"page_size": 500, "total_items": 12_345},
-            },
-        )
+        if request.url.path == "/3/search/person":
+            return _page([{"id": 7, "name": "Christopher Nolan"}, {"id": 8, "name": "Christopher Nolan Jr"}])
+        assert request.url.path == "/3/person/7/movie_credits"
+        return httpx.Response(200, json={
+            "cast": [{"id": 1, "title": "Cameo", "popularity": 1}],
+            "crew": [
+                {"id": 2, "title": "Oppenheimer", "job": "Director", "popularity": 90},
+                {"id": 2, "title": "Oppenheimer", "job": "Writer", "popularity": 90},
+                {"id": 3, "title": "Catering", "job": "Caterer", "popularity": 99},
+            ],
+        })
 
-    _mock_tvdb(monkeypatch, handler)
-
-    result = await discover.browse_page("movie", page=11)
-
-    assert result.page_size == 50
-    assert result.total == 12_345
-    assert result.has_next is True
-    assert [item.tvdb_id for item in result.items] == list(range(550, 600))
+    _mock_tmdb(monkeypatch, handler)
+    items = await discover.search("Christopher Nolan", kind="movie", search_by="person", limit=10)
+    assert [(item.tmdb_id, item.name) for item in items] == [(2, "Oppenheimer"), (1, "Cameo")]
 
 
 @pytest.mark.asyncio
-async def test_browse_page_honors_adjustable_page_size(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_studio_search_asks_for_the_films_of_the_named_companies(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v4/login":
-            return httpx.Response(200, json={"data": {"token": "token"}})
-        return httpx.Response(
-            200,
-            json={
-                "data": [{"id": i, "name": f"Movie {i}", "year": "2024"} for i in range(500)],
-                "links": {"page_size": 500, "total_items": 10_000},
-            },
-        )
+        if request.url.path == "/3/search/company":
+            return _page([{"id": 9, "name": "Pixar Something"}, {"id": 3, "name": "Pixar"}])
+        assert request.url.path == "/3/discover/movie"
+        assert request.url.params["with_companies"] == "3|9"
+        return _page([{"id": 12, "title": "Finding Nemo"}])
 
-    _mock_tvdb(monkeypatch, handler)
+    _mock_tmdb(monkeypatch, handler)
+    items = await discover.search("Pixar", kind="movie", search_by="studio", limit=10)
+    assert [item.name for item in items] == ["Finding Nemo"]
 
-    result = await discover.browse_page("movie", page=2, page_size=100)
 
-    assert result.page_size == 100
-    assert [item.tvdb_id for item in result.items] == list(range(200, 300))
+@pytest.mark.asyncio
+async def test_title_details_give_the_german_name_germanys_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/3/movie/5"
+        return httpx.Response(200, json={
+            "id": 5, "title": "The Platform", "release_date": "2019-11-08",
+            "translations": {"translations": [
+                {"iso_639_1": "de", "iso_3166_1": "AT", "data": {"title": "Der Schacht (AT)"}},
+                {"iso_639_1": "de", "iso_3166_1": "DE", "data": {"title": "Der Schacht"}},
+            ]},
+        })
+
+    _mock_tmdb(monkeypatch, handler)
+    details = await discover.title_details(5, kind="movie")
+    assert (details.english, details.german, details.worldwide_year) == ("The Platform", "Der Schacht", 2019)
+
+
+@pytest.mark.asyncio
+async def test_person_suggestions_drop_repeated_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _page([{"id": 1, "name": "Chris Evans"}, {"id": 2, "name": "chris  evans"}, {"id": 3, "name": "Chris Pratt"}])
+
+    _mock_tmdb(monkeypatch, handler)
+    names = [row.name for row in await discover.person_suggestions("Chris")]
+    assert names == ["Chris Evans", "Chris Pratt"]
+
+
+@pytest.mark.asyncio
+async def test_a_show_comes_with_every_season_in_appended_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        append = request.url.params.get("append_to_response", "")
+        if append.startswith("translations"):
+            return httpx.Response(200, json={
+                "id": 1, "name": "Show", "first_air_date": "2009-09-23", "status": "Ended",
+                "external_ids": {"tvdb_id": 95011},
+                "seasons": [{"season_number": n, "episode_count": 2} for n in range(0, 23)],
+            })
+        numbers = [int(part.split("/")[1]) for part in append.split(",")]
+        assert len(numbers) <= 20
+        return httpx.Response(200, json={
+            f"season/{n}": {"episodes": [{"episode_number": e, "name": f"S{n}E{e}", "air_date": "2010-01-01"} for e in (1, 2)]}
+            for n in numbers
+        })
+
+    _mock_tmdb(monkeypatch, handler)
+    show = await tmdb_titles.show(1)
+    assert show is not None
+    assert len(show["episodes"]) == 46
+    assert show["episodes"][-1] == tmdb_titles.Episode(season=22, episode=2, name="S22E2", aired="2010-01-01")
+    assert (show["status"], show["tvdb_id"], show["year"]) == ("Ended", 95011, 2009)
+
+
+def test_a_search_of_all_kinds_takes_each_rows_own_kind_and_leaves_people_out():
+    from bankai.web import discover
+
+    rows = [
+        {"id": 1, "media_type": "movie", "title": "Avatar", "release_date": "2009-12-15"},
+        {"id": 2, "media_type": "tv", "name": "Avatar: The Last Airbender", "first_air_date": "2005-02-21"},
+        {"id": 3, "media_type": "person", "name": "James Cameron"},
+    ]
+    items = discover._items(rows, "all")
+    assert [(item.tmdb_id, item.kind) for item in items] == [(1, "movie"), (2, "show")]
+    assert discover._search_path("all") == "search/multi"
+    assert discover._search_path("show") == "search/tv"

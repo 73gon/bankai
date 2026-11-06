@@ -291,6 +291,8 @@ def encoded_response(encoded: tuple[bytes | None, bytes | None, str], request: A
 # Which snapshots a write under a path can change. Anything not listed can
 # change anything.
 _WRITE_TAGS: tuple[tuple[str, frozenset[str]], ...] = (
+    # The UI's own settings (a divider dragged) change no tab's data.
+    ("/api/ui/", frozenset()),
     # A review decision changes what is held, not the library: rebuilding the
     # library grid for it cost seconds of CPU after every Discard. Deleted
     # files reach the library through its own inputs (the library walk).

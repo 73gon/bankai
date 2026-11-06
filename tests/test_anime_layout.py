@@ -783,3 +783,18 @@ def test_arcs_move_the_files_name_their_seasons_and_carry_the_files_records(root
     assert _xml((roots.anime / new14).with_suffix(".nfo").read_text(encoding="utf-8")).findtext("episode") == "14"
     # Its encode follows it: not listed again.
     assert str(roots.anime / new14) in encode_library._state()["encoded"]
+
+
+def test_the_show_nfo_carries_its_approved_age_rating_and_tmdb_id_only_once_approved(titan) -> None:
+    from bankai.web import age_ratings
+
+    row = _titan_store().collections[1]
+    nfo = _xml(anime_layout.tvshow_nfo(row, AOT))
+    assert nfo.find("mpaa") is None and [item.get("type") for item in nfo.findall("uniqueid")] == ["anilist"]
+
+    store = age_ratings.load()
+    store["written"]["anime:1"] = {"rating": "FSK-16", "tmdb_id": 1429, "at": 0}
+    age_ratings.save(store)
+    nfo = _xml(anime_layout.tvshow_nfo(row, AOT))
+    assert nfo.findtext("mpaa") == "FSK-16"
+    assert {item.get("type"): item.text for item in nfo.findall("uniqueid")} == {"anilist": str(S1), "tmdb": "1429"}

@@ -2,7 +2,7 @@
  * zon faces.
  *
  * Licht, Licht Sans and Licht Mono are zon's own faces and are still in development. They are NOT
- * vendored: they are requested from the app's own origin at /licht/fonts/*.woff2 and proxied
+ * vendored: they are requested from the app's own origin at /fonts/licht/*.woff2 and proxied
  * server-side to zon.sh/licht/fonts, so every visit gets the current release and the
  * visitor's browser never talks to a third-party host. Use `zonFonts()` from
  * `@zonsh/ui/vite` (or an equivalent rewrite on your host) to set up the proxy.

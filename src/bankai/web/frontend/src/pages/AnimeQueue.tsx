@@ -4,7 +4,16 @@ import { toast } from '@/lib/toast';
 import { animeQueuePath, api, recall, type AnimeQueuePage, type Job } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/zon/ui/alert-dialog';
 import { Button } from '@/zon/ui/button';
+import { Checkbox } from '@/zon/ui/checkbox';
 import { Empty, EmptyActions, EmptyDescription, EmptyTitle } from '@/zon/ui/empty';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/zon/ui/input-group';
 import { Spinner } from '@/zon/ui/spinner';
@@ -12,26 +21,12 @@ import { Switch } from '@/zon/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
 import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
 import { AnimePoster } from '@/components/AnimePoster';
+import { formatBytes } from '@/lib/utils';
 import { cn } from '@/zon/lib/cn';
 
 function formatTime(value: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : '—';
 }
-
-// The phase narrows "running" to the stage the worker last announced, so a
-// torrent still downloading reads differently from a copy into the library.
-const PHASE_DOT: Record<string, string> = {
-  queued: 'bg-warning',
-  downloading: 'bg-torrent',
-  complete: 'bg-starting',
-  transferring: 'bg-transfer',
-  deleting: 'bg-repack',
-  done: 'bg-success',
-  running: 'bg-info',
-  stopped: 'bg-warning',
-  failed: 'bg-destructive',
-  cancelled: 'bg-destructive',
-};
 
 function phaseVariant(phase: string) {
   if (phase === 'done') return 'success' as const;
@@ -42,6 +37,26 @@ function phaseVariant(phase: string) {
   if (phase === 'transferring') return 'transfer' as const;
   if (phase === 'deleting') return 'repack' as const;
   return 'info' as const;
+}
+
+/** A checkbox inside a table: a real button, so the click lands. */
+function Tick({ checked, indeterminate, label, onChange }: {
+  checked: boolean;
+  indeterminate?: boolean;
+  label: string;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <Checkbox
+      nativeButton
+      render={<button type='button' />}
+      className='align-middle'
+      aria-label={label}
+      checked={checked}
+      indeterminate={indeterminate}
+      onCheckedChange={(on) => onChange(on)}
+    />
+  );
 }
 
 function titleCase(value: string) {
@@ -55,6 +70,13 @@ function titleCase(value: string) {
  * hands over to the transfer's own byte progress. The label says which number
  * it is, since the colour alone should not have to carry that.
  */
+/** "4 min", "2 h 10 min": a download's time left. */
+function eta(seconds: number) {
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+  return `${Math.floor(seconds / 3600)} h ${Math.round((seconds % 3600) / 60)} min`;
+}
+
 function JobProgress({ job }: { job: Job }) {
   const transferring =
     job.phase === 'transferring' && job.transfer_percent !== null && job.transfer_percent !== undefined;
@@ -62,9 +84,15 @@ function JobProgress({ job }: { job: Job }) {
   const percent = Math.max(0, Math.min(100, value));
   return (
     <div className='flex min-w-36 flex-col gap-2'>
-      <span className='flex items-center gap-1.5 font-mono text-xs tabular-nums'>
+      <span className='flex items-center gap-1.5 whitespace-nowrap font-mono text-xs tabular-nums'>
         {transferring && <span className='text-transfer'>Transfer</span>}
         <span>{Math.round(percent)}%</span>
+        {/* Speed and time left while downloading, as qBittorrent's tab shows them. */}
+        {!transferring && job.download_speed ? (
+          <span className='text-muted-foreground'>
+            {formatBytes(job.download_speed)}/s{job.download_eta && job.download_eta < 8_640_000 ? ` · ${eta(job.download_eta)}` : ''}
+          </span>
+        ) : null}
       </span>
       <div className='h-1.5 overflow-hidden rounded-full bg-secondary'>
         <div
@@ -119,6 +147,10 @@ export default function AnimeQueue() {
   const [sort, setSort] = useState<SortState<QueueSortKey> | null>(null);
   const [loading, setLoading] = useState(() => firstView() === undefined);
   const [busy, setBusy] = useState<string | null>(null);
+  // Ticked jobs, by id: only those on the page as it is now count.
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const pageSize = 100;
 
@@ -133,6 +165,20 @@ export default function AnimeQueue() {
   useEffect(() => {
     setPage(0);
   }, [search, status, showCompleted]);
+
+  // Another view, other rows: ticks never carry over to jobs out of sight.
+  useEffect(() => {
+    setPicked(new Set());
+  }, [search, status, showCompleted, page, sort]);
+
+  // A job that left the page (finished, removed elsewhere) is no longer ticked.
+  useEffect(() => {
+    setPicked((current) => {
+      const shown = new Set(jobs.map((job) => job.id));
+      const kept = [...current].filter((id) => shown.has(id));
+      return kept.length === current.size ? current : new Set(kept);
+    });
+  }, [jobs]);
 
   // Hiding completed jobs while filtered to them would leave an empty table
   // with no visible reason why.
@@ -223,12 +269,45 @@ export default function AnimeQueue() {
     }
   }
 
+  const pickedJobs = jobs.filter((job) => picked.has(job.id));
+  const pickedRunning = pickedJobs.filter((job) => job.status === 'running').length;
+  const allPicked = jobs.length > 0 && pickedJobs.length === jobs.length;
+
+  function pick(id: string, on: boolean) {
+    setPicked((current) => {
+      const next = new Set(current);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  async function deletePicked() {
+    const targets = pickedJobs;
+    setDeleting(true);
+    const failed: string[] = [];
+    // A few at a time: each delete may stop a process or remove a torrent.
+    for (let start = 0; start < targets.length; start += 4) {
+      const results = await Promise.allSettled(targets.slice(start, start + 4).map((job) => api.deleteJob(job.id)));
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') failed.push(targets[start + index].title);
+      });
+    }
+    const removed = targets.length - failed.length;
+    if (removed) toast.success(`${removed} job${removed === 1 ? '' : 's'} deleted`);
+    if (failed.length) toast.error(`${failed.length} could not be deleted: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}`);
+    setPicked(new Set());
+    setConfirmDelete(false);
+    setDeleting(false);
+    await load(true);
+  }
+
   return (
     <div className='flex flex-col gap-6'>
-      <div className='flex flex-wrap items-end justify-between gap-3'>
-        <div className='flex flex-col gap-1'>
+      <div className='flex flex-wrap items-center justify-between gap-3'>
+        <div className='flex min-w-0 items-baseline gap-3'>
           <h1 className='font-heading text-3xl font-light'>Queue</h1>
-          <p className='text-sm text-muted-foreground'>Only Erai-raws and manually selected Anime downloads appear here.</p>
+          <p className='truncate text-sm text-muted-foreground'>Erai-raws and hand-picked anime downloads</p>
         </div>
         <div className='flex items-center gap-3'>
           <label className='flex items-center gap-2 whitespace-nowrap text-sm text-foreground'>
@@ -318,14 +397,23 @@ export default function AnimeQueue() {
           ) : (
             <Table variant='plain' className='min-w-[900px] table-fixed'>
               <colgroup>
+                <col className='w-10' />
                 <col />
                 <col className='w-28' />
-                <col className='w-52' />
+                <col className='w-80' />
                 <col className='w-32' />
-                <col className='w-20' />
+                <col className='w-24' />
               </colgroup>
               <TableHeader>
                 <TableRow>
+                  <TableHead>
+                    <Tick
+                      label='Select every job on this page'
+                      checked={allPicked}
+                      indeterminate={pickedJobs.length > 0 && !allPicked}
+                      onChange={(on) => setPicked(on ? new Set(jobs.map((job) => job.id)) : new Set())}
+                    />
+                  </TableHead>
                   <SortHeader label='Title' column='title' sort={sort} onSort={toggleSort} />
                   <SortHeader label='Status' column='status' sort={sort} onSort={toggleSort} />
                   <SortHeader label='Progress' column='progress' sort={sort} onSort={toggleSort} />
@@ -336,7 +424,10 @@ export default function AnimeQueue() {
               </TableHeader>
               <TableBody>
                 {jobs.map((job) => (
-                  <TableRow key={job.id} className='data-row'>
+                  <TableRow key={job.id} className='data-row' data-selected={picked.has(job.id) ? '' : undefined}>
+                    <TableCell>
+                      <Tick label={'Select ' + job.title} checked={picked.has(job.id)} onChange={(on) => pick(job.id, on)} />
+                    </TableCell>
                     <TableCell>
                       <div className='flex items-center gap-2.5'>
                         <AnimePoster url={job.poster_url} title={job.series_title || job.title} className='w-8 shrink-0 rounded' />
@@ -373,30 +464,55 @@ export default function AnimeQueue() {
         </div>
       </div>
 
-      {/* Aggregates and paging share the footer, as on the library page, so the
-          top of the page belongs to the queue itself. */}
-      <footer className='flex shrink-0 flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-border pt-2.5 text-xs text-muted-foreground'>
-        <div className='flex flex-wrap items-center gap-x-5 gap-y-1'>
-          <span>
-            <span className='font-mono tabular-nums text-foreground'>{total.toLocaleString()}</span>
-            {' '}{showCompleted ? 'historical' : 'unfinished'} job{total === 1 ? '' : 's'}
-            {filtered ? ' matching the filter' : ''}
+      {/* Sticks to the bottom of the view while jobs are ticked; it sits below the table, so ticking never moves a row. */}
+      {pickedJobs.length > 0 && (
+        <div className='sticky bottom-6 z-10 mx-auto flex flex-wrap items-center gap-2 rounded-control surface-container px-3 py-2 shadow-overlay transition-[opacity,translate] duration-150 ease-out starting:translate-y-2 starting:opacity-0'>
+          <span className='text-xs text-muted-foreground'>
+            <span className='font-mono tabular-nums text-foreground'>{pickedJobs.length}</span> job{pickedJobs.length === 1 ? '' : 's'} selected
           </span>
-          {STATUS_ORDER.filter((name) => counts[name]).map((name) => (
-            <span key={name} className='flex items-center gap-1.5'>
-              <span className={cn('size-1.5 rounded-full', PHASE_DOT[name] ?? 'bg-muted-foreground')} />
-              <span className='font-mono tabular-nums text-foreground'>{counts[name]}</span> {name}
-            </span>
-          ))}
+          <Button size='sm' variant='destructive' disabled={deleting} onClick={() => setConfirmDelete(true)}>
+            <Trash2 data-icon='inline-start' /> Delete
+          </Button>
+          <Button size='sm' variant='ghost' onClick={() => setPicked(new Set())}>
+            <X data-icon='inline-start' /> Clear
+          </Button>
         </div>
-        {total > pageSize && (
-          <div className='flex items-center gap-2'>
-            <span className='font-mono text-[0.68rem] tabular-nums'>Page {page + 1} of {Math.ceil(total / pageSize)}</span>
-            <Button size='sm' variant='secondary' disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}><ChevronLeft data-icon='inline-start' /> Previous</Button>
-            <Button size='sm' variant='secondary' disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight data-icon='inline-end' /></Button>
-          </div>
-        )}
-      </footer>
+      )}
+
+      <AlertDialog open={confirmDelete} onOpenChange={(open) => !open && !deleting && setConfirmDelete(false)}>
+        <AlertDialogContent size='default'>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {pickedJobs.length} job{pickedJobs.length === 1 ? '' : 's'}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              They leave the queue for good, and their torrents leave qBittorrent with them (unless another
+              job still needs one): a deleted job is a download given up. Files already in the library are
+              never touched.
+              {pickedRunning > 0 && ` ${pickedRunning} ${pickedRunning === 1 ? 'is' : 'are'} running and will be stopped.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className='max-h-48 overflow-y-auto rounded-item border border-field-edge bg-field-surface px-3 py-2 text-sm text-foreground'>
+            {pickedJobs.map((job) => (
+              <li key={job.id} className='truncate' title={job.title}>{job.title}</li>
+            ))}
+          </ul>
+          <AlertDialogFooter>
+            <Button variant='secondary' disabled={deleting} onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button variant='destructive' disabled={deleting || pickedJobs.length === 0} onClick={() => void deletePicked()}>
+              {deleting ? <Spinner data-icon='inline-start' /> : <Trash2 data-icon='inline-start' />}
+              {deleting ? 'Deleting…' : 'Delete'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Paging only: the status chips above already count the jobs. */}
+      {total > pageSize && (
+        <footer className='flex shrink-0 items-center justify-end gap-2 border-t border-border pt-2.5 text-xs text-muted-foreground'>
+          <span className='font-mono text-[0.68rem] tabular-nums'>Page {page + 1} of {Math.ceil(total / pageSize)}</span>
+          <Button size='sm' variant='secondary' disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}><ChevronLeft data-icon='inline-start' /> Previous</Button>
+          <Button size='sm' variant='secondary' disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight data-icon='inline-end' /></Button>
+        </footer>
+      )}
     </div>
   );
 }

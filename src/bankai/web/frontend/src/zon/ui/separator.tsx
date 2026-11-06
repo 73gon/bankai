@@ -3,7 +3,7 @@ import type * as React from "react";
 import { sx } from "@/zon/lib/cn";
 
 export interface SeparatorProps extends BaseSeparator.Props {
-  /** A short mono label centred on a horizontal rule, e.g. `"or"` or `"02 — Process"`. */
+  /** A short mono label centred on a horizontal rule, e.g. `"or"` or `"02 — Chapters"`. */
   label?: React.ReactNode;
 }
 
@@ -11,7 +11,7 @@ export interface SeparatorProps extends BaseSeparator.Props {
  * Separator — the hairline rule, which is the default way to group content here.
  *
  * `border/60`, 1px, horizontal or vertical. An optional mono label sits in the middle of a
- * horizontal rule. The rule people break: reaching for a box (a `Card` or `Surface`) where
+ * horizontal rule. The rule people break: reaching for a box (a boxed `Card`) where
  * a rule and whitespace would do. Use this first.
  */
 export function Separator({ orientation = "horizontal", label, className, ...props }: SeparatorProps) {

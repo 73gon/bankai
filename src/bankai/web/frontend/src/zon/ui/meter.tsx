@@ -2,11 +2,26 @@ import { Meter as BaseMeter } from "@base-ui/react/meter";
 import type * as React from "react";
 import { sx } from "@/zon/lib/cn";
 
+const toneFill = {
+  default: "bg-foreground",
+  success: "bg-success",
+  warning: "bg-warning",
+  info: "bg-info",
+  destructive: "bg-destructive",
+} as const;
+
+export type MeterTone = keyof typeof toneFill;
+
 export interface MeterProps extends BaseMeter.Root.Props {
   /** A visible mono label above the track. Without one, pass `aria-label`. */
   label?: React.ReactNode;
   /** Show the formatted value (e.g. `64%`) at the end of the label row. */
   showValue?: boolean;
+  /**
+   * The indicator's colour. A status, or a function of the value that returns one — a disk that
+   * turns amber past 75% and red past 90%. Say the state in the label or value too.
+   */
+  tone?: MeterTone | ((value: number) => MeterTone);
 }
 
 /**
@@ -14,12 +29,15 @@ export interface MeterProps extends BaseMeter.Root.Props {
  *
  * The same recessed 6px track and `--foreground` indicator as `Progress`, with an optional
  * mono label and value. The rule people break: using it for work in progress. Something that
- * will finish is a `Progress`. Red is not a "high" colour — the meter stays monochrome.
+ * will finish is a `Progress`. Red is not a "high" colour: give the meter a `tone` only when the
+ * value crosses a line that matters (nearly full, over budget), and say so in words as well.
  */
-export function Meter({ label, showValue = false, className, children, ...props }: MeterProps) {
+export function Meter({ label, showValue = false, tone = "default", className, children, ...props }: MeterProps) {
+  const resolved = typeof tone === "function" ? tone(props.value) : tone;
   return (
     <BaseMeter.Root
       data-slot="meter"
+      data-tone={resolved}
       className={sx("grid w-full grid-cols-[1fr_auto] items-baseline gap-x-3 gap-y-2", className)}
       {...props}
     >
@@ -43,7 +61,7 @@ export function Meter({ label, showValue = false, className, children, ...props 
       >
         <BaseMeter.Indicator
           data-slot="meter-indicator"
-          className="block h-full rounded-full bg-foreground transition-[width] duration-(--duration) ease-(--ease)"
+          className={sx("block h-full rounded-full transition-[width,background-color] duration-(--duration) ease-(--ease)", toneFill[resolved])}
         />
       </BaseMeter.Track>
       {children}

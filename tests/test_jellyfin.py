@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -72,13 +73,23 @@ def test_changed_episodes_seasons_and_shows_are_refreshed_by_their_path(anime, m
 
 
 @respx.mock
-def test_an_episode_jellyfin_has_not_scanned_yet_is_left_to_its_first_scan(anime, monkeypatch):
+def test_a_video_jellyfin_has_not_scanned_yet_has_its_nearest_known_folder_refreshed(anime, monkeypatch):
+    """Its watcher misses files written over /mnt/g: Spider-Man: Brand New Day waited for a scan."""
     _configure(monkeypatch)
     refresh = _jellyfin()
-    jellyfin.queue([anime / "Bleach" / "Season 01" / "Bleach - S01E99.mkv"])
+    monkeypatch.setattr(jellyfin, "_local", lambda location: anime.parent / "movies" if "movies" in location else None)
+    jellyfin.queue([
+        anime / "Bleach" / "Season 01" / "Bleach - S01E99.mkv",
+        anime / "Bleach" / "Season 01" / "Bleach - S01E98.mkv",
+        anime.parent / "movies" / "New Film (2026)" / "New Film (2026).mkv",
+    ])
 
-    assert asyncio.run(jellyfin.flush())["not_in_jellyfin"] == 1
-    assert refresh.call_count == 0 and jellyfin._load() == []
+    result = asyncio.run(jellyfin.flush())
+    assert result["not_in_jellyfin"] == 3
+    # The season once for both episodes (recursively, which finds them), the movie library for the film.
+    calls = [(call.request.url.path.split("/")[2], call.request.url.params.get("Recursive")) for call in refresh.calls]
+    assert calls == [("season1", "true"), ("movies", "true")]
+    assert jellyfin._load() == []
 
 
 @respx.mock
@@ -88,7 +99,7 @@ def test_with_jellyfin_unreachable_the_queue_waits(anime, monkeypatch):
     jellyfin.queue([anime / "Bleach" / "Season 01" / "Bleach - S01E02.mkv"])
 
     assert asyncio.run(jellyfin.flush())["failed"] == 1
-    assert jellyfin._load() == ["Bleach/Season 01/Bleach - S01E02.mkv"]
+    assert [row["path"] for row in jellyfin._load()] == [str(anime / "Bleach" / "Season 01" / "Bleach - S01E02.mkv")]
     assert jellyfin.last_error["message"] == "ConnectTimeout"
 
 
@@ -119,7 +130,58 @@ def test_a_new_episode_picture_is_queued_for_jellyfin(anime, monkeypatch):
     assert queued == [video]
 
 
-def test_queue_file_is_plain_relative_paths(anime, monkeypatch):
+def test_queue_file_is_paths_and_whether_to_probe_again(anime, monkeypatch):
     _configure(monkeypatch)
-    jellyfin.queue([anime / "Bleach" / "Season 01" / "Bleach - S01E01.mkv", anime.parent / "elsewhere.mkv"])
-    assert json.loads(jellyfin._queue_path().read_text()) == ["Bleach/Season 01/Bleach - S01E01.mkv"]
+    video = anime / "Bleach" / "Season 01" / "Bleach - S01E01.mkv"
+    jellyfin.queue([video, "relative.mkv"])
+    jellyfin.queue([video], reprobe=True)  # a second ask for a probe is kept
+    assert json.loads(jellyfin._queue_path().read_text()) == [{"path": str(video), "reprobe": True}]
+
+
+def test_an_earlier_queue_of_anime_paths_is_read(anime):
+    jellyfin._save(["Bleach/Season 01"])  # type: ignore[list-item]
+    assert jellyfin._load() == [{"path": str(anime / "Bleach" / "Season 01"), "reprobe": False}]
+
+
+@respx.mock
+def test_a_video_written_anew_is_probed_again_and_its_old_subtitles_go(anime, monkeypatch, tmp_path):
+    """Its tracks are numbered anew; Jellyfin's old list and extracted subtitles point at others."""
+    _configure(monkeypatch)
+    refresh = _jellyfin()
+    data = tmp_path / "jellyfin"
+    item = "2e36d62f16c097c827d9d9bc5bab8d81"
+    extracted = data / "data" / "subtitles" / "2e" / "2e36d62f-16c0-97c8-27d9-d9bc5bab8d81"
+    extracted.mkdir(parents=True)
+    (extracted / "20.srt").write_text("old")
+    monkeypatch.setattr(jellyfin, "_local", lambda location: data if location == "C:\\Jellyfin" else None)
+    respx.get(f"{URL}/System/Info").mock(return_value=httpx.Response(200, json={"ProgramDataPath": "C:\\Jellyfin"}))
+    respx.get(f"{URL}/Items").mock(return_value=httpx.Response(200, json={"Items": [
+        {"Id": item, "Path": "G:\\media\\shows_anime\\Bleach\\Season 01\\Bleach - S01E01.mkv"},
+    ]}))
+
+    jellyfin.queue([anime / "Bleach" / "Season 01" / "Bleach - S01E01.mkv"], reprobe=True)
+    assert asyncio.run(jellyfin.flush())["refreshed"] == 1
+    assert refresh.calls[0].request.url.params["MetadataRefreshMode"] == "FullRefresh"
+    assert refresh.calls[0].request.url.params["ReplaceAllMetadata"] == "false"
+    assert not extracted.exists()
+
+
+@respx.mock
+def test_movies_and_shows_on_a_windows_drive_are_found_too(anime, monkeypatch):
+    _configure(monkeypatch)
+    respx.get(f"{URL}/Library/VirtualFolders").mock(return_value=httpx.Response(200, json=[
+        {"Name": "Filme", "ItemId": "movies", "CollectionType": "movies", "Locations": ["E:\\media\\movies"]}, LIBRARY,
+    ]))
+
+    def items(request):
+        if request.url.params["ParentId"] == "movies":
+            return httpx.Response(200, json={"Items": [{"Id": "film", "Path": "E:\\media\\movies\\Memento (2000)\\Memento (2000).mkv"}]})
+        return httpx.Response(200, json={"Items": ITEMS})
+
+    respx.get(f"{URL}/Items").mock(side_effect=items)
+    respx.get(f"{URL}/System/Info").mock(return_value=httpx.Response(200, json={}))
+    refresh = respx.post(url__regex=rf"{URL}/Items/\w+/Refresh").mock(return_value=httpx.Response(204))
+
+    jellyfin.queue([Path("/mnt/e/media/movies/Memento (2000)/Memento (2000).mkv")], reprobe=True)
+    assert asyncio.run(jellyfin.flush())["refreshed"] == 1
+    assert refresh.calls[0].request.url.path == "/Items/film/Refresh"

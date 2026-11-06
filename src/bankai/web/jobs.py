@@ -491,6 +491,10 @@ _HEVC_CHECK_ENTRIES = 3
 # with German looked for, a few AniList entries a pass, none downloaded.
 _MISSING_CHECK_SECONDS = 600.0
 _MISSING_CHECK_ENTRIES = 3
+# Whether each anime episode is the episode it is filed as (see anime_verify):
+# a file's keyframes against TMDB's stills, a few minutes of files a pass.
+_VERIFY_SECONDS = 120.0
+_VERIFY_BUDGET = 240.0
 # German subtitles Erai-raws uploaded later, fetched for library episodes
 # without German (see erai_subs): a few lookups a pass, with the member login.
 _GERMAN_SUBS_SECONDS = 900.0
@@ -510,6 +514,7 @@ _ERAI_SITE_SECONDS = 600.0
 # tracks the user switched off taken out, one file at a time (see track_cleanup).
 _TRACK_READ_SECONDS = 60.0
 _TRACK_CLEAN_SECONDS = 60.0
+_BROWSER_AUDIO_SECONDS = 60.0
 # The libraries' oversized videos encoded again on the GPU, one at a time (see encode_library).
 _ENCODE_SECONDS = 60.0
 # Manga and light novels (see manga_releases): nyaa's newest literature uploads
@@ -518,6 +523,8 @@ _ENCODE_SECONDS = 60.0
 _MANGA_DISCOVER_SECONDS = 900.0
 _MANGA_RECONCILE_SECONDS = 30.0
 _GENRE_SYNC_SECONDS = 3600.0
+# Shows followed in English (see mas_follow): their missing episodes looked for, a few searches a pass.
+_MAS_FOLLOW_SECONDS = 600.0
 
 
 # The scheduler's periodic passes as the dashboard shows them: what each does,
@@ -530,17 +537,98 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "jellyfin_refresh": ("Tell Jellyfin what changed", _JELLYFIN_SECONDS),
     "hevc_check": ("Look for HEVC upgrades", _HEVC_CHECK_SECONDS),
     "missing_check": ("Look for missing episodes", _MISSING_CHECK_SECONDS),
+    "anime_verify": ("Check episodes are the ones they are filed as", _VERIFY_SECONDS),
     "german_subs": ("Add German subtitles from Erai-raws", _GERMAN_SUBS_SECONDS),
     "anime_metadata": ("Keep anime metadata and layout current", _ANIME_METADATA_SECONDS),
-    "job_archive": ("Archive old finished jobs", _JOB_ARCHIVE_SECONDS),
+    "job_archive": ("Archive old jobs, tidy failed anime downloads", _JOB_ARCHIVE_SECONDS),
     "erai_site": ("Read Erai-raws' subtitle lists", _ERAI_SITE_SECONDS),
     "track_read": ("Read the libraries' audio and subtitle tracks", _TRACK_READ_SECONDS),
     "track_clean": ("Take out the tracks switched off", _TRACK_CLEAN_SECONDS),
+    "browser_audio": ("Make Dolby and DTS audio AAC", _BROWSER_AUDIO_SECONDS),
     "manga_discover": ("Look for manga and light novels", _MANGA_DISCOVER_SECONDS),
     "manga_reconcile": ("Download approved manga", _MANGA_RECONCILE_SECONDS),
     "genre_sync": ("Write curated genres to Jellyfin", _GENRE_SYNC_SECONDS),
+    "mas_follow": ("Download followed shows", _MAS_FOLLOW_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
+
+# Intervals changed on the Dashboard (Up next -> a pass's row), by pass name,
+# in pass_intervals.json; a pass not in it keeps its default above.
+_INTERVAL_LOCK = threading.Lock()
+MIN_INTERVAL_SECONDS = 10.0
+MAX_INTERVAL_SECONDS = 7 * 86400.0
+# A pass whose interval was shortened runs at its last run + the new interval,
+# not after the old one is up: monotonic time it is due, by pass name.
+_SOONER: dict[str, float] = {}
+
+
+def _intervals_path() -> Path:
+    return bgjobs.jobs_root().parent / "pass_intervals.json"
+
+
+def _interval_overrides() -> dict[str, float]:
+    try:
+        raw = json.loads(_intervals_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): float(v) for k, v in raw.items() if isinstance(v, (int, float))} if isinstance(raw, dict) else {}
+
+
+def default_interval(name: str) -> float:
+    if name == "manga_discover":
+        return float(get_settings().manga.poll_interval_seconds)
+    return float(_PASS_LABELS[name][1])
+
+
+def interval(name: str) -> float:
+    """How often a pass runs: as changed on the Dashboard, else its default."""
+    return _interval_overrides().get(name) or default_interval(name)
+
+
+def set_interval(name: str, seconds: float | None) -> float:
+    """Change how often a pass runs (None: back to its default). Returns the interval now."""
+    if name not in _PASS_LABELS:
+        raise KeyError(name)
+    if seconds is not None and not MIN_INTERVAL_SECONDS <= float(seconds) <= MAX_INTERVAL_SECONDS:
+        raise ValueError(f"between {MIN_INTERVAL_SECONDS:g} seconds and {MAX_INTERVAL_SECONDS / 86400:g} days")
+    with _INTERVAL_LOCK:
+        overrides = _interval_overrides()
+        if seconds is None or float(seconds) == default_interval(name):
+            overrides.pop(name, None)
+        else:
+            overrides[name] = float(seconds)
+        path = _intervals_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(overrides, indent=1), encoding="utf-8")
+        tmp.replace(path)
+    every = interval(name)
+    row = _PASSES.get(name) or {}
+    if row.get("due_at") and row.get("last_run"):
+        # Due sooner now: from its last run, not from when the old interval ends.
+        due_wall = float(row["last_run"]) + every
+        if due_wall < float(row["due_at"]):
+            _SOONER[name] = time.monotonic() + max(0.0, due_wall - time.time())
+            row["due_at"] = max(time.time(), due_wall)
+    return every
+
+
+def soon(name: str) -> None:
+    """A pass due at the scheduler's next turn (one running carries on; it is due again after)."""
+    _SOONER[name] = time.monotonic()
+
+
+def _due(name: str, next_at: float) -> bool:
+    """Is a pass due: its time has come, or a shorter interval brought it forward."""
+    now = time.monotonic()
+    if now >= next_at:
+        _SOONER.pop(name, None)
+        return True
+    sooner = _SOONER.get(name)
+    if sooner is not None and now >= sooner:
+        _SOONER.pop(name, None)
+        return True
+    return False
 
 
 def _pass_due(name: str, next_monotonic: float) -> None:
@@ -627,6 +715,9 @@ def _pass_summary(name: str, result: object) -> str | None:
             "held": "held",
             "deleting": "removing their torrent",
             "waiting_for_automation": "waiting for automation",
+            "adopted": "taken up to be filed (no job had them)",
+            "leftover_removed": "leftover torrents removed",
+            "unowned": "in qBittorrent with no job (left for a look)",
         }
         bits = [f"{number(key)} {text}" for key, text in words.items() if number(key)]
         return " · ".join(bits) or "No releases in flight"
@@ -671,6 +762,14 @@ def _pass_summary(name: str, result: object) -> str | None:
             return str(result["idle"])
         saved = int(result.get("saved") or 0) / 2**20
         return f"{Path(str(result.get('path') or '')).name}: {saved:.0f} MiB freed"
+    if name == "browser_audio":
+        if result.get("error"):
+            return f"{Path(str(result.get('path') or '')).name}: {result['error']}"
+        if result.get("idle") or result.get("skipped"):
+            return str(result.get("idle") or result.get("skipped"))
+        return (
+            f"{Path(str(result.get('path') or '')).name}: {number('replaced')} made AAC, {number('added')} added"
+        )
     if name == "manga_discover":
         if result.get("skipped"):
             return "Off in the manga settings"
@@ -685,10 +784,23 @@ def _pass_summary(name: str, result: object) -> str | None:
             return str(result["idle"])
         failed = f", {number('failed')} failed" if result.get("failed") else ""
         return f"{_plural(number('written'), 'title')} written{failed}, {number('remaining')} to go"
+    if name == "mas_follow":
+        if result.get("error"):
+            return f"Prowlarr could not be searched: {result['error']}"
+        if not number("followed"):
+            return "No show followed"
+        held = "; held: a drive is short on room" if result.get("held_for_space") else ""
+        return (
+            f"{_plural(number('searched'), 'search', 'searches')}, {_plural(number('queued'), 'download')} started, "
+            f"{number('found_nothing')} found nothing ({_plural(number('followed'), 'show')} followed){held}"
+        )
     if name == "manga_reconcile":
         if result.get("idle"):
             return str(result["idle"])
         return f"{number('active')} downloading, {number('filed')} filed"
+    if name == "anime_verify":
+        wrong = f", {number('wrong')} not what they are filed as" if number("wrong") else ""
+        return f"{_plural(number('checked'), 'episode')} checked{wrong}, {number('remaining')} to go"
     if name == "thumb_sweep":
         if number("held_for_space"):
             return "Held: the library disk is short on room"
@@ -707,10 +819,19 @@ def _pass_progress(name: str) -> dict | None:
         from bankai.web import erai as erai_mod
 
         return dict(erai_mod.hevc_progress) or None
+    if name == "anime_verify":
+        from bankai.web import anime_verify
+
+        return dict(anime_verify.progress) or None
     if name == "missing_check":
         from bankai.web import anime_missing
 
         return dict(anime_missing.progress) or None
+    if name == "mas_follow":
+        from bankai.web import mas_follow
+
+        current = dict(mas_follow.progress)
+        return {"step": f"Searching {current['query']}"} if current.get("query") else None
     if name == "german_subs":
         from bankai.web import erai_subs
 
@@ -728,16 +849,27 @@ def _pass_progress(name: str) -> dict | None:
     if name == "track_clean":
         from bankai.web import track_cleanup
 
-        current = dict(track_cleanup.progress)
+        current = track_cleanup.current_progress()
         return {"step": "Writing " + Path(current["path"]).name + " anew"} if current.get("path") else None
+    if name == "browser_audio":
+        from bankai.web import browser_audio
+
+        current = browser_audio.current_progress()
+        steps = {"encoding": "Encoding the AAC of", "writing": "Writing", "checking": "Checking"}
+        return {"step": f"{steps.get(current.get('step'), 'Writing')} {Path(current['path']).name}"} if current.get("path") else None
     return None
 
 
 def scheduled_passes() -> list[dict]:
     """Every periodic pass: its label, interval, next due time and whether it runs now."""
     out = []
-    for name, (label, every) in _PASS_LABELS.items():
-        row = _PASSES.get(name, {})
+    from bankai.web import library_worker
+
+    in_worker = library_worker.delegated()
+    for name, (label, _default) in _PASS_LABELS.items():
+        every = interval(name)
+        # Run by the library worker: its heartbeat says how it went.
+        row = library_worker.pass_row(name) if in_worker and name in library_worker.PASSES else _PASSES.get(name, {})
         task = row.get("task")
         running = bool(row.get("running") or (task is not None and not task.done()))
         if task is not None and task.done() and not task.cancelled():
@@ -751,6 +883,7 @@ def scheduled_passes() -> list[dict]:
                 "name": name,
                 "label": label,
                 "every_seconds": every,
+                "default_seconds": default_interval(name),
                 "due_at": row.get("due_at"),
                 "last_run": row.get("last_run"),
                 "running": running,
@@ -779,6 +912,92 @@ async def _refresh_library() -> None:
     await asyncio.to_thread(library_walk.refresh_all)
 
 
+# Failed anime downloads tidied by the hourly archive pass (tidy_failed_anime).
+_TIDY_RETRY_CODES = frozenset({"timeout", "network", "download_client", "transfer"})
+_TIDY_MAX_ATTEMPTS = 3
+_TIDY_RETRIES_PER_PASS = 15
+_TIDY_WAIT_SECONDS = 15 * 60
+
+
+def _tidy_path() -> Path:
+    return bgjobs.jobs_root().parent / "anime_retries.json"
+
+
+def tidy_failed_anime(*, now: float | None = None) -> dict[str, int]:
+    """Failed anime downloads either go or run again; none sits in the queue dead.
+
+    Gone: a job that can never run again (named by AniDB or TVDB, before AniList, or for a
+    blacklisted entry) or whose work is done -- the episode is in the library, or its release
+    replaced by another. Run again: one that failed for a passing reason (qBittorrent timing
+    out, a dropped connection, a restart cutting it off), up to three times, a few each pass --
+    137 downloads asked for at once had qBittorrent time out on all of them (Oct 2026).
+    Any other failure stays for a look.
+
+    A release recorded "done" or "duplicate" is no sign the library has the episode: "duplicate"
+    only says another release had claimed it. Taking that for done removed My Hero Academia
+    S07E05-08's jobs while their torrents downloaded on, and nothing filed them (Oct 2026).
+    """
+    from bankai.web import anime_files, erai, reasons
+
+    now = time.time() if now is None else now
+    try:
+        attempts = json.loads(_tidy_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        attempts = {}
+    held = anime_files.by_entry()
+    releases = erai._load_state().get("releases") or {}
+    done_states = {erai.REPLACED_STATUS, "superseded"}
+    # A blacklisted entry is never downloaded again: its failed jobs go, they are not run
+    # again -- Utawarerumono's, run again the night after it was blacklisted (Oct 2026).
+    blocked = erai._policy_anilist_ids()
+    # A job a release still points at is the release's to judge and retry: a record removed
+    # here left Mushoku Tensei's release "transferring" with no job, forever.
+    owned = {str(release.get("job_id")) for release in releases.values() if isinstance(release, dict) and release.get("job_id")}
+    result = {"removed": 0, "retried": 0, "kept": 0}
+    for job in sorted(bgjobs.list_jobs(), key=lambda row: row.finished_at or 0):
+        args = list(job.args or [])
+        if job.status != "failed" or not args or args[0] != "anime-download" or job.id in owned:
+            continue
+        aid = bgjobs.argument_value(args, "--anilist-id") or ""
+        episode = bgjobs.argument_value(args, "--episode") or ""
+        info_hash = (bgjobs.argument_value(args, "--info-hash") or "").casefold()
+        release = releases.get(info_hash) or {}
+        gone = (
+            "an AniDB/TVDB job" if not aid.isdigit()
+            else "the show is blacklisted" if int(aid) in blocked
+            else "the episode is in the library" if episode.isdigit() and int(episode) in held.get(int(aid), {})
+            else f"its release is {release['status']}" if release.get("status") in done_states
+            else None
+        )
+        if gone:
+            if job.delete():
+                log.info("[queue] failed %s removed: %s", job.title, gone)
+                result["removed"] += 1
+            continue
+        key = f"{info_hash or job.title}|{episode}"
+        code = (reasons.classify_reason(bgjobs.failure_reason(job) or "Timed out") or ("other", ""))[0]
+        tries = int((attempts.get(key) or {}).get("count") or 0)
+        if (
+            code not in _TIDY_RETRY_CODES
+            or tries >= _TIDY_MAX_ATTEMPTS
+            or result["retried"] >= _TIDY_RETRIES_PER_PASS
+            or now - float(job.finished_at or 0) < _TIDY_WAIT_SECONDS
+        ):
+            result["kept"] += 1
+            continue
+        queued = enqueue(kind=job.kind, title=job.title, args=args)
+        if queued.get("status") in {"running", "queued", "duplicate"}:
+            job.delete()
+            attempts[key] = {"count": tries + 1, "at": now}
+            result["retried"] += 1
+            log.info("[queue] failed %s run again (%s, attempt %d)", job.title, code, tries + 1)
+    path = _tidy_path()
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(attempts, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    return result
+
+
 def _archive_jobs() -> int:
     from bankai.web import erai
 
@@ -800,6 +1019,14 @@ async def _track_read() -> None:
     _pass_result("track_read", result)
 
 
+async def _anime_verify() -> None:
+    from bankai.web import anime_verify
+
+    with _pass_running("anime_verify"):
+        result = await asyncio.to_thread(anime_verify.run, seconds=_VERIFY_BUDGET)
+    _pass_result("anime_verify", result)
+
+
 async def _encode() -> None:
     from bankai.web import encode_library
 
@@ -811,6 +1038,13 @@ async def _track_clean() -> None:
 
     result = await asyncio.to_thread(track_cleanup.clean_next)
     _pass_result("track_clean", result or {"idle": "Nothing to take out now"})
+
+
+async def _browser_audio() -> None:
+    from bankai.web import browser_audio
+
+    result = await asyncio.to_thread(browser_audio.convert_next)
+    _pass_result("browser_audio", result or {"idle": "Nothing to do now"})
 
 
 async def _manga_discover() -> None:
@@ -830,6 +1064,12 @@ async def _genre_sync() -> None:
 
     result = await genre_sync.apply()
     _pass_result("genre_sync", {**result, "failed": len(result.get("failed") or [])} if "written" in result else result)
+
+
+async def _mas_follow() -> None:
+    from bankai.web import mas_follow
+
+    _pass_result("mas_follow", await mas_follow.run())
 
 
 async def scheduler(*, poll_seconds: float = 2.0) -> None:
@@ -853,15 +1093,26 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     erai_task: asyncio.Future | None = None
     next_track_read = time.monotonic() + 45.0
     track_read_task: asyncio.Future | None = None
+    next_verify = time.monotonic() + 240.0
+    verify_task: asyncio.Future | None = None
     next_track_clean = time.monotonic() + 120.0
     track_clean_task: asyncio.Future | None = None
-    from bankai.web import track_cleanup
+    next_browser_audio = time.monotonic() + 150.0
+    browser_audio_task: asyncio.Future | None = None
+    from bankai.web import browser_audio, encode_library, library_worker, track_cleanup
 
-    # A copy a restart cut off is thrown away before anything else is cleaned.
-    await asyncio.to_thread(track_cleanup.recover)
-    from bankai.web import encode_library
-
-    await asyncio.to_thread(encode_library.recover)
+    # The passes that rewrite library files: here, or in the library worker's own process
+    # (BANKAI_LIBRARY_WORKER=external), which a restart of this one leaves running.
+    in_worker = library_worker.delegated()
+    if not in_worker and not await asyncio.to_thread(library_worker.claim, wait=False):
+        # The worker has them already: never two processes on one file.
+        log.warning("The library worker runs encode, browser audio and track cleanup; this process leaves them to it")
+        in_worker = True
+    if not in_worker:
+        await asyncio.to_thread(browser_audio.recover)
+        # A copy a restart cut off is thrown away before anything else is cleaned.
+        await asyncio.to_thread(track_cleanup.recover)
+        await asyncio.to_thread(encode_library.recover)
     next_encode = time.monotonic() + 60.0
     encode_task: asyncio.Future | None = None
     next_manga_discover = time.monotonic() + 120.0
@@ -871,10 +1122,14 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_genre_sync = time.monotonic() + 300.0
     genre_sync_task: asyncio.Future | None = None
     _pass_due("genre_sync", next_genre_sync)
+    next_mas_follow = time.monotonic() + 180.0
+    mas_follow_task: asyncio.Future | None = None
+    _pass_due("mas_follow", next_mas_follow)
     from bankai.web import manga_releases
 
     _pass_due("manga_discover", next_manga_discover)
     _pass_due("track_read", next_track_read)
+    _pass_due("anime_verify", next_verify)
     _pass_due("library_walk", next_walk_pass)
     _pass_due("anime_metadata", next_metadata_pass)
     _pass_due("erai_site", next_erai_pass)
@@ -882,8 +1137,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     while True:
         # Off to the side: AniList is asked a few times a pass, and laying
         # out a collection is renames over 9p.
-        if time.monotonic() >= next_metadata_pass and (metadata_task is None or metadata_task.done()):
-            next_metadata_pass = time.monotonic() + _ANIME_METADATA_SECONDS
+        if _due("anime_metadata", next_metadata_pass) and (metadata_task is None or metadata_task.done()):
+            next_metadata_pass = time.monotonic() + interval("anime_metadata")
             _pass_due("anime_metadata", next_metadata_pass)
             if metadata_task is not None and metadata_task.exception() is not None:
                 log.warning("anime metadata pass failed: %r", metadata_task.exception())
@@ -891,8 +1146,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
 
             metadata_task = asyncio.ensure_future(anime_maintenance.run())
             _pass_task("anime_metadata", metadata_task)
-        if time.monotonic() >= next_erai_pass and (erai_task is None or erai_task.done()):
-            next_erai_pass = time.monotonic() + _ERAI_SITE_SECONDS
+        if _due("erai_site", next_erai_pass) and (erai_task is None or erai_task.done()):
+            next_erai_pass = time.monotonic() + interval("erai_site")
             _pass_due("erai_site", next_erai_pass)
             if erai_task is not None and erai_task.exception() is not None:
                 log.warning("Erai-raws feed read failed: %r", erai_task.exception())
@@ -901,42 +1156,60 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
             erai_task = asyncio.ensure_future(erai_site.refresh())
             _pass_task("erai_site", erai_task)
         # Off to the side: a slice of ffprobe header reads over 9p.
-        if time.monotonic() >= next_track_read and (track_read_task is None or track_read_task.done()):
-            next_track_read = time.monotonic() + _TRACK_READ_SECONDS
+        if _due("track_read", next_track_read) and (track_read_task is None or track_read_task.done()):
+            next_track_read = time.monotonic() + interval("track_read")
             _pass_due("track_read", next_track_read)
             if track_read_task is not None and track_read_task.exception() is not None:
                 log.warning("track read failed: %r", track_read_task.exception())
             track_read_task = asyncio.ensure_future(_track_read())
             _pass_task("track_read", track_read_task)
+        # Off to the side: a file is read end to end, a minute over 9p.
+        if _due("anime_verify", next_verify) and (verify_task is None or verify_task.done()):
+            next_verify = time.monotonic() + interval("anime_verify")
+            _pass_due("anime_verify", next_verify)
+            if verify_task is not None and verify_task.exception() is not None:
+                log.warning("episode check failed: %r", verify_task.exception())
+            verify_task = asyncio.ensure_future(_anime_verify())
+            _pass_task("anime_verify", verify_task)
         # Off to the side as well, and one at a time: writing a 50 GB episode
         # anew takes a quarter of an hour. Only with a library's cleanup on.
-        if time.monotonic() >= next_track_clean and (track_clean_task is None or track_clean_task.done()):
-            next_track_clean = time.monotonic() + _TRACK_CLEAN_SECONDS
+        if not in_worker and _due("track_clean", next_track_clean) and (track_clean_task is None or track_clean_task.done()):
+            next_track_clean = time.monotonic() + interval("track_clean")
             if track_clean_task is not None and track_clean_task.exception() is not None:
                 log.warning("track cleanup failed: %r", track_clean_task.exception())
             if await asyncio.to_thread(track_cleanup.enabled):
                 _pass_due("track_clean", next_track_clean)
                 track_clean_task = asyncio.ensure_future(_track_clean())
                 _pass_task("track_clean", track_clean_task)
+        # Off to the side and one at a time, like the cleanup: a file read twice and
+        # written once. Only switched on, or with files tried by hand.
+        if not in_worker and _due("browser_audio", next_browser_audio) and (browser_audio_task is None or browser_audio_task.done()):
+            next_browser_audio = time.monotonic() + interval("browser_audio")
+            if browser_audio_task is not None and browser_audio_task.exception() is not None:
+                log.warning("browser audio failed: %r", browser_audio_task.exception())
+            if await asyncio.to_thread(browser_audio.enabled):
+                _pass_due("browser_audio", next_browser_audio)
+                browser_audio_task = asyncio.ensure_future(_browser_audio())
+                _pass_task("browser_audio", browser_audio_task)
         # Off to the side and one at a time: a 4K episode is most of an hour on
         # the GPU. Only what the Encode page queued; the Dashboard's Encoding lane shows it.
-        if time.monotonic() >= next_encode and (encode_task is None or encode_task.done()):
+        if not in_worker and time.monotonic() >= next_encode and (encode_task is None or encode_task.done()):
             next_encode = time.monotonic() + _ENCODE_SECONDS
             if encode_task is not None and encode_task.exception() is not None:
                 log.warning("encode failed: %r", encode_task.exception())
             if await asyncio.to_thread(encode_library.has_work):
                 encode_task = asyncio.ensure_future(_encode())
         # Off to the side: nyaa read a few times, AniList asked about the series followed.
-        if time.monotonic() >= next_manga_discover and (manga_discover_task is None or manga_discover_task.done()):
-            next_manga_discover = time.monotonic() + get_settings().manga.poll_interval_seconds
+        if _due("manga_discover", next_manga_discover) and (manga_discover_task is None or manga_discover_task.done()):
+            next_manga_discover = time.monotonic() + interval("manga_discover")
             _pass_due("manga_discover", next_manga_discover)
             if manga_discover_task is not None and manga_discover_task.exception() is not None:
                 log.warning("manga discovery failed: %r", manga_discover_task.exception())
             manga_discover_task = asyncio.ensure_future(_manga_discover())
             _pass_task("manga_discover", manga_discover_task)
         # Approved manga, only while there are some: added, followed, filed once complete.
-        if time.monotonic() >= next_manga_reconcile and (manga_reconcile_task is None or manga_reconcile_task.done()):
-            next_manga_reconcile = time.monotonic() + _MANGA_RECONCILE_SECONDS
+        if _due("manga_reconcile", next_manga_reconcile) and (manga_reconcile_task is None or manga_reconcile_task.done()):
+            next_manga_reconcile = time.monotonic() + interval("manga_reconcile")
             if manga_reconcile_task is not None and manga_reconcile_task.exception() is not None:
                 log.warning("manga downloads failed: %r", manga_reconcile_task.exception())
             if await asyncio.to_thread(manga_releases.has_work):
@@ -944,21 +1217,33 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 manga_reconcile_task = asyncio.ensure_future(_manga_reconcile())
                 _pass_task("manga_reconcile", manga_reconcile_task)
         # Off to the side: curated genres into Jellyfin, a few dozen titles an hour, once switched on.
-        if time.monotonic() >= next_genre_sync and (genre_sync_task is None or genre_sync_task.done()):
-            next_genre_sync = time.monotonic() + _GENRE_SYNC_SECONDS
+        if _due("genre_sync", next_genre_sync) and (genre_sync_task is None or genre_sync_task.done()):
+            next_genre_sync = time.monotonic() + interval("genre_sync")
             _pass_due("genre_sync", next_genre_sync)
             if genre_sync_task is not None and genre_sync_task.exception() is not None:
                 log.warning("genre sync failed: %r", genre_sync_task.exception())
             genre_sync_task = asyncio.ensure_future(_genre_sync())
             _pass_task("genre_sync", genre_sync_task)
-        if time.monotonic() >= next_archive_pass:
-            next_archive_pass = time.monotonic() + _JOB_ARCHIVE_SECONDS
+        # Off to the side: a few Prowlarr searches for the shows followed in English.
+        if _due("mas_follow", next_mas_follow) and (mas_follow_task is None or mas_follow_task.done()):
+            next_mas_follow = time.monotonic() + interval("mas_follow")
+            _pass_due("mas_follow", next_mas_follow)
+            if mas_follow_task is not None and mas_follow_task.exception() is not None:
+                log.warning("follow pass failed: %r", mas_follow_task.exception())
+            mas_follow_task = asyncio.ensure_future(_mas_follow())
+            _pass_task("mas_follow", mas_follow_task)
+        if _due("job_archive", next_archive_pass):
+            next_archive_pass = time.monotonic() + interval("job_archive")
             _pass_due("job_archive", next_archive_pass)
             try:
                 with _pass_running("job_archive"):
                     moved = await asyncio.to_thread(_archive_jobs)
+                    tidied = await asyncio.to_thread(tidy_failed_anime)
+                    _pass_result("job_archive", tidied)
                 if moved:
                     log.info("Archived %d finished job(s) nobody needs any more", moved)
+                if tidied["removed"] or tidied["retried"]:
+                    log.info("Failed anime downloads: %d removed, %d run again", tidied["removed"], tidied["retried"])
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -971,15 +1256,15 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
             log.warning("queue scheduler failed: %s", exc)
         # Off to the side: checking the tree is seconds of 9p round trips, and
         # dispatching queued work must not wait for it.
-        if time.monotonic() >= next_walk_pass and (walk_task is None or walk_task.done()):
-            next_walk_pass = time.monotonic() + _LIBRARY_WALK_SECONDS
+        if _due("library_walk", next_walk_pass) and (walk_task is None or walk_task.done()):
+            next_walk_pass = time.monotonic() + interval("library_walk")
             _pass_due("library_walk", next_walk_pass)
             if walk_task is not None and walk_task.exception() is not None:
                 log.warning("library walk refresh failed: %r", walk_task.exception())
             walk_task = asyncio.ensure_future(_refresh_library())
             _pass_task("library_walk", walk_task)
-        if time.monotonic() >= next_release_pass:
-            next_release_pass = time.monotonic() + _RELEASE_RECONCILE_SECONDS
+        if _due("release_reconcile", next_release_pass):
+            next_release_pass = time.monotonic() + interval("release_reconcile")
             _pass_due("release_reconcile", next_release_pass)
             try:
                 from bankai.web import erai
@@ -990,8 +1275,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("release reconciliation failed: %s", exc)
-        if time.monotonic() >= next_codec_pass:
-            next_codec_pass = time.monotonic() + _CODEC_SWEEP_SECONDS
+        if _due("codec_sweep", next_codec_pass):
+            next_codec_pass = time.monotonic() + interval("codec_sweep")
             _pass_due("codec_sweep", next_codec_pass)
             try:
                 from pathlib import Path
@@ -1015,8 +1300,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("codec sweep failed: %s", exc)
-        if time.monotonic() >= next_thumb_pass:
-            next_thumb_pass = time.monotonic() + _THUMB_SWEEP_SECONDS
+        if _due("thumb_sweep", next_thumb_pass):
+            next_thumb_pass = time.monotonic() + interval("thumb_sweep")
             _pass_due("thumb_sweep", next_thumb_pass)
             try:
                 from pathlib import Path
@@ -1038,8 +1323,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("thumbnail sweep failed: %s", exc)
-        if time.monotonic() >= next_jellyfin_pass:
-            next_jellyfin_pass = time.monotonic() + _JELLYFIN_SECONDS
+        if _due("jellyfin_refresh", next_jellyfin_pass):
+            next_jellyfin_pass = time.monotonic() + interval("jellyfin_refresh")
             from bankai.web import jellyfin
 
             if jellyfin.configured():
@@ -1058,8 +1343,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                     raise
                 except Exception as exc:
                     log.warning("Jellyfin pass failed: %s", exc)
-        if time.monotonic() >= next_hevc_check:
-            next_hevc_check = time.monotonic() + _HEVC_CHECK_SECONDS
+        if _due("hevc_check", next_hevc_check):
+            next_hevc_check = time.monotonic() + interval("hevc_check")
             _pass_due("hevc_check", next_hevc_check)
             try:
                 from bankai.web import erai as erai_mod
@@ -1073,8 +1358,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 log.warning("HEVC upgrade check failed: %s", exc)
         # Off to the side: its Nyaa searches are spaced seconds apart, minutes
         # for a long show, and dispatching queued work must not wait for them.
-        if time.monotonic() >= next_missing_check and (missing_task is None or missing_task.done()):
-            next_missing_check = time.monotonic() + _MISSING_CHECK_SECONDS
+        if _due("missing_check", next_missing_check) and (missing_task is None or missing_task.done()):
+            next_missing_check = time.monotonic() + interval("missing_check")
             _pass_due("missing_check", next_missing_check)
             if missing_task is not None and missing_task.exception() is not None:
                 log.warning("Missing-episode check failed: %r", missing_task.exception())
@@ -1086,8 +1371,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
             _pass_task("missing_check", missing_task)
         # Off to the side as well: Erai-raws is asked seconds apart. Only with
         # the member login set, as Jellyfin's pass only with Jellyfin.
-        if time.monotonic() >= next_german_subs and (german_subs_task is None or german_subs_task.done()):
-            next_german_subs = time.monotonic() + _GERMAN_SUBS_SECONDS
+        if _due("german_subs", next_german_subs) and (german_subs_task is None or german_subs_task.done()):
+            next_german_subs = time.monotonic() + interval("german_subs")
             from bankai.web import erai_subs
 
             if german_subs_task is not None and german_subs_task.exception() is not None:
@@ -1103,6 +1388,13 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
 
 def list_pending() -> list[PendingJob]:
     return _load_pending()
+
+
+def pending_args(job_id: str) -> list[str] | None:
+    """A queued job's arguments, by its id or a prefix of one; None when it is not queued."""
+    with _LOCK:
+        item = next((i for i in _load_pending() if i.id == job_id or i.id.startswith(job_id)), None)
+    return list(item.args) if item is not None else None
 
 
 def cancel_pending(job_id: str) -> bool:
@@ -1328,6 +1620,9 @@ def _display_row(job) -> dict:
         "transfer_percent": (
             snap.parts["transfer"].percent if "transfer" in snap.parts else None
         ),
+        # The torrent's speed and time left, as qBittorrent's tab shows them.
+        "download_speed": snap.parts["torrent"].speed if "torrent" in snap.parts and job.status == "running" else None,
+        "download_eta": snap.parts["torrent"].eta if "torrent" in snap.parts and job.status == "running" else None,
         "pending": False,
         "queue_position": None,
         "queue_total": None,

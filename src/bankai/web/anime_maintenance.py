@@ -31,6 +31,7 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.metadata import anilist, animelists, jikan, offline, tmdb
 from bankai.web import (
+    age_ratings,
     anime_artwork,
     anime_collections,
     anime_files,
@@ -107,8 +108,12 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
         # The genres tvshow.nfo writes: a rule changed, or curated genres switched on, writes it anew.
         main = row.title if row.title is not None else row.members[0]
         shown_genres = genre_sync.anime_genres(cid, list(anilist.media(main).get("genres") or []))
+        # Its approved age rating: approved or changed, tvshow.nfo is written anew. Only once there
+        # is one, so the others keep their fingerprints and are not all laid out again.
+        rating = age_ratings.nfo_rating(cid)
         material = json.dumps(
-            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version, art, shown_genres, holding, plan.names],
+            [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version, art, shown_genres, holding, plan.names]
+            + ([rating] if rating[0] else []),
             sort_keys=True,
             default=str,
         )

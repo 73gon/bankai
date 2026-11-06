@@ -5,6 +5,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, Plus, RefreshCw, Save, Search, Trash2, Undo2, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type GenreLanguage, type GenrePlan, type GenreRules, type GenreTitle, type GenreWord } from '@/lib/api';
+import { AgeRatingsPanel } from '@/components/age-ratings-panel';
 import { StatusTag } from '@/components/status-tag';
 import { cn } from '@/zon/lib/cn';
 import { Button } from '@/zon/ui/button';
@@ -182,6 +183,8 @@ function TitleGenres({ title, rules, language, onSaved }: { title: GenreTitle; r
   useEffect(() => setShown({ ids: title.ids, add: title.override?.add ?? [], remove: title.override?.remove ?? [] }), [title]);
   const add = new Set(shown.add);
   const remove = new Set(shown.remove);
+  // Jellyfin's own genres a click kept: the title's as before, grey like the rules' (blue said "added").
+  const kept = new Set([...(title.kept_from_jellyfin ?? []), ...shown.add.filter((id) => title.jellyfin_only.includes(id))]);
 
   async function keep(next: { add: Set<string>; remove: Set<string> }, ids: string[]) {
     setShown({ ids, add: [...next.add], remove: [...next.remove] });
@@ -224,10 +227,10 @@ function TitleGenres({ title, rules, language, onSaved }: { title: GenreTitle; r
         return (
           <span
             key={id}
-            title={add.has(id) ? 'Added by hand' : reasons}
+            title={kept.has(id) ? "Jellyfin's own genre, kept" : add.has(id) ? 'Added by hand' : reasons}
             className={cn(
               'inline-flex h-[22px] items-center gap-1 rounded-item border pl-2 pr-0.5 font-mono text-[11px]',
-              add.has(id) ? 'border-info/30 bg-info/15 text-info' : 'border-field-edge bg-control-surface text-foreground',
+              add.has(id) && !kept.has(id) ? 'border-info/30 bg-info/15 text-info' : 'border-field-edge bg-control-surface text-foreground',
             )}
           >
             {nameOf(rules, id, language)}
@@ -243,7 +246,9 @@ function TitleGenres({ title, rules, language, onSaved }: { title: GenreTitle; r
           </span>
         );
       })}
-      {title.jellyfin_only.filter((id) => !shown.ids.includes(id)).map((id) => (
+      {/* Only before bankai's first write: once written, Jellyfin no longer has them, and struck through
+          they read as removed by hand. */}
+      {!title.written && title.jellyfin_only.filter((id) => !shown.ids.includes(id)).map((id) => (
         <button
           key={'jellyfin:' + id}
           type='button'
@@ -302,9 +307,12 @@ export default function Genres() {
   );
 
   async function load(refresh = false, keepDraft = false) {
-    setLoading(true);
+    // The spinner only while there is nothing to show yet, or for a refresh asked for.
+    if (refresh || plan === null) setLoading(true);
     try {
       const answer = await api.genres(undefined, refresh);
+      // The same answer again (coming back to the tab): the page, and the draft, stay as they are.
+      if (answer === plan) return;
       setPlan(answer);
       if (!keepDraft) setDraft(structuredClone(answer.rules));
     } catch (error: any) {
@@ -442,6 +450,7 @@ export default function Genres() {
             <TabsList>
               <TabsTab value='vocabulary'>Vocabulary <span className='ml-1.5 font-mono text-[0.68rem] text-muted-foreground'>{draft.vocabulary.length}</span></TabsTab>
               <TabsTab value='titles'>Titles <span className='ml-1.5 font-mono text-[0.68rem] text-muted-foreground'>{plan.summary.titles}</span></TabsTab>
+              <TabsTab value='ratings'>Age ratings</TabsTab>
               <TabsTab value='unmapped'>
                 Unmapped <span className={cn('ml-1.5 font-mono text-[0.68rem]', plan.unmapped.length ? 'text-warning' : 'text-muted-foreground')}>{plan.unmapped.length}</span>
               </TabsTab>
@@ -622,6 +631,10 @@ export default function Genres() {
                   </p>
                 )}
               </div>
+            </TabsPanel>
+
+            <TabsPanel value='ratings'>
+              <AgeRatingsPanel />
             </TabsPanel>
           </Tabs>
         </>

@@ -19,18 +19,13 @@
 @import "./parts/controls.css";
 @import "./parts/overlays.css";
 @import "./parts/navigation.css";
-@import "./parts/foundations.css";
-@import "./parts/brand.css";
-@import "./parts/editorial.css";
-@import "./parts/isometric.css";
 @import "./parts/feedback.css";
 @import "./parts/data.css";
 @import "./parts/inputs.css";
-@import "./parts/pdf.css";
-@import "./parts/ai.css";
 @import "./parts/react-flow.css";
-@import "./parts/graph.css";
-@import "./parts/whiteboard.css";
+/* bankai: no foundations (prose, code blocks), brand, editorial, isometric, pdf, ai, graph or
+   whiteboard parts -- bankai uses none of their components, and their selectors were matched
+   against every element on every style recalculation (code blocks alone: 400,000 tries a page). */
 
 /* Let Tailwind see the classes used inside this package. */
 /* Tailwind auto-detects copied components. */
@@ -56,12 +51,22 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-tone-blue: var(--tone-blue);
+  --color-tone-aqua: var(--tone-aqua);
+  --color-tone-violet: var(--tone-violet);
+  --color-tone-magenta: var(--tone-magenta);
+  --color-tone-orange: var(--tone-orange);
+  --color-tone-lime: var(--tone-lime);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
 
   --color-control-surface: var(--control-surface);
   --color-control-hover: var(--control-hover);
+  --color-control-pressed: var(--control-pressed);
+  --color-primary-fill-pressed: var(--primary-fill-pressed);
   --color-control-edge: var(--control-edge);
   --color-control-highlight: var(--control-highlight);
   --color-control-inner-edge: var(--control-inner-edge);
@@ -149,27 +154,44 @@
     background-color: var(--foreground);
     color: var(--background);
   }
-  /* Native scrollbars (the page, overflow-auto panels) echo ScrollArea: a thin --field-edge thumb
-     on a transparent track. ScrollArea hides these and draws its own. */
-  html {
-    scrollbar-width: thin;
-  }
-  * {
-    scrollbar-color: var(--field-edge) transparent;
-  }
-  @supports not (scrollbar-color: auto) {
+  /* Native scrollbars (the page, tables, overflow-auto panels) echo ScrollArea: a 4px round
+     --field-edge thumb on a transparent track, no arrow buttons. Chrome, Edge and Safari draw
+     that from the ::-webkit-scrollbar parts — Chrome ignores them, and draws its own arrows,
+     once an element sets scrollbar-width or scrollbar-color, so those are left to Firefox,
+     which has no arrows. ScrollArea hides all of these and draws its own. */
+  @supports selector(::-webkit-scrollbar) {
     ::-webkit-scrollbar {
-      width: 12px;
-      height: 12px;
+      width: 10px;
+      height: 10px;
     }
     ::-webkit-scrollbar-track,
     ::-webkit-scrollbar-corner {
       background: transparent;
     }
+    /* A rounded scroller sets --scrollbar-inset to its radius, so the bar starts and ends where
+       the corners do instead of running over them. */
+    ::-webkit-scrollbar-track:vertical {
+      margin-block: var(--scrollbar-inset, 0px);
+    }
+    ::-webkit-scrollbar-track:horizontal {
+      margin-inline: var(--scrollbar-inset, 0px);
+    }
     ::-webkit-scrollbar-thumb {
       border: 3px solid transparent;
       border-radius: 9999px;
       background: var(--field-edge) padding-box;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background-color: var(--control-focus);
+    }
+    ::-webkit-scrollbar-button {
+      display: none;
+    }
+  }
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: var(--field-edge) transparent;
     }
   }
   :focus-visible {

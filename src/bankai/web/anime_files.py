@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
@@ -161,6 +161,46 @@ def on_disk(anilist_id: int, *, rows: dict[str, Pairs] | None = None) -> dict[in
     return found
 
 
+def library_episodes(
+    anilist_ids: Iterable[int], *, rows: dict[str, Pairs] | None = None
+) -> tuple[dict[int, dict[int, list[Path]]], dict[Path, set[str]]]:
+    """Each entry's episodes with a file in the library itself, and those files.
+
+    Also returns the names in each folder looked at, which hold the subtitle
+    files beside an episode. A folder is listed once rather than a stat per
+    file: over /mnt/g a stat is ~5 ms, and the long shows have a thousand episodes.
+    """
+    entries = by_entry(rows)
+    listed: dict[Path, set[str]] = {}
+
+    def present(path: Path) -> bool:
+        if path.parent not in listed:
+            try:
+                listed[path.parent] = {child.name for child in path.parent.iterdir()}
+            except OSError:
+                listed[path.parent] = set()
+        return path.name in listed[path.parent]
+
+    found: dict[int, dict[int, list[Path]]] = {}
+    for aid in {int(aid) for aid in anilist_ids}:
+        found[aid] = {}
+        for episode, keys in entries.get(aid, {}).items():
+            paths = [path for rel in keys if present(path := locations(rel)[0])]
+            if paths:
+                found[aid][episode] = paths
+    return found, listed
+
+
+def in_library(anilist_ids: Iterable[int], *, rows: dict[str, Pairs] | None = None) -> dict[int, set[int]]:
+    """Each entry's episodes with a file in the library itself, staging not counted.
+
+    What a download leaves out: a copy only in staging is a download not yet
+    published, which a download of it again must carry on with.
+    """
+    found, _listed = library_episodes(anilist_ids, rows=rows)
+    return {aid: set(episodes) for aid, episodes in found.items()}
+
+
 __all__ = [
     "Pairs",
     "anime_root",
@@ -168,7 +208,9 @@ __all__ = [
     "editing",
     "existing",
     "forget",
+    "in_library",
     "key",
+    "library_episodes",
     "load",
     "locations",
     "of",

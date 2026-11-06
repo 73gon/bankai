@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { Settings as SettingsIcon, Save, Loader2, Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type SettingRow } from '@/lib/api';
@@ -75,7 +75,7 @@ function labelize(key: string) {
     .join(' ');
 }
 
-// The section is the config table the key belongs to, e.g. "metadata.tvdb_api_key" -> "metadata".
+// The section is the config table the key belongs to, e.g. "metadata.tmdb_api_key" -> "metadata".
 function sectionOf(key: string): string {
   const dot = key.indexOf('.');
   return dot > 0 ? key.slice(0, dot) : 'general';
@@ -123,10 +123,16 @@ export default function Settings({ scope = 'all' }: { scope?: SettingsScope } = 
   const [reveal, setReveal] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
 
+  // The last answer: the same one again (coming back to the tab) leaves the page as it is.
+  const lastAnswer = useRef<unknown>(null);
+
   async function load() {
-    setLoading(true);
+    // The spinner only while there is nothing to show yet.
+    if (lastAnswer.current === null) setLoading(true);
     try {
       const r = await api.settings();
+      if (r === lastAnswer.current) return;
+      lastAnswer.current = r;
       setRows(r.settings.filter((row) => !row.key.startsWith('anime.') && row.key !== 'transfer.anime_shows_dir'));
     } catch (e: any) {
       toast.error(e.message);

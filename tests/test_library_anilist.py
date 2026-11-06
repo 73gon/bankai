@@ -129,7 +129,7 @@ def test_a_collection_is_one_card_with_a_tab_per_season_and_one_for_the_specials
     assert (show["anilist_id"], show["anilist_ids"]) == (S1, [S1, S2, S3, S3P2, OVA])
     assert (show["collection_id"], show["collection_name_custom"]) == (1, False)
     tabs = {row["season_number"]: row["season"] for row in show["episodes"]}
-    assert tabs == {1: "S1 · " + AOT, 2: "S2 · Season 2", 3: "S3 · Season 3", 4: "S4 · Season 3 Part 2", 5: "Specials"}
+    assert tabs == {1: "Season 1", 2: "Season 2", 3: "Season 3", 4: "S4 · Season 3 Part 2", 5: "Specials"}
     assert show["season_anilist"]["4"] == [{"anilist_id": S3P2, "title": "Attack on Titan Season 3 Part 2"}]
     assert show["season_anilist"]["5"] == [{"anilist_id": OVA, "title": "Attack on Titan OVA"}]
     assert (show["poster_url"], show["year"], show["source_title"]) == ("https://img/aot.jpg", 2013, "Shingeki no Kyojin")
@@ -145,7 +145,7 @@ def test_an_arranged_season_is_one_tab_numbered_as_on_disk(titan, library) -> No
     show = _shows(files, library.anime)[AOT]
 
     tabs = {row["season_number"]: row["season"] for row in show["episodes"]}
-    assert tabs[2] == "S2 · Season 2 +1"
+    assert tabs[2] == "Season 2"
     # Season 3's first episode follows Season 2's two in the season they make up.
     row = next(row for row in show["episodes"] if row.get("path"))
     assert (row["season_number"], row["episode"], row["anilist_id"], row["anilist_episode"]) == (2, 3, S3, 1)

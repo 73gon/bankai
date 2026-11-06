@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useMemo, useState } from 'react';
 import { CalendarClock, Check, ChevronRight, CirclePlay, Film, Files, Loader2, Plus, Search, Tv, X } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type DiscoverItem, type FilmpalastDetails, type FilmpalastFeed, type RecentRelease, type RecentReleasePage } from '@/lib/api';
+import { POSTER_IMG, posterSources } from '@/lib/posters';
 import { GermanRelease } from '@/components/GermanRelease';
 import { StatusTag } from '@/components/status-tag';
 import { Button } from '@/zon/ui/button';
@@ -42,11 +43,10 @@ function Poster({ item }: { item: RecentRelease }) {
     <div className='aspect-[2/3] overflow-hidden bg-control-surface'>
       {item.poster_url && !failed ? (
         <img
-          src={api.posterUrl(item.poster_url)}
+          {...posterSources(item.poster_url)}
+          {...POSTER_IMG}
           alt={`${item.title} cover`}
           className='size-full object-cover'
-          loading='lazy'
-          decoding='async'
           onError={() => setFailed(true)}
         />
       ) : (
@@ -65,7 +65,7 @@ export default function Recent() {
   const [loading, setLoading] = useState(!pageCache.has(pageCacheKey('new', 0)));
   const [kind, setKind] = useState<'all' | 'movie' | 'episode'>('all');
   const [selected, setSelected] = useState<RecentRelease | null>(null);
-  const [tvdbQuery, setTvdbQuery] = useState('');
+  const [titleQuery, setTitleQuery] = useState('');
   const [matches, setMatches] = useState<DiscoverItem[]>([]);
   const [matching, setMatching] = useState(false);
   const [queueing, setQueueing] = useState<number | null>(null);
@@ -193,11 +193,11 @@ export default function Recent() {
     }
   }
 
-  async function findTvdb(item: RecentRelease, query?: string) {
+  async function findTitle(item: RecentRelease, query?: string) {
     const identity = item.kind === 'episode' ? episodeIdentity(item) : null;
     const term = query ?? identity?.seriesTitle ?? item.title;
     setSelected(item);
-    setTvdbQuery(term);
+    setTitleQuery(term);
     setMatches([]);
     setMatching(true);
     try {
@@ -217,11 +217,11 @@ export default function Recent() {
   }
 
   async function queueSelection(match: DiscoverItem) {
-    if (!selected || !match.tvdb_id) return;
-    setQueueing(match.tvdb_id);
+    if (!selected || !match.tmdb_id) return;
+    setQueueing(match.tmdb_id);
     try {
       const details = await api.discoverGerman(
-        match.tvdb_id,
+        match.tmdb_id,
         selected.kind === 'episode' ? 'show' : 'movie',
       );
       const canonicalName = details.english || match.name;
@@ -385,7 +385,7 @@ export default function Recent() {
                 <Button className='flex-1' size='sm' variant='secondary' onClick={() => void openDetails(item)}>
                   <CirclePlay data-icon='inline-start' /> Details
                 </Button>
-                <Button className='flex-1' size='sm' variant='secondary' onClick={() => void findTvdb(item)}>
+                <Button className='flex-1' size='sm' variant='secondary' onClick={() => void findTitle(item)}>
                   <Plus data-icon='inline-start' /> Add
                 </Button>
               </CardFooter>
@@ -516,7 +516,7 @@ export default function Recent() {
           <DialogHeader>
             <DialogTitle>Choose the {selected?.kind === 'episode' ? 'show' : 'movie'} identity</DialogTitle>
             <DialogDescription>
-              Select the matching TVDB {selected?.kind === 'episode' ? 'show' : 'movie'}. Bankai will keep the exact Filmpalast release below as the German source.
+              Select the matching TMDB {selected?.kind === 'episode' ? 'show' : 'movie'}. Bankai will keep the exact Filmpalast release below as the German source.
             </DialogDescription>
           </DialogHeader>
           {selected && (
@@ -527,12 +527,12 @@ export default function Recent() {
           )}
           <div className='flex gap-2'>
             <Input
-              value={tvdbQuery}
-              onChange={(event) => setTvdbQuery(event.target.value)}
-              onKeyDown={(event) => event.key === 'Enter' && selected && void findTvdb(selected, tvdbQuery.trim())}
-              placeholder='Search TVDB title…'
+              value={titleQuery}
+              onChange={(event) => setTitleQuery(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && selected && void findTitle(selected, titleQuery.trim())}
+              placeholder='Search TMDB title…'
             />
-            <Button variant='secondary' disabled={!tvdbQuery.trim() || matching} onClick={() => selected && void findTvdb(selected, tvdbQuery.trim())}>
+            <Button variant='secondary' disabled={!titleQuery.trim() || matching} onClick={() => selected && void findTitle(selected, titleQuery.trim())}>
               {matching ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Search data-icon='inline-start' />}
               Search
             </Button>
@@ -542,19 +542,19 @@ export default function Recent() {
           ) : matches.length === 0 ? (
             <Empty>
               <EmptyMedia><Search /></EmptyMedia>
-              <EmptyTitle>No TVDB match yet</EmptyTitle>
+              <EmptyTitle>No TMDB match yet</EmptyTitle>
               <EmptyDescription>Adjust the title above and search again.</EmptyDescription>
             </Empty>
           ) : (
             <div className='flex flex-col gap-2'>
               {matches.map((match) => (
-                <div key={match.tvdb_id ?? match.name} className='flex items-center justify-between gap-3 rounded-control border border-field-edge p-3'>
+                <div key={match.tmdb_id ?? match.name} className='flex items-center justify-between gap-3 rounded-control border border-field-edge p-3'>
                   <div className='min-w-0'>
                     <div className='truncate font-medium text-foreground'>{match.name}</div>
                     <div className='font-mono text-xs tabular-nums text-muted-foreground'>{match.year ?? 'Year unknown'}</div>
                   </div>
-                  <Button size='sm' variant='secondary' disabled={!match.tvdb_id || queueing !== null} onClick={() => void queueSelection(match)}>
-                    {queueing === match.tvdb_id ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Plus data-icon='inline-start' />}
+                  <Button size='sm' variant='secondary' disabled={!match.tmdb_id || queueing !== null} onClick={() => void queueSelection(match)}>
+                    {queueing === match.tmdb_id ? <Loader2 data-icon='inline-start' className='animate-spin' /> : <Plus data-icon='inline-start' />}
                     Queue
                   </Button>
                 </div>

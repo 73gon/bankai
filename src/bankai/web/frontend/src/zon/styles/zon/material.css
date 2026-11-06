@@ -22,6 +22,12 @@
   }
 }
 
+/*
+ * The button materials end their transition list with --material-motion, a slot for what else a
+ * part animates (a collapsible Button's padding and corners). Its fallback is a no-op. The press
+ * states repeat it, so a press never cuts a fold short.
+ */
+
 /* ── Primary ───────────────────────────────────────────────────────────────── */
 
 @utility material-primary {
@@ -31,10 +37,13 @@
   background-image: linear-gradient(#ffffff0f, transparent 55%);
   border: 1px solid transparent;
   box-shadow: var(--primary-shadow);
+  /* A press sinks in fast and rises back gently: the release eases over longer, on a softer curve
+     than the brand ease, so even a quick click is seen to press and settle. Reduced motion: 0. */
   transition:
-    background-color var(--duration) var(--ease),
+    background-color calc(var(--duration) * 1.7) cubic-bezier(0.33, 1, 0.68, 1),
     color var(--duration) var(--ease),
-    box-shadow var(--duration) var(--ease);
+    box-shadow calc(var(--duration) * 1.7) cubic-bezier(0.33, 1, 0.68, 1),
+    var(--material-motion, padding 0s);
 
   @media (hover: hover) {
     &:not(:disabled, [data-disabled]):hover {
@@ -43,7 +52,14 @@
   }
   &:not(:disabled, [data-disabled]):active,
   &[data-pressed] {
+    /* Pressed, the key goes down: its fill dips darker and the inset shadow takes the edge. */
+    background-color: var(--primary-fill-pressed);
     box-shadow: var(--primary-shadow-pressed);
+    transition:
+      background-color calc(var(--duration) * 0.6) cubic-bezier(0.33, 1, 0.68, 1),
+      color var(--duration) var(--ease),
+      box-shadow calc(var(--duration) * 0.6) cubic-bezier(0.33, 1, 0.68, 1),
+      var(--material-motion, padding 0s);
   }
 }
 
@@ -58,10 +74,13 @@
     0 0 0 1px var(--control-edge),
     inset 0 1px 0 var(--control-highlight),
     inset 0 0 0 1px var(--control-inner-edge);
+  /* A press sinks in fast and rises back gently: the release eases over longer, on a softer curve
+     than the brand ease, so even a quick click is seen to press and settle. Reduced motion: 0. */
   transition:
-    background-color var(--duration) var(--ease),
+    background-color calc(var(--duration) * 1.7) cubic-bezier(0.33, 1, 0.68, 1),
     color var(--duration) var(--ease),
-    box-shadow var(--duration) var(--ease);
+    box-shadow calc(var(--duration) * 1.7) cubic-bezier(0.33, 1, 0.68, 1),
+    var(--material-motion, padding 0s);
 
   @media (hover: hover) {
     &:not(:disabled, [data-disabled]):hover {
@@ -69,10 +88,17 @@
     }
   }
   &:not(:disabled, [data-disabled]):active {
+    /* Pressed, the key goes down: a darker fill and a deeper inset, visible on a dark ground too. */
+    background-color: var(--control-pressed);
     box-shadow:
       0 0 0 1px var(--control-edge),
-      inset 0 2px 4px #0000002e,
+      inset 0 2px 6px #00000047,
       inset 0 0 0 1px var(--control-inner-edge);
+    transition:
+      background-color calc(var(--duration) * 0.6) cubic-bezier(0.33, 1, 0.68, 1),
+      color var(--duration) var(--ease),
+      box-shadow calc(var(--duration) * 0.6) cubic-bezier(0.33, 1, 0.68, 1),
+      var(--material-motion, padding 0s);
   }
   &[data-popup-open] {
     background-color: var(--control-hover);
@@ -90,7 +116,8 @@
   transition:
     background-color var(--duration) var(--ease),
     color var(--duration) var(--ease),
-    box-shadow var(--duration) var(--ease);
+    box-shadow var(--duration) var(--ease),
+    var(--material-motion, padding 0s);
 
   @media (hover: hover) {
     &:not(:disabled, [data-disabled]):hover {
@@ -133,12 +160,20 @@
     box-shadow var(--duration) var(--ease),
     background-color var(--duration) var(--ease);
 
-  &:focus-visible,
-  &:has(> input:focus-visible),
-  &[data-popup-open] {
-    border-color: var(--control-focus);
+  /* Focus is a softer edge, not a ring: a focused text field — or a field holding one — and an
+     open select take a border halfway to --control-focus. A field that is a button (a select's
+     trigger, a native select) also keeps the 2px ring for keyboard focus, which a click never
+     shows. A field marked invalid keeps its red edge. */
+  &:is(:is(input, textarea):focus, :has(:is(input, textarea):focus), [data-popup-open]):not(
+      [data-invalid],
+      [aria-invalid="true"]
+    ) {
+    border-color: color-mix(in oklab, var(--field-edge), var(--control-focus));
   }
-  &:focus-visible {
+  &:is(input, textarea):focus-visible {
+    outline: none;
+  }
+  &:not(input, textarea):focus-visible {
     outline: 2px solid var(--control-focus);
     outline-offset: 0;
   }
@@ -151,6 +186,18 @@
   &:disabled {
     opacity: 0.55;
     cursor: not-allowed;
+  }
+  /* Read-only is quieter than editable, and not dimmed like disabled: the field is no longer
+     recessed — no fill, no inset — and its text takes the softer ink, inside the same edge. It
+     can still be focused, selected and copied, so it keeps the focus edge. */
+  &:is(input, textarea)[readonly],
+  &[data-readonly],
+  &:has(> :is(input, textarea)[readonly]) {
+    color: var(--foreground-soft);
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    cursor: default;
   }
   &::placeholder {
     color: var(--control-muted);

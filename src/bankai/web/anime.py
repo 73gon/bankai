@@ -12,9 +12,11 @@ import functools
 import html
 import re
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -67,6 +69,8 @@ class AnimeSearchPage:
     page: int
     has_next: bool
     aliases: list[str]
+    # The requests asked of Nyaa for it, shown under the filters.
+    sent: tuple[str, ...] = ()
 
 
 def is_nyaa_url(url: str) -> bool:
@@ -173,6 +177,17 @@ def _publisher(title: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def _compact(text: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", text.casefold())
+
+
+def publisher_matches(publisher: str, entry: NyaaEntry) -> bool:
+    """Is the release by this group: its [tag] or its uploader, without spaces or punctuation
+    ("PHT Mini" is "[PHTMini]")?"""
+    wanted = _compact(publisher)
+    return bool(wanted) and any(wanted in _compact(found) for found in (entry.publisher or "", _publisher(entry.title) or ""))
+
+
 def _quality(title: str) -> str | None:
     match = re.search(r"(?<!\d)(2160|1080|720|480)p\b", title, flags=re.I)
     return f"{match.group(1)}p" if match else None
@@ -206,12 +221,7 @@ def parse_rss(xml: str) -> list[NyaaEntry]:
         season, episode = release_episode_info(title)
         if not match or not info_hash:
             continue
-        magnet = (
-            f"magnet:?xt=urn:btih:{info_hash}&dn={quote(title)}"
-            "&tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce"
-            "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce"
-            "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
-        )
+        magnet = magnet_uri(info_hash, title)
         size = nyaa("size")
         rss_description = HTMLParser(text("description")).text(separator=" ", strip=True)
         items.append(
@@ -243,23 +253,86 @@ def parse_rss(xml: str) -> list[NyaaEntry]:
     return items
 
 
+def parse_listing(page_html: str) -> list[NyaaEntry]:
+    """Nyaa's web listing as entries, as parse_rss reads the feed: the feed ignores the page."""
+    from email.utils import formatdate
+
+    entries: list[NyaaEntry] = []
+    for row in HTMLParser(page_html).css("table.torrent-list tbody tr"):
+        cells = row.css("td")
+        if len(cells) < 8:
+            continue
+        name = next((link for link in cells[1].css('a[href^="/view/"]') if "comments" not in (link.attributes.get("class") or "")), None)
+        magnet_link = cells[2].css_first('a[href^="magnet:"]')
+        download = cells[2].css_first('a[href$=".torrent"]')
+        found = re.search(r"/view/(\d+)", (name.attributes.get("href") or "") if name else "")
+        magnet = html.unescape(magnet_link.attributes.get("href") or "") if magnet_link else ""
+        info_hash = re.search(r"btih:([0-9a-fA-F]{40})", magnet)
+        if not (name and found and info_hash):
+            continue
+        title = html.unescape(name.attributes.get("title") or name.text(strip=True))
+        category = cells[0].css_first("a")
+        size = cells[3].text(strip=True)
+        stamp = cells[4].attributes.get("data-timestamp")
+        season, episode = release_episode_info(title)
+        classes = row.attributes.get("class") or ""
+
+        def number(cell) -> int:
+            text = cell.text(strip=True)
+            return int(text) if text.isdigit() else 0
+
+        entries.append(
+            NyaaEntry(
+                id=int(found.group(1)),
+                title=title,
+                download_url=urljoin(_NYAA_BASE, download.attributes.get("href") or "") if download else "",
+                detail_url=urljoin(_NYAA_BASE, f"/view/{found.group(1)}"),
+                magnet_uri=magnet,
+                info_hash=info_hash.group(1).lower(),
+                category_id=((category.attributes.get("href") or "").rsplit("=", 1)[-1]) if category else "",
+                category=(category.attributes.get("title") or "") if category else "",
+                size=size,
+                size_bytes=_size_bytes(size),
+                seeders=number(cells[5]),
+                leechers=number(cells[6]),
+                downloads=number(cells[7]),
+                comments=0,
+                trusted="success" in classes,
+                remake="danger" in classes,
+                published_at=formatdate(int(stamp), usegmt=True) if stamp and stamp.isdigit() else None,
+                publisher=_publisher(title),
+                quality=_quality(title),
+                season=season,
+                episode=episode,
+                description="",
+            )
+        )
+    return entries
+
+
+def _feed_params(query: str, category: str, page: int, user: str | None = None) -> dict[str, Any]:
+    params: dict[str, Any] = {"page": "rss", "q": query, "c": category, "f": "0", "p": page + 1, "s": "seeders", "o": "desc"}
+    if user:
+        params["u"] = user  # one uploader's own torrents
+    if page > 0:
+        # The feed ignores the page (and the sort): page 2 was page 1 again. The web listing,
+        # newest first like the feed, goes on where the first page ended.
+        params = {**params, "s": "id"}
+        params.pop("page")
+    return params
+
+
+def feed_url(query: str, category: str, page: int, user: str | None = None) -> str:
+    """The address one search asks Nyaa for, as Discover shows it."""
+    return f"{_NYAA_BASE}/?{urlencode(_feed_params(query, category, page, user))}"
+
+
 async def _fetch_rss(
-    client: httpx.AsyncClient, query: str, category: str, page: int
+    client: httpx.AsyncClient, query: str, category: str, page: int, *, user: str | None = None
 ) -> list[NyaaEntry]:
-    response = await client.get(
-        "/",
-        params={
-            "page": "rss",
-            "q": query,
-            "c": category,
-            "f": "0",
-            "p": page + 1,
-            "s": "seeders",
-            "o": "desc",
-        },
-    )
+    response = await client.get("/", params=_feed_params(query, category, page, user))
     response.raise_for_status()
-    return parse_rss(response.text)
+    return parse_listing(response.text) if page > 0 else parse_rss(response.text)
 
 
 async def _detail_url(
@@ -300,6 +373,21 @@ def _normalise(value: str) -> str:
     return " ".join(re.findall(r"\w+", value.casefold(), flags=re.UNICODE))
 
 
+def season_pack_name(title: str) -> str | None:
+    """A scene-style season pack's show and season: "My Hero Academia S02 1080p NF WEB-DL ...
+    (Boku no Hero Academia 4, ...)" -> "My Hero Academia Season 2".
+
+    The cleaner keeps such a name whole, and its bracket can name another season
+    altogether: picked by hand from that, VARYG's season 2 was filed as season 4 (Oct 2026).
+    """
+    value = re.sub(r"^(?:\s*\[[^]]+\])+\s*", "", title).strip()
+    match = re.match(r"^(?P<name>.+?)[\s._]+S(?P<season>\d{1,2})(?=[\s._]|$)", value, re.I)
+    if not match:
+        return None
+    name = re.sub(r"[._]+", " ", match["name"]).strip(" -")
+    return f"{name} Season {int(match['season'])}" if name else None
+
+
 def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | None:
     """The AniList entry and episode a release is, from the title index; no network.
 
@@ -312,9 +400,16 @@ def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict |
 
     if table is None:
         return None
-    parsed = erai._erai_name_episode(title)
-    name = parsed[0] if parsed else clean_release_title(title)
-    number = parsed[1] if parsed else release_episode_info(title)[1]
+    # A batch's name too ("2nd Season - 01 ~ 13"): read by the cleaner alone it lost its season,
+    # and Re:Zero's second season was taken for the first and replaced it (Nov 2026).
+    parsed = erai._erai_identity_name(title)
+    if parsed:
+        name, number = parsed
+    else:
+        name = clean_release_title(title)
+        season, number = release_episode_info(title)
+        if season and season > 1 and not erai._SHOW_SEASON_SUFFIX.search(name):
+            name = f"{name} Season {season}"
     saved = mappings.get(erai._mapping_key(title)) or {}
     if str(saved.get("anilist_id") or "").isdigit():
         entry = table.anime.get(int(saved["anilist_id"]))
@@ -322,6 +417,9 @@ def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict |
             number += int(saved.get("anilist_episode_offset") or 0)
     else:
         entry = anilist.resolve_in(table, name).anime
+        if entry is None:
+            pack = season_pack_name(title)
+            entry = anilist.resolve_in(table, pack).anime if pack else None
         if entry is not None and number is not None:
             entry, number = anilist.settle_in(entry, number)
     if entry is None:
@@ -337,6 +435,98 @@ def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict |
         "format": anilist.kind(entry.id),
         "year": anilist.year(entry.id),
     }
+
+
+_SUBTITLE_EXTS = {".ass", ".ssa", ".srt", ".sub", ".vtt"}
+# What a release can bring the episodes the library has: German, preferred above all.
+GAIN_LANGUAGES = ("ger",)
+
+
+def _episode_languages(paths: list[Path], listed: dict[Path, set[str]], inventory: dict[str, dict]) -> tuple[set[str], set[str]] | None:
+    """An episode's audio and subtitle languages over its library copies; None when none was read yet.
+
+    Its tracks as the Tracks page read them, and the subtitle files beside it
+    ("<stem>.de.ass": the German Erai-raws uploads later).
+    """
+    from bankai.web import track_cleanup
+
+    audio: set[str] = set()
+    subtitles: set[str] = set()
+    read = False
+    for path in paths:
+        entry = inventory.get(str(path))
+        if entry:
+            read = True
+            for track in entry.get("tracks") or []:
+                code = track_cleanup.language(track.get("lang"))
+                if code == "und":
+                    continue
+                if track.get("kind") == "audio":
+                    audio.add(code)
+                elif track.get("kind") == "subtitles":
+                    subtitles.add(code)
+        for name in listed.get(path.parent, ()):
+            if not name.startswith(path.stem + ".") or Path(name).suffix.casefold() not in _SUBTITLE_EXTS:
+                continue
+            # "<stem>.de.ass", "<stem>.de.forced.ass": the first part that is a language.
+            codes = [track_cleanup.language(part) for part in name[len(path.stem) + 1 :].split(".")[:-1]]
+            code = next((code for code in codes if code != "und"), None)
+            if code:
+                subtitles.add(code)
+    return (audio, subtitles) if read else None
+
+
+def _counts(sets: list[set[str]]) -> dict[str, int]:
+    counted = Counter(code for found in sets for code in found)
+    return dict(sorted(counted.items(), key=lambda item: (-item[1], item[0])))
+
+
+def mark_owned(rows: list[dict]) -> list[dict]:
+    """Each matched row's entry with what the library has of it.
+
+    ``owned`` its episodes in the library, ``episodes`` how many it has,
+    ``languages`` the audio and subtitle languages of the episodes the row is
+    about (its one episode, or a batch's entry's) with the number of episodes
+    having each, and ``gains`` what the release would bring them: German audio
+    or subtitles they lack, told from the languages a nekobt row lists.
+    """
+    from bankai.metadata import anilist
+    from bankai.web import anime_files, track_cleanup
+
+    matches = [(row, row["anilist"]) for row in rows if row.get("anilist")]
+    found, listed = anime_files.library_episodes(match["anilist_id"] for _row, match in matches)
+    inventory = track_cleanup.load_inventory()
+    languages: dict[int, dict[int, tuple[set[str], set[str]] | None]] = {
+        aid: {episode: _episode_languages(paths, listed, inventory) for episode, paths in episodes.items()}
+        for aid, episodes in found.items()
+    }
+    for row, match in matches:
+        aid = match["anilist_id"]
+        have = languages.get(aid, {})
+        match["owned"] = sorted(have)
+        match["episodes"] = anilist.episode_count(aid)
+        episode = match.get("episode")
+        about = list(have) if episode is None else [episode] if episode in have else []
+        read = [found for number in about if (found := have[number]) is not None]
+        match["languages"] = {
+            "read": len(read),
+            "audio": _counts([audio for audio, _subtitles in read]),
+            "subtitles": _counts([subtitles for _audio, subtitles in read]),
+        }
+        offered = {
+            "audio": {track_cleanup.language(code) for code in row.get("audio_langs") or []},
+            "subtitles": {
+                track_cleanup.language(code) for code in [*(row.get("sub_langs") or []), *(row.get("fansub_langs") or [])]
+            },
+        }
+        gains = []
+        for code in GAIN_LANGUAGES:
+            for kind, index in (("audio", 0), ("subtitles", 1)):
+                lacking = sum(1 for pair in read if code not in pair[index])
+                if code in offered[kind] and lacking:
+                    gains.append({"kind": kind, "language": code, "episodes": lacking, "of": len(read)})
+        match["gains"] = gains
+    return rows
 
 
 async def _enrich_anilist(entries: list[NyaaEntry]) -> list[NyaaEntry]:
@@ -366,7 +556,7 @@ def _matches_filters(
         and (entry.quality or "").casefold() != quality.casefold()
     ):
         return False
-    if publisher and publisher.casefold() not in (entry.publisher or "").casefold():
+    if publisher and not publisher_matches(publisher, entry):
         return False
     if entry.seeders < min_seeders:
         return False
@@ -402,12 +592,21 @@ async def search(
             if value and value.casefold() not in {item.casefold() for item in aliases}:
                 aliases.append(value)
     queries = aliases or [""]
+    feeds = [(term, None) for term in queries]
+    if publisher and publisher.strip():
+        # Asked of Nyaa, not only filtered from what came back: the newest uploads hold a small
+        # group's releases rarely (PHT Mini). Its name with the title, as typed and without spaces
+        # (the tag is "[PHTMini]"), and the uploader's own torrents when it is an account.
+        group = publisher.strip()
+        names = list(dict.fromkeys([group, re.sub(r"\s+", "", group)]))
+        feeds = [(f"{name} {term}".strip(), None) for name in names for term in queries]
+        feeds += [(term, group) for term in queries]
     headers = {"User-Agent": get_settings().scraper.user_agent}
     async with httpx.AsyncClient(
         base_url=_NYAA_BASE, headers=headers, timeout=30, follow_redirects=True
     ) as client:
         fetched = await asyncio.gather(
-            *(_fetch_rss(client, term, category, page) for term in queries),
+            *(_fetch_rss(client, term, category, page, user=user) for term, user in feeds),
             return_exceptions=True,
         )
         batches = [batch for batch in fetched if isinstance(batch, list)]
@@ -415,12 +614,16 @@ async def search(
             failure = next((item for item in fetched if isinstance(item, Exception)), None)
             raise RuntimeError(f"Nyaa did not return a usable feed: {failure}")
         by_hash: dict[str, NyaaEntry] = {}
-        for batch in batches:
+        for (_term, user), batch in zip(feeds, fetched, strict=True):
+            if not isinstance(batch, list):
+                continue
             for entry in batch:
-                by_hash.setdefault(entry.info_hash, entry)
+                # From the uploader's own feed: its release, whatever the tag says.
+                by_hash.setdefault(entry.info_hash, replace(entry, publisher=user) if user else entry)
         items = list(by_hash.values())
         description_terms = split_filter_terms(description_filters)
-        if description_terms or publisher:
+        # Only for a description filter: the group is in the release's [tag] or found by its feed.
+        if description_terms:
             detail_slots = asyncio.Semaphore(6)
 
             async def load_detail(
@@ -463,11 +666,12 @@ async def search(
     # AniList entry is picked for it.
     items = await _enrich_anilist(items)
     has_next = any(len(batch) >= _RSS_PAGE_SIZE for batch in batches)
-    return AnimeSearchPage(items=items, page=page, has_next=has_next, aliases=aliases)
+    sent = tuple(feed_url(term, category, page, user) for term, user in feeds)
+    return AnimeSearchPage(items=items, page=page, has_next=has_next, aliases=aliases, sent=sent)
 
 
 def entry_to_dict(entry: NyaaEntry) -> dict:
-    return asdict(entry)
+    return {**asdict(entry), "source": "nyaa"}
 
 
 __all__ = [
@@ -483,3 +687,13 @@ __all__ = [
     "search",
     "split_filter_terms",
 ]
+
+
+def magnet_uri(info_hash: str, title: str) -> str:
+    """A Nyaa torrent's magnet link: its hash, its name, Nyaa's trackers."""
+    return (
+        f"magnet:?xt=urn:btih:{info_hash}&dn={quote(title)}"
+        "&tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce"
+        "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce"
+        "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+    )

@@ -1,5 +1,17 @@
 /* controls components — owned by the controls group. Prefer Tailwind in TSX; use this only for what classes cannot express (keyframes, complex selectors, SVG). */
 
+/* The switch thumb's stretch and travel, registered so they can transition as values. */
+@property --thumb-w {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 18px;
+}
+@property --thumb-on {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+
 @layer components {
   /* ── Toggle: the pressed ("on") shadow ───────────────────────────────────────
    * The raised-current edge (--control-focus) plus a pressed-in inset. The inset uses
@@ -33,44 +45,66 @@
    * faster, and the fill clears as it finishes. Base UI keeps the indicator mounted while
    * its own transitions run, so it carries a stepped opacity of the same length. Starting and
    * ending styles exist only on change, so nothing animates on first render. */
-  [data-slot="checkbox"] {
+  [data-slot="checkbox"],
+  [data-slot="menu-checkbox-item"],
+  [data-slot="menubar-checkbox-item"] {
     --check-undraw: calc(var(--duration) * 0.72);
   }
-  [data-slot="checkbox-indicator"] {
+  /* A menu's checkbox item draws its check the same way. */
+  :is([data-slot="checkbox-indicator"], [data-slot="menu-checkbox-indicator"]) {
     transition: opacity var(--check-undraw) steps(1, end);
   }
-  [data-slot="checkbox-indicator"][data-ending-style] {
+  :is([data-slot="checkbox-indicator"], [data-slot="menu-checkbox-indicator"])[data-ending-style] {
     opacity: 0;
   }
-  [data-slot="checkbox-indicator"] svg {
+  :is([data-slot="checkbox-indicator"], [data-slot="menu-checkbox-indicator"]) svg {
     stroke-dasharray: 24;
     stroke-dashoffset: 0;
     transition: stroke-dashoffset calc(var(--duration) * 1.6) var(--ease);
   }
-  [data-slot="checkbox-indicator"]:is([data-starting-style], [data-ending-style]) svg {
+  :is([data-slot="checkbox-indicator"], [data-slot="menu-checkbox-indicator"]):is(
+      [data-starting-style],
+      [data-ending-style]
+    )
+    svg {
     stroke-dashoffset: -24;
   }
-  [data-slot="checkbox-indicator"][data-ending-style] svg {
+  :is([data-slot="checkbox-indicator"], [data-slot="menu-checkbox-indicator"])[data-ending-style] svg {
     transition-duration: var(--check-undraw);
     transition-timing-function: cubic-bezier(0.65, 0, 0.35, 1);
+  }
+
+  /* ── Menu: a trigger's down chevron turns up while its menu is open ───────────────────── */
+  [aria-haspopup="menu"] svg.lucide-chevron-down {
+    transition: rotate var(--duration) var(--ease);
+  }
+  [aria-haspopup="menu"][aria-expanded="true"] svg.lucide-chevron-down {
+    rotate: 180deg;
   }
 
   /* ── Switch: the thumb stretches, then slides ────────────────────────────────
    * Hover stretches the thumb from 18 to 22px, a press to 25px, toward the side it will travel.
    * Checked, it sits against the far edge: the track's inner width (34px) minus its own width,
-   * so it stays flush while it stretches. Width and position move together in 2 × --duration. */
+   * so it stays flush while it stretches.
+   *
+   * Two registered values move, not width and position: the stretch (--thumb-w) and how far on
+   * the switch is (--thumb-on, 0 to 1), each in 2 × --duration. Width and offset are worked out
+   * from them every frame, both in layout, so the far edge cannot drift — two separate
+   * transitions fell out of step whenever one was reversed mid-way (hover out, release). */
   [data-slot="switch-thumb"] {
     --thumb-w: 18px;
+    --thumb-on: 0;
     width: var(--thumb-w);
     height: 18px;
+    margin-inline-start: calc((34px - var(--thumb-w)) * var(--thumb-on));
     transition:
-      width calc(var(--duration) * 2) var(--ease),
-      translate calc(var(--duration) * 2) var(--ease),
+      --thumb-w calc(var(--duration) * 2) var(--ease),
+      --thumb-on calc(var(--duration) * 2) var(--ease),
       background-color var(--duration) var(--ease),
       box-shadow var(--duration) var(--ease);
   }
   [data-slot="switch-thumb"][data-checked] {
-    translate: calc(34px - var(--thumb-w)) 0;
+    --thumb-on: 1;
   }
   @media (hover: hover) {
     [data-slot="switch"]:not([data-disabled], [data-readonly]):hover > [data-slot="switch-thumb"] {
@@ -243,6 +277,113 @@
     opacity: 0;
   }
 
+  /* ── Button, collapsible: the label folds away to leave the icon ─────────────────────────
+   * Like a revealing toggle-group segment: the label is a one-column grid that narrows to 0fr
+   * with its text clipped, on 2 × --duration, and fades on --duration. The icon–label gap
+   * travels inside it (a pseudo-element on the icon's side), so nothing of it is left. The
+   * first decision, before the first paint, is drawn without motion (data-collapse-instant; the
+   * button's own transitions are switched off by a utility in Button, above the material). */
+  [data-slot="button"] > [data-slot="button-label"] {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: center;
+    transition:
+      grid-template-columns calc(var(--duration) * 2) var(--ease),
+      opacity var(--duration) var(--ease);
+  }
+  [data-slot="button-label"] > span {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+  }
+  [data-slot="button-label"][data-after-icon] > span::before,
+  [data-slot="button-label"]:not([data-after-icon]) > span::after {
+    content: "";
+    flex: none;
+    width: var(--button-gap);
+  }
+  [data-slot="button"][data-collapsed] > [data-slot="button-label"] {
+    grid-template-columns: 0fr;
+    opacity: 0;
+  }
+  /* An expandable button is the fold in reverse: folded at rest, open on hover or keyboard
+     focus. Touch screens have no hover, so there it stays an icon. */
+  @media (hover: hover) {
+    [data-slot="button"][data-expandable="label"]:hover > [data-slot="button-label"] {
+      grid-template-columns: 1fr;
+      opacity: 1;
+    }
+  }
+  [data-slot="button"][data-expandable="label"]:focus-visible > [data-slot="button-label"] {
+    grid-template-columns: 1fr;
+    opacity: 1;
+  }
+  /* Hover intent: an expandable button opens once the pointer rests on it (70ms), so passing over
+     it on the way somewhere does nothing, and stays open a moment after it leaves (140ms), so
+     the button the pointer is heading for does not move away under it. Keyboard focus and
+     reduced motion are immediate. */
+  [data-slot="button"][data-expandable] {
+    --expand-delay: 140ms;
+  }
+  @media (hover: hover) {
+    [data-slot="button"][data-expandable]:hover {
+      --expand-delay: 70ms;
+    }
+  }
+  [data-slot="button"][data-expandable]:focus-visible {
+    --expand-delay: 0s;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-slot="button"][data-expandable] {
+      --expand-delay: 0s !important;
+    }
+  }
+  [data-slot="button"][data-expandable] > :is([data-slot="button-label"], [data-slot="button-icon"]) {
+    transition-delay: var(--expand-delay);
+  }
+
+  /* expandable="icon" is the other way round: the text stays, and the icon slides in beside it
+     on hover or keyboard focus, out of a 0fr column like a revealing toggle-group segment. The
+     gap travels inside the icon's column, on the side that faces the text. */
+  [data-slot="button"] > [data-slot="button-icon"] {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: center;
+    transition:
+      grid-template-columns calc(var(--duration) * 2) var(--ease),
+      opacity var(--duration) var(--ease);
+  }
+  [data-slot="button-icon"] > span {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+  }
+  [data-slot="button-icon"][data-before-label] > span::after,
+  [data-slot="button-icon"]:not([data-before-label]) > span::before {
+    content: "";
+    flex: none;
+    width: var(--button-gap);
+  }
+  [data-slot="button"][data-expandable="icon"] > [data-slot="button-icon"] {
+    grid-template-columns: 0fr;
+    opacity: 0;
+  }
+  @media (hover: hover) {
+    [data-slot="button"][data-expandable="icon"]:hover > [data-slot="button-icon"] {
+      grid-template-columns: 1fr;
+      opacity: 1;
+    }
+  }
+  [data-slot="button"][data-expandable="icon"]:focus-visible > [data-slot="button-icon"] {
+    grid-template-columns: 1fr;
+    opacity: 1;
+  }
+  [data-slot="button"][data-collapse-instant] > [data-slot="button-label"] {
+    transition: none;
+  }
+
   /* ── Input group: nested radius ──────────────────────────────────────────────
    * A button inside the field is concentric with it: outer radius − inset = inner radius,
    * where the inset is the space between the field's border and the button.
@@ -349,4 +490,39 @@
   )
   > [data-variant="secondary"]::after {
   background: var(--field-edge);
+}
+
+/*
+ * A folded collapsible Button is a circle as tall as the button: padding of (height − 16px icon −
+ * 2px border) / 2 and corners of half the height. Unlayered on purpose: it has to win over the
+ * Button size utilities (px-3, rounded-button), and both move on --material-motion.
+ */
+[data-slot="button"][data-collapsed] {
+  --collapsed-h: var(--control-h);
+  padding-inline: calc((var(--collapsed-h) - 1rem - 2px) / 2);
+  border-radius: calc(var(--collapsed-h) / 2);
+}
+[data-slot="button"][data-collapsed][data-size="sm"] {
+  --collapsed-h: var(--control-h-sm);
+}
+[data-slot="button"][data-collapsed][data-size="lg"] {
+  --collapsed-h: var(--control-h-lg);
+}
+
+/* An expandable Button opens to its size's padding and corners on hover or keyboard focus. */
+@media (hover: hover) {
+  [data-slot="button"][data-expandable="label"][data-collapsed]:hover {
+    padding-inline: var(--expanded-pad, 1rem);
+    border-radius: var(--radius-button);
+  }
+}
+[data-slot="button"][data-expandable="label"][data-collapsed]:focus-visible {
+  padding-inline: var(--expanded-pad, 1rem);
+  border-radius: var(--radius-button);
+}
+[data-slot="button"][data-expandable="label"][data-size="sm"] {
+  --expanded-pad: 0.75rem;
+}
+[data-slot="button"][data-expandable="label"][data-size="lg"] {
+  --expanded-pad: 1.25rem;
 }

@@ -8,6 +8,7 @@ session-cookie based.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ class TorrentStatus:
     peers_total: int = 0
     added_on: int = 0
     last_activity: int = 0
+    completion_on: int = 0  # when it finished downloading; 0 while it has not
 
 
 _DONE_STATES = {"uploading", "stalledUP", "queuedUP", "pausedUP", "forcedUP", "checkingUP"}
@@ -57,6 +59,10 @@ _ERROR_STATES = {"error", "missingFiles"}
 
 class QBittorrentError(Exception):
     pass
+
+
+class TorrentStalled(QBittorrentError):
+    """A torrent whose progress stopped: no metadata, or nobody to download from."""
 
 
 class QBittorrentClient:
@@ -243,6 +249,12 @@ class QBittorrentClient:
         )
         response.raise_for_status()
 
+    async def recheck(self, torrent_hash: str) -> None:
+        """Check the torrent's pieces on disk again (what clears an errored torrent, with a start)."""
+        await self._ensure_login()
+        response = await self._client.post("/api/v2/torrents/recheck", data={"hashes": torrent_hash})
+        response.raise_for_status()
+
     async def force_start(self, torrent_hash: str, *, enabled: bool) -> None:
         """Let an active Bankai worker bypass blocked qBittorrent queue slots."""
         await self._ensure_login()
@@ -260,10 +272,16 @@ class QBittorrentClient:
         *,
         cancel_token: asyncio.Event | None = None,
         progress_cb: Any = None,
+        stall_seconds: float | None = None,
     ) -> TorrentStatus:
-        """Poll until the torrent is in a "complete" state."""
+        """Poll until the torrent is in a "complete" state.
+
+        ``stall_seconds``: give up (TorrentStalled) when its progress has not moved for that
+        long -- no metadata, or no seeder: Modern Family S06E17 sat at 0% for hours.
+        """
         interval = self._settings.poll_interval_seconds
         transport_failures = 0
+        best, moved_at = -1.0, time.monotonic()
         while True:
             try:
                 status = await self.get(torrent_hash)
@@ -296,6 +314,13 @@ class QBittorrentClient:
                 raise QBittorrentError(f"torrent in error state: {status.state}")
             if status.progress >= 1.0 or status.state in _DONE_STATES:
                 return status
+            if status.progress > best:
+                best, moved_at = status.progress, time.monotonic()
+            elif stall_seconds and time.monotonic() - moved_at >= stall_seconds:
+                raise TorrentStalled(
+                    f"no progress for {round(stall_seconds / 60)} min at {status.progress * 100:.1f}% "
+                    f"({status.seeds_total} seeders, {status.state})"
+                )
             if cancel_token is not None and cancel_token.is_set():
                 raise QBittorrentError("cancelled")
             await asyncio.sleep(interval)
@@ -319,4 +344,5 @@ def _to_status(row: dict[str, Any]) -> TorrentStatus:
         peers_total=int(row.get("num_incomplete") or 0),
         added_on=int(row.get("added_on") or 0),
         last_activity=max(0, int(row.get("last_activity") or 0)),
+        completion_on=max(0, int(row.get("completion_on") or 0)),
     )

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon, Check, Link2 } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type DiscoverItem, type PagedDiscover, type SearchResult } from '@/lib/api';
+import { POSTER_IMG, posterSources } from '@/lib/posters';
 import { Tabs, TabsList, TabsTab, TabsPanel } from '@/zon/ui/tabs';
 import { Button } from '@/zon/ui/button';
 import { StatusTag } from '@/components/status-tag';
@@ -65,7 +66,7 @@ function Poster({ item, onClick }: { item: DiscoverItem; onClick: () => void }) 
       className='poster-card group relative aspect-[2/3] overflow-hidden rounded-control bg-control-surface text-left ring-1 ring-border/40 focus-ring hover:ring-primary/50'
     >
       {item.poster_url && !err ? (
-        <img src={api.posterUrl(item.poster_url)} onError={() => setErr(true)} className='h-full w-full object-cover' loading='lazy' />
+        <img {...posterSources(item.poster_url)} {...POSTER_IMG} alt='' onError={() => setErr(true)} className='h-full w-full object-cover' />
       ) : (
         <div className='flex h-full w-full items-center justify-center text-muted-foreground'>
           {item.kind === 'movie' ? <Film className='h-8 w-8' /> : <Tv className='h-8 w-8' />}
@@ -237,9 +238,9 @@ export default function Discover() {
     setEpisodes('');
     let canonicalName = item.name;
     let sourceName = item.name;
-    if (item.tvdb_id) {
+    if (item.tmdb_id) {
       try {
-        const details = await api.discoverGerman(item.tvdb_id, item.kind);
+        const details = await api.discoverGerman(item.tmdb_id, item.kind);
         canonicalName = details.english || canonicalName;
         sourceName = details.german || sourceName;
         setSelected((current) =>
@@ -396,7 +397,7 @@ export default function Discover() {
     <div className='space-y-6'>
       <header className='flex items-baseline gap-2'>
         <h1 className='font-heading text-3xl font-light'>Discover</h1>
-        <span className='text-sm text-muted-foreground'>— Trending titles from TheTVDB.</span>
+        <span className='text-sm text-muted-foreground'>— Popular titles from TMDB.</span>
       </header>
 
       <Tabs
@@ -415,8 +416,8 @@ export default function Discover() {
           {!configured ? (
             <Empty>
               <EmptyMedia><Compass /></EmptyMedia>
-              <EmptyTitle>TheTVDB key not configured</EmptyTitle>
-              <EmptyDescription>Add your TVDB API key in Settings to browse trending titles.</EmptyDescription>
+              <EmptyTitle>TMDB key not configured</EmptyTitle>
+              <EmptyDescription>Add your TMDB API key in Settings to browse trending titles.</EmptyDescription>
             </Empty>
           ) : loading ? (
             <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
@@ -432,7 +433,7 @@ export default function Discover() {
           ) : (
             <div className='grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10'>
               {visibleItems.map((it) => (
-                <Poster key={`${it.kind}-${it.tvdb_id}-${it.name}`} item={it} onClick={() => openItem(it)} />
+                <Poster key={`${it.kind}-${it.tmdb_id}-${it.name}`} item={it} onClick={() => openItem(it)} />
               ))}
             </div>
           )}

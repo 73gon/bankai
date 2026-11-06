@@ -419,3 +419,43 @@ def test_qbittorrent_reports_download_disk_free_space(
         assert asyncio.run(client.free_space_bytes()) == 12345
     finally:
         asyncio.run(client.aclose())
+
+
+def test_the_dub_pipeline_finds_its_torrent_in_its_own_category_not_the_anime_one() -> None:
+    """The anime automation, while off, pauses every unfinished torrent of its category as backlog."""
+    import asyncio
+
+    from bankai.torrent import worker as worker_mod
+
+    asked: list[str | None] = []
+
+    class FakeQbit:
+        async def list_torrents(self, *, category=None):
+            asked.append(category)
+            return [type("T", (), {"hash": "new", "name": "Film.2026.1080p"})()]
+
+    found = asyncio.run(worker_mod.TorrentWorker(qbit=FakeQbit())._locate_added("Film 2026 1080p", before_hashes=set()))
+    assert found == "new"
+    assert asked == [worker_mod.CATEGORY] and worker_mod.CATEGORY != "bankai"
+
+
+def test_a_torrent_whose_progress_stops_is_given_up(monkeypatch) -> None:
+    """Modern Family S06E17 sat at 0% for hours: no metadata, no seeder."""
+    import asyncio
+
+    from bankai.torrent import qbittorrent as qb
+
+    client = qb.QBittorrentClient.__new__(qb.QBittorrentClient)
+    client._settings = type("S", (), {"poll_interval_seconds": 0})()
+    status = type("T", (), {"progress": 0.2, "state": "stalledDL", "seeds_total": 0})()
+
+    async def get(_hash):
+        return status
+
+    from types import SimpleNamespace
+
+    clock = iter(range(0, 100_000, 1000))
+    monkeypatch.setattr(qb, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    client.get = get
+    with pytest.raises(qb.TorrentStalled, match="no progress"):
+        asyncio.run(client.wait_until_complete("h", stall_seconds=3600))

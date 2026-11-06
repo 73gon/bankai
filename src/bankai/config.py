@@ -89,11 +89,9 @@ class ScraperSettings(BaseModel):
 
 
 class MetadataSettings(BaseModel):
-    tvdb_enabled: bool = True
-    tvdb_api_key: str = ""
-    tvdb_pin: str = ""
-    tvdb_languages: list[str] = Field(default_factory=lambda: ["deu", "eng"])
-    # TMDB's v3 API key or v4 read access token; the anime library's artwork.
+    # TMDB's v3 API key or v4 read access token: Movies & Shows titles, German
+    # names and episode lists, the anime library's artwork, genres. (TheTVDB's
+    # keys, until Oct 2026, are ignored where an old config still has them.)
     tmdb_api_key: str = ""
 
 
@@ -159,6 +157,12 @@ class AnimeAutomationSettings(BaseModel):
     # logos, landscape thumbs and season posters, Specials included. Needs
     # metadata.tmdb_api_key.
     artwork_tmdb: bool = True
+    # Release groups worth knowing, offered by Discover's publisher filter (Settings -> Publishers).
+    # Matched without spaces or punctuation: "PHT Mini" finds "[PHTMini]".
+    publishers: list[str] = Field(default_factory=lambda: ["Ironclad", "PHT Mini", "Erai-raws"])
+    # Languages Discover's nekobt.to filters offer for subtitles and audio, as nekobt writes them
+    # (de, en, ja, pt-br, es-419); Settings -> nekobt languages.
+    nekobt_languages: list[str] = Field(default_factory=lambda: ["de", "en", "ja"])
 
 
     @model_validator(mode="after")
@@ -319,7 +323,7 @@ class WebSettings(BaseModel):
     # Anime roots are listed separately so the Movies & Shows library can scan
     # its own two lists while the server library scans all three.
     server_anime_dirs: list[Path] = Field(default_factory=lambda: [Path("/mnt/media12/shows_anime")])
-    # Seconds to cache TVDB discover/trending responses and ffprobe data.
+    # Seconds to cache TMDB discover/trending responses and ffprobe data.
     cache_ttl_seconds: int = 900
 
 

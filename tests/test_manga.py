@@ -349,7 +349,7 @@ def test_a_volume_holds_its_chapters_from_first_to_last_and_two_volumes_those_be
     assert manga_contents.own_chapters(set()) == []
 
 
-def test_a_volume_whose_chapters_the_library_has_stays_out_and_its_chapter_files_follow_it(library):
+def test_a_volume_replaces_the_chapter_files_it_holds_and_its_chapter_files_follow_it(library):
     folder = manga_library.ensure_folder(FRIEREN, "manga")
     for n in range(1, 6):
         cbz(folder / f"Chapter {n:04d}.cbz", [f"Frieren - c{n:03d} - p001.jpg"])
@@ -361,7 +361,8 @@ def test_a_volume_whose_chapters_the_library_has_stays_out_and_its_chapter_files
     )
 
     assert verdicts == {
-        "Frieren v01.cbz": "the library has its chapters",
+        # Volumes where they exist: it takes the place of chapter files 1-5.
+        "Frieren v01.cbz": None,
         "Frieren v02.cbz": None,
         # In Vol 02, which goes in.
         "Frieren - c007.cbz": "the library has it",
@@ -504,6 +505,8 @@ def test_an_anime_shows_its_manga_with_what_bankai_does_about_each(library, monk
 
     assert (rows[MUSHOKU_NOVEL]["on_disk"], rows[MUSHOKU_NOVEL]["format"]) == (True, "NOVEL")
     assert rows[MUSHOKU_MANGA]["blacklisted"] is True
+    # Which anime links it, so the relation graph draws its line from there.
+    assert rows[MUSHOKU_NOVEL]["anime"] == [MUSHOKU_ANIME]
 
 
 def test_a_series_graph_holds_its_anime_and_its_other_manga(library, monkeypatch):
@@ -760,3 +763,257 @@ def test_books_of_another_series_move_into_its_folder_under_their_new_names(libr
         (content / name).write_bytes(b"new")
     result = manga_releases.file_release({"anilist_id": FRIEREN, "kind": "manga"}, content)
     assert (result["copied"], result["left"]) == (["Vol 02.cbz"], [["Frieren v00 (2021) (Digital) (1r0n).cbz", "moved to another series"]])
+
+
+def test_a_removed_series_loses_its_folder_and_downloads_and_is_blacklisted(library, monkeypatch):
+    from bankai.torrent import qbittorrent
+
+    folder = manga_library.ensure_folder(FRIEREN, "manga")
+    (folder / "Vol 01.cbz").write_bytes(b"volume one")
+    other = manga_library.ensure_folder(OSHI, "manga")
+    (other / "Vol 01.cbz").write_bytes(b"another series")
+    downloading, waiting = found(library, "Frieren v02 (Digital) (1r0n)", "Frieren v03 (Digital) (1r0n)")
+    manga_releases.approve(downloading)
+    fake = FakeQbit([])
+    monkeypatch.setattr(qbittorrent, "QBittorrentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(openpanel, "scan", lambda: asyncio.sleep(0))
+
+    result = asyncio.run(manga_releases.remove_series(FRIEREN))
+
+    rows = manga_releases.releases()
+    assert (result["deleted_files"], result["stopped"], result["discarded"]) == (1, 1, 1)
+    assert not folder.exists() and manga_library.folder_of(FRIEREN) is None
+    assert (other / "Vol 01.cbz").read_bytes() == b"another series"
+    assert fake.removed == [downloading]
+    assert rows[downloading]["status"] == rows[waiting]["status"] == "discarded"
+    assert FRIEREN in manga_series.blacklisted()
+    # Nothing of it is downloaded again: the downloads pass has nothing left to follow.
+    assert asyncio.run(manga_releases.reconcile()) == {}
+
+
+def test_a_download_stopped_while_the_pass_runs_is_not_brought_back(library):
+    (info_hash,) = found(library, "Frieren v02 (Digital) (1r0n)")
+    manga_releases.approve(info_hash)
+    manga_releases._change(info_hash, status="discarded", reason="series removed from the library")
+
+    manga_releases._change(info_hash, only=manga_releases.ACTIVE, status="downloading", progress=0.5)
+
+    assert manga_releases.releases()[info_hash]["status"] == "discarded"
+
+
+# -- The plan: what to download of a series ------------------------------------------------------
+
+
+def roles_of(card):
+    return {view["info_hash"]: view["role"] for view in card["releases"]}
+
+
+def test_the_plan_is_the_fewest_releases_that_bring_everything_and_the_rest_are_other_versions(library):
+    whole, older, single, rip = found(
+        library,
+        "Frieren v01-14 + 138-147 (2021-2026) (Digital) (1r0n)",
+        "Frieren v01-10 (2021-2024) (Digital) (LuCaZ)",
+        "Frieren v12 (Digital)",
+        "Sousou no Frieren CH001-140 Mangadex-RIP",
+    )
+
+    (card,) = manga_releases.review()
+
+    # The rip's chapters up to 137 are in the pack's volumes, as its name says; 138-140 it holds too.
+    assert roles_of(card) == {whole: "plan", older: "covered", single: "covered", rip: "covered"}
+    assert card["releases"][0]["info_hash"] == whole
+
+
+def test_a_download_under_way_counts_as_had_so_its_other_versions_wait_behind_it(library):
+    whole, older = found(library, "Frieren v01-14 (Digital) (1r0n)", "Frieren v01-10 (Digital) (LuCaZ)")
+    manga_releases.approve(whole)
+
+    (card,) = manga_releases.review()
+
+    assert roles_of(card) == {older: "covered"}
+
+
+def test_taking_a_plan_approves_its_releases_and_never_a_guessed_match(library):
+    whole, single, guessed = found(library, "Frieren v01-14 (Digital) (1r0n)", "Frieren v15 (Digital)", "Frieren v16 (Digital)")
+    state = manga_releases._read()
+    state["releases"][guessed]["guess"] = True
+    manga_releases._write(state)
+
+    assert manga_releases.take_plan(FRIEREN) == [whole, single]
+
+    rows = manga_releases.releases()
+    assert [rows[key]["status"] for key in (whole, single, guessed)] == ["queued", "queued", "review"]
+    (card,) = manga_releases.review()
+    assert roles_of(card) == {guessed: "extra"}
+
+
+def test_a_volume_the_folder_holds_as_chapter_files_is_still_wanted_to_replace_them(library):
+    folder = manga_library.ensure_folder(FRIEREN, "manga")
+    for chapter in (1, 2):
+        cbz(folder / f"Chapter {chapter:04d}.cbz", [f"Frieren - c{chapter:03d} (v01) - p{page:03d}.jpg" for page in range(3)])
+    volume_one, volume_two = found(library, "Frieren v01 (Digital)", "Frieren v02 (Digital)")
+
+    found_now = manga_releases.holdings(FRIEREN)
+    rows = manga_releases.releases()
+
+    assert manga_releases.adds(rows[volume_one], found_now) == ({1.0}, set())
+    assert manga_releases.release_view(volume_one, rows[volume_one], found_now)["replaces"] == "Vol 1"
+    assert manga_releases.release_view(volume_two, rows[volume_two], found_now)["replaces"] is None
+
+
+# -- Collections and the layout on disk ---------------------------------------------------------
+
+GHOUL, GHOUL_RE, GHOUL_JACK = 63327, 85611, 77777
+
+
+def ghouls(*, jack=False):
+    """Tokyo Ghoul and its sequel in AniList's cache (and Jack, a side story, when asked)."""
+    store = manga_meta._store()
+    data = json.loads(store.read_text(encoding="utf-8"))
+    entries = {
+        GHOUL: {"english": "Tokyo Ghoul", "year": 2011, "relations": [[GHOUL_RE, "SEQUEL", "MANGA", "MANGA"], [GHOUL_JACK, "SIDE_STORY", "MANGA", "MANGA"]]},
+        GHOUL_RE: {"english": "Tokyo Ghoul:re", "year": 2014, "relations": [[GHOUL, "PREQUEL", "MANGA", "MANGA"]]},
+    }
+    if jack:
+        entries[GHOUL_JACK] = {"english": "Tokyo Ghoul: Jack", "year": 2013, "relations": [[GHOUL, "PARENT", "MANGA", "MANGA"]]}
+    for aid, row in entries.items():
+        data[str(aid)] = {"synonyms": [], "fetched_at": time.time(), "format": "MANGA", "romaji": row["english"], **row}
+    store.write_text(json.dumps(data), encoding="utf-8")
+    manga_meta._MEDIA = None
+
+
+def shelve(library, folder, aid, *books):
+    path = library["manga"] / folder
+    path.mkdir(parents=True)
+    for book in books:
+        (path / book).write_bytes(b"x")
+    manga_library._remember(aid, "manga", folder, "hand")
+    return path
+
+
+def test_the_main_line_joins_a_collection_named_after_what_its_entries_share(library):
+    from bankai.web import manga_collections
+
+    ghouls(jack=True)
+    store = manga_collections.Store()
+
+    manga_collections.build(store, {GHOUL, GHOUL_RE, GHOUL_JACK, FRIEREN})
+
+    # The side story stays out, and an entry alone is no collection.
+    (row,) = store.collections.values()
+    assert row.members == [GHOUL, GHOUL_RE]
+    assert manga_collections.name(row) == "Tokyo Ghoul"
+    manga_collections.exclude(store, GHOUL_RE)
+    assert store.collections == {}
+    manga_collections.build(store, {GHOUL, GHOUL_RE})
+    assert store.collections == {}
+
+
+def test_a_collection_s_entries_move_into_its_folder_their_books_renamed_and_undo_puts_it_back(library, monkeypatch):
+    from bankai.web import manga_layout
+
+    ghouls()
+    monkeypatch.setattr(manga_series, "followed", lambda: {})
+    shelve(library, "Tokyo Ghoul (2011)", GHOUL, "Tokyo Ghoul v01 (2015) (Digital).cbz", "Vol 02.cbz")
+    shelve(library, "Tokyo Ghoul - re (2014)", GHOUL_RE, "Vol 01.cbz")
+    alone = shelve(library, "Frieren (2020)", FRIEREN, "Frieren v01-02 (Digital).cbz")
+
+    result = manga_layout.apply()
+
+    first, second = "Tokyo Ghoul/Tokyo Ghoul (2011) - 63327", "Tokyo Ghoul/Tokyo Ghoul -re (2014) - 85611"
+    assert [move["to"] for move in result["folders"]] == [first, second]
+    assert sorted(path.name for path in (library["manga"] / first).iterdir()) == ["Vol 01.cbz", "Vol 02.cbz"]
+    assert sorted(path.name for path in alone.iterdir()) == ["Vol 01-02.cbz"]
+    assert manga_library.folder_of(GHOUL_RE) == library["manga"] / second
+    assert manga_library.folders("manga") == ["Frieren (2020)", first, second]
+    assert manga_layout.plan()["folders"] == []
+
+    manga_layout.undo(result["journal"])
+
+    assert sorted(path.name for path in library["manga"].iterdir()) == ["Frieren (2020)", "Tokyo Ghoul (2011)", "Tokyo Ghoul - re (2014)"]
+    assert (library["manga"] / "Tokyo Ghoul (2011)" / "Tokyo Ghoul v01 (2015) (Digital).cbz").exists()
+    assert manga_library.folder_of(GHOUL) == library["manga"] / "Tokyo Ghoul (2011)"
+
+
+def test_a_collection_of_which_the_library_has_one_entry_keeps_it_where_it_is(library, monkeypatch):
+    from bankai.web import manga_layout
+
+    ghouls()
+    monkeypatch.setattr(manga_series, "followed", lambda: {GHOUL_RE: ["anime"]})
+    shelve(library, "Tokyo Ghoul (2011)", GHOUL, "Vol 01.cbz")
+
+    todo = manga_layout.plan()
+
+    assert [(row["name"], row["folder"]) for row in todo["collections"]] == [("Tokyo Ghoul", None)]
+    assert todo["folders"] == []
+
+
+def test_a_new_entry_of_a_collection_is_filed_into_its_folder_and_the_one_on_disk_moves_in(library, monkeypatch):
+    from bankai.web import manga_collections
+
+    ghouls()
+    monkeypatch.setattr(manga_series, "followed", lambda: {GHOUL_RE: ["anime"]})
+    shelve(library, "Tokyo Ghoul (2011)", GHOUL, "Vol 01.cbz")
+    with manga_collections.editing() as store:
+        manga_collections.build(store, {GHOUL, GHOUL_RE})
+
+    folder = manga_library.ensure_folder(GHOUL_RE, "manga")
+
+    assert folder == library["manga"] / "Tokyo Ghoul" / "Tokyo Ghoul -re (2014) - 85611"
+    assert manga_library.folder_of(GHOUL) == library["manga"] / "Tokyo Ghoul" / "Tokyo Ghoul (2011) - 63327"
+    assert (manga_library.folder_of(GHOUL) / "Vol 01.cbz").exists()
+
+
+def test_a_filed_volume_takes_the_place_of_its_chapter_files_and_a_second_copy_stays_out(library):
+    folder = manga_library.ensure_folder(FRIEREN, "manga")
+    for chapter in (1, 2, 3):
+        cbz(folder / f"Chapter {chapter:04d}.cbz", [f"Frieren - c{chapter:03d} (v01) - p001.jpg"])
+    content = library["downloads"] / "manga" / "Frieren v01-02"
+    content.mkdir(parents=True)
+    cbz(content / "Frieren v01 (Digital).cbz", [f"Frieren - c{chapter:03d} (v01) - p001.jpg" for chapter in (1, 2, 3)])
+    cbz(content / "Frieren - c004 (Digital).cbz", ["Frieren - c004 (v02) - p001.jpg"])
+
+    result = manga_releases.file_release({"anilist_id": FRIEREN, "kind": "manga"}, content)
+
+    assert sorted(result["copied"]) == ["Chapter 0004.cbz", "Vol 01.cbz"]
+    assert result["replaced"] == ["Chapter 0001.cbz", "Chapter 0002.cbz", "Chapter 0003.cbz"]
+    assert sorted(path.name for path in folder.iterdir()) == ["Chapter 0004.cbz", "Vol 01.cbz"]
+    # Its chapters in a volume now, another copy of that volume stays out.
+    assert manga_releases.wanted(FRIEREN, ["Frieren v01 (Other).cbz"], pages={"Frieren v01 (Other).cbz": [1.0, 2.0, 3.0]}) == {
+        "Frieren v01 (Other).cbz": "the library has it"}
+
+
+def test_entries_split_off_and_collections_merge_by_hand(library):
+    from bankai.web import manga_collections
+
+    ghouls(jack=True)
+    store = manga_collections.Store()
+    manga_collections.build(store, {GHOUL, GHOUL_RE})
+    (row,) = store.collections.values()
+    other = manga_collections.together(store, [GHOUL_JACK, FRIEREN])
+
+    manga_collections.merge(store, row.id, other.id)
+
+    assert store.collections[row.id].members == [GHOUL, GHOUL_JACK, GHOUL_RE, FRIEREN]
+    assert other.id not in store.collections
+    assert manga_collections.split(store, [GHOUL_JACK, FRIEREN]) is not None
+    assert manga_collections.split(store, [GHOUL_RE]) is None
+    assert {tuple(c.members) for c in store.collections.values()} == {(GHOUL_JACK, FRIEREN)}
+    assert GHOUL_RE in store.alone
+
+
+def test_every_entry_of_a_collection_shows_the_same_graph_its_main_line_in_order(library, monkeypatch):
+    from bankai.web import manga_views
+
+    ghouls(jack=True)
+    shelve(library, "Tokyo Ghoul (2011)", GHOUL, "Vol 01.cbz")
+    shelve(library, "Tokyo Ghoul - re (2014)", GHOUL_RE, "Vol 01.cbz")
+    monkeypatch.setattr(manga_series, "followed", lambda: {})
+    monkeypatch.setattr(manga_meta, "ensure", lambda *_a, **_k: asyncio.sleep(0, 0))
+    monkeypatch.setattr(anilist, "ensure", lambda *_a, **_k: asyncio.sleep(0, 0))
+
+    first, second = asyncio.run(manga_views.graph(GHOUL)), asyncio.run(manga_views.graph(GHOUL_RE))
+
+    shape = lambda graph: (sorted(node["anilist_id"] for node in graph["nodes"]), graph["members"])  # noqa: E731
+    assert shape(first) == shape(second) == (sorted([GHOUL, GHOUL_RE, GHOUL_JACK]), [GHOUL, GHOUL_RE])
+    assert (first["root"], second["root"]) == (GHOUL, GHOUL_RE)

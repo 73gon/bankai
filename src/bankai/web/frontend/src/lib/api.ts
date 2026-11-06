@@ -36,8 +36,20 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(detail);
   }
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  if ((options?.method ?? 'GET').toUpperCase() !== 'GET') return res.json() as Promise<T>;
+  // The same answer as last time is the same object: a page refreshing or polling
+  // then sets state it already has, and React leaves the page as it is instead of
+  // laying out hundreds of rows again for nothing.
+  const text = await res.text();
+  const last = lastAnswers.get(path);
+  if (last && last.text === text) return last.value as T;
+  const value = JSON.parse(text) as T;
+  lastAnswers.set(path, { text, value });
+  return value;
 }
+
+// Each GET's last answer, as text and as the object it became.
+const lastAnswers = new Map<string, { text: string; value: unknown }>();
 
 // ---- Remembered answers -------------------------------------------------
 // The last answer to each page's main request, so coming back to a tab shows
@@ -50,6 +62,9 @@ const REMEMBER_MAX_CHARS = 1_500_000;
 const remembered = new Map<string, unknown>();
 
 function remember(path: string, value: unknown): void {
+  // The same answer again (request() hands back the same object): already kept,
+  // and writing a large one to localStorage again cost a tenth of a second a time.
+  if (remembered.get(path) === value) return;
   remembered.set(path, value);
   try {
     const text = JSON.stringify(value);
@@ -117,6 +132,8 @@ async function remembering<T>(path: string): Promise<T> {
 export interface EraiRelease {
   info_hash: string;
   name: string;
+  /** The torrent's magnet link (its hash and Nyaa's trackers). */
+  magnet?: string;
   title: string;
   /** Erai's subtitle codes, the flags it shows: "us", "de", ... */
   subs: string[];
@@ -173,14 +190,19 @@ export type EraiResolution = '1080p' | '720p' | 'SD' | 'all';
 
 export type EraiCodec = 'all' | 'hevc' | 'avc';
 
+/** What Erai's category says a release is: an airing single, an encode, a batch, a movie or special. */
+export type EraiKind = 'all' | 'airing' | 'encoded' | 'batch' | 'special';
+
 export function eraiPath(
   page = 0,
   q = '',
   german: 'all' | 'yes' | 'no' = 'all',
   res: EraiResolution = '1080p',
   codec: EraiCodec = 'all',
+  kind: EraiKind = 'all',
 ): string {
   const params = new URLSearchParams({ page: String(page), german, res, codec });
+  if (kind !== 'all') params.set('kind', kind);
   if (q.trim()) params.set('q', q.trim());
   return `/api/anime/erai?${params}`;
 }
@@ -270,6 +292,10 @@ export interface DashboardDueItem {
   count?: number | null;
   running?: boolean;
   href?: string | null;
+  /** A scheduled pass: its name and interval, editable from its row. */
+  pass_name?: string | null;
+  every_seconds?: number | null;
+  default_seconds?: number | null;
 }
 
 export interface DashboardDueGroup {
@@ -283,13 +309,46 @@ export interface DashboardRecent {
   key: string;
   title: string;
   poster_url: string | null;
-  kind: 'movie' | 'show' | 'episode';
+  /** book: a manga or light novel download filed (its books in ``episode_label``). */
+  kind: 'movie' | 'show' | 'episode' | 'book';
   href: string;
   added_at: number;
   count: number;
   episode_label: string | null;
   /** Encoded again (smaller) rather than new: dated when that was done. */
   encoded?: boolean;
+  /** What happened: new, encoded again, or written anew with tracks taken out. */
+  change?: 'added' | 'encoded' | 'remuxed' | 'replaced';
+}
+
+/** One reading of the machine, for the Dashboard's System card. Rates are null on the first read. */
+export interface SystemUsage {
+  at: number;
+  host: string;
+  cpu: { percent: number | null; cores: number | null; load: number[] } | null;
+  memory: {
+    total: number;
+    used: number;
+    cached: number;
+    swap_total: number;
+    swap_used: number;
+    /** Bytes a second moved out of swap and into it since the last read; null on the first. */
+    swap_in_per_second?: number | null;
+    swap_out_per_second?: number | null;
+  } | null;
+  network: { received_per_second: number | null; sent_per_second: number | null } | null;
+  gpus: {
+    name: string;
+    percent: number | null;
+    encoder_percent: number | null;
+    decoder_percent: number | null;
+    memory_used: number | null;
+    memory_total: number | null;
+    temperature: number | null;
+    power_watts: number | null;
+    power_limit_watts: number | null;
+  }[] | null;
+  uptime_seconds: number | null;
 }
 
 export interface Dashboard {
@@ -304,7 +363,7 @@ export interface Dashboard {
   };
   lanes: DashboardLane[];
   due: DashboardDueGroup[];
-  recent: { mas: DashboardRecent[]; anime: DashboardRecent[]; anime_episodes?: DashboardRecent[] };
+  recent: { mas: DashboardRecent[]; mas_episodes?: DashboardRecent[]; anime: DashboardRecent[]; anime_episodes?: DashboardRecent[]; manga?: DashboardRecent[] };
 }
 
 // ---- Background actions -------------------------------------------------
@@ -346,13 +405,13 @@ export interface HealthResponse {
   ffprobe: boolean;
   ffmpeg: boolean;
   mkvmerge: boolean;
-  tvdb_configured: boolean;
+  tmdb_configured: boolean;
 }
 
 export interface DiscoverItem {
   name: string;
   kind: string;
-  tvdb_id: number | null;
+  tmdb_id: number | null;
   year: number | null;
   release_date?: string | null;
   poster_url: string | null;
@@ -428,10 +487,23 @@ export interface AnimeAniListMatch {
   /** Not in the contract: shown, and used to default to a movie, only when sent. */
   format?: string | null;
   year?: number | null;
+  /** The entry's episodes the library has: a download leaves them out. */
+  owned?: number[];
+  /** How many episodes the entry has, when AniList says. */
+  episodes?: number | null;
+  /** The languages of the library's episodes the row is about (Matroska codes: ger, eng, jpn),
+   *  with how many of the ``read`` episodes have each. */
+  languages?: { read: number; audio: Record<string, number>; subtitles: Record<string, number> };
+  /** What the release would bring those episodes: German audio or subtitles they lack. */
+  gains?: { kind: 'audio' | 'subtitles'; language: string; episodes: number; of: number }[];
 }
 
+export type AnimeSource = 'nyaa' | 'nekobt';
+
 export interface AnimeEntry {
-  id: number;
+  source: AnimeSource;
+  /** Nyaa's number, nekobt's id (too long for a number). */
+  id: number | string;
   title: string;
   download_url: string;
   detail_url: string;
@@ -454,6 +526,13 @@ export interface AnimeEntry {
   episode: number | null;
   description: string;
   anilist: AnimeAniListMatch | null;
+  /** nekobt only: the picture's source (BD Mini, WEB-DL ...) and codec, the languages it says it has. */
+  video_type?: string | null;
+  codec?: string | null;
+  audio_langs?: string[];
+  sub_langs?: string[];
+  fansub_langs?: string[];
+  groups?: string[];
 }
 
 /** Movies & Shows -> Torrents: a Prowlarr release, downloaded and filed as it is. */
@@ -481,6 +560,99 @@ export type DirectSearchOptions = { quality?: string; titleFilters?: string; exc
 /** A library folder a download can go to. */
 export type DirectTarget = { root: string; library: 'movies' | 'shows'; language: string; drive: string; label: string; exists: boolean };
 
+/** A download of a Torrents search row: into one root, or "by-language" (German / English folder by each file's audio). */
+export type DirectDownloadBody = {
+  id: string;
+  kind: DirectKind;
+  root: string;
+  title: string;
+  year: number | null;
+  season: number | null;
+  follow?: number | null;
+  episodes?: string[];
+  names?: string[];
+};
+
+export type FollowRoots = { German?: string; English?: string };
+export type FollowQuality = '2160p' | '1080p' | '720p' | '480p';
+export type FollowState = 'german' | 'english' | 'downloading' | 'missing' | 'upcoming';
+
+/** A show followed in English: every aired episode downloaded, German where a release has it. */
+export type FollowedShow = {
+  tmdb_id: number;
+  title: string;
+  year: number | null;
+  quality: FollowQuality;
+  roots: FollowRoots;
+  names: string[];
+  added: number;
+};
+
+export type FollowSeason = { season: number; episodes: number; aired: number; german: number; english: number; downloading: number; missing: number };
+
+export type FollowPreview = {
+  tmdb_id: number;
+  title: string;
+  german_title: string | null;
+  year: number | null;
+  status: string | null;
+  poster_url: string | null;
+  seasons: FollowSeason[];
+  counts: { episodes: number; aired: number; german: number; english: number; downloading: number; missing: number };
+  estimate: { bytes: number; per_episode: number; basis: 'releases' | 'runtime'; samples: number };
+  quality: FollowQuality;
+  followed: FollowedShow | null;
+  roots: FollowRoots;
+  targets: DirectTarget[];
+  problem: string | null;
+};
+
+export type FollowEpisode = {
+  season: number;
+  episode: number;
+  name: string | null;
+  aired: string | null;
+  runtime: number | null;
+  state: FollowState;
+  paths: string[];
+  extra?: boolean;
+  quality?: string | null;
+  /** English audio: whether it comes with English subtitles (null: tracks not read yet). */
+  english_subs?: boolean | null;
+};
+
+export type FollowJob = { id: string; status: string; title: string; release: string; episodes: [number, number][]; season: number | null; reason?: string | null };
+
+export type FollowDetail = {
+  show: FollowedShow;
+  info: { name: string; german: string | null; year: number | null; status: string | null; poster_url: string | null };
+  episodes: FollowEpisode[];
+  seasons: FollowSeason[];
+  searches: Record<string, { at: number; found: boolean; query: string; release?: string; held?: string; results?: number }>;
+  active: FollowJob[];
+  failed: FollowJob[];
+};
+
+export type FollowOverview = FollowedShow & {
+  poster_url: string | null;
+  status: string | null;
+  counts: Record<FollowState, number>;
+  episodes: number;
+};
+
+export type MovieReleases = {
+  tmdb_id: number;
+  title: string;
+  german_title: string | null;
+  year: number | null;
+  items: (DirectRelease & { german: boolean; fits: boolean })[];
+  best: string | null;
+  held: { German: string[]; English: string[] };
+  roots: FollowRoots;
+  found: number;
+  problem: string | null;
+};
+
 export interface AnimeSearchOptions {
   category?: string;
   page?: number;
@@ -496,6 +668,21 @@ export interface AnimeSearchPage {
   page: number;
   has_next: boolean;
   aliases: string[];
+  /** The requests asked of the source for this page. */
+  sent: string[];
+}
+
+export interface NekobtSearchOptions {
+  page?: number;
+  quality?: string;
+  publisher?: string;
+  titleFilters?: string;
+  descriptionFilters?: string;
+  subtitles?: string[];
+  audio?: string[];
+  /** true: batches alone; false: single episodes alone; unset: both. */
+  batch?: boolean;
+  minSeeders?: number;
 }
 
 export interface HeldRelease {
@@ -596,6 +783,35 @@ export interface GenreOverride {
 }
 
 /** A title's genres now and as curated (a dry run). */
+/** One anime collection or show with the FSK rating bankai gives it (web/age_ratings.py). */
+export interface AgeRatingTitle {
+  key: string;
+  kind: 'anime' | 'show';
+  name: string;
+  year: number | null;
+  tmdb_id: number | null;
+  tmdb_name: string | null;
+  /** How the TMDB show was found: anime-lists, name search, Jellyfin, by hand. */
+  match: string | null;
+  /** TMDB's ratings by country code. */
+  ratings: Record<string, string>;
+  /** "FSK-16"; null when nothing says one. */
+  rating: string | null;
+  age: number | null;
+  source: 'hand' | 'de' | 'adult' | 'estimate' | null;
+  /** What the rating is made from: "DE 16", "US TV-MA". */
+  basis: string | null;
+  /** Shows: Jellyfin's OfficialRating now; anime: what bankai wrote into tvshow.nfo. */
+  current: string | null;
+  written: string | null;
+  due: boolean;
+}
+
+export interface AgeRatingPlan {
+  titles: AgeRatingTitle[];
+  configured: boolean;
+}
+
 export interface GenreTitle {
   key: string;
   item_id: string | null;
@@ -615,6 +831,8 @@ export interface GenreTitle {
   unmapped: string[];
   /** Genres Jellyfin's own genres give that the curated list does not: about to go. */
   jellyfin_only: string[];
+  /** Genres a click kept from jellyfin_only: Jellyfin's own, shown as the rules' (not as added by hand). */
+  kept_from_jellyfin?: string[];
   override: GenreOverride | null;
   written: boolean;
   changes: boolean;
@@ -751,10 +969,19 @@ export interface MangaRelease {
   progress: number | null;
   /** What it would add to the series' folder; "" nothing, null when it does not say. */
   adds: string | null;
+  /** Of the volumes it adds, those the folder holds as chapter files: filed, they replace them. */
+  replaces?: string | null;
   found_at: number;
   /** Downloaded: the books it filed, and those it left out with why (the library has them…). */
   copied?: string[] | null;
   left?: Array<[string, string]> | null;
+  /** In the review, what it is to its series' plan: one of the fewest releases that bring everything
+   *  ("plan", in ``order``); another version of books the plan or a download under way brings ("covered",
+   *  sharing most with ``covered_by``); something more no release the plan may take brings ("extra");
+   *  or its name says nothing ("unsure"). */
+  role?: 'plan' | 'extra' | 'unsure' | 'covered';
+  order?: number;
+  covered_by?: string | null;
   /** Library page only: the series it is. */
   anilist_id?: number;
   name?: string;
@@ -774,8 +1001,30 @@ export interface MangaFolder {
 export interface MangaLibrary {
   series: MangaSeries[];
   followed: MangaSeries[];
+  /** The collections: the AniList entries of one story kept together, in their order. */
+  collections?: MangaCollection[];
   unmatched: MangaFolder[];
   downloads: MangaRelease[];
+}
+
+/** A manga collection: ``folder`` once two or more of its entries are on disk (one folder, an entry's inside). */
+export interface MangaCollection {
+  id: number;
+  name: string;
+  /** The user's own name, else null: the one its entries share. */
+  custom: string | null;
+  folder: string | null;
+  members: number[];
+}
+
+/** What laying the manga out by collection would do: folders moved, books renamed (paths below the library's root). */
+export interface MangaLayoutPlan {
+  collections: Array<MangaCollection & { on_disk: number[] }>;
+  folders: Array<{ anilist_id: number; kind: MangaKind; from: string; to: string }>;
+  files: Array<{ anilist_id: number; kind: MangaKind; folder: string; from: string; to: string }>;
+  skipped: Array<{ anilist_id: number; from: string; to: string; why: string }>;
+  journals?: Array<{ name: string; at: number; moves: number; undone: boolean }>;
+  journal?: string | null;
 }
 
 export interface MangaGraphNode {
@@ -791,6 +1040,10 @@ export interface MangaGraphNode {
   blacklisted?: boolean;
   /** A manga in the library: what its folder holds, "Vol 1–29". */
   owned?: string;
+  /** The collection a manga is in, and whether that is the open series' own. */
+  collection_id?: number | null;
+  collection_name?: string | null;
+  in_collection?: boolean;
 }
 
 export interface MangaDetail extends MangaSeries {
@@ -803,7 +1056,22 @@ export interface MangaDetail extends MangaSeries {
   releases: MangaRelease[];
   policy: { mode: string } | null;
   breakdown: MangaBreakdown;
-  graph: { root: number; nodes: MangaGraphNode[]; edges: Array<{ from: number; to: number; label: string }> };
+  graph: {
+    root: number;
+    nodes: MangaGraphNode[];
+    edges: Array<{ from: number; to: number; label: string }>;
+    /** Its collection's entries in their order (just the series when in none): the graph's main line. */
+    members?: number[];
+    collection_id?: number | null;
+    collection_name?: string | null;
+  };
+  /** The collection it is in, each entry with whether the library has it: the drawer's tabs. */
+  collection?: {
+    id: number;
+    name: string;
+    custom: string | null;
+    members: Array<{ anilist_id: number; name: string; year: number | null; on_disk: boolean }>;
+  } | null;
 }
 
 /** A manga or light novel an anime links to, for the anime drawer. */
@@ -819,6 +1087,8 @@ export interface LinkedManga {
   followed: boolean;
   blacklisted: boolean;
   in_review: boolean;
+  /** The anime asked about that link it, in the order asked. */
+  anime?: number[];
 }
 
 export interface MangaBlacklistRow {
@@ -856,9 +1126,71 @@ export interface MangaStatus {
 }
 
 /** The three libraries whose tracks are cleaned up, each by its own rules. */
+export type BrowserAudioPreview = {
+  files: number;
+  replace: number;
+  add: number;
+  add_files: number;
+  default: number;
+  unsure: number;
+  bytes: number;
+};
+
+export type BrowserAudio = {
+  enabled: boolean;
+  tried: string[];
+  scopes: Record<TrackScopeName, BrowserAudioPreview>;
+  done: Partial<Record<TrackScopeName, { files: number; bytes: number }>>;
+  recent: { path: string; scope: TrackScopeName; replaced: number; added: number; default_moved?: boolean; grown: number; at: number }[];
+  failed: { path: string; scope: TrackScopeName; error: string; at: number }[];
+  waiting: Record<string, number>;
+  current: { path: string; scope: TrackScopeName; step: string; started: number; size: number } | null;
+};
+
+export type BrowserAudioTrack = {
+  lang: string;
+  name: string | null;
+  codec: string | null;
+  profile: string | null;
+  channels: number | null;
+  bit_rate: number | null;
+  default: boolean;
+  becomes_default: boolean;
+  action: 'replace' | 'add' | 'keep';
+  aac_bit_rate: number | null;
+  /** A replaced track's name with AAC for its codec (unchanged when it names none). */
+  new_name: string | null;
+};
+
+export type BrowserAudioFile = {
+  path: string;
+  scope: TrackScopeName;
+  tried: boolean;
+  bytes: number;
+  unsure: boolean;
+  tracks: BrowserAudioTrack[];
+};
+
 export type TrackScopeName = 'anime' | 'shows' | 'movies';
 
 /** One audio or subtitle language in a library. ``bytes`` counts the tracks that say their size. */
+/** A title with tracks that name no language. */
+export interface UnknownTrackTitle {
+  title: string;
+  files: number;
+  tracks: number;
+  /** A few of the tracks' own names. */
+  names: string[];
+}
+
+/** One file's tracks that name no language; ``position`` is its place among the file's tracks of that kind. */
+export interface UnknownTrackFile {
+  path: string;
+  relative: string;
+  mkv: boolean;
+  tracks: { position: number; name: string | null; codec: string | null; default: boolean; forced: boolean; bytes: number | null }[];
+}
+
 export interface TrackLanguage {
   code: string;
   name: string;
@@ -899,10 +1231,10 @@ export interface TrackScope {
   current: { path: string; started: number; size: number } | null;
 }
 
-/** The file being encoded: its step ("encode", "dolby_vision", "mux", "check"), share done, seconds left. */
+/** The file being encoded: its step ("encode", "dolby_vision", "frame_times", "mux", "check"), share done, seconds left. */
 export interface EncodeCurrent {
   path: string;
-  step: 'encode' | 'dolby_vision' | 'mux' | 'check';
+  step: 'trial' | 'encode' | 'dolby_vision' | 'frame_times' | 'mux' | 'check';
   fraction: number | null;
   started: number;
   size: number;
@@ -1058,6 +1390,10 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
   german_dub?: boolean;
   /** Carries German subtitles; null while the file is not probed for them yet. */
   german_subs?: boolean | null;
+  /** Movies & Shows: the picture as a release names it (2160p, 1080p, 720p, SD). */
+  quality?: string | null;
+  /** Movies & Shows: English subtitles in the file or beside it; null while its tracks are not read. */
+  english_subs?: boolean | null;
   missing?: boolean;
   tba?: boolean;
   aired?: string | null;
@@ -1068,6 +1404,53 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
   anilist_id?: number | null;
   /** That entry's episode the file is. */
   anilist_episode?: number | null;
+  /** Held inside another file ("S03E18-E21"): that file's name. */
+  part_of?: string;
+  /** Whether the file is the episode it is filed as (the episode check); absent until checked. */
+  verify?: EpisodeVerify;
+}
+
+/** One file's episode check: its keyframes against TMDB's stills, its length, other files. */
+/** A magnet link looked at before a replace: ``pending`` while the swarm has not answered. */
+export interface MagnetPreview {
+  info_hash: string;
+  name: string;
+  pending: boolean;
+  size?: number;
+  private?: boolean;
+  trackers?: number;
+  files?: Array<{ path: string; name: string; size: number; episode?: number | string | null; replaces: string | null; why?: string }>;
+  ticked?: number;
+  covered?: number;
+  uncovered?: string[];
+  known?: {
+    erai?: { name: string; subtitles: string[]; german: boolean; resolution: string | null; published: number | null };
+    release?: { status: string; title: string };
+  } | null;
+}
+
+export interface EpisodeVerify {
+  /** verified: the picture is this episode; wrong: certainly another; plausible: no picture, length fits;
+   *  confirmed: the user said it is this episode; unsure: undecided (not shown). */
+  verdict: 'verified' | 'wrong' | 'unsure' | 'plausible' | 'confirmed' | 'unchecked';
+  checked_at?: number;
+  confirmed_at?: number;
+  error?: string;
+  length?: { seconds: number; expected_minutes: number; source: 'TMDB' | 'AniList'; ok: boolean };
+  picture?: {
+    state: 'ok' | 'wrong' | 'unsure' | 'none';
+    why?: string;
+    expected?: string;
+    expected_name?: string;
+    score?: number | null;
+    match?: string;
+    match_name?: string;
+    match_score?: number;
+    /** The AniList entry and episode the picture's TMDB episode is, within the collection. */
+    is?: [number, number];
+  };
+  /** Beside other files: two on one episode, past the entry's end, the same picture as another. */
+  issues?: string[];
 }
 
 /** The three kinds of root the server library scans. */
@@ -1100,6 +1483,11 @@ export interface AnimeLibraryShow {
   hevc_checked_at?: number | null;
   /** Missing episodes the background search found a release with German subtitles for, not queued yet. */
   missing_available_count?: number;
+  /** The episode check: files in the library, checked as they are now, shown as another episode, undecided. */
+  verify_files?: number;
+  verify_checked?: number;
+  verify_wrong?: number;
+  verify_unsure?: number;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
   /** Each tab's AniList entries. */
@@ -1110,6 +1498,11 @@ export interface AnimeLibraryShow {
   collection_name_custom?: boolean;
   /** The collection's entries in order; the owned ones can name it. */
   collection_entries?: Array<{ anilist_id: number; title: string; owned: boolean; season?: string | null }>;
+  /** Each season's counted episodes in order, a letter each: d German dub, h HEVC, a AVC,
+   *  u on disk (codec not read), s staged, m missing, t not aired. */
+  strip?: Array<{ label: string; states: string }>;
+  /** Seasons named by hand: the entry each opens with -> its name. */
+  season_names?: Record<string, string>;
   downloaded_count: number;
   total_count: number;
   completion_state: 'empty' | 'upcoming' | 'partial' | 'complete' | 'unknown';
@@ -1147,6 +1540,36 @@ export interface MissingRelease {
   episodes: Array<{ anilist_id: number; anilist_episode: number; season: string | null; season_number: number | null; episode: number | null }>;
 }
 
+export interface HevcUpgradeResult {
+  ok: boolean;
+  queued: number;
+  downloads?: number;
+  no_replacement: number;
+  already_hevc: number;
+  german_dub_kept: number;
+  /** Episodes whose files the codec sweep has not probed yet. */
+  not_probed?: number;
+  /** Episodes left out: the files a release would replace are no longer the ones approved. */
+  changed?: number;
+}
+
+/** One HEVC release an upgrade would download, what bankai takes it for, and every file it replaces. */
+export interface HevcUpgradePlan {
+  info_hash: string;
+  title: string;
+  detail_url: string | null;
+  size_bytes: number;
+  anilist_id: number;
+  /** The AniList entry the release is taken for. */
+  entry: string;
+  first: number;
+  last: number;
+  episodes: number[];
+  /** Episodes in its range kept for their German dub. */
+  keeps: number[];
+  replaces: Array<{ path: string; name: string; folder: string; episode: number; size: number }>;
+}
+
 /** What the library's bulk buttons act on: HEVC upgrades found, or releases found for missing episodes. */
 export type AnimeBulkKind = 'upgrade' | 'missing';
 
@@ -1160,6 +1583,8 @@ export interface AnimeBulkShow {
   /** Releases to download; only for missing episodes. */
   downloads: number;
   size_bytes: number;
+  /** Upgrade: what each release would replace, as the last look found it; null until looked at again. */
+  plans?: HevcUpgradePlan[] | null;
 }
 
 export interface AnimeBulkResult {
@@ -1170,6 +1595,7 @@ export interface AnimeBulkResult {
   /** Upgrade: downloads queued and episodes no replacement was found for on the second look. */
   downloads?: number;
   no_replacement?: number;
+  changed?: number;
   /** Missing: releases already in the queue, and the episodes the queued ones cover. */
   duplicates?: number;
   episodes?: number;
@@ -1197,6 +1623,10 @@ export interface ArtworkSlot {
   /** Chosen by hand rather than automatically. */
   chosen: boolean;
   candidates: ArtworkCandidate[];
+  /** Movies & Shows: the picture Jellyfin shows in the slot now (Jellyfin's own when none is chosen). */
+  jellyfin_url?: string;
+  /** That picture is one Jellyfin fetched itself, not the one bankai wrote. */
+  jellyfin_own?: boolean;
 }
 
 /** One AniList entry in a collection's relation graph. */
@@ -1262,25 +1692,33 @@ export interface MasMovie {
   key: string;
   folders: string[];
   title: string;
-  tvdb_id: number | null;
+  tmdb_id: number | null;
   year: number | null;
   poster_url: string | null;
   metadata_available: boolean;
+  /** Matched to its TMDB title by hand (the drawer's Match), not by the folder name. */
+  matched_by_hand?: boolean;
   file_count: number;
+  /** The film's picture (its largest file): 2160p, 1080p, 720p or SD; null until the track reader got to it. */
+  quality: string | null;
+  /** Carries German audio; null until the track reader got to it. */
+  german: boolean | null;
   size: number;
   /** Configured roots it was found under; more than one means it is stored twice. */
   roots: string[];
   files: AnimeLibraryEntry[];
 }
 
-/** A series on the server, merged against its TVDB roster. */
+/** A series on the server, merged against its TMDB episode list. */
 export interface MasShow {
   key: string;
   folders: string[];
   title: string;
-  tvdb_id: number | null;
+  tmdb_id: number | null;
   year: number | null;
   poster_url: string | null;
+  /** Matched to its TMDB title by hand (the drawer's Match), not by the folder name. */
+  matched_by_hand?: boolean;
   episode_count: number;
   season_count: number;
   size: number;
@@ -1291,13 +1729,19 @@ export interface MasShow {
   finished: boolean;
   metadata_available: boolean;
   episodes: AnimeLibraryEpisode[];
+  /** Episodes on disk with German audio, and with English only; the rest are not read yet. */
+  german_count?: number;
+  english_count?: number;
+  /** Each season's counted episodes in order, a letter each: g German dub, e English with English
+   *  subtitles, n English without them, u on disk (tracks not read), s staged, m missing, t not aired. */
+  strip?: Array<{ label: string; states: string }>;
 }
 
 export type DiscoverSearchBy = 'title' | 'person' | 'studio';
 
 export interface PersonSuggestion {
   name: string;
-  tvdb_id: number | null;
+  tmdb_id: number | null;
 }
 
 export interface SearchResult {
@@ -1405,7 +1849,6 @@ export interface EpisodeItem {
 }
 
 export interface Job {
-  tvdb_id?: number | string | null;
   /** Anime jobs: the AniList entry the job files under. */
   anilist_id?: number | string | null;
   poster_url?: string | null;
@@ -1428,6 +1871,9 @@ export interface Job {
   phase: string;
   /** Byte progress of the library copy, present once the transfer stage starts. */
   transfer_percent: number | null;
+  /** While downloading: bytes a second and seconds left, as the torrent reports them. */
+  download_speed?: number | null;
+  download_eta?: number | null;
   pending: boolean;
   action_required: boolean;
   reason?: string | null;
@@ -1581,6 +2027,10 @@ export interface SettingRow {
 
 export const api = {
   health: () => request<HealthResponse>('/api/health'),
+  // The UI's own settings, shared between devices (see lib/prefs.ts).
+  uiPrefs: () => request<{ prefs: Record<string, unknown> }>('/api/ui/prefs'),
+  saveUiPref: (key: string, value: unknown) =>
+    request<{ ok: boolean }>(`/api/ui/prefs/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   vpnStatus: () => request<VpnStatus>('/api/vpn/status'),
   vpnConnect: () => request<VpnStatus>('/api/vpn/connect', { method: 'POST' }),
 
@@ -1594,10 +2044,10 @@ export const api = {
       `/api/discover/people/suggest?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
   discoverGerman: (id: number, kind: string) =>
-    request<{ tvdb_id: number; kind: string; english: string | null; german: string | null; year: number | null; release_date: string | null }>(
+    request<{ tmdb_id: number; kind: string; english: string | null; german: string | null; year: number | null; release_date: string | null }>(
       `/api/discover/german?id=${id}&kind=${kind}`,
     ),
-  // TVDB artwork is a public CDN resource; sending every image through the
+  // TMDB artwork is a public CDN resource; sending every image through the
   // single Bankai process created 50-100 avoidable backend requests per page.
   // Retain the proxy only for legacy/non-HTTPS artwork URLs.
   posterUrl: (url: string) =>
@@ -1619,6 +2069,9 @@ export const api = {
     remembering<{ items: QBittorrentItem[] }>(pagePaths.qbittorrent),
   qbittorrentStart: (hash: string) =>
     request<{ ok: boolean }>(`/api/qbittorrent/torrents/${encodeURIComponent(hash)}/start`, { method: 'POST' }),
+  /** An errored torrent run again: checked on disk, then started. */
+  qbittorrentRetry: (hash: string) =>
+    request<{ ok: boolean }>(`/api/qbittorrent/torrents/${encodeURIComponent(hash)}/retry`, { method: 'POST' }),
   qbittorrentStop: (hash: string) =>
     request<{ ok: boolean }>(`/api/qbittorrent/torrents/${encodeURIComponent(hash)}/stop`, { method: 'POST' }),
   qbittorrentRemove: (hash: string, deleteFiles = false) =>
@@ -1653,8 +2106,18 @@ export const api = {
     return request<DirectSearch>(`/api/direct/search?${params.toString()}`);
   },
   directTargets: () => request<{ targets: DirectTarget[] }>('/api/direct/targets'),
-  directDownload: (body: { id: string; kind: DirectKind; root: string; title: string; year: number | null; season: number | null }) =>
+  directDownload: (body: DirectDownloadBody) =>
     request<Job>('/api/direct/download', { method: 'POST', body: JSON.stringify(body) }),
+  followList: () => request<{ shows: FollowOverview[] }>('/api/mas/follow'),
+  followPreview: (tmdbId: number, quality: FollowQuality) =>
+    request<FollowPreview>(`/api/mas/follow/preview?tmdb_id=${tmdbId}&quality=${quality}`),
+  follow: (body: { tmdb_id: number; quality: FollowQuality; root_german: string; root_english: string }) =>
+    request<FollowedShow>('/api/mas/follow', { method: 'POST', body: JSON.stringify(body) }),
+  unfollow: (tmdbId: number) => request<{ removed: boolean }>(`/api/mas/follow/${tmdbId}`, { method: 'DELETE' }),
+  followDetail: (tmdbId: number) => request<FollowDetail>(`/api/mas/follow/${tmdbId}`),
+  followRun: (tmdbId: number) => request<{ started: boolean }>(`/api/mas/follow/${tmdbId}/run`, { method: 'POST' }),
+  movieReleases: (tmdbId: number, quality: FollowQuality) =>
+    request<MovieReleases>(`/api/mas/movie/releases?tmdb_id=${tmdbId}&quality=${quality}`),
   animeSearch: (q: string, options: AnimeSearchOptions = {}) => {
     const params = new URLSearchParams({ q });
     if (options.category) params.set('category', options.category);
@@ -1666,6 +2129,21 @@ export const api = {
     if (options.minSeeders != null) params.set('min_seeders', String(options.minSeeders));
     return request<AnimeSearchPage>(`/api/anime?${params.toString()}`);
   },
+  animeSearchNekobt: (q: string, options: NekobtSearchOptions = {}) => {
+    const params = new URLSearchParams({ q });
+    if (options.page != null) params.set('page', String(options.page));
+    if (options.quality) params.set('quality', options.quality);
+    if (options.publisher) params.set('publisher', options.publisher);
+    if (options.titleFilters) params.set('title_filters', options.titleFilters);
+    if (options.descriptionFilters) params.set('description_filters', options.descriptionFilters);
+    if (options.subtitles?.length) params.set('subtitles', options.subtitles.join(','));
+    if (options.audio?.length) params.set('audio', options.audio.join(','));
+    if (options.batch != null) params.set('batch', String(options.batch));
+    if (options.minSeeders) params.set('min_seeders', String(options.minSeeders));
+    return request<AnimeSearchPage>(`/api/anime/nekobt?${params.toString()}`);
+  },
+  nekobtDescription: (id: string) =>
+    request<{ description: string }>(`/api/anime/nekobt/description?id=${encodeURIComponent(id)}`),
   animeDetail: (url: string) =>
     request<{ description: string; magnet_uri: string | null; publisher: string | null }>(
       `/api/anime/detail?url=${encodeURIComponent(url)}`,
@@ -1685,6 +2163,7 @@ export const api = {
         kind,
         publish,
         episode,
+        source: entry.source ?? 'nyaa',
       }),
     }),
   torrentAction: (jobId: string) =>
@@ -1730,6 +2209,31 @@ export const api = {
   /** Manga and light novel releases waiting for a decision, a card per series. */
   mangaReview: () => remembering<{ items: MangaReviewCard[] }>(pagePaths.mangaReview),
   /** Approve a release: downloaded, then filed into the library. */
+  /** What laying the manga out by collection would move and rename; nothing moves. */
+  mangaLayout: () => request<MangaLayoutPlan>('/api/manga/layout'),
+  /** Lay the manga out by collection: folders moved, books renamed, every move journaled. */
+  applyMangaLayout: () => request<MangaLayoutPlan>('/api/manga/layout/apply', { method: 'POST' }),
+  /** A collection's own name; "" gives back the one its entries share. Its folder follows. */
+  renameMangaCollection: (collectionId: number, name: string) =>
+    request<MangaLayoutPlan>(`/api/manga/collections/${collectionId}/name`, { method: 'POST', body: JSON.stringify({ name }) }),
+  /** An entry into a collection by hand; with ``into`` null, the two entries into a new one. */
+  includeInMangaCollection: (anilistId: number, into: { collection: number } | { with: number }) =>
+    request<MangaLayoutPlan>('/api/manga/collections/include', {
+      method: 'POST',
+      body: JSON.stringify('collection' in into ? { collection_id: into.collection, anilist_id: anilistId } : { anilist_ids: [into.with, anilistId] }),
+    }),
+  /** Entries split off by hand: one on its own, several into a new collection together. */
+  splitMangaCollection: (anilistIds: number[]) =>
+    request<MangaLayoutPlan>('/api/manga/collections/split', { method: 'POST', body: JSON.stringify({ anilist_ids: anilistIds }) }),
+  /** A whole collection merged into another. */
+  mergeMangaCollection: (into: number, other: number) =>
+    request<MangaLayoutPlan>('/api/manga/collections/merge', { method: 'POST', body: JSON.stringify({ collection_id: into, other_id: other }) }),
+  /** An entry out of its collection by hand: it never joins one on its own again. */
+  excludeFromMangaCollection: (anilistId: number) =>
+    request<MangaLayoutPlan>('/api/manga/collections/exclude', { method: 'POST', body: JSON.stringify({ anilist_id: anilistId }) }),
+  /** Download a series' plan as it stands now: the fewest waiting releases that bring all they offer. */
+  takeMangaPlan: (anilistId: number) =>
+    request<{ approved: string[] }>(`/api/manga/series/${anilistId}/plan`, { method: 'POST' }),
   downloadMangaRelease: (infoHash: string) =>
     request<{ status: string }>(`/api/manga/releases/${infoHash}/download`, { method: 'POST' }),
   /** Discard a release: never offered again. */
@@ -1741,6 +2245,10 @@ export const api = {
   /** Never look for a series again. */
   blacklistMangaSeries: (anilistId: number) =>
     request<{ discarded: number }>(`/api/manga/series/${anilistId}/blacklist`, { method: 'POST' }),
+  /** A series out of the library: its folder deleted, its downloads stopped, and blacklisted unless ``blacklist`` is false. */
+  removeMangaSeries: (anilistId: number, blacklist = true) =>
+    request<{ deleted_files: number; deleted_bytes: number; folder: string | null; stopped: number; discarded: number }>(
+      `/api/manga/series/${anilistId}/remove`, { method: 'POST', body: JSON.stringify({ blacklist }) }),
   /** Off the blacklist: its discarded releases wait for review again. */
   restoreMangaSeries: (anilistId: number) =>
     request<{ restored: number }>(`/api/manga/series/${anilistId}/restore`, { method: 'POST' }),
@@ -1772,8 +2280,33 @@ export const api = {
   mangaStatus: () => request<MangaStatus>('/api/manga/status'),
   /** Look for releases now rather than at the next pass. */
   runManga: () => request<{ started: boolean }>('/api/manga/run', { method: 'POST' }),
+  /** Dolby and DTS made AAC: per library what it would do, whether it is on, what was done. */
+  browserAudio: () => request<BrowserAudio>('/api/browser-audio'),
+  /** The files it would write anew, track by track. */
+  browserAudioFiles: (scope: TrackScopeName, limit = 100) =>
+    request<{ files: BrowserAudioFile[] }>(`/api/browser-audio/files?scope=${scope}&limit=${limit}`),
+  /** Do these files next, even while it is off. */
+  tryBrowserAudio: (paths: string[]) =>
+    request<{ queued: number; skipped: number }>('/api/browser-audio/try', { method: 'POST', body: JSON.stringify({ paths }) }),
+  setBrowserAudio: (enabled: boolean) =>
+    request<{ enabled: boolean }>('/api/browser-audio', { method: 'POST', body: JSON.stringify({ enabled }) }),
   /** Each library's audio and subtitle languages, its rules and what they change. */
   tracks: () => request<{ scopes: Record<TrackScopeName, TrackScope> }>('/api/tracks'),
+  /** Titles with tracks in one language (``und``: naming none); with ``title``, that title's files and tracks. */
+  unknownTrackTitles: (scope: TrackScopeName, kind: 'audio' | 'subtitles', language = 'und') =>
+    request<{ titles: UnknownTrackTitle[] }>(`/api/tracks/${scope}/unknown?kind=${kind}&language=${encodeURIComponent(language)}`),
+  unknownTrackFiles: (scope: TrackScopeName, kind: 'audio' | 'subtitles', title: string, language = 'und') =>
+    request<{ files: UnknownTrackFile[] }>(`/api/tracks/${scope}/unknown?kind=${kind}&language=${encodeURIComponent(language)}&title=${encodeURIComponent(title)}`),
+  /** Take tracks out of their files: queued for the Tracks cleanup, which writes each file anew. */
+  removeTracks: (tracks: { path: string; kind: 'audio' | 'subtitles'; position: number }[]) =>
+    request<{ queued: number; files: number }>('/api/tracks/remove', { method: 'POST', body: JSON.stringify({ tracks }) }),
+  /** A language being written into many files in the background: {done, total}, or {}. */
+  trackLanguageProgress: () => request<{ done?: number; total?: number }>('/api/tracks/language'),
+  /** Write a language into tracks (the n-th track of its kind in each file); many files go in the background. */
+  setTrackLanguage: (tracks: { path: string; kind: 'audio' | 'subtitles'; position: number }[], language: string) =>
+    request<{ language: string; name?: string; files: number; failed?: { path: string; error: string }[]; background?: boolean }>('/api/tracks/language', {
+      method: 'POST', body: JSON.stringify({ tracks, language }),
+    }),
   /** Change a library's rules; the answer says what they change now. */
   setTrackRules: (scope: TrackScopeName, body: Partial<TrackRules>) =>
     request<{ rules: TrackRules; preview: TrackPreview }>('/api/tracks/' + scope, { method: 'POST', body: JSON.stringify(body) }),
@@ -1857,6 +2390,11 @@ export const api = {
       method: 'POST', body: JSON.stringify({ anilist_id: anilistId }),
     }),
   /** Rename a collection by hand; null gives it back AniList's name. */
+  animeSeasonName: (collectionId: number, anilistId: number, name: string | null) =>
+    request<{ ok: boolean; name: string | null; moved: number }>(`/api/anime/collections/${collectionId}/season-name`, {
+      method: 'POST',
+      body: JSON.stringify({ anilist_id: anilistId, name }),
+    }),
   collectionName: (collectionId: number, name: string | null) =>
     request<{ ok: boolean; name?: string | null }>(`/api/anime/collections/${collectionId}/name`, {
       method: 'POST', body: JSON.stringify({ name }),
@@ -1881,6 +2419,12 @@ export const api = {
         ),
       },
     ),
+  /** A show's files checked next by the episode check, whatever their results say. */
+  verifyAnimeShow: (key: string) =>
+    request<{ ok: boolean; queued: number }>('/api/anime/library/verify', { method: 'POST', body: JSON.stringify({ key }) }),
+  /** The user's word: these files are the episodes they are filed as (``right``), or that taken back. */
+  confirmAnimeEpisodes: (paths: string[], right = true) =>
+    request<{ ok: boolean; changed: number }>('/api/anime/library/verify/confirm', { method: 'POST', body: JSON.stringify({ paths, right }) }),
   /** A collection's whole season arrangement, or back to the automatic one; files are renamed into place. */
   arrangeCollection: (collectionId: number, body: { seasons: number[][]; specials: number[] } | { reset: true }) =>
     request<{ ok: boolean; moved: number; result: CollectionArrangement }>(
@@ -1892,19 +2436,17 @@ export const api = {
     request<Pick<PurgeResult, 'deleted_files' | 'deleted_folders' | 'freed_bytes'>>('/api/anime/library/episodes/delete', {
       method: 'POST', body: JSON.stringify({ key, paths }),
     }),
-  /** Queue HEVC replacements for the AVC episodes of a card's AniList entries. */
-  upgradeShowToHevc: (anilistIds: number[]) =>
-    request<{
-      ok: boolean;
-      queued: number;
-      no_replacement: number;
-      already_hevc: number;
-      german_dub_kept: number;
-      /** Episodes whose files the codec sweep has not probed yet. */
-      not_probed?: number;
-    }>(
-      '/api/anime/library/upgrade-hevc',
+  /** What an HEVC upgrade of a card's AniList entries would download and replace; nothing is queued. */
+  previewHevcUpgrade: (anilistIds: number[]) =>
+    request<HevcUpgradeResult & { plans: HevcUpgradePlan[] }>(
+      '/api/anime/library/upgrade-hevc/preview',
       { method: 'POST', body: JSON.stringify({ anilist_ids: anilistIds }) },
+    ),
+  /** Queue the approved HEVC replacements: each release with the paths the approval showed it replacing. */
+  upgradeShowToHevc: (anilistIds: number[], approved: Record<string, string[]>) =>
+    request<HevcUpgradeResult>(
+      '/api/anime/library/upgrade-hevc',
+      { method: 'POST', body: JSON.stringify({ anilist_ids: anilistIds, approved }) },
     ),
   /** What the background search found for a show's missing episodes. */
   missingReleases: (key: string) =>
@@ -1918,8 +2460,8 @@ export const api = {
   animeBulkPlan: (kind: AnimeBulkKind) =>
     request<{ kind: AnimeBulkKind; shows: AnimeBulkShow[] }>('/api/anime/library/bulk?' + new URLSearchParams({ kind })),
   /** Queue it for the confirmed shows, in the background. */
-  runAnimeBulk: (kind: AnimeBulkKind, keys: string[]) =>
-    runAction<AnimeBulkResult>('/api/anime/library/bulk', { kind, keys }),
+  runAnimeBulk: (kind: AnimeBulkKind, keys: string[], approved?: Record<string, string[]>) =>
+    runAction<AnimeBulkResult>('/api/anime/library/bulk', { kind, keys, approved }),
   /** A collection's artwork slots and what each can show; TMDB's is fetched when not kept yet. */
   collectionArtwork: (collectionId: number, refresh = false) =>
     request<{ collection_id: number; tmdb: boolean; tmdb_error: { error?: string } | null; slots: ArtworkSlot[] }>(
@@ -1929,6 +2471,34 @@ export const api = {
   chooseArtwork: (collectionId: number, slot: string, url: string | null) =>
     request<{ ok: boolean; pictures: number }>(`/api/anime/collections/${collectionId}/artwork`, {
       method: 'POST', body: JSON.stringify({ slot, url }),
+    }),
+  /** A Movies & Shows title's artwork slots; a slot not chosen here is Jellyfin's own picture. */
+  masArtwork: (kind: 'show' | 'movie', key: string, refresh = false) =>
+    request<{ tmdb: boolean; tmdb_error: { error?: string } | null; slots: ArtworkSlot[] }>(
+      `/api/mas/artwork?kind=${kind}&key=${encodeURIComponent(key)}` + (refresh ? '&refresh=true' : ''),
+    ),
+  /** Choose a Movies & Shows slot's picture by URL, written beside the files at once; null gives it back to Jellyfin. */
+  chooseMasArtwork: (kind: 'show' | 'movie', key: string, slot: string, url: string | null) =>
+    request<{ ok: boolean; pictures: number }>('/api/mas/artwork', {
+      method: 'POST', body: JSON.stringify({ kind, key, slot, url }),
+    }),
+  /** The release groups Discover's publisher filter offers (anime settings). */
+  animePublishers: () => request<{ publishers: string[]; nekobt_languages: string[] }>('/api/anime/publishers'),
+  /** An AniList entry's episodes in the library, which a download of it leaves out. */
+  animeOwned: (anilistId: number) =>
+    request<{ owned: number[]; episodes: number | null }>(`/api/anime/owned?anilist_id=${anilistId}`),
+  /** Replace ticked anime library files with a magnet link's torrent (one AniList entry). */
+  /** What a magnet link is before it replaces anything: name, size, files (from the swarm), which ticked file each replaces. */
+  magnetPreview: (magnet: string, paths: string[], scope: 'anime' | 'show' | 'movie') =>
+    request<MagnetPreview>('/api/magnet/preview', { method: 'POST', body: JSON.stringify({ magnet, paths, scope }) }),
+  animeReplaceMagnet: (paths: string[], magnet: string, loseGerman = false) =>
+    request<{ ok: boolean; queued: string; anilist_title: string; episodes: number[]; files_to_replace: number }>('/api/anime/replace-magnet', {
+      method: 'POST', body: JSON.stringify({ paths, magnet, lose_german: loseGerman }),
+    }),
+  /** Replace ticked Movies & Shows files (episodes, or a film's file) with a magnet link's torrent. */
+  masReplaceMagnet: (kind: 'show' | 'movie', key: string, paths: string[], magnet: string) =>
+    request<{ status: string; id?: string }>('/api/mas/replace-magnet', {
+      method: 'POST', body: JSON.stringify({ kind, key, paths, magnet }),
     }),
   /** Take every episode picture again at the saved setting. */
   regenerateThumbs: () => request<{ ok: boolean }>('/api/anime/thumbs/regenerate', { method: 'POST' }),
@@ -1954,11 +2524,20 @@ export const api = {
   },
   /** Every sidebar badge in one call; see /api/sidebar/counts. */
   dashboard: () => remembering<Dashboard>(pagePaths.dashboard),
+  systemUsage: () => request<SystemUsage>('/api/system/usage'),
+  /** How often a scheduled pass runs; null goes back to its default. */
+  setPassInterval: (name: string, seconds: number | null) =>
+    request<{ name: string; every_seconds: number; default_seconds: number }>(`/api/scheduler/passes/${name}/interval`, {
+      method: 'POST', body: JSON.stringify({ seconds }),
+    }),
   storage: () => request<StorageUsage>('/api/storage'),
   refreshStorage: () => request<{ started: boolean }>('/api/storage/refresh', { method: 'POST' }),
-  eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p', codec: EraiCodec = 'all') =>
-    remembering<EraiPage>(eraiPath(page, q, german, res, codec)),
+  eraiReleases: (page = 0, q = '', german: 'all' | 'yes' | 'no' = 'all', res: EraiResolution = '1080p', codec: EraiCodec = 'all', kind: EraiKind = 'all') =>
+    remembering<EraiPage>(eraiPath(page, q, german, res, codec, kind)),
   refreshErai: () => request<{ refreshing: boolean }>('/api/anime/erai/refresh', { method: 'POST' }),
+  /** Erai-raws' show names starting with or holding the query (another name of a show finds it: ``via``). */
+  eraiSuggest: (q: string) =>
+    request<{ items: Array<{ name: string; releases: number; newest: number; via?: string }> }>(`/api/anime/erai/suggest?q=${encodeURIComponent(q)}`),
   genres: (language?: GenreLanguage, fresh = false) =>
     request<GenrePlan>('/api/genres?' + new URLSearchParams({ ...(language ? { language } : {}), ...(fresh ? { fresh: 'true' } : {}) })),
   animeArcs: (cid: number) => request<{ collection_id: number; seasons: AnimeArcSeason[] }>(`/api/anime/collections/${cid}/arcs`),
@@ -1966,6 +2545,17 @@ export const api = {
     request<{ ok: boolean; moved: number; seasons: AnimeArcSeason[] }>(`/api/anime/collections/${cid}/arcs`, {
       method: 'POST', body: JSON.stringify({ anilist_id: anilistId, arcs }),
     }),
+  ageRatings: () => request<AgeRatingPlan>('/api/age-ratings'),
+  applyAgeRatings: (keys: string[] | 'all') =>
+    request<{ written: number; anime: number; shows: number; failed: string[] }>('/api/age-ratings/apply', {
+      method: 'POST', body: JSON.stringify(keys === 'all' ? { all: true } : { keys }),
+    }),
+  setAgeRating: (key: string, age: number | null) =>
+    request<{ ok?: boolean; written?: number }>('/api/age-ratings/hand', { method: 'POST', body: JSON.stringify({ key, age }) }),
+  setAgeRatingTmdb: (key: string, tmdbId: number | null) =>
+    request<{ ok: boolean }>('/api/age-ratings/tmdb', { method: 'POST', body: JSON.stringify({ key, tmdb_id: tmdbId }) }),
+  undoAgeRatings: (keys: string[]) =>
+    request<{ undone: number }>('/api/age-ratings/undo', { method: 'POST', body: JSON.stringify({ keys }) }),
   saveGenreRules: (rules: GenreRules) => request<GenreRules>('/api/genres/rules', { method: 'PUT', body: JSON.stringify(rules) }),
   saveGenreOverride: (key: string, choices: GenreOverride) =>
     request<GenreOverride>('/api/genres/titles/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify(choices) }),
@@ -2089,6 +2679,9 @@ export const api = {
     if (includeEpisodes) remember(pagePaths.masLibrary, fresh);
     return fresh;
   },
+  /** Match a library folder to a TMDB title by hand; ``tmdb_id: null`` goes back to the automatic match. */
+  masLibraryMatch: (body: { kind: 'movie' | 'show'; key: string; tmdb_id: number | null; name?: string; year?: number | null; poster_url?: string | null }) =>
+    request<{ ok: boolean }>('/api/mas/library/match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[]; anime: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
 
   serverShow: (path: string) => request<{ path: string; seasons: ServerSeason[] }>(`/api/server/show?path=${encodeURIComponent(path)}`),

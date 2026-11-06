@@ -1,5 +1,5 @@
 import { NumberField as BaseNumberField } from "@base-ui/react/number-field";
-import { MinusIcon, MoveHorizontalIcon, PlusIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon, MinusIcon, MoveHorizontalIcon, PlusIcon } from "lucide-react";
 import * as React from "react";
 import { cn, sx } from "@/zon/lib/cn";
 
@@ -13,6 +13,15 @@ const stepperSizes = {
   default: "size-(--control-inset) material-raised",
 } as const;
 
+/** The stacked pair: one key split in two, as tall as a side stepper, the halves meeting square. */
+const stackSizes = {
+  sm: "h-(--control-inset-sm) w-5",
+  default: "h-(--control-inset) w-6",
+} as const;
+
+/** The number starts where an Input's text does: its padding, less the group's inset. */
+const stackedInput = { sm: "text-left pl-2", default: "text-left pl-[11px]" } as const;
+
 export interface NumberFieldProps extends BaseNumberField.Root.Props {
   /** `sm` (30px) for dense surfaces; `default` (38px) everywhere else. */
   size?: keyof typeof groupSizes;
@@ -23,6 +32,11 @@ export interface NumberFieldProps extends BaseNumberField.Root.Props {
   label?: React.ReactNode;
   /** Placeholder for the input while it is empty. */
   placeholder?: string;
+  /**
+   * `sides`: a round − before the number and a + after it, the number centred. `stacked`: the
+   * number left-aligned like an Input, with ▲ and ▼ stacked at the end of the field.
+   */
+  steppers?: "sides" | "stacked";
   /** Accessible names for the steppers. */
   decrementLabel?: string;
   incrementLabel?: string;
@@ -44,8 +58,11 @@ const STEP_KEYS = new Set([
   "Escape",
 ]);
 
-/** Changes that step the value — these roll the digits; typing, pasting and blur formatting don't. */
-const STEP_REASONS = new Set<string>(["increment-press", "decrement-press", "keyboard", "wheel"]);
+/**
+ * Changes that step the value — the steppers, keys, wheel and scrubbing the label roll the digits;
+ * typing, pasting and blur formatting don't.
+ */
+const STEP_REASONS = new Set<string>(["increment-press", "decrement-press", "keyboard", "wheel", "scrub"]);
 
 type Roll = { from: string; to: string; dir: 1 | -1; key: number };
 
@@ -109,6 +126,7 @@ function DigitRoll({ roll, className, onDone }: { roll: Roll; className: string;
  */
 export function NumberField({
   size = "default",
+  steppers = "sides",
   label,
   placeholder,
   decrementLabel = "Decrease",
@@ -121,6 +139,9 @@ export function NumberField({
   const generatedId = React.useId();
   const id = idProp ?? generatedId;
   const textSize = size === "sm" ? "text-[13px]" : "text-base sm:text-[15px]";
+  const stacked = steppers === "stacked";
+  // The roll overlay sits where the input's text does.
+  const textAlign = stacked ? cn("justify-start", stackedInput[size]) : "";
 
   /* The digit roll: remember the text and direction of a step, read the new text once it renders. */
   const input = React.useRef<HTMLInputElement>(null);
@@ -167,10 +188,53 @@ export function NumberField({
     onValueChange?.(value, details);
   };
 
+  const stepper = cn(
+    "inline-flex shrink-0 cursor-pointer items-center justify-center text-foreground focus-ring",
+    "data-disabled:pointer-events-none data-disabled:opacity-50",
+  );
+  // Stacked, the halves keep the key's 7px outer corners and meet square in the middle.
+  const decrement = (
+    <BaseNumberField.Decrement
+      data-slot="number-field-decrement"
+      aria-label={decrementLabel}
+      onPointerDown={hideCaret}
+      className={cn(
+        stepper,
+        stacked
+          ? cn(
+              "min-h-0 w-full flex-1 rounded-b-item [&_svg]:size-3",
+              size === "sm" ? "material-row" : "material-raised",
+            )
+          : cn("rounded-full [&_svg]:size-3.5", stepperSizes[size]),
+      )}
+    >
+      {stacked ? <ChevronDownIcon /> : <MinusIcon />}
+    </BaseNumberField.Decrement>
+  );
+  const increment = (
+    <BaseNumberField.Increment
+      data-slot="number-field-increment"
+      aria-label={incrementLabel}
+      onPointerDown={hideCaret}
+      className={cn(
+        stepper,
+        stacked
+          ? cn(
+              "min-h-0 w-full flex-1 rounded-t-item [&_svg]:size-3",
+              size === "sm" ? "material-row" : "material-raised",
+            )
+          : cn("rounded-full [&_svg]:size-3.5", stepperSizes[size]),
+      )}
+    >
+      {stacked ? <ChevronUpIcon /> : <PlusIcon />}
+    </BaseNumberField.Increment>
+  );
+
   return (
     <BaseNumberField.Root
       data-slot="number-field"
       data-size={size}
+      data-steppers={steppers}
       id={id}
       className={sx("flex flex-col items-start gap-2", className)}
       onValueChange={handleValueChange}
@@ -197,24 +261,12 @@ export function NumberField({
         data-slot="number-field-group"
         className={cn(
           "flex w-full material-field items-center gap-1 rounded-control",
-          "has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-offset-0 has-[input:focus-visible]:outline-control-focus",
           // The whole group already dims when disabled; do not dim the steppers twice.
-          "data-disabled:[&>button]:opacity-100",
+          "data-disabled:[&_button]:opacity-100",
           groupSizes[size],
         )}
       >
-        <BaseNumberField.Decrement
-          data-slot="number-field-decrement"
-          aria-label={decrementLabel}
-          onPointerDown={hideCaret}
-          className={cn(
-            "inline-flex shrink-0 cursor-pointer items-center justify-center rounded-full text-foreground focus-ring",
-            "data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:size-3.5",
-            stepperSizes[size],
-          )}
-        >
-          <MinusIcon />
-        </BaseNumberField.Decrement>
+        {!stacked && decrement}
         <span className="relative flex min-w-0 flex-1 items-center self-stretch">
           <BaseNumberField.Input
             ref={input}
@@ -226,27 +278,26 @@ export function NumberField({
               if (caretHidden && !STEP_KEYS.has(e.key)) showCaret();
             }}
             className={cn(
-              "w-full min-w-0 bg-transparent text-center font-mono text-foreground tabular-nums outline-none placeholder:text-control-muted",
+              "w-full min-w-0 bg-transparent font-mono text-foreground tabular-nums outline-none placeholder:text-control-muted",
+              stacked ? stackedInput[size] : "text-center",
               caretHidden ? "caret-transparent" : "caret-foreground",
               textSize,
               // While the digits roll, the overlay draws them; the input keeps its caret and value.
               roll && "text-transparent",
             )}
           />
-          {roll && <DigitRoll key={roll.key} roll={roll} className={textSize} onDone={endRoll} />}
-        </span>
-        <BaseNumberField.Increment
-          data-slot="number-field-increment"
-          aria-label={incrementLabel}
-          onPointerDown={hideCaret}
-          className={cn(
-            "inline-flex shrink-0 cursor-pointer items-center justify-center rounded-full text-foreground focus-ring",
-            "data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:size-3.5",
-            stepperSizes[size],
+          {roll && (
+            <DigitRoll key={roll.key} roll={roll} className={cn(textSize, textAlign)} onDone={endRoll} />
           )}
-        >
-          <PlusIcon />
-        </BaseNumberField.Increment>
+        </span>
+        {stacked ? (
+          <span data-slot="number-field-steppers" className={cn("flex shrink-0 flex-col", stackSizes[size])}>
+            {increment}
+            {decrement}
+          </span>
+        ) : (
+          increment
+        )}
       </BaseNumberField.Group>
     </BaseNumberField.Root>
   );

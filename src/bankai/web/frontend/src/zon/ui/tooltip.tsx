@@ -1,13 +1,28 @@
 import { Tooltip as BaseTooltip } from "@base-ui/react/tooltip";
+import * as React from "react";
 import { sx, triggerSlot } from "@/zon/lib/cn";
 import { overlayArrow } from "@/zon/ui/_overlay";
+
+/** The quick open delay (ms): long enough to pass over a control without a flash, short enough to feel immediate. */
+const TOOLTIP_DELAY = 150;
+
+/** True below a TooltipProvider, whose delay a trigger then inherits. */
+const InProviderContext = React.createContext(false);
 
 /**
  * TooltipProvider — shares one quick delay across every tooltip below it, so moving from one
  * icon button to the next opens the next tooltip instantly. Wrap the app (or a toolbar) once.
  */
-export function TooltipProvider({ delay = 300, closeDelay = 0, ...props }: BaseTooltip.Provider.Props) {
-  return <BaseTooltip.Provider delay={delay} closeDelay={closeDelay} {...props} />;
+export function TooltipProvider({
+  delay = TOOLTIP_DELAY,
+  closeDelay = 0,
+  ...props
+}: BaseTooltip.Provider.Props) {
+  return (
+    <InProviderContext.Provider value>
+      <BaseTooltip.Provider delay={delay} closeDelay={closeDelay} {...props} />
+    </InProviderContext.Provider>
+  );
 }
 
 /**
@@ -18,9 +33,20 @@ export function TooltipProvider({ delay = 300, closeDelay = 0, ...props }: BaseT
  */
 export const Tooltip = BaseTooltip.Root;
 
-/** The element the tooltip describes. Compose with a control: `render={<Button size="icon" … />}`. */
-export function TooltipTrigger(props: BaseTooltip.Trigger.Props) {
-  return <BaseTooltip.Trigger {...triggerSlot("tooltip-trigger", props.render)} {...props} />;
+/**
+ * The element the tooltip describes. Compose with a control: `render={<Button size="icon" … />}`.
+ * It opens after the provider's delay, or the same quick 150ms without one; pass `delay` for a
+ * tooltip that should wait longer.
+ */
+export function TooltipTrigger({ delay, ...props }: BaseTooltip.Trigger.Props) {
+  const inProvider = React.useContext(InProviderContext);
+  return (
+    <BaseTooltip.Trigger
+      {...triggerSlot("tooltip-trigger", props.render)}
+      delay={delay ?? (inProvider ? undefined : TOOLTIP_DELAY)}
+      {...props}
+    />
+  );
 }
 
 const tooltipVariants = {

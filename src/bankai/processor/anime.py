@@ -19,6 +19,8 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import httpx
+
 from bankai.backend.transfer import _copy2_with_progress
 from bankai.cli import bgjobs
 from bankai.config import get_settings
@@ -33,6 +35,9 @@ from bankai.web import anime_files, anime_layout, anime_unsorted, review
 log = get_logger(__name__)
 
 _SIDE_CAR_EXTS = {".ass", ".ssa", ".srt", ".sub", ".vtt"}
+_VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts", ".webm"}
+# Polls of three seconds for a torrent's file list before episodes are left out.
+_FILE_LIST_TRIES = 100
 _ANIME_EPISODE = re.compile(
     r"(?:\b(?:E|EP|Episode)\s*|\s+-\s+)(?P<episode>\d{1,4})(?:v\d+)?\b",
     flags=re.I,
@@ -74,6 +79,25 @@ def season_episode(filename: str) -> tuple[int, int] | None:
     return (int(match.group("season")), int(match.group("episode"))) if match else None
 
 
+def _named_entry(filename: str) -> tuple[int, str] | None:
+    """The AniList entry a file's own name says it is (id, name), or None when the name tells none.
+
+    A replacement checks it before writing over anything: Re:Zero's second season, its batch taken
+    for the first season, replaced the first season's thirteen episodes (Nov 2026).
+    """
+    from bankai.web import anime as anime_web, erai
+
+    # A name without an episode number is no release name ("random.mkv" is AniList's "Random").
+    if erai._erai_identity_name(filename) is None and anime_web.release_episode_info(filename)[1] is None:
+        return None
+    try:
+        found = anime_web.anilist_match(filename, table=anilist.cached_index(), mappings=erai._load_mappings())
+    except Exception as exc:
+        log.warning("[anime] could not tell which entry %s is: %s", filename, exc)
+        return None
+    return (int(found["anilist_id"]), str(found.get("name") or found["anilist_id"])) if found else None
+
+
 def _staged_path(key: str, suffix: str) -> Path:
     """Where a file of this layout key is staged, with the file's own suffix."""
     return anime_files.staging_root().joinpath(*PurePosixPath(key).parts).with_suffix(suffix.casefold())
@@ -89,6 +113,9 @@ async def _organize_show(
     keep_episodes: frozenset[int] = frozenset(),
     german_sub_url: str | None = None,
     leftover: list[tuple[Path, str]] | None = None,
+    episode_map: dict[int, tuple[int, int]] | None = None,
+    skip_owned: bool = False,
+    owned_left: list[Path] | None = None,
 ) -> list[tuple[Path, int, int]]:
     """Stage each video where the layout puts its episode, and say so in the file index.
 
@@ -105,6 +132,8 @@ async def _organize_show(
     marked as another season ("S00E01" beside "S01E01".."S01E64": OVAs) --
     goes to ``leftover`` with the reason, for matching by hand in Review.
     Files marked with seasons are numbered by the lowest season past 0.
+    ``skip_owned``: an episode the library has a file of is left out, not
+    staged beside it (a download that is no replacement never writes over one).
     """
     if episode_override is not None and len(sources) != 1:
         raise RuntimeError(
@@ -114,6 +143,7 @@ async def _organize_show(
     await anime_layout.ensure_metadata([anilist_id])
     entry = await anilist.anime(anilist_id)
     placed: list[tuple[Path, int, int]] = []
+    owned: dict[int, set[int]] = {}
     marked = {source: season_episode(source.name) for source in sources}
     main = min((pair[0] for pair in marked.values() if pair and pair[0] > 0), default=None)
     for source in sources:
@@ -133,12 +163,38 @@ async def _organize_show(
         if episode in keep_episodes:
             log.info("[anime] episode %d kept as it is (German dub): %s", episode, source.name)
             continue
+        if episode_map is not None:
+            # Replace with magnet link: the torrent's episode N is the library's SxxE<N> that was
+            # ticked, of whichever AniList entry that file is; the rest of the torrent stays out.
+            if episode not in episode_map:
+                log.info("[anime] episode %d was not ticked to be replaced: %s", episode, source.name)
+                if leftover is not None:
+                    leftover.append((source, "not ticked to be replaced"))
+                continue
+            placed.append((source, *episode_map[episode]))
+            continue
         aid, number = anilist_id, episode
         if episode_override is None and entry is not None:
             settled, number = anilist.settle_in(entry, episode)
             aid = settled.id
             if aid != anilist_id:
                 log.info("[anime] %s is episode %d of its sequel, AniList %d", source.name, number, aid)
+        if replace_existing and episode_override is None:
+            named = _named_entry(source.name)
+            if named is not None and named[0] not in (anilist_id, aid):
+                reason = f"its name is {named[1]}, not the entry it would replace"
+                log.warning("[anime] %s: %s; nothing replaced with it", source.name, reason)
+                if leftover is not None:
+                    leftover.append((source, reason))
+                continue
+        if skip_owned:
+            if aid not in owned:
+                owned.update(anime_files.in_library([aid]))
+            if number in owned[aid]:
+                log.info("[anime] episode %d of AniList %d is in the library already, left out: %s", number, aid, source.name)
+                if owned_left is not None:
+                    owned_left.append(source)
+                continue
         placed.append((source, aid, number))
     targets: dict[int, dict[int, str]] = {}
     for aid in dict.fromkeys(aid for _source, aid, _number in placed):
@@ -165,6 +221,73 @@ async def _organize_show(
         anime_files.record(destination, [(aid, number)])
         outputs.append((destination, aid, number))
     return outputs
+
+
+async def _leave_out_owned(
+    qbit: QBittorrentClient, torrent_hash: str, *, anilist_id: int, episode_override: int | None
+) -> tuple[list[str], int]:
+    """Set the torrent's files of episodes the library has to "do not download".
+
+    Numbered as ``_organize_show`` numbers them. Returns the names left out and
+    the number of videos. Waits a few minutes for the file list (the torrent's
+    metadata); without it everything downloads, and organizing leaves them out.
+    """
+    files: list[dict[str, Any]] = []
+    for _ in range(_FILE_LIST_TRIES):
+        try:
+            files = await qbit.files(torrent_hash)
+        except (httpx.HTTPError, QBittorrentError) as exc:
+            log.debug("[anime] no file list for %s yet: %s", torrent_hash[:8], exc)
+        except Exception as exc:
+            log.warning("[anime] could not read the file list of %s: %s", torrent_hash[:8], exc)
+            return [], 0
+        if files:
+            break
+        await asyncio.sleep(3)
+    videos = [row for row in files if Path(str(row.get("name") or "")).suffix.casefold() in _VIDEO_EXTS]
+    if not videos:
+        return [], 0
+    if episode_override is not None and len(videos) != 1:
+        episode_override = None
+    await anime_layout.ensure_metadata([anilist_id])
+    entry = await anilist.anime(anilist_id)
+    marked = {row["name"]: season_episode(row["name"]) for row in videos} if episode_override is None else {}
+    main = min((pair[0] for pair in marked.values() if pair and pair[0] > 0), default=None)
+    owned: dict[int, set[int]] = {}
+    left: list[str] = []
+    for row in videos:
+        name = str(row["name"])
+        pair = marked.get(name)
+        if pair is not None and pair[0] != main:
+            continue
+        number = pair[1] if pair is not None else episode_number(name, episode_override=episode_override)
+        if number is None:
+            continue
+        aid = anilist_id
+        if episode_override is None and entry is not None:
+            settled, number = anilist.settle_in(entry, number)
+            aid = settled.id
+        if aid not in owned:
+            owned.update(anime_files.in_library([aid]))
+        if number in owned[aid]:
+            left.append(name)
+    # A subtitle beside a video left out ("<stem>.en.ass") goes with it.
+    stems = {str(PurePosixPath(name).with_suffix("")) for name in left}
+    names = set(left) | {
+        str(row.get("name")) for row in files
+        if Path(str(row.get("name"))).suffix.casefold() in _SIDE_CAR_EXTS
+        and any(str(row.get("name")).startswith(stem + ".") for stem in stems)
+    }
+    indexes = [int(row["index"]) for row in files if str(row.get("name")) in names and "index" in row]
+    if indexes and len(left) < len(videos):
+        await qbit.file_priority(torrent_hash, indexes, 0)
+    return sorted(names), len(videos)
+
+
+def _left_out_paths(files: list[dict[str, Any]], status: TorrentStatus) -> set[Path]:
+    """Files set to "do not download": qBittorrent may still have written part of one."""
+    save = _mapped_path(status.save_path)
+    return {save.joinpath(*PurePosixPath(str(row["name"])).parts) for row in files if row.get("priority") == 0}
 
 
 def _current_paths(published: list[tuple[Path, int, int]]) -> list[Path]:
@@ -468,6 +591,7 @@ async def download_anime(
     keep_episodes: frozenset[int] = frozenset(),
     publish: bool = False,
     german_sub_url: str | None = None,
+    episode_map: dict[int, tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     if media_kind not in {"show", "movie"}:
         raise ValueError("anime kind must be show or movie")
@@ -508,6 +632,27 @@ async def download_anime(
         torrent_hash = await _locate_torrent(qbit, info_hash=info_hash, before_hashes=before_hashes)
         if background_id:
             torrent_actions.set_active_torrent(background_id, torrent_hash)
+        # Episodes the library has are not downloaded again; a replacement takes them on purpose.
+        skip_owned = media_kind == "show" and not replace_existing and episode_map is None
+        if skip_owned:
+            left_out, videos = await _leave_out_owned(
+                qbit, torrent_hash, anilist_id=int(anilist_id), episode_override=episode_override
+            )
+            if left_out and len([name for name in left_out if Path(name).suffix.casefold() in _VIDEO_EXTS]) >= videos:
+                log.info("[anime] every episode of %s is in the library already: nothing downloaded", release_title)
+                if not existed_before:
+                    with suppress(Exception):
+                        await qbit.remove(torrent_hash, delete_files=True)
+                return {
+                    "final_path": None,
+                    "paths": [],
+                    "kept_for_review": 0,
+                    "anilist_id": anilist_id,
+                    "torrent_hash": torrent_hash,
+                    "already_in_library": videos,
+                }
+            if left_out:
+                log.info("[anime] %d file(s) the library has are not downloaded: %s", len(left_out), ", ".join(left_out[:5]))
         # The discovery prefill deliberately adds a large ordered backlog to
         # qBittorrent. A worker must promote its own torrent before waiting;
         # otherwise errored entries at the head of qBittorrent's queue can
@@ -534,6 +679,8 @@ async def download_anime(
         kept_for_review = 0
         # Each show file with the AniList entry and episode it is.
         episodes: list[tuple[Path, int, int]] = []
+        # Episodes the library had, left out while filing.
+        owned_left: list[Path] = []
         output = settings.output
         if media_kind == "movie":
             source = pick_movie_file(root)
@@ -554,6 +701,13 @@ async def download_anime(
             outputs.append(destination)
         else:
             sources = find_video_files(root)
+            if skip_owned:
+                try:
+                    skipped = _left_out_paths(await qbit.files(torrent_hash), status)
+                except Exception as exc:
+                    log.warning("[anime] could not read which files were left out: %s", exc)
+                    skipped = set()
+                sources = [source for source in sources if source not in skipped]
             log.info("[anime] filing as AniList %d: %s", anilist_id, anilist_title or english_title)
             leftover: list[tuple[Path, str]] = []
             episodes = await _organize_show(
@@ -565,8 +719,13 @@ async def download_anime(
                 keep_episodes=keep_episodes,
                 german_sub_url=german_sub_url,
                 leftover=leftover,
+                episode_map=episode_map,
+                skip_owned=skip_owned,
+                owned_left=owned_left,
             )
             outputs.extend(path for path, _aid, _episode in episodes)
+            # Left out on purpose (Replace with magnet link): nothing to match by hand.
+            leftover = [(source, reason) for source, reason in leftover if reason != "not ticked to be replaced"]
             for source, reason in leftover:
                 pair = season_episode(source.name)
                 anime_unsorted.add(
@@ -583,6 +742,19 @@ async def download_anime(
             if leftover:
                 log.info("[anime] %d file(s) wait in Anime -> Review to be matched by hand", len(leftover))
             kept_for_review = len(leftover)
+        if not outputs and not kept_for_review and owned_left:
+            log.info("[anime] every episode of %s is in the library already: nothing filed", release_title)
+            if settings.paths.cleanup_after_success and not existed_before:
+                with suppress(Exception):
+                    await qbit.remove(torrent_hash, delete_files=True)
+            return {
+                "final_path": None,
+                "paths": [],
+                "kept_for_review": 0,
+                "anilist_id": anilist_id,
+                "torrent_hash": torrent_hash,
+                "already_in_library": len(owned_left),
+            }
         if not outputs and not kept_for_review:
             raise RuntimeError("the selected Nyaa release contained no recognizable anime files")
 

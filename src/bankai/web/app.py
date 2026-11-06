@@ -593,10 +593,33 @@ class DirectDownloadRequest(BaseModel):
     # A row of a recent Torrents search (web/direct.py keeps its links).
     id: str
     kind: str
+    # A library root, or "by-language": each file by its audio into the German or
+    # English folder (the followed show's, else the first of each).
     root: str
     title: str
     year: int | None = None
     season: int | None = None
+    follow: int | None = None
+    episodes: list[str] | None = None
+    names: list[str] = []
+
+
+class FollowRequest(BaseModel):
+    tmdb_id: int
+    quality: str = "1080p"
+    root_german: str
+    root_english: str
+
+
+class LibraryMatchRequest(BaseModel):
+    kind: str
+    key: str
+    # None goes back to the automatic match.
+    tmdb_id: int | None = None
+    name: str | None = None
+    year: int | None = None
+    poster_url: str | None = None
+    status: str | None = None
 
 
 class AnimeDownloadRequest(BaseModel):
@@ -613,6 +636,8 @@ class AnimeDownloadRequest(BaseModel):
     # from the Anime search page or a missing episode picked in the drawer.
     # A movie from the search page stages, for the movies' Transfer.
     publish: bool = False
+    # Where it was found: "nyaa", or "nekobt" -- by its magnet alone, no .torrent link.
+    source: str = "nyaa"
 
 
 class QueuePriorityRequest(BaseModel):
@@ -702,9 +727,6 @@ class SettingRequest(BaseModel):
 
 # Settings keys the web UI is allowed to edit (safe subset).
 SAFE_SETTING_KEYS: set[str] = {
-    "metadata.tvdb_api_key",
-    "metadata.tvdb_pin",
-    "metadata.tvdb_enabled",
     "notifications.webhook_url",
     "notifications.on_success",
     "notifications.on_failure",
@@ -734,6 +756,8 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.thumb_time_seconds",
     "anime.thumb_width",
     "anime.artwork_tmdb",
+    "anime.publishers",
+    "anime.nekobt_languages",
     "manga.enabled",
     "manga.library_dir",
     "manga.novels_dir",
@@ -816,6 +840,25 @@ def _validate_setting_value(key: str, value: Any) -> Any:
         return token
     if key == "anime.erai_username":
         return str(value or "").strip()
+    if key == "anime.publishers":
+        # A list, or one per line (a textarea) / comma separated.
+        if isinstance(value, str):
+            value = value.replace(",", "\n").splitlines()
+        if not isinstance(value, list):
+            raise ValueError("expected one publisher per line")
+        return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+    if key == "anime.nekobt_languages":
+        from bankai.web.nekobt import valid_language
+
+        if isinstance(value, str):
+            value = value.replace(",", "\n").splitlines()
+        if not isinstance(value, list):
+            raise ValueError("expected one language code per line")
+        codes = list(dict.fromkeys(str(item).strip().casefold() for item in value if str(item).strip()))
+        wrong = [code for code in codes if not valid_language(code)]
+        if wrong:
+            raise ValueError("not a language code as nekobt writes them (de, en, ja, pt-br, es-419): " + ", ".join(wrong))
+        return codes
     if key.startswith("anime."):
         field = key.removeprefix("anime.")
         data = get_settings().anime.model_dump()
@@ -905,16 +948,12 @@ def create_app() -> Any:
             migration_task = asyncio.create_task(
                 anyio.to_thread.run_sync(_backfill_review_metadata)
             )
-            # One-off: releases queued by older builds sit in the pending
-            # queue waiting for a download the reconciler now watches directly.
+            # Downloads queued by hand that earlier starts turned into release
+            # records nothing starts go back into the job queue.
             with suppress(Exception):
-                retired = erai_mod.retire_download_pendings()
-                if retired.get("retired"):
-                    log.info(
-                        "Retired %(retired)d download placeholders "
-                        "(%(adopted)d adopted into release tracking)",
-                        retired,
-                    )
+                returned = erai_mod.return_adopted_downloads()
+                if returned.get("found"):
+                    log.info("Returned %(returned)d of %(found)d downloads to the job queue", returned)
             with suppress(Exception):
                 stale = erai_mod.reconcile_stale_holds()
                 if stale.get("reopened") or stale.get("filtered"):
@@ -1009,6 +1048,26 @@ def create_app() -> Any:
         return p
 
     # ------------------------------------------------------------------
+    # The UI's own settings, shared between devices (see ui_prefs)
+    # ------------------------------------------------------------------
+    @app.get("/api/ui/prefs")
+    async def ui_prefs_all() -> dict:
+        from bankai.web import ui_prefs
+
+        return {"prefs": await asyncio.to_thread(ui_prefs.load)}
+
+    @app.put("/api/ui/prefs/{key}")
+    async def ui_prefs_put(key: str, req: dict) -> dict:
+        """Keep one setting: ``{"value": ...}``; a null value forgets it."""
+        from bankai.web import ui_prefs
+
+        try:
+            await asyncio.to_thread(ui_prefs.save, key, req.get("value"))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
     # Health / meta
     # ------------------------------------------------------------------
     @app.get("/api/health")
@@ -1021,7 +1080,7 @@ def create_app() -> Any:
             "ffprobe": media_mod.ffprobe_bin() is not None,
             "ffmpeg": media_mod.ffmpeg_bin() is not None,
             "mkvmerge": media_mod.mkvmerge_bin() is not None,
-            "tvdb_configured": discover_mod.is_configured(),
+            "tmdb_configured": discover_mod.is_configured(),
         }
 
     # ------------------------------------------------------------------
@@ -1178,7 +1237,7 @@ def create_app() -> Any:
             filtered = _filter_discover(result.items, kind, membership)
             for item in _apply_availability(filtered, kind):
                 identity = (
-                    item.get("tvdb_id"),
+                    item.get("tmdb_id"),
                     _norm_title(str(item.get("name") or "")),
                     item.get("year"),
                 )
@@ -1226,7 +1285,8 @@ def create_app() -> Any:
         page: int = Query(0, ge=0),
         page_size: int = Query(50, ge=10, le=100),
     ) -> dict:
-        k = "movie" if kind == "movie" else "show"
+        # "all": films and shows together, as TMDB ranks them (title search only).
+        k = kind if kind in {"movie", "all"} else "show"
         mode = search_by.strip().casefold()
         if mode not in {"title", "person", "studio"}:
             raise HTTPException(status_code=400, detail="by must be title, person, or studio")
@@ -1243,13 +1303,16 @@ def create_app() -> Any:
         items = [i for i in paged.items if discover_mod.is_released(i)]
         import anyio.to_thread
 
-        have, active, staged = await anyio.to_thread.run_sync(_catalog_membership, k)
-        added = have | active | staged
-        in_library = have | staged
+        # Each result against its own library: a film's against the films, a show's the shows.
+        membership = {}
+        for each in ({"movie", "show"} if k == "all" else {k}):
+            have, active, staged = await anyio.to_thread.run_sync(_catalog_membership, each)
+            membership[each] = (have | active | staged, have | staged)
         results: list[dict] = []
         for item in items:
             result = discover_mod.to_dict(item)
             key = _norm_title(item.name)
+            added, in_library = membership.get(item.kind, (set(), set()))
             result["added"] = bool(key and key in added)
             result["in_library"] = bool(key and key in in_library)
             results.append(result)
@@ -1271,7 +1334,7 @@ def create_app() -> Any:
         return {
             "configured": discover_mod.is_configured(),
             "items": [
-                {"name": suggestion.name, "tvdb_id": suggestion.tvdb_id}
+                {"name": suggestion.name, "tmdb_id": suggestion.tmdb_id}
                 for suggestion in suggestions
             ],
         }
@@ -1299,7 +1362,7 @@ def create_app() -> Any:
         k = "movie" if kind == "movie" else "show"
         details = await discover_mod.title_details(id, kind=k)
         return {
-            "tvdb_id": id,
+            "tmdb_id": id,
             "kind": k,
             "english": details.english,
             "german": details.german,
@@ -1624,17 +1687,28 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail="a title is needed to name the folder")
         if req.year is not None and not 1900 <= req.year <= 2100:
             raise HTTPException(status_code=422, detail="the year is out of range")
-        try:
-            target = await asyncio.to_thread(direct.target, req.root, req.kind)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        args = [
-            "direct-download",
-            "--release-title", row["title"],
-            "--kind", req.kind,
-            "--root", target["root"],
-            "--title", title,
-        ]
+        args = ["direct-download", "--release-title", row["title"], "--kind", req.kind, "--title", title]
+        if req.root == "by-language":
+            from bankai.web import mas_follow
+
+            shown = mas_follow.get(req.follow) if req.follow else None
+            roots = (shown or {}).get("roots") or await asyncio.to_thread(direct.default_roots, req.kind)
+            try:
+                for language in ("German", "English"):
+                    if not roots.get(language):
+                        raise ValueError(f"there is no folder for {language}")
+                    await asyncio.to_thread(direct.target, roots[language], req.kind)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            args += ["--root-german", roots["German"], "--root-english", roots["English"]]
+            label = "by language"
+        else:
+            try:
+                target = await asyncio.to_thread(direct.target, req.root, req.kind)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            args += ["--root", target["root"]]
+            label = target["label"]
         for option, value in (
             ("--download-url", row.get("download_url")),
             ("--magnet-uri", row.get("magnet_uri")),
@@ -1642,16 +1716,120 @@ def create_app() -> Any:
             ("--info-url", row.get("info_url")),
             ("--year", req.year),
             ("--season", req.season),
+            ("--follow", req.follow),
+            ("--episodes", ",".join(req.episodes or [])),
         ):
             if value:
                 args.extend([option, str(value)])
+        for other in req.names:
+            if other.strip() and other.strip() != title:
+                args.extend(["--also-named", other.strip()])
         name = f"{title} ({req.year})" if req.year else title
         return await asyncio.to_thread(
             webjobs.enqueue,
             kind="movie" if req.kind == "movie" else "show",
-            title=f"{name} · {target['label']} · {row['title']}",
+            title=f"{name} · {label} · {row['title']}",
             args=args,
         )
+
+    # Shows followed in English (web/mas_follow.py): every aired episode, German where a release has it.
+    follow_tasks: set[asyncio.Task] = set()
+
+    def _follow_soon(tmdb_id: int) -> None:
+        from bankai.web import mas_follow
+
+        async def go() -> None:
+            try:
+                await mas_follow.run(only=tmdb_id)
+            except Exception as exc:
+                log.warning("follow pass for %s failed: %s", tmdb_id, exc)
+
+        task = asyncio.ensure_future(go())
+        follow_tasks.add(task)
+        task.add_done_callback(follow_tasks.discard)
+
+    @app.get("/api/mas/follow")
+    async def follow_list() -> dict:
+        from bankai.web import mas_follow
+
+        return {"shows": await mas_follow.overview()}
+
+    @app.get("/api/mas/follow/preview")
+    async def follow_preview(tmdb_id: int = Query(...), quality: str = Query("1080p")) -> dict:
+        from bankai.web import mas_follow
+
+        try:
+            return await mas_follow.preview(tmdb_id, quality=quality)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/mas/follow")
+    async def follow_add(req: FollowRequest) -> dict:
+        from bankai.web import mas_follow
+        from bankai.web.anime_library import show_info
+
+        info = await show_info(req.tmdb_id)
+        if not info:
+            raise HTTPException(status_code=404, detail="TMDB has no such show (or cannot be reached)")
+        before = mas_follow.get(req.tmdb_id)
+        try:
+            row = await asyncio.to_thread(
+                mas_follow.follow,
+                req.tmdb_id,
+                title=info["name"],
+                year=info.get("year"),
+                quality=req.quality,
+                roots={"German": req.root_german, "English": req.root_english},
+                names=[info["german"]] if info.get("german") else [],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Only following (or another quality) has anything new to look for; a folder
+        # changed applies to the next downloads as they come.
+        if before is None or before.get("quality") != row.get("quality"):
+            _follow_soon(req.tmdb_id)
+        return row
+
+    @app.delete("/api/mas/follow/{tmdb_id}")
+    async def follow_remove(tmdb_id: int) -> dict:
+        from bankai.web import mas_follow
+
+        return {"removed": await asyncio.to_thread(mas_follow.unfollow, tmdb_id)}
+
+    @app.get("/api/mas/follow/{tmdb_id}")
+    async def follow_detail(tmdb_id: int) -> dict:
+        from bankai.web import mas_follow
+
+        try:
+            return await mas_follow.detail(tmdb_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/mas/follow/{tmdb_id}/run")
+    async def follow_run(tmdb_id: int) -> dict:
+        """Look for this show's missing episodes now, whatever was searched before."""
+        from bankai.web import mas_follow
+
+        if mas_follow.get(tmdb_id) is None:
+            raise HTTPException(status_code=404, detail="that show is not followed")
+        await asyncio.to_thread(mas_follow.forget_searches, tmdb_id)
+        _follow_soon(tmdb_id)
+        return {"started": True}
+
+    @app.get("/api/mas/movie/releases")
+    async def movie_releases(tmdb_id: int = Query(...), quality: str = Query("1080p")) -> dict:
+        from bankai.web import mas_follow
+
+        try:
+            return await mas_follow.movie_releases(tmdb_id, quality=quality)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Anime (Nyaa-only direct downloads)
@@ -1681,12 +1859,65 @@ def create_app() -> Any:
         except Exception as exc:
             log.warning("Nyaa search failed: %s", exc)
             raise HTTPException(status_code=502, detail=f"Nyaa search failed: {exc}") from exc
+        items = [anime_mod.entry_to_dict(item) for item in result.items]
         return {
-            "items": [anime_mod.entry_to_dict(item) for item in result.items],
+            "items": await asyncio.to_thread(anime_mod.mark_owned, items),
             "page": result.page,
             "has_next": result.has_next,
             "aliases": result.aliases,
+            "sent": list(result.sent),
         }
+
+    @app.get("/api/anime/nekobt")
+    async def anime_search_nekobt(
+        q: str = Query(""),
+        page: int = Query(0, ge=0),
+        quality: str | None = Query(None),
+        publisher: str | None = Query(None),
+        title_filters: str | None = Query(None),
+        description_filters: str | None = Query(None),
+        subtitles: str | None = Query(None, description="nekobt language codes, comma separated: any of them"),
+        audio: str | None = Query(None, description="nekobt language codes, comma separated: any of them"),
+        batch: bool | None = Query(None, description="true: batches alone, false: single episodes"),
+        min_seeders: int = Query(0, ge=0),
+    ) -> dict:
+        """Discover's nekobt.to source: its releases in the rows Nyaa's come in."""
+        from bankai.web import nekobt
+
+        try:
+            result = await nekobt.search(
+                q, page=page, quality=quality, publisher=publisher, title_filters=title_filters,
+                description_filters=description_filters,
+                subtitles=[code for code in (subtitles or "").split(",") if code.strip()],
+                audio=[code for code in (audio or "").split(",") if code.strip()],
+                batch=batch,
+                min_seeders=min_seeders,
+            )
+        except Exception as exc:
+            log.warning("nekobt search failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"nekobt search failed: {exc}") from exc
+        await asyncio.to_thread(anime_mod.mark_owned, result["items"])
+        return result
+
+    @app.get("/api/anime/owned")
+    async def anime_owned(anilist_id: int = Query(..., ge=1)) -> dict:
+        """An entry's episodes in the library: what a download of it leaves out."""
+        from bankai.metadata import anilist
+        from bankai.web import anime_files
+
+        have = await asyncio.to_thread(anime_files.in_library, [anilist_id])
+        return {"owned": sorted(have.get(anilist_id, ())), "episodes": anilist.episode_count(anilist_id)}
+
+    @app.get("/api/anime/nekobt/description")
+    async def anime_nekobt_description(id: str = Query(..., min_length=1)) -> dict:
+        from bankai.web import nekobt
+
+        try:
+            return {"description": await nekobt.description(id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"nekobt did not answer: {exc}") from exc
 
     def _anime_state_files(*names: str) -> Callable[[], tuple]:
         """Inputs of the anime snapshots: the automation's files in the state directory."""
@@ -1701,13 +1932,18 @@ def create_app() -> Any:
         """Every job's latest write: a job rewrites its own directory as it runs."""
         from bankai.cli import bgjobs
 
-        newest, count = 0, 0
+        newest, count, written = 0, 0, 0
         with suppress(OSError), os.scandir(bgjobs.jobs_root()) as entries:
             for entry in entries:
                 with suppress(OSError):
                     newest = max(newest, entry.stat(follow_symlinks=False).st_mtime_ns)
                     count += 1
-        return (count, newest)
+                # A running job writes its progress into its log, which leaves the folder's time
+                # as it was: the queue's bars moved only when some other job came or went. In
+                # steps of 10 s, so a busy queue is rebuilt that often, not on every line.
+                with suppress(OSError):
+                    written = max(written, (Path(entry.path) / "log").stat().st_mtime_ns // 10_000_000_000)
+        return (count, newest, written)
 
     _anime_inputs = _anime_state_files(
         "erai_series_policies.json",
@@ -1831,8 +2067,27 @@ def create_app() -> Any:
 
     # -- bankai's curated genres (web.genres, web.genre_sync) -----------------
 
-    @app.get("/api/genres")
-    async def genres_overview(language: str | None = Query(None, pattern="^(en|de)$"), fresh: bool = False) -> dict:
+    def _state_files(*names: str) -> Callable[[], tuple]:
+        """A snapshot's inputs: these files of the state directory, by size and time."""
+        from bankai.cli import bgjobs
+
+        return snapshots_mod.file_stamps(lambda: [bgjobs.jobs_root().parent / name for name in names])
+
+    async def _genres_payload() -> dict:
+        from bankai.web import genre_sync
+
+        return await genre_sync.plan()
+
+    # Jellyfin's catalogue took a quarter of a second to two and a half every time the
+    # tab was opened: kept built, again when a rule or a pick changes, else every 5 min.
+    snaps.add(
+        "genres", _genres_payload,
+        inputs=_state_files("genre_rules.json", "genre_overrides.json", "genre_sources.json", "genre_state.json"),
+        tags={"genres"}, min_interval=30.0, max_age=300.0,
+    )
+
+    @app.get("/api/genres", response_model=None)
+    async def genres_overview(request: Request, language: str | None = Query(None, pattern="^(en|de)$"), fresh: bool = False):
         """The vocabulary with its counts, every title's genres now and as curated (a dry run:
         nothing is written), the raw genres no rule maps, and what each rule catches."""
         import httpx
@@ -1840,6 +2095,8 @@ def create_app() -> Any:
         from bankai.web import genre_sync
 
         try:
+            if language is None and not fresh:
+                return snapshots_mod.response(await snaps["genres"].get(), request)
             return await genre_sync.plan(fresh=fresh, language=language)
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"Jellyfin could not be asked: {exc}") from exc
@@ -1924,14 +2181,176 @@ def create_app() -> Any:
             done += await genre_sync.undo(str(key))
         return {"undone": done, "write": genre_sync.switches()}
 
+    # -- German age ratings (FSK) of anime and shows --------------------------
+
+    @app.get("/api/age-ratings")
+    async def age_ratings_overview() -> dict:
+        """Every anime collection and show with the FSK rating bankai would give it, where from
+        (TMDB's German rating, an estimate from another country's, by hand), and what it has now."""
+        import httpx
+
+        from bankai.web import age_ratings
+
+        try:
+            return await age_ratings.plan()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Jellyfin or TMDB: {exc}") from exc
+
+    @app.post("/api/age-ratings/apply")
+    async def age_ratings_apply(req: dict) -> dict:
+        """Write the ratings of ``keys`` (a trial), or of every title with one (``all`` true):
+        anime into tvshow.nfo, shows into Jellyfin, locked."""
+        from bankai.web import age_ratings
+
+        keys = req.get("keys")
+        if isinstance(keys, list) and keys:
+            return await age_ratings.apply({str(key) for key in keys})
+        if req.get("all") is True:
+            return await age_ratings.apply(None)
+        raise HTTPException(status_code=400, detail="keys or all")
+
+    @app.post("/api/age-ratings/hand")
+    async def age_ratings_hand(req: dict) -> dict:
+        """A title's rating by hand: ``key``, ``age`` (0, 6, 12, 16, 18; null: TMDB's again). A title
+        already written is written again with it."""
+        from bankai.web import age_ratings
+
+        key, age = str(req.get("key") or ""), req.get("age")
+        if not key:
+            raise HTTPException(status_code=400, detail="key")
+        try:
+            age_ratings.set_hand(key, None if age is None else int(age))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if key in age_ratings.load()["written"]:
+            return await age_ratings.apply({key})
+        return {"ok": True}
+
+    @app.post("/api/age-ratings/tmdb")
+    async def age_ratings_tmdb(req: dict) -> dict:
+        """The TMDB show a title is, by hand: ``key``, ``tmdb_id`` (null: matched again)."""
+        from bankai.web import age_ratings
+
+        key, tmdb_id = str(req.get("key") or ""), req.get("tmdb_id")
+        if not key:
+            raise HTTPException(status_code=400, detail="key")
+        try:
+            age_ratings.set_tmdb(key, None if tmdb_id in (None, "") else int(tmdb_id))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True}
+
+    @app.post("/api/age-ratings/undo")
+    async def age_ratings_undo(req: dict) -> dict:
+        """Take written ratings back: ``keys``."""
+        from bankai.web import age_ratings
+
+        done = 0
+        for key in req.get("keys") or []:
+            done += await age_ratings.undo(str(key))
+        return {"undone": done}
+
     # -- Audio and subtitle tracks taken out of the libraries' videos ---------
 
-    @app.get("/api/tracks")
-    async def tracks_overview() -> dict:
-        """Each library's languages, the ones switched off, what that changes and what was done."""
+    async def _tracks_payload() -> dict:
         from bankai.web import track_cleanup
 
         return await asyncio.to_thread(track_cleanup.overview)
+
+    # A fifth of a second every time: kept built, rebuilt as the inventory, the rules or the
+    # results change (and every few seconds, for the file being cleaned).
+    snaps.add(
+        "tracks", _tracks_payload,
+        inputs=_state_files("track_inventory.json", "track_rules.json", "track_cleanup.json", "track_removals.json"),
+        tags={"tracks"}, min_interval=3.0, max_age=10.0,
+    )
+
+    @app.get("/api/tracks", response_model=None)
+    async def tracks_overview(request: Request):
+        """Each library's languages, the ones switched off, what that changes and what was done."""
+        return snapshots_mod.response(await snaps["tracks"].get(), request)
+
+    # Ahead of /api/tracks/{scope}: it took "language" for a library ("no such library").
+    # Languages written in the background: held so they are not collected half way.
+    language_tasks: set[asyncio.Task] = set()
+
+    @app.get("/api/tracks/language")
+    def tracks_language_progress() -> dict:
+        """A language being written into many files in the background: {done, total}, or {}."""
+        from bankai.web import track_cleanup
+
+        return dict(track_cleanup.progress_language)
+
+    @app.post("/api/tracks/language")
+    async def tracks_set_language(req: dict) -> dict:
+        """Write a language into tracks that name none: ``tracks`` [{path, kind, position}], ``language``."""
+        from bankai.web import track_cleanup
+
+        tracks = list(req.get("tracks") or [])
+        language = str(req.get("language") or "")
+        if track_cleanup.language(language) == "und":
+            raise HTTPException(status_code=422, detail="pick a language (a code such as ger, eng, jpn)")
+        if len({str(item.get("path")) for item in tracks}) > 25:
+            # Many files (Naruto Shippuden's 500): written in the background, the page not kept waiting.
+            if track_cleanup.progress_language:
+                raise HTTPException(status_code=409, detail="a language is being written already; wait for it")
+            track_cleanup.progress_language.update(done=0, total=len({str(item.get("path")) for item in tracks}))
+            task = asyncio.create_task(asyncio.to_thread(track_cleanup.set_language, tracks, language))
+            language_tasks.add(task)
+            task.add_done_callback(language_tasks.discard)
+            return {"background": True, "files": track_cleanup.progress_language["total"], "language": track_cleanup.language(language)}
+        try:
+            return await asyncio.to_thread(track_cleanup.set_language, tracks, language)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/api/tracks/remove")
+    async def tracks_remove(req: dict) -> dict:
+        """Take tracks out of their files: ``tracks`` [{path, kind, position}], queued for the cleanup."""
+        from bankai.web import track_cleanup
+
+        try:
+            return await asyncio.to_thread(track_cleanup.remove_tracks, list(req.get("tracks") or []))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+    @app.get("/api/browser-audio")
+    async def browser_audio_overview() -> dict:
+        """Dolby and DTS made AAC: per library what it would do, whether it is on, what was done."""
+        from bankai.web import browser_audio
+
+        return await asyncio.to_thread(browser_audio.overview)
+
+    @app.get("/api/browser-audio/files")
+    async def browser_audio_files(scope: str | None = Query(None), limit: int = Query(100, ge=1, le=2000)) -> dict:
+        """The files it would write anew, track by track: replaced, added beside, kept."""
+        from bankai.web import browser_audio, track_cleanup
+
+        if scope is not None and scope not in track_cleanup.SCOPES:
+            raise HTTPException(status_code=404, detail="no such library")
+        return {"files": await asyncio.to_thread(browser_audio.files, scope, limit)}
+
+    @app.post("/api/browser-audio/try")
+    async def browser_audio_try(req: dict) -> dict:
+        """Do these files next, even while it is off: ``paths``."""
+        from bankai.web import browser_audio
+
+        paths = req.get("paths")
+        if not isinstance(paths, list) or not paths:
+            raise HTTPException(status_code=422, detail="paths is a list of files")
+        return await asyncio.to_thread(browser_audio.try_files, [str(path) for path in paths])
+
+    @app.post("/api/browser-audio")
+    async def browser_audio_switch(req: dict) -> dict:
+        """Switch the whole-library run on or off: ``enabled``."""
+        from bankai.web import browser_audio
+
+        if not isinstance(req.get("enabled"), bool):
+            raise HTTPException(status_code=422, detail="enabled is true or false")
+        return {"enabled": await asyncio.to_thread(browser_audio.set_enabled, req["enabled"])}
 
     @app.post("/api/tracks/{scope}")
     async def tracks_rules(scope: str, req: dict) -> dict:
@@ -1953,14 +2372,37 @@ def create_app() -> Any:
         preview = await asyncio.to_thread(track_cleanup.preview, scope)
         return {"rules": rule, "preview": preview}
 
+    @app.get("/api/tracks/{scope}/unknown")
+    async def tracks_unknown(scope: str, kind: str, title: str | None = None, language: str = "und") -> dict:
+        """Tracks in one language (``und``, the default: naming none): the titles that have them, or
+        one title's files and tracks."""
+        from bankai.web import track_cleanup
+
+        if scope not in track_cleanup.SCOPES or kind not in track_cleanup.KINDS:
+            raise HTTPException(status_code=404, detail="no such library or kind")
+        code = language.strip().casefold() or "und"
+        if title is None:
+            return {"titles": await asyncio.to_thread(track_cleanup.unknown_titles, scope, kind, code)}
+        return {"files": await asyncio.to_thread(track_cleanup.unknown_tracks, scope, kind, title, code)}
+
     # -- Oversized videos encoded again on the GPU ------------------------------
 
-    @app.get("/api/encode")
-    async def encode_overview() -> dict:
-        """Each library's switch, what it would encode, what is being encoded and what was done."""
+    async def _encode_payload() -> dict:
         from bankai.web import encode_library
 
         return await asyncio.to_thread(encode_library.overview)
+
+    # Kept built like the other tabs; rebuilt every few seconds for the encode's progress.
+    snaps.add(
+        "encode", _encode_payload,
+        inputs=_state_files("encode_state.json", "encode_queue.json", "track_inventory.json"),
+        tags={"encode"}, min_interval=2.0, max_age=4.0,
+    )
+
+    @app.get("/api/encode", response_model=None)
+    async def encode_overview(request: Request):
+        """Each library's switch, what it would encode, what is being encoded and what was done."""
+        return snapshots_mod.response(await snaps["encode"].get(), request)
 
     def _paths(req: dict) -> list[str]:
         paths = req.get("paths")
@@ -2047,6 +2489,146 @@ def create_app() -> Any:
         from bankai.web import manga_releases
 
         return {"discarded": await asyncio.to_thread(manga_releases.blacklist, anilist_id)}
+
+    @app.get("/api/manga/layout")
+    async def manga_layout_plan() -> dict:
+        """What laying the manga out by collection would move and rename; nothing moves. With the runs done."""
+        from bankai.web import manga_layout
+
+        return {**await asyncio.to_thread(manga_layout.plan), "journals": await asyncio.to_thread(manga_layout.journals)}
+
+    @app.post("/api/manga/layout/apply")
+    async def manga_layout_apply() -> dict:
+        """Lay the manga out by collection: folders moved, books renamed, every move journaled."""
+        from bankai.web import manga_layout, openpanel
+
+        try:
+            result = await asyncio.to_thread(manga_layout.apply)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await openpanel.scan()
+        return result
+
+    @app.post("/api/manga/layout/undo")
+    async def manga_layout_undo(req: dict) -> dict:
+        """Put one run of the layout back: ``{"journal": name}``."""
+        from bankai.web import manga_layout, openpanel
+
+        try:
+            result = await asyncio.to_thread(manga_layout.undo, str(req.get("journal") or ""))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await openpanel.scan()
+        return result
+
+    async def _manga_regroup(change: Any, affected: set[int]) -> dict:
+        """A collection changed by hand, then its entries' folders follow (manga_layout, journaled)."""
+        from bankai.web import manga_collections, manga_layout, openpanel
+
+        def work() -> dict:
+            with manga_collections.editing() as store:
+                change(store)
+            return manga_layout.apply(only=affected)
+
+        try:
+            result = await asyncio.to_thread(work)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if result.get("journal"):
+            await openpanel.scan()
+        return result
+
+    @app.post("/api/manga/collections/{cid}/name")
+    async def manga_collection_name(cid: int, req: dict) -> dict:
+        """A collection's own name (``{"name": ""}`` gives back the one its entries share); its folder follows."""
+        from bankai.web import manga_collections
+
+        name = str(req.get("name") or "").strip() or None
+        store = manga_collections.load()
+        row = store.collections.get(cid)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such collection")
+
+        def change(store: Any) -> None:
+            store.collections[cid].custom = name
+
+        return await _manga_regroup(change, set(row.members))
+
+    @app.post("/api/manga/collections/include")
+    async def manga_collection_include(req: dict) -> dict:
+        """An entry into a collection by hand: ``{"collection_id": n, "anilist_id": n}``, or two entries into
+        a new one: ``{"anilist_ids": [a, b]}``."""
+        from bankai.web import manga_collections
+
+        store = manga_collections.load()
+        if req.get("anilist_ids"):
+            aids = [int(aid) for aid in req["anilist_ids"]]
+            affected = set(aids) | {m for aid in aids if (row := store.collection_of(aid)) for m in row.members}
+            return await _manga_regroup(lambda store: manga_collections.together(store, aids), affected)
+        cid, aid = int(req.get("collection_id") or 0), _manga_aid(req)
+        row = store.collections.get(cid)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such collection")
+        old = store.collection_of(aid)
+        affected = set(row.members) | {aid} | set(old.members if old else [])
+        return await _manga_regroup(lambda store: manga_collections.include(store, cid, aid), affected)
+
+    @app.post("/api/manga/collections/split")
+    async def manga_collection_split(req: dict) -> dict:
+        """Entries split off by hand: ``{"anilist_ids": [...]}`` -- one on its own, several into a new collection."""
+        from bankai.web import manga_collections
+
+        aids = [int(aid) for aid in req.get("anilist_ids") or []]
+        if not aids:
+            raise HTTPException(status_code=422, detail="anilist_ids required")
+        store = manga_collections.load()
+        affected = set(aids) | {m for aid in aids if (row := store.collection_of(aid)) for m in row.members}
+        return await _manga_regroup(lambda store: manga_collections.split(store, aids), affected)
+
+    @app.post("/api/manga/collections/merge")
+    async def manga_collection_merge(req: dict) -> dict:
+        """A whole collection merged into another: ``{"collection_id": into, "other_id": merged}``."""
+        from bankai.web import manga_collections
+
+        cid, other = int(req.get("collection_id") or 0), int(req.get("other_id") or 0)
+        store = manga_collections.load()
+        rows = [store.collections.get(cid), store.collections.get(other)]
+        if not all(rows):
+            raise HTTPException(status_code=404, detail="no such collection")
+        affected = {m for row in rows for m in row.members}
+        return await _manga_regroup(lambda store: manga_collections.merge(store, cid, other), affected)
+
+    @app.post("/api/manga/collections/exclude")
+    async def manga_collection_exclude(req: dict) -> dict:
+        """An entry out of its collection by hand: ``{"anilist_id": n}``; it never joins one on its own again."""
+        from bankai.web import manga_collections
+
+        aid = _manga_aid(req)
+        row = manga_collections.load().collection_of(aid)
+        affected = set(row.members) if row else {aid}
+        return await _manga_regroup(lambda store: manga_collections.exclude(store, aid), affected)
+
+    @app.post("/api/manga/series/{anilist_id}/plan")
+    async def manga_series_plan(anilist_id: int) -> dict:
+        """Download a series' plan as it stands now: the fewest waiting releases that bring all they offer."""
+        from bankai.web import manga_releases
+
+        try:
+            return {"approved": await asyncio.to_thread(manga_releases.take_plan, anilist_id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/manga/series/{anilist_id}/remove")
+    async def manga_series_remove(anilist_id: int, req: dict) -> dict:
+        """A series out of the library: its folder deleted, its downloads stopped, and blacklisted
+        unless ``{"blacklist": false}``. The folder is the one the library knows as the series',
+        never a path from the request."""
+        from bankai.web import manga_releases
+
+        try:
+            return await manga_releases.remove_series(anilist_id, blacklisting=req.get("blacklist") is not False)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/manga/series/{anilist_id}/restore")
     async def manga_series_restore(anilist_id: int) -> dict:
@@ -2515,15 +3097,22 @@ def create_app() -> Any:
         rows = await asyncio.to_thread(webjobs.anime_snapshot)
         # Most releases are waiting on qBittorrent and deliberately have no
         # bankai job, so the queue has to show them from the release table or
-        # the backlog would be invisible.
-        return [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows)]
+        # the backlog would be invisible -- with qBittorrent's own progress.
+        torrents: dict[str, Any] = {}
+        with suppress(Exception):
+            from bankai.torrent.qbittorrent import QBittorrentClient
+
+            async with QBittorrentClient() as client:
+                torrents = {str(t.hash).casefold(): t for t in await client.list_torrents(category=get_settings().qbittorrent.category)}
+        return [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows, None, torrents)]
 
     # The whole queue, before any page's search, sort or slice. Kept as rows,
     # not an encoded answer, since each request cuts its own page from it.
     snaps.add(
         "anime_queue_rows",
         _anime_queue_rows,
-        inputs=lambda: (_queue_files(), _jobs_stamp()),
+        # And every 15 s: the releases' progress is qBittorrent's, which changes no file here.
+        inputs=lambda: (_queue_files(), _jobs_stamp(), int(time.time() // 15)),
         tags={"anime", "qbit", "review"},
         min_interval=2.0,
         # Rebuilt when the state or a job changes; a full build is seconds of
@@ -2723,14 +3312,32 @@ def create_app() -> Any:
         library_walk.mark_stale()
         return result
 
-    @app.post("/api/anime/library/upgrade-hevc")
-    async def anime_library_upgrade_hevc(req: dict) -> dict:
-        """Queue HEVC replacements for one show's published AVC episodes, by its AniList entries."""
+    def _approved_upgrades(req: dict) -> dict[str, list[str]]:
+        raw = req.get("approved")
+        if not isinstance(raw, dict) or not raw:
+            raise HTTPException(status_code=422, detail="approve the replacements first (approved: {info_hash: [paths]})")
+        return {str(key): [str(path) for path in paths or []] for key, paths in raw.items()}
+
+    @app.post("/api/anime/library/upgrade-hevc/preview")
+    async def anime_library_upgrade_hevc_preview(req: dict) -> dict:
+        """What an HEVC upgrade of one show would download and replace, file by file; nothing is queued."""
         anilist_ids = [int(aid) for aid in req.get("anilist_ids") or [] if str(aid).isdigit()]
         if not anilist_ids:
             raise HTTPException(status_code=422, detail="anilist_ids are required")
         try:
-            return await erai_mod.upgrade_show_to_hevc(anilist_ids)
+            return await erai_mod.upgrade_show_to_hevc(anilist_ids, queue=False)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/anime/library/upgrade-hevc")
+    async def anime_library_upgrade_hevc(req: dict) -> dict:
+        """Queue the approved HEVC replacements for one show's published AVC episodes."""
+        anilist_ids = [int(aid) for aid in req.get("anilist_ids") or [] if str(aid).isdigit()]
+        if not anilist_ids:
+            raise HTTPException(status_code=422, detail="anilist_ids are required")
+        approved = _approved_upgrades(req)
+        try:
+            return await erai_mod.upgrade_show_to_hevc(anilist_ids, approved=approved)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -2876,7 +3483,12 @@ def create_app() -> Any:
     async def anime_library_bulk(kind: str = Query(...)) -> dict:
         """The shows and episodes "Upgrade all" or "Download all available" would take; nothing is queued."""
         plan = await _bulk_plan(_bulk_kind(kind))
-        return {"kind": kind, "shows": [{k: v for k, v in row.items() if k != "items"} for row in plan]}
+        shows = [{k: v for k, v in row.items() if k != "items"} for row in plan]
+        if kind == "upgrade":
+            # What each would replace, as a look found it; None: the dialog looks again for that show.
+            for row in shows:
+                row["plans"] = await asyncio.to_thread(erai_mod.stored_hevc_plans, row["anilist_ids"])
+        return {"kind": kind, "shows": shows}
 
     @app.post("/api/anime/library/bulk")
     async def anime_library_bulk_run(req: dict) -> dict:
@@ -2889,6 +3501,7 @@ def create_app() -> Any:
         keys = {str(raw) for raw in req.get("keys") or [] if str(raw).strip()}
         if not keys:
             raise HTTPException(status_code=422, detail="keys are required")
+        approved = _approved_upgrades(req) if kind == "upgrade" else {}
 
         async def work(action: Any) -> dict:
             plan = [row for row in await _bulk_plan(kind) if row["key"] in keys]
@@ -2897,8 +3510,8 @@ def create_app() -> Any:
                 action.detail = f"{index}/{len(plan)}: {row['title']}"
                 try:
                     if kind == "upgrade":
-                        result = await erai_mod.upgrade_show_to_hevc(row["anilist_ids"])
-                        for name in ("queued", "downloads", "no_replacement"):
+                        result = await erai_mod.upgrade_show_to_hevc(row["anilist_ids"], approved=approved)
+                        for name in ("queued", "downloads", "no_replacement", "changed"):
                             total[name] = total.get(name, 0) + int(result.get(name) or 0)
                     else:
                         result = await _queue_missing_releases(row["items"])
@@ -3238,6 +3851,26 @@ def create_app() -> Any:
         result = await _collection_change(change)
         return {**result, "name": result["result"]}
 
+    @app.post("/api/anime/collections/{cid}/season-name")
+    async def anime_season_name(cid: int, req: dict) -> dict:
+        """Name the season an entry opens by hand: ``{"anilist_id": 1, "name": "..."}``; an empty
+        or null name gives it its entry's name again. The tab and Jellyfin's season follow."""
+        from bankai.web import anime_collections
+
+        await _collection_graph(cid)
+        try:
+            aid = int(req.get("anilist_id"))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=422, detail="anilist_id is the entry the season opens with") from error
+        raw = req.get("name")
+
+        def change(store: Any) -> tuple[Any, set[int]]:
+            anime_collections.name_season(store, cid, aid, None if raw is None else str(raw))
+            return store.collections[cid].season_names.get(aid), {cid}
+
+        result = await _collection_change(change)
+        return {**result, "name": result["result"]}
+
     async def _artwork_target(cid: int) -> tuple[Any, Any]:
         """A collection and its plan, for its artwork; a 404 when there is no such collection."""
         from bankai.web import anime_collections, anime_files
@@ -3343,6 +3976,40 @@ def create_app() -> Any:
         layout = await _relayout_entries({entry.id}) if result["matched"] else {}
         return {"ok": True, "anilist_id": entry.id, **result, "moved": layout.get("moved", 0)}
 
+    @app.post("/api/anime/library/verify")
+    async def anime_library_verify(req: dict) -> dict:
+        """A show's files checked next by the episode check (see anime_verify), whatever they say now."""
+        from bankai.web import anime_files, anime_verify
+
+        key = str(req.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail="key is required")
+        listing = await _anime_library_payload(show=key)
+        rels = [
+            rel
+            for show in listing.get("shows") or []
+            for row in show.get("episodes") or []
+            if row.get("path") and not row.get("missing") and not row.get("staged")
+            and (rel := anime_files.key(row["path"]))
+        ]
+        if not rels:
+            raise HTTPException(status_code=422, detail="this show has no files in the library to check")
+        queued = await asyncio.to_thread(anime_verify.ask_first, rels)
+        webjobs.soon("anime_verify")
+        return {"ok": True, "queued": queued}
+
+    @app.post("/api/anime/library/verify/confirm")
+    async def anime_library_verify_confirm(req: dict) -> dict:
+        """The user's word on files the episode check doubts: ``right`` (default) they are the episodes
+        they are filed as, kept while each file stays as it is; false takes that back."""
+        from bankai.web import anime_files, anime_verify
+
+        rels = [rel for raw in req.get("paths") or [] if (rel := anime_files.key(str(raw)))]
+        if not rels:
+            raise HTTPException(status_code=422, detail="paths: library files of the anime root")
+        changed = await asyncio.to_thread(anime_verify.confirm, rels, right=req.get("right", True) is not False)
+        return {"ok": True, "changed": changed}
+
     @app.post("/api/anime/library/rematch")
     async def anime_library_rematch(req: dict) -> dict:
         """Every file of one AniList entry becomes another's, episode for episode, and moves into place."""
@@ -3446,11 +4113,13 @@ def create_app() -> Any:
         )
         erai_mod.mark_blacklisted_shows(shows)
         # A blacklisted show with nothing on disk is just a list of episodes
-        # that will never come; the card is kept only while files remain.
+        # that will never come; the card is kept while any file of it remains --
+        # the library shows everything its folders hold, blacklisted or not.
         shows = [
             row
             for row in shows
-            if not row.get("blacklisted") or row.get("downloaded_count") or row.get("staged_count")
+            if not row.get("blacklisted")
+            or row.get("downloaded_count") or row.get("staged_count") or row.get("episode_count") or row.get("size")
         ]
         if drawers:
             # Every episode is worked out for the grid anyway, so each drawer
@@ -3578,7 +4247,8 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail="episode must be positive")
         if req.kind == "movie" and req.episode is not None:
             raise HTTPException(status_code=422, detail="a movie has no episode")
-        if not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url):
+        from_nekobt = req.source == "nekobt"
+        if not from_nekobt and (not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url)):
             raise HTTPException(
                 status_code=422, detail="anime downloads only accept nyaa.si sources"
             )
@@ -3603,8 +4273,9 @@ def create_app() -> Any:
         return await _enqueue_anime_download(
             entry,
             title=title,
-            torrent_url=req.torrent_url.strip(),
-            detail_url=req.detail_url.strip(),
+            # The CLI takes a magnet alone when both links are empty.
+            torrent_url="" if from_nekobt else req.torrent_url.strip(),
+            detail_url="" if from_nekobt else req.detail_url.strip(),
             magnet_uri=req.magnet_uri.strip(),
             info_hash=req.info_hash.casefold(),
             kind=req.kind,
@@ -3811,6 +4482,8 @@ def create_app() -> Any:
                     "category": row.get("category") or "",
                     "published": row.get("published") or 0,
                     "page": row.get("page") or "",
+                    # The same torrent as on Nyaa: Erai's feed carries its hash.
+                    "magnet": anime_mod.magnet_uri(info_hash, name),
                     "status": status,
                     "reason": mine.get("reason"),
                 }
@@ -3839,10 +4512,14 @@ def create_app() -> Any:
         german: str = Query("all", pattern="^(all|yes|no)$"),
         res: str = Query("1080p", pattern="^(all|2160p|1080p|720p|SD)$"),
         codec: str = Query("all", pattern="^(all|hevc|avc)$"),
+        kind: str = Query("all", pattern="^(all|airing|encoded|batch|special)$"),
         page: int = Query(0, ge=0),
         page_size: int = Query(100, ge=20, le=200),
     ) -> dict:
         """Erai-raws' own listing of releases, with the subtitle languages it names.
+
+        ``kind`` is what Erai's category says a release is (``erai_site.kinds``):
+        an airing single, an encode, a batch, a movie or special.
 
         A search also asks the site's own search, once an hour per term: the
         site-wide feed only reaches back about eighteen months, and a show's
@@ -3874,6 +4551,8 @@ def create_app() -> Any:
             rows = [row for row in rows if row["german"] == (german == "yes")]
         if codec != "all":
             rows = [row for row in rows if row["codec"] == codec]
+        if kind != "all":
+            rows = [row for row in rows if kind in erai_site.kinds(row["category"])]
         start = page * page_size
         return {
             **erai_site.summary(),
@@ -3885,6 +4564,14 @@ def create_app() -> Any:
             "empty_show": empty_show,
             "items": rows[start : start + page_size],
         }
+
+    @app.get("/api/anime/erai/suggest")
+    async def anime_erai_suggest(q: str = "") -> dict:
+        """Erai-raws' show names for the search's suggestions, from what bankai has read of its feeds;
+        another name of a show (English, from the anime-offline-database) finds it too."""
+        from bankai.web import erai_site
+
+        return {"items": await asyncio.to_thread(erai_site.suggest, q)}
 
     _erai_refresh: dict[str, asyncio.Task | None] = {"task": None}
 
@@ -3927,13 +4614,17 @@ def create_app() -> Any:
             mas_shows = cards_by_folder(mas["shows"])
 
         def gather() -> dict:
-            from bankai.web import encode_library
+            from bankai.web import encode_library, replaced, track_cleanup
 
             anime = library_walk.files([s.transfer.anime_shows_dir])
             movies = library_walk.files(list(s.web.server_movie_dirs))
             shows = library_walk.files(list(s.web.server_show_dirs))
             # Files encoded again join the arrivals, marked, by when they were encoded.
             times = encode_library.encoded_times()
+            # And files tracks were taken out of (written anew, "Remuxed").
+            cleaned = track_cleanup.remuxed()
+            # And files a magnet link replaced by hand ("Replaced").
+            swapped = replaced.load()
 
             def newest(rows: list[dict], limit: int) -> list[dict]:
                 return sorted(rows, key=lambda row: -row["added_at"])[:limit]
@@ -3943,18 +4634,44 @@ def create_app() -> Any:
                 *dashboard.recent_additions(shows, mas_shows, kind="show", href="/mas/library"),
                 *dashboard.recent_additions(dashboard.encodes(movies, times), mas_movies, kind="movie", href="/mas/library", encoded=True),
                 *dashboard.recent_additions(dashboard.encodes(shows, times), mas_shows, kind="show", href="/mas/library", encoded=True),
+                *dashboard.recent_additions(dashboard.remuxes(movies, cleaned), mas_movies, kind="movie", href="/mas/library", change="remuxed"),
+                *dashboard.recent_additions(dashboard.remuxes(shows, cleaned), mas_shows, kind="show", href="/mas/library", change="remuxed"),
+                *dashboard.recent_additions(dashboard.remuxes(movies, swapped), mas_movies, kind="movie", href="/mas/library", change="replaced"),
+                *dashboard.recent_additions(dashboard.remuxes(shows, swapped), mas_shows, kind="show", href="/mas/library", change="replaced"),
             ]
+            # Movies & Shows one row per episode too (a film is one row either way), for the Episodes view.
+            mas_episodes = [
+                *dashboard.recent_additions(movies, mas_movies, kind="movie", href="/mas/library"),
+                *dashboard.recent_episodes(shows, mas_shows, href="/mas/library"),
+                *dashboard.recent_additions(dashboard.encodes(movies, times), mas_movies, kind="movie", href="/mas/library", encoded=True),
+                *dashboard.recent_episodes(dashboard.encodes(shows, times), mas_shows, href="/mas/library", encoded=True),
+                *dashboard.recent_additions(dashboard.remuxes(movies, cleaned), mas_movies, kind="movie", href="/mas/library", change="remuxed"),
+                *dashboard.recent_episodes(dashboard.remuxes(shows, cleaned), mas_shows, href="/mas/library", change="remuxed"),
+                *dashboard.recent_additions(dashboard.remuxes(movies, swapped), mas_movies, kind="movie", href="/mas/library", change="replaced"),
+                *dashboard.recent_episodes(dashboard.remuxes(shows, swapped), mas_shows, href="/mas/library", change="replaced"),
+            ]
+            from bankai.web import manga_releases
+
             anime_encoded = dashboard.encodes(anime, times)
+            anime_remuxed = dashboard.remuxes(anime, cleaned)
+            anime_replaced = dashboard.remuxes(anime, swapped)
             return {
                 "mas": newest(mas_rows, dashboard.RECENT_LIMIT),
+                "mas_episodes": newest(mas_episodes, dashboard.RECENT_EPISODES_LIMIT),
+                # Manga and light novels filed, one row per download.
+                "manga": dashboard.recent_manga(manga_releases.releases().values(), limit=dashboard.RECENT_EPISODES_LIMIT),
                 "anime": newest([
                     *dashboard.recent_additions(anime, anime_cards, kind="show", href="/a/library"),
                     *dashboard.recent_additions(anime_encoded, anime_cards, kind="show", href="/a/library", encoded=True),
+                    *dashboard.recent_additions(anime_remuxed, anime_cards, kind="show", href="/a/library", change="remuxed"),
+                    *dashboard.recent_additions(anime_replaced, anime_cards, kind="show", href="/a/library", change="replaced"),
                 ], dashboard.RECENT_LIMIT),
                 # The same, one row per episode, for the page's Episodes view.
                 "anime_episodes": newest([
                     *dashboard.recent_episodes(anime, anime_cards, href="/a/library"),
                     *dashboard.recent_episodes(anime_encoded, anime_cards, href="/a/library", encoded=True),
+                    *dashboard.recent_episodes(anime_remuxed, anime_cards, href="/a/library", change="remuxed"),
+                    *dashboard.recent_episodes(anime_replaced, anime_cards, href="/a/library", change="replaced"),
                 ], dashboard.RECENT_EPISODES_LIMIT),
             }
 
@@ -3963,8 +4680,8 @@ def create_app() -> Any:
     snaps.add(
         "dashboard_recent",
         _dashboard_recent,
-        inputs=lambda: (*_mas_inputs(), _encode_stamp()),
-        tags={"anime", "mas"},
+        inputs=lambda: (*_mas_inputs(), _encode_stamp(), _track_cleanup_stamp(), _manga_releases_stamp()),
+        tags={"anime", "mas", "manga"},
         min_interval=10.0,
         max_age=600.0,
         encode=False,
@@ -4074,9 +4791,9 @@ def create_app() -> Any:
     async def queue_movie(req: MovieQueueRequest) -> dict:
         from bankai.backend import BatchMovie, build_movie_args
 
-        # The year MUST come from the exact title the user selected (its TVDB
+        # The year MUST come from the exact title the user selected (its TMDB
         # entry) or an explicit user prompt. We deliberately do NOT fuzzy-search
-        # TVDB by name to guess a year -- that once resolved "Obsession 2026" to
+        # by name to guess a year -- that once resolved "Obsession 2026" to
         # a different "Obsession (2019)" and downloaded the wrong movie.
         year = req.year
         if year is None:
@@ -4369,9 +5086,16 @@ def create_app() -> Any:
     @app.delete("/api/queue/{job_id}")
     async def queue_delete(job_id: str) -> dict:
         from bankai.cli import bgjobs
+        from bankai.torrent import actions as torrent_actions
+        from bankai.web import torrent_ties
 
+        # A download given up takes its torrent with it (web/torrent_ties): left
+        # behind, a torrent no job reads sits in qBittorrent for good.
+        queued_args = await asyncio.to_thread(webjobs.pending_args, job_id)
         if await asyncio.to_thread(webjobs.cancel_pending, job_id):
-            return {"deleted": True, "pending": True}
+            # A job queued again still has its torrent from the attempt before.
+            dropped = await torrent_ties.drop_torrent_of(queued_args or [])
+            return {"deleted": True, "pending": True, "torrent_removed": bool(dropped)}
         job = await asyncio.to_thread(bgjobs.get_job, job_id)
         if job is None:
             # The anime queue's waiting rows are releases, not jobs: the
@@ -4380,12 +5104,17 @@ def create_app() -> Any:
             if removed is not None:
                 return {**removed, "pending": True}
             raise HTTPException(status_code=404, detail="job not found")
+        # Read before stopping it: a stopped job clears the torrent it was reading.
+        active = await asyncio.to_thread(torrent_actions.get_active_torrent, job.id)
+        finished = job.status == "done"
         if job.status == "running":
             await asyncio.to_thread(job.cancel)
         ok = await asyncio.to_thread(job.delete)
         if not ok:
             raise HTTPException(status_code=500, detail="job could not be removed from disk")
-        return {"deleted": ok, "pending": False}
+        # A finished job already decided about its torrent (a torrent that was the user's stays).
+        dropped = None if finished else await torrent_ties.drop_torrent_of(list(job.args or []), job_id=job.id, active=active)
+        return {"deleted": ok, "pending": False, "torrent_removed": bool(dropped)}
 
     @app.get("/api/jobs/{job_id}/log")
     def job_log(job_id: str, lines: int = Query(200, ge=1, le=5000)) -> dict:
@@ -4954,6 +5683,22 @@ def create_app() -> Any:
                 status_code=502, detail="qBittorrent could not start the torrent."
             ) from exc
         return {"ok": True, "hash": normalized_hash, "action": "start"}
+
+    @app.post("/api/qbittorrent/torrents/{torrent_hash}/retry")
+    async def qbittorrent_retry(torrent_hash: str) -> dict:
+        """An errored torrent run again: its pieces checked on disk (a file gone or cut short is found
+        missing and fetched again), then started. qBittorrent leaves an errored torrent stopped until then."""
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        normalized_hash = _qbittorrent_hash(torrent_hash)
+        try:
+            async with QBittorrentClient() as client:
+                await client.recheck(normalized_hash)
+                await client.resume(normalized_hash)
+        except Exception as exc:
+            log.warning("qBittorrent retry failed for %s: %s", normalized_hash, exc)
+            raise HTTPException(status_code=502, detail="qBittorrent could not run the torrent again.") from exc
+        return {"ok": True, "hash": normalized_hash, "action": "retry"}
 
     @app.post("/api/qbittorrent/torrents/{torrent_hash}/stop")
     async def qbittorrent_stop(torrent_hash: str) -> dict:
@@ -5656,6 +6401,22 @@ def create_app() -> Any:
 
         return encode_library.state_stamp()
 
+    def _manga_releases_stamp() -> int:
+        from bankai.web import manga_releases
+
+        with suppress(OSError):
+            return manga_releases._path().stat().st_mtime_ns
+        return 0
+
+    def _track_cleanup_stamp() -> int:
+        from bankai.web import replaced, track_cleanup
+
+        stamps = 0
+        for path in (track_cleanup._path("track_cleanup.json"), replaced._path()):
+            with suppress(OSError):
+                stamps += path.stat().st_mtime_ns
+        return stamps
+
     def _mas_inputs() -> tuple:
         from bankai.web import library_walk
 
@@ -5684,6 +6445,190 @@ def create_app() -> Any:
         if rescan:
             snaps["mas_library"].invalidate()
         return result
+
+    @app.get("/api/anime/publishers")
+    def anime_publishers() -> dict:
+        """The release groups Discover's publisher filter offers (anime settings)."""
+        anime = get_settings().anime
+        return {"publishers": list(anime.publishers), "nekobt_languages": list(anime.nekobt_languages)}
+
+    @app.post("/api/magnet/preview")
+    async def magnet_preview(req: dict) -> dict:
+        """What a magnet link is before it replaces anything: name, size, files from the swarm (nothing is
+        downloaded), what bankai knows of it, and which ticked file each of its files would replace.
+        ``pending`` while the swarm has not answered: ask again."""
+        from bankai.web import magnet_preview as preview_mod
+
+        scope = str(req.get("scope") or "anime")
+        if scope not in {"anime", "show", "movie"}:
+            raise HTTPException(status_code=422, detail="scope must be anime, show or movie")
+        paths = [str(path) for path in req.get("paths") or [] if path]
+        try:
+            return await preview_mod.preview(str(req.get("magnet") or ""), paths, scope)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:  # qBittorrent unreachable or refusing: said, not a 500
+            raise HTTPException(status_code=502, detail=f"qBittorrent could not read the magnet: {exc}") from exc
+
+    @app.post("/api/anime/replace-magnet")
+    async def anime_replace_magnet(req: dict) -> dict:
+        """Replace the ticked episodes of the anime library with a magnet link's torrent."""
+        paths = [str(path) for path in req.get("paths") or [] if path]
+        if not paths:
+            raise HTTPException(status_code=422, detail="tick the episodes to replace")
+        try:
+            return await erai_mod.replace_from_magnet(paths, str(req.get("magnet") or ""), lose_german=bool(req.get("lose_german")))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/mas/replace-magnet")
+    async def mas_replace_magnet(req: dict) -> dict:
+        """Replace the ticked episodes (or the film) of the Movies & Shows library with a magnet link's torrent.
+
+        The torrent's files go by their audio into the German or English folder the title is in, as a
+        followed show's do; each replaces the ticked file of its episode, whatever language that is.
+        """
+        from bankai.web import direct, mas_follow
+
+        kind, key = str(req.get("kind") or ""), str(req.get("key") or "")
+        if kind not in {"show", "movie"}:
+            raise HTTPException(status_code=422, detail="kind must be show or movie")
+        try:
+            info_hash, name = erai_mod.magnet_parts(str(req.get("magnet") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        value = (await snaps["mas_library"].get()).value
+        card = next((row for row in value.get("shows" if kind == "show" else "movies") or [] if row.get("key") == key), None)
+        if card is None:
+            raise HTTPException(status_code=404, detail="no such title in the library")
+        files = card.get("episodes" if kind == "show" else "files") or []
+        known = {str(row.get("path")): row for row in files if row.get("path")}
+        paths = [str(path) for path in req.get("paths") or [] if str(path) in known]
+        if not paths:
+            raise HTTPException(status_code=422, detail="tick the files to replace")
+        followed = mas_follow.get(int(card["tmdb_id"])) if kind == "show" and card.get("tmdb_id") else None
+        roots = dict((followed or {}).get("roots") or {})
+        # Else the folders the title is in, by language; a language it is in nowhere, the first root of it.
+        for row in files:
+            if row.get("root"):
+                roots.setdefault("English" if str(row["root"]).rstrip("/").endswith("_en") else "German", str(row["root"]))
+        for language, root in (await asyncio.to_thread(direct.default_roots, kind)).items():
+            roots.setdefault(language, root)
+        if not roots.get("German") or not roots.get("English"):
+            raise HTTPException(status_code=422, detail="a German and an English folder are needed")
+        folder = str((card.get("folders") or [card["title"]])[0])
+        dated = re.match(r"^(.*?)\s*\(((?:19|20)\d\d)\)\s*$", folder)
+        title, year = (dated.group(1), int(dated.group(2))) if dated else (folder, card.get("year"))
+        args = ["direct-download", "--release-title", name, "--kind", kind, "--title", title,
+                "--root-german", roots["German"], "--root-english", roots["English"],
+                "--magnet-uri", str(req["magnet"]).strip(), "--info-hash", info_hash]
+        if year:
+            args += ["--year", str(year)]
+        if kind == "show":
+            codes = sorted({
+                f"S{numbers[0]:02d}E{episode:02d}"
+                for path in paths if (numbers := direct.file_episode(Path(path).name))
+                for episode in range(numbers[1], (numbers[2] or numbers[1]) + 1)
+            })
+            if not codes:
+                raise HTTPException(status_code=422, detail="the ticked files name no episode (SxxEyy)")
+            args += ["--episodes", ",".join(codes)]
+            seasons = {code[1:3] for code in codes}
+            if len(seasons) == 1:
+                args += ["--season", str(int(next(iter(seasons))))]
+            if followed:
+                args += ["--follow", str(card["tmdb_id"])]
+        for other in card.get("folders") or []:
+            if other != folder:
+                args += ["--also-named", other]
+        for path in paths:
+            args += ["--replace-path", path]
+        return await asyncio.to_thread(
+            webjobs.enqueue, kind=kind, title=f"{card['title']} · replace {len(paths)} · {name}", args=args,
+        )
+
+    @app.post("/api/scheduler/passes/{name}/interval")
+    def scheduler_pass_interval(name: str, req: dict) -> dict:
+        """How often a scheduled pass runs (the Dashboard's Up next); ``seconds: null`` is its default."""
+        seconds = req.get("seconds")
+        try:
+            every = webjobs.set_interval(name, None if seconds is None else float(seconds))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="no such pass") from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"the interval must be {exc}") from exc
+        return {"name": name, "every_seconds": every, "default_seconds": webjobs.default_interval(name)}
+
+    @app.get("/api/system/usage")
+    async def system_usage() -> dict:
+        """CPU, memory, GPU and network now, for the Dashboard."""
+        from bankai.web import system_usage as usage
+
+        return await asyncio.to_thread(usage.sample)
+
+    @app.post("/api/mas/library/match")
+    async def mas_library_match(req: LibraryMatchRequest) -> dict:
+        """Match a library folder to a TMDB title by hand (or undo that)."""
+        from bankai.web import mas_library as mas
+
+        item = None
+        if req.tmdb_id is not None:
+            item = {"tmdb_id": req.tmdb_id, "english_title": req.name, "year": req.year,
+                    "poster_url": req.poster_url, "status": req.status}
+        try:
+            await asyncio.to_thread(mas.set_match, req.key, req.kind, item)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        snaps["mas_library"].invalidate()
+        return {"ok": True}
+
+    async def _mas_card(kind: str, key: str) -> dict:
+        """A Movies & Shows library card by its key, with its files; a 404 when there is none."""
+        if kind not in {"show", "movie"}:
+            raise HTTPException(status_code=400, detail="kind must be show or movie")
+        value = (await snaps["mas_library"].get()).value
+        for card in value.get("shows" if kind == "show" else "movies") or []:
+            if card.get("key") == key:
+                if not card.get("tmdb_id"):
+                    raise HTTPException(status_code=409, detail="match this title to TMDB first")
+                return card
+        raise HTTPException(status_code=404, detail="no such title in the library")
+
+    @app.get("/api/mas/artwork")
+    async def mas_artwork_panel(kind: str, key: str, refresh: bool = False) -> dict:
+        """Each artwork slot of a film or show: the picture chosen here (else Jellyfin's own, as
+        Jellyfin shows it now) and TMDB's choice."""
+        from bankai.metadata import tmdb
+        from bankai.web import mas_artwork
+
+        card = await _mas_card(kind, key)
+        seasons = mas_artwork.seasons(card) if kind == "show" else set()
+        if tmdb.configured():
+            await tmdb.ensure(*mas_artwork.ref(kind, card["tmdb_id"]), seasons, force=refresh)
+        slots = await asyncio.to_thread(mas_artwork.panel, kind, int(card["tmdb_id"]), seasons)
+        return {
+            "tmdb": tmdb.configured(),
+            "tmdb_error": dict(tmdb.last_error) or None,
+            "slots": await mas_artwork.with_jellyfin(slots, kind, card),
+        }
+
+    @app.post("/api/mas/artwork")
+    async def mas_artwork_choose(req: dict) -> dict:
+        """Choose a slot's picture (``url``), or ``null`` to give it back to Jellyfin; written at once."""
+        from bankai.web import mas_artwork
+
+        kind, key, slot = str(req.get("kind") or ""), str(req.get("key") or ""), str(req.get("slot") or "")
+        card = await _mas_card(kind, key)
+        if slot not in mas_artwork.slot_names(kind, mas_artwork.seasons(card) if kind == "show" else set()):
+            raise HTTPException(status_code=422, detail="no such artwork slot for this title")
+        url = req.get("url")
+        if url is not None and not str(url).startswith(("http://", "https://")):
+            raise HTTPException(status_code=422, detail="the picture must be an http(s) address")
+        await asyncio.to_thread(mas_artwork.choose, kind, int(card["tmdb_id"]), slot, url)
+        pictures = await mas_artwork.apply(kind, int(card["tmdb_id"]), card)
+        return {"ok": True, "pictures": pictures}
 
     @app.get("/api/server/contents")
     def server_contents(rescan: bool = Query(False)) -> dict:

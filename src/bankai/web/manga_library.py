@@ -70,16 +70,44 @@ def _write(data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def folders(kind: str) -> list[str]:
+def _has_books(path: Path) -> bool:
     try:
-        return sorted(entry.name for entry in root(kind).iterdir() if entry.is_dir() and not entry.name.startswith("."))
+        with os.scandir(path) as listing:
+            return any(entry.is_file() and Path(entry.name).suffix.lower() in manga_names.BOOK_EXTENSIONS for entry in listing)
+    except OSError:
+        return False
+
+
+def _subfolders(path: Path | str) -> list[os.DirEntry]:
+    try:
+        with os.scandir(path) as listing:
+            return [entry for entry in listing if entry.is_dir() and not entry.name.startswith(".")]
     except OSError:
         return []
 
 
+def folders(kind: str) -> list[str]:
+    """Every series folder of a library, by its path below the root: a folder there, or -- a
+    collection's (manga_collections) -- one inside a folder there that holds folders and no book.
+    "Tokyo Ghoul (2011)", "Tokyo Ghoul/Tokyo Ghoul -re (2014) - 85611"."""
+    found: list[str] = []
+    for entry in _subfolders(root(kind)):
+        inner = [] if _has_books(Path(entry.path)) else [child.name for child in _subfolders(entry.path)]
+        if inner:
+            found.extend(f"{entry.name}/{child}" for child in inner)
+        else:
+            found.append(entry.name)
+    return sorted(found)
+
+
+def leaf(folder: str) -> str:
+    """A series folder's own name, without the collection folder it may be in."""
+    return folder.rsplit("/", 1)[-1]
+
+
 def folder_id(name: str) -> int | None:
     """An AniList id in a folder's name, as OpenPanel reads it: five or six digits, not a year."""
-    for match in _FOLDER_ID.finditer(name):
+    for match in _FOLDER_ID.finditer(leaf(name)):
         number = int(match[1])
         if not 1900 <= number <= 2100:
             return number
@@ -87,13 +115,13 @@ def folder_id(name: str) -> int | None:
 
 
 def folder_year(name: str) -> int | None:
-    match = _FOLDER_YEAR.search(name)
+    match = _FOLDER_YEAR.search(leaf(name))
     return int(match[1]) if match else None
 
 
 def folder_title(name: str) -> str:
     """A folder's series name without its year and id: "Tokyo Ghoul - re (2014)" -> "Tokyo Ghoul - re"."""
-    cleaned = _FOLDER_YEAR.sub("", name)
+    cleaned = _FOLDER_YEAR.sub("", leaf(name))
     cleaned = re.sub(r"\s*[-–—]\s*\d{5,6}\s*$", "", cleaned)
     return " ".join(cleaned.split())
 
@@ -172,8 +200,9 @@ async def adopt(*, max_searches: int = 10) -> dict[str, int]:
             if (kind, name) in known:
                 continue
             how, aid = "folder", folder_id(name)
-            if aid is None and name in openpanel:
-                how, aid = "openpanel", openpanel[name]
+            # OpenPanel names a series after the folder holding its books.
+            if aid is None and leaf(name) in openpanel:
+                how, aid = "openpanel", openpanel[leaf(name)]
             if aid is None:
                 tried = data["unmatched"].get(f"{kind}/{name}") or {}
                 if searched >= max_searches or now - float(tried.get("tried") or 0) < _RETRY_SECONDS:
@@ -225,8 +254,8 @@ _STATS: dict[str, tuple[int, dict[str, Any]]] = {}
 
 
 def stats(anilist_id: int) -> dict[str, Any]:
-    """A series' folder: its volumes and chapters by its files' names, its books and their size."""
-    empty: dict[str, Any] = {"volumes": set(), "chapters": set(), "books": 0, "size": 0}
+    """A series' folder: its volumes and chapters by its files' names, its books (and their names) and their size."""
+    empty: dict[str, Any] = {"volumes": set(), "chapters": set(), "books": 0, "size": 0, "names": []}
     folder = folder_of(anilist_id)
     if folder is None:
         return empty
@@ -238,7 +267,8 @@ def stats(anilist_id: int) -> dict[str, Any]:
         # One stat a file: on the 9p mount each costs ~2 ms.
         with os.scandir(folder) as listing:
             entries = [entry for entry in listing if entry.is_file() and Path(entry.name).suffix.lower() in manga_names.BOOK_EXTENSIONS]
-        found = {**empty, "volumes": set(), "chapters": set(), "books": len(entries), "size": sum(entry.stat().st_size for entry in entries)}
+        found = {**empty, "volumes": set(), "chapters": set(), "books": len(entries), "size": sum(entry.stat().st_size for entry in entries),
+                 "names": sorted(entry.name for entry in entries)}
     except OSError:
         return empty
     for entry in entries:
@@ -247,6 +277,14 @@ def stats(anilist_id: int) -> dict[str, Any]:
             found["volumes" if number[0] == "volume" else "chapters"].add(number[1])
     _STATS[str(folder)] = (stamp, found)
     return {**found, "volumes": set(found["volumes"]), "chapters": set(found["chapters"])}
+
+
+def forget(folder: Path) -> None:
+    """A folder bankai just changed: its books read again next time (``stats``, ``manga_contents.holdings``)."""
+    from bankai.web import manga_contents
+
+    _STATS.pop(str(folder), None)
+    manga_contents.forget(folder)
 
 
 def owned(anilist_id: int) -> tuple[set[float], set[float]]:
@@ -281,14 +319,29 @@ def new_folder_name(anilist_id: int) -> str:
 
 
 def ensure_folder(anilist_id: int, kind: str) -> Path:
-    """The series' folder, made (and remembered) when it has none yet."""
+    """The series' folder, made (and remembered) when it has none yet: inside its collection's
+    folder (manga_collections) when another entry of it is on disk -- which then moves in too."""
+    from bankai.web import manga_collections
+
     existing = folder_of(anilist_id)
     if existing is not None:
         return existing
     name = new_folder_name(anilist_id)
+    collection = manga_collections.load().collection_of(int(anilist_id))
+    others = [aid for aid in (collection.members if collection else []) if aid != int(anilist_id) and aid in series()]
+    if collection is not None and others:
+        name = f"{manga_collections.folder_name(collection)}/{name}"
     path = root(kind) / name
     path.mkdir(parents=True, exist_ok=True)
     _remember(int(anilist_id), kind, name, "bankai")
+    if others:
+        # Now two of the collection are on disk: the others move into its folder too (journaled).
+        from bankai.web import manga_layout
+
+        try:
+            manga_layout.apply(only=set(others), check=False)
+        except OSError as exc:
+            log.warning("[manga] %s's collection could not be gathered: %s", name, exc)
     return path
 
 
@@ -336,6 +389,43 @@ def move(from_id: int, names: list[str], to_id: int, renames: dict[str, str] | N
     _write(data)
     log.info("[manga] %d file(s) from %s into %s", len(plan), source.name, target.name)
     return {"moved": len(plan), "folder": target.name, "names": targets}
+
+
+def remove(anilist_id: int) -> dict[str, Any]:
+    """A series off the disk: its folder with every book in it, and the folder forgotten. Only the
+    folder bankai knows as the series', and only a series folder of its library (``folders``); a
+    collection's folder left empty goes with it."""
+    aid = int(anilist_id)
+    row = series().get(aid)
+    folder = folder_of(aid)
+    count = size = 0
+    if row is not None and folder is not None:
+        target = folder.resolve()
+        base = root(row.get("kind") or "manga").resolve()
+        if target.parent != base and target.parent.parent != base:
+            raise ValueError(f"{folder} is not a series folder of the library")
+        for path in target.rglob("*"):
+            if path.is_file():
+                count += 1
+                size += path.stat().st_size
+        shutil.rmtree(target)
+        log.info("[manga] %s deleted: %d file(s)", target.name, count)
+        if target.parent != base and not any(target.parent.iterdir()):
+            target.parent.rmdir()
+    if row is not None:
+        data = _read()
+        data["series"].pop(str(aid), None)
+        _write(data)
+    return {"deleted_files": count, "deleted_bytes": size, "folder": (row or {}).get("folder")}
+
+
+def relocate(anilist_id: int, folder: str) -> None:
+    """A series' folder moved (manga_layout): remembered at its new path below the root."""
+    data = _read()
+    row = data["series"].get(str(int(anilist_id)))
+    if row is not None:
+        row["folder"] = folder
+        _write(data)
 
 
 def moved_away(anilist_id: int) -> set[str]:

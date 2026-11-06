@@ -32,7 +32,6 @@ import os
 import re
 import shutil
 import subprocess
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -40,6 +39,7 @@ from typing import Any
 from bankai.cli import bgjobs
 from bankai.config import get_settings
 from bankai.logging import get_logger
+from bankai.web.state_lock import StateLock
 
 log = get_logger(__name__)
 
@@ -56,10 +56,19 @@ _QUIET_SECONDS = 3600.0
 _RETRY_SECONDS = 24 * 3600.0
 _PART = ".tracks.part"
 
-_LOCK = threading.Lock()
+# Shared with the library worker's process (web.state_lock): its passes write these files too.
+_LOCK = StateLock("track_cleanup")
 _INVENTORY: tuple[tuple[int, int] | None, dict[str, dict]] | None = None
 # What clean_next is doing now, for the page.
 progress: dict[str, Any] = {}
+
+
+def current_progress() -> dict[str, Any]:
+    """The file being written anew, wherever it runs: the library worker's heartbeat when it runs the pass (web.library_worker)."""
+    from bankai.web import library_worker
+
+    return library_worker.progress("track_clean") if library_worker.delegated() else dict(progress)
+
 
 # ISO 639: two-letter and terminology codes as the bibliographic ones Matroska writes.
 _ALIASES = {
@@ -221,7 +230,19 @@ def _state() -> dict[str, Any]:
     raw.setdefault("done", {})
     raw.setdefault("last", {})
     raw.setdefault("failed", {})
+    raw.setdefault("recent", [])
     return raw
+
+
+# The files written anew kept for the Dashboard's Recently added ("Remuxed").
+_RECENT_KEPT = 300
+
+
+def remuxed() -> dict[str, dict[str, Any]]:
+    """The files tracks were taken out of lately, by path: when and what (newest kept)."""
+    with _LOCK:
+        rows = _state()["recent"]
+    return {str(row["path"]): row for row in rows if isinstance(row, dict) and row.get("path")}
 
 
 def _save_state(state: dict[str, Any]) -> None:
@@ -248,7 +269,7 @@ def inspect_file(path: Path) -> dict[str, Any] | None:
             [
                 binary, "-v", "error",
                 "-show_entries",
-                "stream=index,codec_type,codec_name,width,height,pix_fmt,field_order,color_transfer"
+                "stream=index,codec_type,codec_name,profile,channels,bit_rate,width,height,pix_fmt,field_order,color_transfer"
                 ":stream_tags:stream_disposition=default,forced,attached_pic"
                 ":stream_side_data=side_data_type,dv_profile:format=duration,bit_rate",
                 "-of", "json", str(path),
@@ -297,17 +318,22 @@ def inspect_file(path: Path) -> dict[str, Any] | None:
         if kind is None:
             continue
         size = next((value for key, value in tags.items() if key.startswith("number_of_bytes")), None)
-        tracks.append(
-            {
-                "kind": kind,
-                "lang": language(tags.get("language")),
-                "name": tags.get("title") or None,
-                "codec": stream.get("codec_name"),
-                "default": bool(disposition.get("default")),
-                "forced": bool(disposition.get("forced")),
-                "bytes": int(size) if str(size or "").isdigit() else None,
-            }
-        )
+        row = {
+            "kind": kind,
+            "lang": language(tags.get("language")),
+            "name": tags.get("title") or None,
+            "codec": stream.get("codec_name"),
+            "default": bool(disposition.get("default")),
+            "forced": bool(disposition.get("forced")),
+            "bytes": int(size) if str(size or "").isdigit() else None,
+        }
+        if kind == "audio":
+            # What browser_audio decides by: DTS-HD MA is "dts" too, told apart by its profile.
+            bps = stream.get("bit_rate") or next((value for key, value in tags.items() if key == "bps" or key.startswith("bps-")), None)
+            row["profile"] = stream.get("profile") or None
+            row["channels"] = stream.get("channels")
+            row["bit_rate"] = int(bps) if str(bps or "").isdigit() else None
+        tracks.append(row)
     form = data.get("format") or {}
     try:
         duration = float(form.get("duration") or 0) or None
@@ -362,6 +388,9 @@ def read_tracks(*, limit: int = READ_BATCH) -> dict[str, int]:
         or entry.get("scope") != scope
         # Read before the video was kept: read again for it.
         or "video" not in entry
+        # Audio read before its profile, channels and bitrate were kept (browser_audio: DTS-HD MA
+        # is "dts" too, and an AAC's bitrate follows its source's).
+        or any(track.get("kind") == "audio" and "channels" not in track for track in entry.get("tracks") or [])
     )
     read: dict[str, dict] = {}
     for path in todo[:limit]:
@@ -394,14 +423,62 @@ def note(path: Path, scope: str) -> None:
 # -- what the rules change ------------------------------------------------------
 
 
-def plan(path: str, entry: dict, rule: dict) -> dict[str, Any] | None:
-    """What a library's rules take out of one file, and whether it changes container; None for nothing."""
+# -- tracks picked by hand to be taken out (Tracks -> Unknown -> Remove) -------------
+
+
+def removals() -> dict[str, dict[str, list[int]]]:
+    """Path -> {"audio": [...], "subtitles": [...]}: tracks by their place among the file's of that kind."""
+    rows = _read("track_removals.json")
+    return {path: row for path, row in rows.items() if isinstance(row, dict)}
+
+
+def remove_tracks(items: list[dict[str, Any]]) -> dict[str, int]:
+    """Queue tracks to be taken out: ``items`` {path, kind, position}. The cleanup writes the file anew
+    without them -- one at a time, checked as always -- even in a library whose cleanup is off."""
+    inventory = load_inventory()
+    with _LOCK:
+        rows = removals()
+        queued = 0
+        for item in items:
+            path, kind = str(item.get("path") or ""), str(item.get("kind") or "")
+            if path not in inventory or kind not in KINDS or not str(item.get("position") or "").isdigit():
+                raise ValueError("each track is a library file, a kind (audio, subtitles) and a position")
+            row = rows.setdefault(path, {"audio": [], "subtitles": []})
+            position = int(item["position"])
+            if position not in row[kind]:
+                row[kind] = sorted([*row[kind], position])
+                queued += 1
+        _write("track_removals.json", rows)
+        # Asked for by hand: a file that failed before is tried at once, not after its day's wait.
+        state = _state()
+        if any(state["failed"].pop(str(item.get("path")), None) for item in items):
+            _save_state(state)
+    return {"queued": queued, "files": len({str(item.get("path")) for item in items})}
+
+
+def _forget_removal(path: str) -> None:
+    with _LOCK:
+        rows = removals()
+        if rows.pop(path, None) is not None:
+            _write("track_removals.json", rows)
+
+
+def _picked(path: str, kind: str, picked: dict[str, dict[str, list[int]]] | None = None) -> set[int]:
+    return set(((removals() if picked is None else picked).get(path) or {}).get(kind) or [])
+
+
+def plan(path: str, entry: dict, rule: dict, picked: dict[str, dict[str, list[int]]] | None = None) -> dict[str, Any] | None:
+    """What a library's rules take out of one file (and the tracks picked by hand), and whether it
+    changes container; None for nothing. ``picked``: ``removals()``, read once by a caller going
+    through every file (read per file, it was 13,000 reads of the same JSON for one page)."""
     tracks = entry.get("tracks") or []
     audio = [track for track in tracks if track.get("kind") == "audio"]
-    drop_audio = [track for track in audio if track.get("lang") in rule["audio"]]
+    subtitles = [track for track in tracks if track.get("kind") == "subtitles"]
+    picked_audio, picked_subs = _picked(path, "audio", picked), _picked(path, "subtitles", picked)
+    drop_audio = [track for index, track in enumerate(audio, 1) if track.get("lang") in rule["audio"] or index in picked_audio]
     if len(drop_audio) == len(audio):
         drop_audio = []  # never the last audio track
-    drop_subs = [track for track in tracks if track.get("kind") == "subtitles" and track.get("lang") in rule["subtitles"]]
+    drop_subs = [track for index, track in enumerate(subtitles, 1) if track.get("lang") in rule["subtitles"] or index in picked_subs]
     convert = Path(path).suffix.casefold() != ".mkv"
     if entry.get("unreadable") or not (drop_audio or drop_subs or convert):
         return None
@@ -433,6 +510,163 @@ def languages(scope: str) -> dict[str, list[dict[str, Any]]]:
     return {kind: sorted(rows.values(), key=lambda row: (-row["files"], row["name"])) for kind, rows in found.items()}
 
 
+# -- tracks that name no language, told by hand ------------------------------------
+#
+# A track tagged "und" (or nothing) is "Unknown" in the language tables, in Jellyfin and ZonTV
+# alike. The Tracks page lists them by title, with each track's own name -- what the players show
+# too -- and the language picked for one is written into the file's header with mkvpropedit:
+# no copy, seconds even for 50 GB.
+
+
+def _title(path: str, scope: str) -> tuple[str, str]:
+    """A file's title (its show's or film's folder, else its name) and its path below the root."""
+    for root in roots(scope):
+        try:
+            relative = Path(path).relative_to(root)
+        except ValueError:
+            continue
+        parts = relative.parts
+        return (parts[0] if len(parts) > 1 else Path(path).stem), str(relative)
+    return Path(path).parent.name, Path(path).name
+
+
+def _unknown(entry: dict, kind: str, code: str = "und") -> list[dict[str, Any]]:
+    """A file's tracks of this kind in one language (by default: naming none), with their place among
+    the kind's tracks."""
+    out = []
+    position = 0
+    for track in entry.get("tracks") or []:
+        if track.get("kind") != kind:
+            continue
+        position += 1
+        if (track.get("lang") or "und") == code:
+            out.append({**track, "position": position})
+    return out
+
+
+def unknown_titles(scope: str, kind: str, code: str = "und") -> list[dict[str, Any]]:
+    """The titles of a library with tracks of this kind in this language (by default: naming none):
+    how many files and tracks. Any language opens this way on the Tracks page."""
+    found: dict[str, dict[str, Any]] = {}
+    for path, entry in load_inventory().items():
+        if entry.get("scope") != scope:
+            continue
+        tracks = _unknown(entry, kind, code)
+        if not tracks:
+            continue
+        title, _relative = _title(path, scope)
+        row = found.setdefault(title, {"title": title, "files": 0, "tracks": 0, "names": set()})
+        row["files"] += 1
+        row["tracks"] += len(tracks)
+        row["names"].update(str(track.get("name") or "") for track in tracks)
+    return sorted(
+        ({**row, "names": sorted(name for name in row["names"] if name)[:6]} for row in found.values()),
+        key=lambda row: (-row["files"], row["title"].casefold()),
+    )
+
+
+def unknown_tracks(scope: str, kind: str, title: str, code: str = "und") -> list[dict[str, Any]]:
+    """One title's files with tracks of this kind in this language (by default: naming none), each
+    such track listed."""
+    files = []
+    for path, entry in load_inventory().items():
+        if entry.get("scope") != scope:
+            continue
+        name, relative = _title(path, scope)
+        tracks = _unknown(entry, kind, code)
+        if name != title or not tracks:
+            continue
+        files.append({
+            "path": path,
+            "relative": relative,
+            "mkv": path.casefold().endswith(".mkv"),
+            "tracks": [
+                {key: track.get(key) for key in ("position", "name", "codec", "default", "forced", "bytes")}
+                for track in tracks
+            ],
+        })
+    return sorted(files, key=lambda row: row["relative"].casefold())
+
+
+# A language being written into many files in the background: {done, total}.
+progress_language: dict[str, int] = {}
+
+
+def set_language(items: list[dict[str, Any]], code: str) -> dict[str, Any]:
+    """Write a language into tracks: ``items`` are {path, kind, position} (the n-th track of the kind).
+
+    MKV only (mkvpropedit edits the header in place); a file still seeding in qBittorrent waits, as
+    the cleanup has it -- an edit would break the torrent's pieces. The mtime is the old one + 1 s:
+    Jellyfin reads the file again, recency order stays.
+    """
+    from bankai.web import jellyfin
+
+    lang = language(code)
+    if lang == "und":
+        raise ValueError("pick a language (a code such as ger, eng, jpn)")
+    by_path: dict[str, list[tuple[str, int]]] = {}
+    for item in items:
+        kind = str(item.get("kind") or "")
+        if kind not in KINDS or not str(item.get("position") or "").isdigit():
+            raise ValueError("each track is a kind (audio, subtitles) and a position")
+        by_path.setdefault(str(item.get("path") or ""), []).append((kind, int(item["position"])))
+    binary = shutil.which("mkvpropedit")
+    if binary is None:
+        raise RuntimeError("mkvpropedit is not installed")
+    inventory = load_inventory()
+    done, failed = [], []
+    written: dict[str, dict[str, Any]] = {}
+    for path, tracks in by_path.items():
+        file = Path(path)
+        entry = inventory.get(path)
+        if entry is None or not file.is_file():
+            failed.append({"path": path, "error": "not in the library any more"})
+            continue
+        if file.suffix.casefold() != ".mkv":
+            failed.append({"path": path, "error": "not an MKV: the cleanup puts it into one first"})
+            continue
+        before = file.stat()
+        if before.st_nlink > 1:
+            failed.append({"path": path, "error": "still seeding in qBittorrent"})
+            continue
+        args = [binary, path]
+        for kind, position in tracks:
+            args += ["--edit", f"track:{'a' if kind == 'audio' else 's'}{position}", "--set", f"language={lang}"]
+        try:
+            result = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", timeout=300, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failed.append({"path": path, "error": str(exc)})
+            continue
+        if result.returncode not in (0, 1):  # 1: done with warnings
+            failed.append({"path": path, "error": (result.stdout or result.stderr).strip()[-300:]})
+            continue
+        os.utime(file, (before.st_atime, before.st_mtime + 1))
+        after = file.stat()
+        # What was written is known: the record follows without reading the file again (500
+        # Naruto Shippuden episodes took ten minutes that way, the inventory saved after each).
+        tracks_now = [dict(track) for track in entry.get("tracks") or []]
+        places = {kind: 0 for kind in KINDS}
+        chosen = set(tracks)
+        for track in tracks_now:
+            kind = track.get("kind")
+            if kind in places:
+                places[kind] += 1
+                if (kind, places[kind]) in chosen:
+                    track["lang"] = lang
+        written[path] = {**entry, "tracks": tracks_now, "size": after.st_size, "mtime": after.st_mtime}
+        done.append(path)
+        progress_language.update(done=len(done), total=len(by_path))
+    if written:
+        with _LOCK:
+            rows = dict(load_inventory())
+            rows.update(written)
+            _save_inventory(rows)
+        jellyfin.queue([Path(path) for path in written], reprobe=True)
+    progress_language.clear()
+    log.info("[tracks] %s written into %d track(s) of %d file(s)", lang, sum(len(by_path[p]) for p in done), len(done))
+    return {"language": lang, "name": language_name(lang), "files": len(done), "failed": failed}
+
+
 def held(path: Path) -> str | None:
     """Why a file waits for now, if it does."""
     try:
@@ -450,13 +684,14 @@ def candidates(scope: str | None = None) -> list[tuple[str, str, dict]]:
     """The files the rules change, most space first: (path, library, plan). Failed ones wait a day."""
     every = rules()
     failed = _state()["failed"]
+    picked = removals()
     now = time.time()
     out = []
     for path, entry in load_inventory().items():
         library = entry.get("scope")
         if library not in every or (scope is not None and library != scope):
             continue
-        change = plan(path, entry, every[library])
+        change = plan(path, entry, every[library], picked)
         if change is None:
             continue
         miss = failed.get(path)
@@ -572,13 +807,17 @@ def clean_file(path: Path, scope: str) -> dict[str, Any]:
     tracks = info.get("tracks") or []
     audio = [track for track in tracks if track.get("type") == "audio"]
     subs = [track for track in tracks if track.get("type") == "subtitles"]
-    drop_audio = [track["id"] for track in audio if _lang(track) in rule["audio"]]
+    # The library's languages switched off when its cleanup is on; tracks picked by hand always.
+    switched_off = rule if rule["enabled"] else {"audio": [], "subtitles": []}
+    picked_audio, picked_subs = _picked(str(path), "audio"), _picked(str(path), "subtitles")
+    drop_audio = [track["id"] for index, track in enumerate(audio, 1) if _lang(track) in switched_off["audio"] or index in picked_audio]
     if len(drop_audio) == len(audio):
         drop_audio = []
-    drop_subs = [track["id"] for track in subs if _lang(track) in rule["subtitles"]]
+    drop_subs = [track["id"] for index, track in enumerate(subs, 1) if _lang(track) in switched_off["subtitles"] or index in picked_subs]
     convert = path.suffix.casefold() != ".mkv"
     if not (drop_audio or drop_subs or convert):
         note(path, scope)
+        _forget_removal(str(path))
         return {"path": str(path), "scope": scope, "skipped": "nothing to take out"}
     target = path.with_suffix(".mkv") if convert else path
     if convert:
@@ -652,10 +891,10 @@ def clean_file(path: Path, scope: str) -> dict[str, Any]:
             _save_state(state)
     size = target.stat().st_size
     note(target, scope)
-    if scope == "anime":
-        from bankai.web import jellyfin
+    from bankai.web import jellyfin
 
-        jellyfin.queue([target])
+    # Written anew: Jellyfin reads its tracks again, in every library.
+    jellyfin.queue([target], reprobe=True)
     saved = before.st_size - size
     done = {
         "path": str(target),
@@ -672,8 +911,10 @@ def clean_file(path: Path, scope: str) -> dict[str, Any]:
         totals["files"] += 1
         totals["bytes"] += max(0, saved)
         state["last"][scope] = done
+        state["recent"] = [*state["recent"], done][-_RECENT_KEPT:]
         state["failed"].pop(str(path), None)
         _save_state(state)
+    _forget_removal(str(path))
     log.info(
         "[tracks] %s: %d audio, %d subtitle track(s) taken out%s, %.0f MiB freed",
         target.name, len(drop_audio), len(drop_subs), ", now MKV" if convert else "", saved / 2**20,
@@ -717,17 +958,20 @@ def clean_next() -> dict[str, Any] | None:
     Files that wait -- still seeding, just changed -- are counted per library
     for the page when nothing could be done.
     """
-    from bankai.web import encode_library
+    from bankai.web import browser_audio, encode_library
 
     every = rules()
     waiting: dict[str, dict[str, int]] = {}
-    busy = encode_library.progress.get("path")
+    busy = encode_library.current_progress().get("path")
+    picked = removals()
     for path, scope, _change in candidates():
-        if not every[scope]["enabled"]:
+        if not every[scope]["enabled"] and path not in picked:
             continue
         reason = held(Path(path))
         if reason is None and path == busy:
             reason = "being encoded"
+        if reason is None and path == browser_audio.current_progress().get("path"):
+            reason = "getting browser audio"
         if reason:
             counts = waiting.setdefault(scope, {})
             counts[reason] = counts.get(reason, 0) + 1
@@ -747,7 +991,8 @@ def _set_waiting(waiting: dict[str, dict[str, int]]) -> None:
 
 
 def enabled() -> bool:
-    return any(row["enabled"] for row in rules().values())
+    """Is there cleaning to do at all: a library's cleanup on, or tracks picked by hand to take out."""
+    return any(row["enabled"] for row in rules().values()) or bool(removals())
 
 
 def overview() -> dict[str, Any]:
@@ -758,7 +1003,7 @@ def overview() -> dict[str, Any]:
     for entry in inventory.values():
         listed_by_scope[entry.get("scope")] = listed_by_scope.get(entry.get("scope"), 0) + 1
     every = rules()
-    current = dict(progress) if progress else None
+    current = current_progress() or None
     from bankai.web import library_walk
 
     out = {}
