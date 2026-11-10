@@ -144,7 +144,7 @@ def test_the_library_rows_carry_current_results_only(monkeypatch, tmp_path):
         {"path": "", "anilist_id": 7, "anilist_episode": 3, "missing": True},
     ]
     counts = verify.annotate(rows)
-    assert counts == {"verify_checked": 1, "verify_wrong": 1, "verify_unsure": 0, "verify_files": 2}
+    assert counts == {"verify_checked": 1, "verify_wrong": 1, "verify_unsure": 0, "verify_length": 0, "verify_files": 2}
     assert rows[0]["verify"]["verdict"] == "wrong"
     assert "verify" not in rows[1]
 
@@ -199,3 +199,49 @@ def test_a_confirmation_follows_the_layouts_renames():
     verify._save({"files": {}, "first": [], "confirmed": {"Old/a.mkv": {"size": 1, "mtime": 1.0}}})
     verify.follow_renames({"Old/a.mkv": "New/a.mkv"})
     assert set(verify.load()["confirmed"]) == {"New/a.mkv"}
+
+
+def _season(runtimes: list[int], season: int = 1) -> list[dict]:
+    return [{"season": season, "episode": n, "runtime": minutes} for n, minutes in enumerate(runtimes, 1)]
+
+
+def test_half_of_a_double_length_episode_is_length_off():
+    """Re:Zero S01E01 runs 50 minutes among 25s; its file held only Part Two (Nov 2026)."""
+    episodes = _season([50, 25, 25, 25, 25])
+
+    length = verify.judge_length(24 * 60, [episodes[0]], episodes, 25, [(1, 1)])
+
+    assert length["ok"] is False
+    assert verify.length_off({"length": length}) == "runs 24 min, TMDB says 50"
+
+
+def test_a_length_tmdb_counts_otherwise_fits_when_anilist_s_does():
+    # Kaguya-sama's Stairway to Adulthood: TMDB one special of 53 minutes, AniList two of 26.
+    specials = _season([53, 10, 90], season=0)
+    assert verify.judge_length(25.5 * 60, [specials[0]], specials, 26, [(1, 1)])["ok"] is True
+    # TONIKAWA High School Days: TMDB says 1 minute for every episode.
+    junk = _season([1, 1, 1, 1])
+    assert verify.judge_length(24 * 60, [junk[0]], junk, 24, [(1, 1)])["ok"] is True
+
+
+def test_anilist_s_average_judges_only_far_off_and_episode_0_not_at_all():
+    assert verify.judge_length(32 * 60, [], [], 18, [(1, 1)])["ok"] is True
+    assert verify.judge_length(34 * 60, [], [], 140, [(1, 1)])["ok"] is False
+    assert verify.judge_length(14 * 60, [], [], 67, [(1, 0)]) is None
+
+
+def test_a_length_off_is_shown_whatever_the_picture_says(monkeypatch, tmp_path):
+    from bankai.web import anime_files
+
+    monkeypatch.setattr(anime_files, "anime_root", lambda: tmp_path)
+    rel = "Show/Season 01/Show - S01E01.mkv"
+    found = {rel: {"verdict": "unsure", "size": 10, "mtime": 100.0, "picture": {"state": "unsure"},
+                   "length": {"seconds": 1458, "expected_minutes": 50.0, "source": "TMDB", "ok": False}}}
+    monkeypatch.setattr(verify, "results", lambda: found)
+    monkeypatch.setattr(anilist, "media", lambda aid: {})
+    rows = [{"path": str(tmp_path / rel), "anilist_id": 7, "anilist_episode": 1, "size": 10, "mtime": 100.0}]
+
+    counts = verify.annotate(rows)
+
+    assert counts["verify_length"] == 1
+    assert rows[0]["verify"]["issues"] == ["runs 24 min, TMDB says 50"]

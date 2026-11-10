@@ -7,17 +7,17 @@ import { toast } from '@/lib/toast';
 import { api, type GenreLanguage, type GenrePlan, type GenreRules, type GenreTitle, type GenreWord } from '@/lib/api';
 import { AgeRatingsPanel } from '@/components/age-ratings-panel';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Input } from '@/zon/ui/input';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Popover, PopoverContent, PopoverTrigger } from '@/zon/ui/popover';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Popover, PopoverContent, PopoverTrigger } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 
 const LANGUAGES: Array<[GenreLanguage, string]> = [['en', 'English'], ['de', 'Deutsch']];
 

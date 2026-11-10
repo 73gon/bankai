@@ -133,6 +133,14 @@ class PipelineWorker(Worker):
                     "out": str(planned_out),
                 }
 
+        # ---- 0b. A release that is German already ----------------------
+        # Synced from a stream, the German track often needs its delay set by hand: a torrent that
+        # carries German audio needs nothing of that, so it is looked for first.
+        if settings.selector.german_release_first and not payload.get("skip_german_release"):
+            found = await self._german_release(ctx, payload)
+            if found is not None:
+                return found
+
         # ---- 1. Extract dub audio --------------------------------------
         _log_stage(1, "extract", "Extract stream audio")
         original_stream_url = normalize_stream_url(payload["stream_url"])
@@ -336,6 +344,103 @@ class PipelineWorker(Worker):
             "remux": remux_result,
             "final_path": remux_result["path"],
         }
+
+    async def _german_release(self, ctx: WorkerContext, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """A torrent that carries German audio itself, taken into the library as it is; None when
+        there is none, or the one taken turns out to have no German track (then removed)."""
+        from bankai.torrent.actions import candidate_to_dict
+        from bankai.torrent.prowlarr import ProwlarrClient
+        from bankai.torrent.selector import TorrentSelector
+        from bankai.torrent.worker import _CAT_MOVIES, _CAT_TV, episode_search_queries
+        from bankai.web import direct
+
+        kind = payload.get("kind", "movie")
+        queries = episode_search_queries(payload) if kind == "episode" else [payload["query"]]
+        # German releases are often named by the German title ("Der Pate", not "The Godfather").
+        german_name = await _german_title(payload)
+        if german_name:
+            if kind == "episode":
+                english = str(payload.get("series_title") or "")
+                queries += [query.replace(english, german_name, 1) for query in list(queries) if english and english in query]
+            else:
+                year = re.search(r"\b(19|20)\d{2}\b", payload["query"])
+                queries.append(f"{german_name} {year.group(0)}" if year else german_name)
+        queries = list(dict.fromkeys(queries))
+        policy = get_settings().selector
+        # German preferred, nothing marked down for being foreign.
+        selector = TorrentSelector(policy.model_copy(update={"preferred_audio_languages": ["german", "deutsch"]}))
+        chosen = None
+        prowlarr = ProwlarrClient()
+        try:
+            for query in queries:
+                try:
+                    candidates = await prowlarr.search(f"{query} German", categories=_CAT_TV if kind == "episode" else _CAT_MOVIES)
+                except Exception as exc:
+                    log.info("[german] search %r failed: %s", query, exc)
+                    continue
+                german = [item for item in selector.relevant(candidates, query=query) if german_audio_named(item.title)]
+                ranked = selector.rank(german)
+                if ranked:
+                    chosen = ranked[0]
+                    break
+        finally:
+            aclose = getattr(prowlarr, "aclose", None)
+            if callable(aclose):
+                await aclose()
+        if chosen is None:
+            log.info("[german] no release with German audio found; the German track is taken from the stream")
+            return None
+        log.info("[german] taking %s (seeders=%d)", chosen.candidate.title, chosen.candidate.seeders)
+        torrent_payload = {
+            key: payload[key] for key in ("query", "kind", "category", "season", "episode", "series_title") if key in payload
+        }
+        torrent_payload["manual_candidate"] = candidate_to_dict(chosen.candidate, eligible=True)
+        try:
+            torrent_result = await self._run_stage(ctx, self._torrent, JobKind.TORRENT, torrent_payload)
+        except Exception as exc:
+            log.warning("[german] download of %s failed (%s); the German track is taken from the stream", chosen.candidate.title, exc)
+            return None
+        source = Path(torrent_result["path"])
+        if not await asyncio.to_thread(direct.has_german, source, "", probe=True):
+            log.warning("[german] %s has no German audio track after all; removed, the stream is used", source.name)
+            await self._remove_torrent(torrent_result.get("torrent_hash"))
+            return None
+        out_path = Path(payload.get("out") or _default_output_path(
+            payload["query"],
+            kind=kind,
+            season=payload.get("season"),
+            episode=payload.get("episode"),
+            episode_title=payload.get("episode_title"),
+            series_title=payload.get("series_title"),
+        ))
+        _log_stage(4, "remux", "Write final MKV (German release)")
+        await _copy_into_mkv(source, out_path)
+        self._record_output_review(
+            str(out_path),
+            {"delay_ms": 0, "confidence": 1.0, "needs_review": False},
+            german_source_url=f"German release: {chosen.candidate.title}",
+            torrent_result=torrent_result,
+        )
+        if get_settings().paths.cleanup_after_success:
+            await self._remove_torrent(torrent_result.get("torrent_hash"))
+        return {
+            "torrent": torrent_result,
+            "german_release": chosen.candidate.title,
+            "final_path": str(out_path),
+        }
+
+    async def _remove_torrent(self, torrent_hash: str | None) -> None:
+        from bankai.torrent.qbittorrent import QBittorrentClient
+
+        if not torrent_hash:
+            return
+        qbit = QBittorrentClient()
+        try:
+            await qbit.remove(torrent_hash, delete_files=True)
+        except Exception as exc:
+            log.warning("[cleanup] failed to remove torrent %s: %s", torrent_hash[:8], exc)
+        finally:
+            await qbit.aclose()
 
     async def _run_extract_attempts(
         self,
@@ -912,6 +1017,74 @@ def _extract_attempt_payloads(
         }
         for i, (url, hint, fallback_only) in enumerate(specs)
     ]
+
+
+async def _german_title(payload: dict[str, Any]) -> str | None:
+    """The German title TMDB gives the film (or the episode's show), when it differs; None without TMDB."""
+    from bankai.metadata import tmdb_titles
+
+    if not tmdb_titles.configured():
+        return None
+    episode = payload.get("kind") == "episode"
+    name = str(payload.get("series_title") or "") if episode else str(payload.get("query") or "")
+    year = re.search(r"\b(19|20)\d{2}\b", name)
+    bare = re.sub(r"[\s(]*\b(19|20)\d{2}\b\)?\s*$", "", name).strip()
+    if not bare:
+        return None
+    try:
+        found = await tmdb_titles.get_title_aliases(bare, kind="series" if episode else "movie", detailed=1)
+    except Exception as exc:  # noqa: BLE001 -- the English name is searched all the same
+        log.info("[german] TMDB not asked for the German title: %s", exc)
+        return None
+    for alias in found[:1]:
+        if year and alias.year and abs(alias.year - int(year.group(0))) > 1:
+            return None
+        german = (alias.german_title or "").strip()
+        if german and german.casefold() != bare.casefold():
+            return german
+    return None
+
+
+_GERMAN_AUDIO_WORDS = {"german", "deutsch", "ger"}
+# Words that make "German" mean subtitles only: "German.Subbed", "GerSub", "German Subs".
+_SUBTITLE_ONLY_WORDS = {"subbed", "gersub", "gersubbed", "subs", "sub", "subtitles", "untertitel", "omu"}
+
+
+def german_audio_named(title: str) -> bool:
+    """Whether a release's name says it carries German audio, not German subtitles alone.
+
+    "Title.2019.German.DL.1080p.BluRay.x264" (German and the original), "Title 2019 German AC3",
+    "Title.German.Dubbed": yes; "Title.2019.German.Subbed" or "...GerSub...": no -- unless it says
+    DL or Dubbed as well. The file's own audio tracks are checked after the download.
+    """
+    words = re.findall(r"[a-z]+", title.casefold())
+    if not _GERMAN_AUDIO_WORDS & set(words):
+        return False
+    if _SUBTITLE_ONLY_WORDS & set(words):
+        return bool({"dl", "dubbed", "dual"} & set(words))
+    return True
+
+
+async def _copy_into_mkv(source: Path, out: Path) -> None:
+    """The release's file as the library's MKV, every track kept (mkvmerge, lossless)."""
+    from bankai.web.media import mkvmerge_bin
+
+    binary = mkvmerge_bin()
+    if not binary:
+        raise PermanentWorkerError("mkvmerge not found")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name("." + out.name + ".part")
+    proc = await asyncio.create_subprocess_exec(
+        binary, "-q", "-o", str(part), str(source),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    # mkvmerge: 0 done, 1 done with warnings, 2 failed.
+    if proc.returncode not in (0, 1) or not part.exists():
+        part.unlink(missing_ok=True)
+        message = (stderr or stdout).decode("utf-8", "replace").strip()[-300:]
+        raise PermanentWorkerError(f"mkvmerge could not copy the German release: {message}")
+    os.replace(part, out)
 
 
 def _log_stage(step: int, key: str, label: str) -> None:

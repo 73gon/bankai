@@ -129,9 +129,24 @@ def folder_title(name: str) -> str:
 # -- Which entry each folder is ---------------------------------------------------
 
 
+_SERIES: tuple[tuple[int, int], dict[int, dict[str, Any]]] | None = None
+
+
 def series() -> dict[int, dict[str, Any]]:
-    """Every series in the libraries bankai knows the entry of: {aid: {folder, kind, how}}."""
-    return {int(key): row for key, row in _read()["series"].items() if str(key).isdigit()}
+    """Every series in the libraries bankai knows the entry of: {aid: {folder, kind, how}}.
+
+    Parsed again only when the file changed: read once per folder, a library build parsed it 543
+    times (Nov 2026). The rows are shared; callers read them, writers go through ``_read``.
+    """
+    global _SERIES
+    try:
+        stat = _store_path().stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        stamp = (0, 0)
+    if _SERIES is None or _SERIES[0] != stamp:
+        _SERIES = (stamp, {int(key): row for key, row in _read()["series"].items() if str(key).isdigit()})
+    return dict(_SERIES[1])
 
 
 def unmatched() -> list[dict[str, Any]]:
@@ -348,12 +363,12 @@ def ensure_folder(anilist_id: int, kind: str) -> Path:
 def move(from_id: int, names: list[str], to_id: int, renames: dict[str, str] | None = None) -> dict[str, Any]:
     """Books of one series' folder that are another series' (Jujutsu Kaisen's "Vol 00" is
     Jujutsu Kaisen 0): into that series' folder, made when it has none, each under its
-    new name where one is given. Every name is checked before anything moves."""
+    new name where one is given. The same series renumbers them in place ("Chapter 0168.1"
+    -> "Chapter 0001"), names swapped among them too. Every name is checked before anything moves."""
     source = folder_of(from_id)
     if source is None:
         raise ValueError("the series has no folder")
-    if int(from_id) == int(to_id):
-        raise ValueError("the files are in that series already")
+    same = int(from_id) == int(to_id)
     renames = renames or {}
     plan: list[tuple[Path, str]] = []
     for name in dict.fromkeys(names):
@@ -367,6 +382,8 @@ def move(from_id: int, names: list[str], to_id: int, renames: dict[str, str] | N
     targets = [new for _path, new in plan]
     if len(set(targets)) != len(targets):
         raise ValueError("two files would get the same name")
+    if same:
+        return _renumber(source, plan)
     kind = manga_meta.kind_of(manga_meta.media(to_id).get("format"))
     target = ensure_folder(int(to_id), kind)
     taken = [new for new in targets if (target / new).exists()]
@@ -387,8 +404,29 @@ def move(from_id: int, names: list[str], to_id: int, renames: dict[str, str] | N
             if not row["moved"]:
                 row.pop("moved")
     _write(data)
+    forget(source)
+    forget(target)
     log.info("[manga] %d file(s) from %s into %s", len(plan), source.name, target.name)
     return {"moved": len(plan), "folder": target.name, "names": targets}
+
+
+def _renumber(folder: Path, plan: list[tuple[Path, str]]) -> dict[str, Any]:
+    """Books renamed inside their folder: through a name of their own first, so two may swap."""
+    plan = [(path, new) for path, new in plan if path.name != new]
+    leaving = {path.name for path, _new in plan}
+    taken = [new for _path, new in plan if (folder / new).exists() and new not in leaving]
+    if taken:
+        raise ValueError(f"{folder.name} has {', '.join(taken)} already")
+    passing = []
+    for index, (path, new) in enumerate(plan):
+        between = folder / f".{index}.{os.getpid()}.renumber{path.suffix}"
+        path.replace(between)
+        passing.append((between, new))
+    for between, new in passing:
+        between.replace(folder / new)
+    forget(folder)
+    log.info("[manga] %d file(s) renumbered in %s", len(plan), folder.name)
+    return {"moved": len(plan), "folder": folder.name, "names": [new for _path, new in plan]}
 
 
 def remove(anilist_id: int) -> dict[str, Any]:

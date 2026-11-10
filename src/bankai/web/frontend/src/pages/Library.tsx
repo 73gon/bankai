@@ -32,14 +32,14 @@ import {
 import { toast } from '@/lib/toast';
 import { api, pagePaths, recall, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
 import { POSTER_IMG, posterSources } from '@/lib/posters';
-import { Button } from '@/zon/ui/button';
-import { Input } from '@/zon/ui/input';
-import { Badge } from '@/zon/ui/badge';
-import { Slider } from '@/zon/ui/slider';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Button } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Badge } from '@zonsh/ui';
+import { Slider } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
 import {
   AlertDialog,
   AlertDialogContent,
@@ -47,15 +47,15 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/zon/ui/alert-dialog';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Tabs, TabsList, TabsTab, TabsPanel } from '@/zon/ui/tabs';
-import { Popover, PopoverContent, PopoverDescription, PopoverTitle, PopoverTrigger } from '@/zon/ui/popover';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+} from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Tabs, TabsList, TabsTab, TabsPanel } from '@zonsh/ui';
+import { Popover, PopoverContent, PopoverDescription, PopoverTitle, PopoverTrigger } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
 import { StatusTag } from '@/components/status-tag';
 import { SortHeader } from '@/components/sort-header';
 import { formatBytes } from '@/lib/utils';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 const PAGE_SIZE_ITEMS = [
   { value: '10', label: '10' },

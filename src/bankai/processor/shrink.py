@@ -420,14 +420,19 @@ def _rpu_commands(source: Source, rpu: Path) -> tuple[list[str], list[str]]:
 
 def _extract_rpu(source: Source, rpu: Path) -> None:
     stream, extract = _rpu_commands(source, rpu)
-    with subprocess.Popen(stream, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as reader:
-        result = subprocess.run(extract, stdin=reader.stdout, capture_output=True, check=False)
-        if reader.stdout:
-            reader.stdout.close()
-        reader.wait()
-    _stopped(min(result.returncode, reader.returncode or 0), "reading the Dolby Vision metadata")
-    if result.returncode != 0 or not rpu.is_file():
-        raise ShrinkError("Dolby Vision metadata could not be read: " + result.stderr.decode("utf-8", "replace")[-300:])
+    # ffmpeg's complaints go to a file, not a pipe read only at the end: Spectre's filled the pipe's
+    # 64 KB, ffmpeg waited to write more, dovi_tool for its input, and both 13 hours (Nov 2026).
+    with tempfile.TemporaryFile() as complaints:
+        with subprocess.Popen(stream, stdout=subprocess.PIPE, stderr=complaints) as reader:
+            result = subprocess.run(extract, stdin=reader.stdout, capture_output=True, check=False)
+            if reader.stdout:
+                reader.stdout.close()
+            reader.wait()
+        _stopped(min(result.returncode, reader.returncode or 0), "reading the Dolby Vision metadata")
+        if result.returncode != 0 or not rpu.is_file():
+            complaints.seek(0)
+            said = (result.stderr or b"").decode("utf-8", "replace")[-300:] or complaints.read().decode("utf-8", "replace")[-300:]
+            raise ShrinkError("Dolby Vision metadata could not be read: " + said)
 
 
 def _inject_rpu(video: Path, rpu: Path, output: Path) -> None:

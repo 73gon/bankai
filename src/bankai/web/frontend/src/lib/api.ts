@@ -162,6 +162,9 @@ export interface ReplacementPlan {
   german: boolean;
   anilist_id: number;
   anilist_title: string;
+  anilist_year: number | null;
+  /** Picked in the dialog, not told from the name. */
+  chosen: boolean;
   held_count: number;
   file_count: number;
   german_dubs_kept: number[];
@@ -860,6 +863,27 @@ export interface GenrePlan {
 export type MangaKind = 'manga' | 'novel';
 
 /** An AniList manga or light novel, as cards and the pick dialog show it. */
+export type MangaBookKind = 'volume' | 'chapter';
+
+/** Books about to move into a series, or be renumbered in their own (`same`). */
+export interface MangaMovePlan {
+  anilist_id: number;
+  same: boolean;
+  unit: MangaBookKind;
+  /** AniList's counts; null where it gives none. */
+  counts: Record<MangaBookKind, number | null>;
+  /** The numbers the series lacks, at most 500 of each. */
+  missing: Record<MangaBookKind, number[]>;
+  /** The books in its folder now (the ones being renumbered left out). */
+  names: string[];
+  files: {
+    name: string;
+    kind: MangaBookKind | null;
+    number: number | null;
+    suggested: { kind: MangaBookKind; number: number; name: string };
+  }[];
+}
+
 export interface MangaEntry {
   anilist_id: number;
   name: string | null;
@@ -1412,6 +1436,14 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 
 /** One file's episode check: its keyframes against TMDB's stills, its length, other files. */
 /** A magnet link looked at before a replace: ``pending`` while the swarm has not answered. */
+/** A ticked anime episode the library has no file of: its entry and number, and the library's season and episode. */
+export interface MagnetMissingEpisode {
+  anilist_id: number;
+  anilist_episode: number;
+  season_number: number;
+  episode: number;
+}
+
 export interface MagnetPreview {
   info_hash: string;
   name: string;
@@ -1419,9 +1451,11 @@ export interface MagnetPreview {
   size?: number;
   private?: boolean;
   trackers?: number;
-  files?: Array<{ path: string; name: string; size: number; episode?: number | string | null; replaces: string | null; why?: string }>;
+  files?: Array<{ path: string; name: string; size: number; episode?: number | string | null; replaces: string | null; fills?: boolean; why?: string }>;
   ticked?: number;
   covered?: number;
+  /** Of the files it takes, those filling a ticked missing episode. */
+  filled?: number;
   uncovered?: string[];
   known?: {
     erai?: { name: string; subtitles: string[]; german: boolean; resolution: string | null; published: number | null };
@@ -1488,6 +1522,8 @@ export interface AnimeLibraryShow {
   verify_checked?: number;
   verify_wrong?: number;
   verify_unsure?: number;
+  /** Files whose length does not fit their episode (and are not shown as another episode): half an episode, a recap. */
+  verify_length?: number;
   /** Blacklisted by the user, yet its files are still in the library. */
   blacklisted?: boolean;
   /** Each tab's AniList entries. */
@@ -2258,6 +2294,9 @@ export const api = {
     request<{ followed: boolean }>(`/api/manga/series/${anilistId}/unfollow`, { method: 'POST' }),
   mangaSeries: (anilistId: number) => request<MangaDetail>(`/api/manga/series/${anilistId}`),
   /** Books of one series that are another's: into its folder, each under its new name. */
+  /** Where books would go in series toId (fromId itself: renumbered), with a suggested number each. Nothing moves. */
+  mangaMovePlan: (fromId: number, files: string[], toId: number) =>
+    request<MangaMovePlan>(`/api/manga/series/${fromId}/move/plan`, { method: 'POST', body: JSON.stringify({ files, anilist_id: toId }) }),
   moveMangaFiles: (fromId: number, files: string[], toId: number, names: Record<string, string>) =>
     request<{ moved: number; folder: string; names: string[] }>(`/api/manga/series/${fromId}/move`, {
       method: 'POST', body: JSON.stringify({ files, anilist_id: toId, names }),
@@ -2489,11 +2528,12 @@ export const api = {
     request<{ owned: number[]; episodes: number | null }>(`/api/anime/owned?anilist_id=${anilistId}`),
   /** Replace ticked anime library files with a magnet link's torrent (one AniList entry). */
   /** What a magnet link is before it replaces anything: name, size, files (from the swarm), which ticked file each replaces. */
-  magnetPreview: (magnet: string, paths: string[], scope: 'anime' | 'show' | 'movie') =>
-    request<MagnetPreview>('/api/magnet/preview', { method: 'POST', body: JSON.stringify({ magnet, paths, scope }) }),
-  animeReplaceMagnet: (paths: string[], magnet: string, loseGerman = false) =>
-    request<{ ok: boolean; queued: string; anilist_title: string; episodes: number[]; files_to_replace: number }>('/api/anime/replace-magnet', {
-      method: 'POST', body: JSON.stringify({ paths, magnet, lose_german: loseGerman }),
+  /** `missing`: ticked anime episodes with no file, filled from the torrent. */
+  magnetPreview: (magnet: string, paths: string[], scope: 'anime' | 'show' | 'movie', missing: MagnetMissingEpisode[] = []) =>
+    request<MagnetPreview>('/api/magnet/preview', { method: 'POST', body: JSON.stringify({ magnet, paths, scope, missing }) }),
+  animeReplaceMagnet: (paths: string[], magnet: string, loseGerman = false, missing: MagnetMissingEpisode[] = []) =>
+    request<{ ok: boolean; queued: string; anilist_title: string; episodes: number[]; files_to_replace: number; episodes_to_fill: number }>('/api/anime/replace-magnet', {
+      method: 'POST', body: JSON.stringify({ paths, magnet, lose_german: loseGerman, missing }),
     }),
   /** Replace ticked Movies & Shows files (episodes, or a film's file) with a magnet link's torrent. */
   masReplaceMagnet: (kind: 'show' | 'movie', key: string, paths: string[], magnet: string) =>
@@ -2559,11 +2599,14 @@ export const api = {
   saveGenreRules: (rules: GenreRules) => request<GenreRules>('/api/genres/rules', { method: 'PUT', body: JSON.stringify(rules) }),
   saveGenreOverride: (key: string, choices: GenreOverride) =>
     request<GenreOverride>('/api/genres/titles/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify(choices) }),
-  replacementPlan: (key: string, infoHash: string) =>
-    request<ReplacementPlan>('/api/anime/review/replace-plan?' + new URLSearchParams({ key, info_hash: infoHash })),
-  replaceFromErai: (key: string, infoHash: string, label = '', loseGerman = false) =>
+  /** `anilistId`: without a card, the entry picked in the dialog instead of the one the name says. */
+  replacementPlan: (key: string, infoHash: string, anilistId?: number) =>
+    request<ReplacementPlan>('/api/anime/review/replace-plan?' + new URLSearchParams({
+      key, info_hash: infoHash, ...(anilistId ? { anilist_id: String(anilistId) } : {}),
+    })),
+  replaceFromErai: (key: string, infoHash: string, label = '', loseGerman = false, anilistId?: number) =>
     runAction<{ ok: boolean; queued: string; held_replaced: number; files_to_replace: number; german_dubs_kept: number[] }>(
-      '/api/anime/review/replace', { key, info_hash: infoHash, label, lose_german: loseGerman },
+      '/api/anime/review/replace', { key, info_hash: infoHash, label, lose_german: loseGerman, ...(anilistId ? { anilist_id: anilistId } : {}) },
     ),
   sidebarCounts: () => remembering<{ counts: Record<string, number | null> }>(pagePaths.sidebarCounts),
   /** `rescan` checks the library against the disk first instead of the held tree. */

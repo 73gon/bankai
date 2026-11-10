@@ -271,14 +271,10 @@ async def search(
 
 
 async def _identify(items: list[dict]) -> None:
-    """Each row's AniList entry, told from its name as Nyaa's are: offline, no requests."""
-    from bankai.metadata import anilist
-    from bankai.web import erai
-
-    table = await anilist.index()
-    mappings = await asyncio.to_thread(erai._load_mappings)
-    for row in items:
-        row["anilist"] = anime_mod.anilist_match(row["title"], table=table, mappings=mappings)
+    """Each row's AniList entry, told from its name as Nyaa's are."""
+    matches = await anime_mod.anilist_matches([row["title"] for row in items])
+    for row, match in zip(items, matches):
+        row["anilist"] = match
 
 
 async def description(torrent_id: str) -> str:

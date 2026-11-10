@@ -205,11 +205,14 @@ def _release_anilist_id(
     canonical: str = "",
     mappings: dict[str, Any] | None = None,
     table: Any = None,
+    published: float | None = None,
 ) -> int | None:
     """Which AniList entry a release is, without the network.
 
     Its canonical key if it was identified on AniList, else the user's choice
-    for its name, else the title index as last loaded.
+    for its name, else the title index as last loaded. ``published``: when the
+    release was uploaded -- a choice naming an entry that began airing later is
+    not this release's.
     """
     if canonical.startswith("anilist:"):
         head = canonical.split("|", 1)[0].split(":", 1)[1]
@@ -220,7 +223,7 @@ def _release_anilist_id(
     saved = (mappings if mappings is not None else _load_mappings()).get(
         _mapping_key(release_title)
     ) or {}
-    if str(saved.get("anilist_id") or "").isdigit():
+    if str(saved.get("anilist_id") or "").isdigit() and not _chosen_after(int(saved["anilist_id"]), published):
         return int(saved["anilist_id"])
     index = table if table is not None else anilist.cached_index()
     if index is None:
@@ -230,6 +233,23 @@ def _release_anilist_id(
         return None
     settled, _ = anilist.settle_in(resolution.anime, parsed[1])
     return settled.id
+
+
+def _chosen_after(anilist_id: int, published: float | None) -> bool:
+    """Whether an entry began airing more than two weeks after a release was uploaded.
+
+    Erai names a new season as plainly as the first ("Tokyo Revengers - 01"), so the choice made for
+    the new season's releases is kept under the bare name -- and took the first season's batch,
+    uploaded two years before it, for War of the Three Titans Arc (Nov 2026).
+    """
+    if not published:
+        return False
+    start = str(anilist.media(anilist_id).get("start") or "")
+    try:
+        began = datetime.fromisoformat(start[:10]).replace(tzinfo=UTC).timestamp() if len(start) >= 10 else None
+    except ValueError:
+        began = None
+    return began is not None and began > float(published) + 14 * 86400
 
 
 def _release_pairs(
@@ -3024,20 +3044,23 @@ def _has_german(path: Path) -> bool:
     return bool(has_german_subtitles(cached) or has_german_audio(cached) or german_sidecar(path))
 
 
-def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
+def _replacement_plan(key: str, info_hash: str, anilist_id: int | None = None) -> dict[str, Any]:
     """What taking this release for a review card would do.
 
     The release is one Erai-raws lists, or one held for the card itself -- a
     batch the automation did not take on its own. Without a card (``key``
     empty: downloaded straight from the Erai-raws page) the release's own name
-    says its AniList entry, and that entry's card is the one it stands for.
+    says its AniList entry, and that entry's card is the one it stands for --
+    unless the dialog picked another (``anilist_id``), for this release alone.
     """
     state = _load_state()
     releases = state.get("releases") or {}
     own = releases.get(info_hash.casefold()) or {}
     row = erai_site.lookup(info_hash)
     show_title = ""
+    published = None
     if row is not None:
+        published = row.get("published")
         name = str(row.get("name") or row.get("title") or "")
         german = "de" in (row.get("subs") or [])
         # Erai's own show title; the file name can be a short one ("Kaguya 3").
@@ -3054,8 +3077,10 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     head, _, tail = key.partition(":")
     card_aid = int(tail) if head == "anilist" and tail.isdigit() else None
     release_aid = (
-        _release_anilist_id(show_title, table=table) if show_title else None
-    ) or _release_anilist_id(name, table=table)
+        _release_anilist_id(show_title, table=table, published=published) if show_title else None
+    ) or _release_anilist_id(name, table=table, published=published)
+    if anilist_id and not card_aid:
+        release_aid = int(anilist_id)
     if card_aid and release_aid and card_aid != release_aid:
         other = table.anime.get(release_aid) if table else None
         label = other.name if other else f"AniList {release_aid}"
@@ -3110,6 +3135,8 @@ def _replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
         "german": german,
         "anilist_id": anime.id,
         "anilist_title": anime.name,
+        "anilist_year": anilist.year(anime.id),
+        "chosen": bool(anilist_id and not card_aid),
         "held": held,
         "files": replaced,
         "german_dubs_kept": dubs,
@@ -3151,10 +3178,13 @@ def _find_on_nyaa(name: str, info_hash: str) -> asyncio.Task:
     return task
 
 
-async def replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
+async def replacement_plan(key: str, info_hash: str, anilist_id: int | None = None) -> dict[str, Any]:
     """The plan, as the confirm dialog shows it; Nyaa is asked meanwhile."""
     await anilist.index()
-    plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
+    if anilist_id:
+        await anilist.ensure([int(anilist_id)], refresh=False, max_batches=1)
+        await anilist.index()
+    plan = await asyncio.to_thread(_replacement_plan, key, info_hash, anilist_id)
     _find_on_nyaa(plan["name"], plan["info_hash"])
     return {
         **{name: value for name, value in plan.items() if name not in {"held", "files"}},
@@ -3163,7 +3193,9 @@ async def replacement_plan(key: str, info_hash: str) -> dict[str, Any]:
     }
 
 
-async def replace_from_erai(key: str, info_hash: str, *, lose_german: bool = False) -> dict[str, Any]:
+async def replace_from_erai(
+    key: str, info_hash: str, *, lose_german: bool = False, anilist_id: int | None = None
+) -> dict[str, Any]:
     """Queue an Erai-raws release in place of what a review card holds.
 
     One that lists no German never replaces files that have it unless asked to
@@ -3172,7 +3204,7 @@ async def replace_from_erai(key: str, info_hash: str, *, lose_german: bool = Fal
     from bankai.torrent.qbittorrent import QBittorrentClient
 
     await anilist.index()
-    plan = await asyncio.to_thread(_replacement_plan, key, info_hash)
+    plan = await asyncio.to_thread(_replacement_plan, key, info_hash, anilist_id)
     if plan["replaces_german"] and not lose_german:
         raise ValueError(
             f"It lists no German subtitles, and would replace {plan['replaces_german']} "
@@ -3275,7 +3307,9 @@ def magnet_parts(magnet: str) -> tuple[str, str]:
     return info_hash.casefold(), name or info_hash
 
 
-async def replace_from_magnet(paths: list[str], magnet: str, *, lose_german: bool = False) -> dict[str, Any]:
+async def replace_from_magnet(
+    paths: list[str], magnet: str, *, lose_german: bool = False, missing: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Replace library episodes picked by hand with a magnet link's torrent (Replace with magnet link).
 
     The ticked files are of one library season, which may be several AniList entries (Attack on
@@ -3284,6 +3318,10 @@ async def replace_from_magnet(paths: list[str], magnet: str, *, lose_german: boo
     whichever entry that is (``--episode-map``); its other files stay out. Taken as it is, without
     the German check -- but files that can be watched in German go only when that is confirmed
     (``lose_german``). The old files go once the new ones are published, as with Replace.
+
+    ``missing``: ticked episodes the library has no file of ({anilist_id, anilist_episode,
+    season_number, episode}), filled from the same torrent: one episode on disk and ten not, one
+    batch for all eleven instead of a replace and a download (Nov 2026).
     """
     from bankai.torrent.matcher import parse_se
     from bankai.torrent.qbittorrent import QBittorrentClient
@@ -3310,6 +3348,17 @@ async def replace_from_magnet(paths: list[str], magnet: str, *, lose_german: boo
                 "path": str(path), "anilist_id": int(pairs[0][0]), "episode": int(pairs[0][1]),
                 "size": stat.st_size, "mtime": stat.st_mtime,
             })
+    from_files = len(mapping)
+    for row in missing or []:
+        try:
+            aid, number = int(row["anilist_id"]), int(row["anilist_episode"])
+            season, episode = int(row["season_number"]), int(row["episode"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("a ticked episode with no file says no AniList entry or episode") from None
+        seasons.add(season)
+        mapping.setdefault(episode, (aid, number))
+    if not mapping:
+        raise ValueError("tick the episodes to replace or download")
     if len(seasons) != 1:
         raise ValueError("pick episodes of one season at a time: a season pack is one torrent")
     german = sum(1 for row in files if _has_german(Path(row["path"])))
@@ -3370,6 +3419,7 @@ async def replace_from_magnet(paths: list[str], magnet: str, *, lose_german: boo
     return {
         "ok": True, "queued": name, "anilist_title": " + ".join(names),
         "episodes": sorted(mapping), "files_to_replace": len(files),
+        "episodes_to_fill": len(mapping) - from_files,
     }
 
 
@@ -4432,7 +4482,7 @@ async def reconcile_releases() -> dict[str, int]:
     try:
         await hold_downloads(hold=not get_settings().anime.enabled)
     except Exception as exc:
-        log.warning("Could not pause or resume the waiting anime downloads: %s", exc)
+        log.warning("Could not pause or resume the waiting anime downloads: %r", exc)
     # Its own look at the library, not one left over from an earlier pass.
     token = _DISK_INDEX.set({})
     try:

@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { Ban, Check, Download, ExternalLink, Layers, LayoutGrid, Link2, RefreshCw, RotateCcw, Rows3, Search, ShieldCheck, Subtitles, Trash2 } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { inBackground, toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AniListAnime, type AnimeReviewItem, type HeldRelease } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { AnimePoster } from '@/components/AnimePoster';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card } from '@/zon/ui/card';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Spinner } from '@/zon/ui/spinner';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 import AnimeErai from '@/pages/AnimeErai';
 import { ReplaceDialog, episodesLabel, type ReplaceCandidate } from '@/components/ReplaceDialog';
 import { UnsortedFiles } from '@/components/UnsortedFiles';
@@ -174,27 +174,24 @@ export default function AnimeReview({ blacklist = false }: { blacklist?: boolean
   }, [view]);
 
   async function chooseEntry(anime: AniListAnime) {
-    if (!entryFor?.release_title) return;
-    try {
-      const result = await api.saveAnilistMapping(entryFor.release_title, anime.anilist_id);
-      toast.success(entryFor.source_title + ' is ' + anilistName(anime) + ' · ' + result.requested + ' releases rechecking');
-      setEntryFor(null);
-      void load();
-    } catch (error: any) {
-      toast.error(error.message);
-    }
+    const target = entryFor;
+    if (!target?.release_title) return;
+    // The dialog closes at once; a toast follows the save and the recheck.
+    setEntryFor(null);
+    void inBackground(api.saveAnilistMapping(target.release_title, anime.anilist_id), {
+      loading: 'Filing ' + target.source_title + ' as ' + anilistName(anime) + '…',
+      success: (result) => target.source_title + ' is ' + anilistName(anime) + ' · ' + result.requested + ' releases rechecking',
+    }).then(() => load(), () => undefined);
   }
 
   async function link(anime: AniListAnime) {
-    if (!linkTarget) return;
-    try {
-      const result = await api.linkAnimeBlacklist(linkTarget.key, anime.anilist_id);
-      toast.success('Linked to ' + anilistName(anime) + (result.caught ? ' · ' + result.caught + ' more releases blacklisted' : ''));
-      setLinkTarget(null);
-      void load();
-    } catch (error: any) {
-      toast.error(error.message);
-    }
+    const target = linkTarget;
+    if (!target) return;
+    setLinkTarget(null);
+    void inBackground(api.linkAnimeBlacklist(target.key, anime.anilist_id), {
+      loading: 'Linking to ' + anilistName(anime) + '…',
+      success: (result) => 'Linked to ' + anilistName(anime) + (result.caught ? ' · ' + result.caught + ' more releases blacklisted' : ''),
+    }).then(() => load(), () => undefined);
   }
 
   async function decide(item: AnimeReviewItem, action: 'recheck' | 'allow_german' | 'blacklist') {

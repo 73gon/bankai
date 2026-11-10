@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, CircleStop, Play, RefreshCw, RotateCcw, Search, Trash2, X } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { inBackground, toast } from '@/lib/toast';
 import { animeQueuePath, api, recall, type AnimeQueuePage, type Job } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
@@ -11,18 +11,18 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/zon/ui/alert-dialog';
-import { Button } from '@/zon/ui/button';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Empty, EmptyActions, EmptyDescription, EmptyTitle } from '@/zon/ui/empty';
-import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/zon/ui/input-group';
-import { Spinner } from '@/zon/ui/spinner';
-import { Switch } from '@/zon/ui/switch';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+} from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Empty, EmptyActions, EmptyDescription, EmptyTitle } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Switch } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 import { AnimePoster } from '@/components/AnimePoster';
 import { formatBytes } from '@/lib/utils';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 function formatTime(value: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : '—';
@@ -150,7 +150,6 @@ export default function AnimeQueue() {
   // Ticked jobs, by id: only those on the page as it is now count.
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const pageSize = 100;
 
@@ -282,24 +281,31 @@ export default function AnimeQueue() {
     });
   }
 
-  async function deletePicked() {
+  function deletePicked() {
     const targets = pickedJobs;
-    setDeleting(true);
-    const failed: string[] = [];
-    // A few at a time: each delete may stop a process or remove a torrent.
-    for (let start = 0; start < targets.length; start += 4) {
-      const results = await Promise.allSettled(targets.slice(start, start + 4).map((job) => api.deleteJob(job.id)));
-      results.forEach((result, index) => {
-        if (result.status === 'rejected') failed.push(targets[start + index].title);
-      });
-    }
-    const removed = targets.length - failed.length;
-    if (removed) toast.success(`${removed} job${removed === 1 ? '' : 's'} deleted`);
-    if (failed.length) toast.error(`${failed.length} could not be deleted: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}`);
+    // The confirmation closes at once; a toast follows the deletes.
     setPicked(new Set());
     setConfirmDelete(false);
-    setDeleting(false);
-    await load(true);
+    const work = (async () => {
+      const failed: string[] = [];
+      // A few at a time: each delete may stop a process or remove a torrent.
+      for (let start = 0; start < targets.length; start += 4) {
+        const results = await Promise.allSettled(targets.slice(start, start + 4).map((job) => api.deleteJob(job.id)));
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') failed.push(targets[start + index].title);
+        });
+      }
+      if (failed.length === targets.length) throw new Error(`none could be deleted: ${failed.slice(0, 3).join(', ')}`);
+      return failed;
+    })();
+    void inBackground(work, {
+      loading: `Deleting ${targets.length} job${targets.length === 1 ? '' : 's'}…`,
+      success: (failed) => {
+        const removed = targets.length - failed.length;
+        return `${removed} job${removed === 1 ? '' : 's'} deleted`
+          + (failed.length ? ` · ${failed.length} could not be: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}` : '');
+      },
+    }).finally(() => void load(true)).catch(() => undefined);
   }
 
   return (
@@ -470,7 +476,7 @@ export default function AnimeQueue() {
           <span className='text-xs text-muted-foreground'>
             <span className='font-mono tabular-nums text-foreground'>{pickedJobs.length}</span> job{pickedJobs.length === 1 ? '' : 's'} selected
           </span>
-          <Button size='sm' variant='destructive' disabled={deleting} onClick={() => setConfirmDelete(true)}>
+          <Button size='sm' variant='destructive' onClick={() => setConfirmDelete(true)}>
             <Trash2 data-icon='inline-start' /> Delete
           </Button>
           <Button size='sm' variant='ghost' onClick={() => setPicked(new Set())}>
@@ -479,7 +485,7 @@ export default function AnimeQueue() {
         </div>
       )}
 
-      <AlertDialog open={confirmDelete} onOpenChange={(open) => !open && !deleting && setConfirmDelete(false)}>
+      <AlertDialog open={confirmDelete} onOpenChange={(open) => !open && setConfirmDelete(false)}>
         <AlertDialogContent size='default'>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete {pickedJobs.length} job{pickedJobs.length === 1 ? '' : 's'}?</AlertDialogTitle>
@@ -496,10 +502,10 @@ export default function AnimeQueue() {
             ))}
           </ul>
           <AlertDialogFooter>
-            <Button variant='secondary' disabled={deleting} onClick={() => setConfirmDelete(false)}>Cancel</Button>
-            <Button variant='destructive' disabled={deleting || pickedJobs.length === 0} onClick={() => void deletePicked()}>
-              {deleting ? <Spinner data-icon='inline-start' /> : <Trash2 data-icon='inline-start' />}
-              {deleting ? 'Deleting…' : 'Delete'}
+            <Button variant='secondary' onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button variant='destructive' disabled={pickedJobs.length === 0} onClick={() => deletePicked()}>
+              <Trash2 data-icon='inline-start' />
+              Delete
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

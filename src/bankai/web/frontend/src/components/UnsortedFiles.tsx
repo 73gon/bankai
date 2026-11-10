@@ -1,18 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExternalLink, FileQuestion, Link2, Search, Trash2 } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { inBackground, toast } from '@/lib/toast';
 import { api, type AniListAnime, type UnsortedFile, type UnsortedGroup, type UnsortedSuggestion } from '@/lib/api';
 import { anilistName, anilistUrl, formatLabel } from '@/lib/anilist';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { AnimePoster } from '@/components/AnimePoster';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card } from '@/zon/ui/card';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Input } from '@/zon/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -153,47 +153,42 @@ export function UnsortedFiles({ onChanged, onCount }: { onChanged?: () => void; 
       toast.error('Two files cannot be the same episode');
       return;
     }
-    setBusy(true);
-    try {
-      if (taken === null) {
+    if (taken === null) {
+      // Asked in the dialog: whether the library has these episodes already is the dialog's question.
+      setBusy(true);
+      try {
         const check = await api.checkUnsorted(entry.anilist_id, values);
         if (check.taken.length) {
           // Asked once: the button now says it replaces them.
           setTaken(check.taken);
           return;
         }
+      } catch (error: any) {
+        toast.error(error.message);
+        return;
+      } finally {
+        setBusy(false);
       }
-      const ids = target.files.map((file) => file.id);
-      const result = await api.matchUnsorted(ids, entry.anilist_id, values, Boolean(taken?.length), `Match ${ids.length} files to ${entry.title}`);
-      toast.success(
-        result.filed + ' file' + (result.filed === 1 ? '' : 's') + ' matched to ' + entry.title
-        + (result.replaced ? ' · ' + result.replaced + ' replaced' : '') + '; they are in the library now',
-      );
-      setMatching(null);
-      await load();
-      onChanged?.();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setBusy(false);
     }
+    // The filing itself goes on behind a toast; the dialog closes.
+    const ids = target.files.map((file) => file.id);
+    const replace = Boolean(taken?.length);
+    setMatching(null);
+    void inBackground(api.matchUnsorted(ids, entry.anilist_id, values, replace, `Match ${ids.length} files to ${entry.title}`), {
+      loading: 'Filing ' + ids.length + ' file' + (ids.length === 1 ? '' : 's') + ' as ' + entry.title + '…',
+      success: (result) => result.filed + ' file' + (result.filed === 1 ? '' : 's') + ' matched to ' + entry.title
+        + (result.replaced ? ' · ' + result.replaced + ' replaced' : '') + '; they are in the library now',
+    }).then(() => { void load(); onChanged?.(); }, () => undefined);
   }
 
   async function discard() {
     const target = discarding;
     if (!target) return;
-    setBusy(true);
-    try {
-      const result = await api.discardUnsorted(target.files.map((file) => file.id));
-      toast.success(result.deleted + ' file' + (result.deleted === 1 ? '' : 's') + ' deleted');
-      setDiscarding(null);
-      await load();
-      onChanged?.();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setBusy(false);
-    }
+    setDiscarding(null);
+    void inBackground(api.discardUnsorted(target.files.map((file) => file.id)), {
+      loading: 'Deleting ' + target.files.length + ' file' + (target.files.length === 1 ? '' : 's') + '…',
+      success: (result) => result.deleted + ' file' + (result.deleted === 1 ? '' : 's') + ' deleted',
+    }).then(() => { void load(); onChanged?.(); }, () => undefined);
   }
 
   if (!groups.length) return null;
@@ -416,7 +411,7 @@ export function UnsortedFiles({ onChanged, onCount }: { onChanged?: () => void; 
             <Button variant='secondary' onClick={() => setMatching(null)} disabled={busy}>Cancel</Button>
             <Button onClick={() => void match()} disabled={busy || !entry}>
               <Link2 data-icon='inline-start' />
-              {busy ? 'Matching…' : !entry ? 'Pick an entry' : taken?.length ? 'Replace and match' : 'Match to ' + entry.title}
+              {busy ? 'Checking…' : !entry ? 'Pick an entry' : taken?.length ? 'Replace and match' : 'Match to ' + entry.title}
             </Button>
           </DialogFooter>
         </DialogContent>

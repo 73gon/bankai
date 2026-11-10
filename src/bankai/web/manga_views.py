@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -288,6 +289,88 @@ def _place(rows: list[dict[str, Any]], apart: list[tuple[tuple[str, float], dict
     return placed
 
 
+# Missing numbers listed for a move's choices at most: a long series lacks hundreds of chapters.
+_PLAN_MISSING = 500
+
+
+def move_plan(from_id: int, names: list[str], to_id: int) -> dict[str, Any]:
+    """Where books moved into a series (or renumbered in their own) would go: each file's
+    number now and a suggested volume or chapter of the target, with what the target has.
+
+    A number is kept where it fits the target: whole, from 1, within AniList's count when
+    there is one, and not on disk there already. Anything else -- Jujutsu Kaisen's "Vol 00"
+    in Jujutsu Kaisen 0, its bonus chapter filed as "Chapter 0168.1" -- takes the target's
+    first missing number of its kind, in the files' order, else the one after its last.
+    """
+    entry = manga_meta.media(to_id)
+    novel = manga_meta.kind_of(entry.get("format")) == "novel"
+    same = int(from_id) == int(to_id)
+    moving = set(names)
+    present = [name for name in manga_library.stats(to_id)["names"] if not (same and name in moving)]
+    owned: dict[str, set[float]] = {"volume": set(), "chapter": set()}
+    for name in present:
+        number = manga_names.file_number(name)
+        if number:
+            owned[number[0]].add(number[1])
+    shape = breakdown(to_id) if manga_library.folder_of(to_id) is not None else {"unit": "volume" if novel else "chapter", "rows": [], "volumes": []}
+    missing: dict[str, list[int]] = {"volume": [], "chapter": []}
+    for row in shape["rows"]:
+        if row["kind"] == "missing":
+            missing[shape["unit"]].extend(range(int(row["from"]), int(row["to"]) + 1))
+    missing["volume"].extend(row["volume"] for row in shape.get("volumes") or [] if row["state"] == "missing")
+    counts = {"volume": int(entry.get("volumes") or 0) or None, "chapter": int(entry.get("chapters") or 0) or None}
+    for kind in missing:
+        # Renumbered in place, a file's own number is free again; nothing the folder holds is missing.
+        if same:
+            freed = {number[1] for name in names if (number := manga_names.file_number(name)) and number[0] == kind}
+            missing[kind].extend(int(value) for value in freed if value == int(value) and value >= 1 and (not counts[kind] or value <= counts[kind]))
+        if not missing[kind] and counts[kind]:
+            missing[kind] = list(range(1, counts[kind] + 1))
+        missing[kind] = sorted({value for value in missing[kind] if value not in owned[kind] and (not counts[kind] or value <= counts[kind])})
+
+    def fits(kind: str, value: float) -> bool:
+        if value < 1 or value in owned[kind] or value in taken[kind]:
+            return False
+        return not counts[kind] or (value == int(value) and value <= counts[kind])
+
+    taken: dict[str, set[float]] = {"volume": set(), "chapter": set()}
+    parsed = {name: manga_names.file_number(name) for name in names}
+    order = sorted(names, key=lambda name: (parsed[name] is None, parsed[name][1] if parsed[name] else 0, name))
+    # Books whose own number fits keep it first; the rest then take the gaps left, in order.
+    chosen: dict[str, tuple[str, float]] = {}
+    for name in order:
+        number = parsed[name]
+        if number and fits(*number):
+            chosen[name] = number
+            taken[number[0]].add(number[1])
+    files = []
+    for name in order:
+        number = parsed[name]
+        if name not in chosen:
+            kind = number[0] if number else ("volume" if novel or counts["volume"] else "chapter")
+            spare = [slot for slot in missing[kind] if slot not in taken[kind]]
+            value = float(spare[0]) if spare else float(int(max([*owned[kind], *taken[kind]], default=0)) + 1)
+            taken[kind].add(value)
+            chosen[name] = (kind, value)
+        kind, value = chosen[name]
+        extension = manga_names.library_extension(Path(name).suffix)
+        files.append({
+            "name": name,
+            "kind": number[0] if number else None,
+            "number": number[1] if number else None,
+            "suggested": {"kind": kind, "number": value, "name": manga_names.target_name(kind, value, extension)},
+        })
+    return {
+        "anilist_id": int(to_id),
+        "same": same,
+        "unit": "volume" if novel else "chapter",
+        "counts": counts,
+        "missing": {kind: values[:_PLAN_MISSING] for kind, values in missing.items()},
+        "names": present,
+        "files": files,
+    }
+
+
 def warm(*, budget: int = 400) -> int:
     """Read the pages' names of library archives not read yet, a few hundred a pass; then what
     each series' folder holds, so the review and the drawer answer at once."""
@@ -480,29 +563,35 @@ async def graph(anilist_id: int) -> dict[str, Any]:
 
 async def series_detail(anilist_id: int) -> dict[str, Any]:
     await manga_meta.ensure([int(anilist_id)], refresh=False)
-    entry = manga_meta.media(anilist_id)
-    followed = manga_series.followed()
-    links = manga_series.anime_links()
-    rows = [
-        (info_hash, row) for info_hash, row in releases_mod.releases().items()
-        if int(row.get("anilist_id") or 0) == int(anilist_id)
-    ]
-    found = releases_mod.holdings(anilist_id)
-    views = sorted((releases_mod.release_view(info_hash, row, found) for info_hash, row in rows), key=lambda view: -view["found_at"])
-    return {
-        **_card(anilist_id, followed=followed, links=links, on_disk=manga_library.series(), waiting=_waiting()),
-        "description": entry.get("description"),
-        "genres": entry.get("genres") or [],
-        "authors": entry.get("authors") or [],
-        "banner": entry.get("banner"),
-        "country": entry.get("country"),
-        "files": manga_library.files(anilist_id),
-        "releases": views,
-        "policy": manga_series.policies().get(int(anilist_id)),
-        "breakdown": await asyncio.to_thread(breakdown, anilist_id),
-        "graph": await graph(anilist_id),
-        "collection": _collection_of(anilist_id),
-    }
+
+    def build() -> dict[str, Any]:
+        # The folder's files over 9p, the state files, a collection refreshed and written: off the
+        # event loop, where they held every other request while they ran (Nov 2026).
+        entry = manga_meta.media(anilist_id)
+        followed = manga_series.followed()
+        links = manga_series.anime_links()
+        rows = [
+            (info_hash, row) for info_hash, row in releases_mod.releases().items()
+            if int(row.get("anilist_id") or 0) == int(anilist_id)
+        ]
+        found = releases_mod.holdings(anilist_id)
+        views = sorted((releases_mod.release_view(info_hash, row, found) for info_hash, row in rows), key=lambda view: -view["found_at"])
+        return {
+            **_card(anilist_id, followed=followed, links=links, on_disk=manga_library.series(), waiting=_waiting()),
+            "description": entry.get("description"),
+            "genres": entry.get("genres") or [],
+            "authors": entry.get("authors") or [],
+            "banner": entry.get("banner"),
+            "country": entry.get("country"),
+            "files": manga_library.files(anilist_id),
+            "releases": views,
+            "policy": manga_series.policies().get(int(anilist_id)),
+            "breakdown": breakdown(anilist_id),
+            "collection": _collection_of(anilist_id),
+        }
+
+    detail = await asyncio.to_thread(build)
+    return {**detail, "graph": await graph(anilist_id)}
 
 
 async def search(query: str) -> list[dict[str, Any]]:

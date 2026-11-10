@@ -70,13 +70,13 @@ import { toast } from '@/lib/toast';
 import { api, type CollectionGraph as Graph, type CollectionNode, type LinkedManga } from '@/lib/api';
 import { anilistUrl, formatLabel } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Popover, PopoverContent, PopoverTrigger } from '@/zon/ui/popover';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Spinner } from '@/zon/ui/spinner';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Popover, PopoverContent, PopoverTrigger } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
 
 // One entry's card: a poster with its title under it.
 const CARD_W = 208;
@@ -111,9 +111,16 @@ function typeOf(node: CollectionNode) {
   return TYPES[format === 'TV_SHORT' ? 'TV' : format] ?? OTHER_TYPE;
 }
 
-type EntryData = { node: CollectionNode; selected: boolean; /** Where the unsaved arrangement files it, when that differs. */ draft?: string | null };
-type FrameData = { name: string; width: number; height: number; tone: string; own: boolean };
-type MangaData = { item: LinkedManga };
+type EntryData = {
+  node: CollectionNode;
+  selected: boolean;
+  /** Where the unsaved arrangement files it, when that differs. */
+  draft?: string | null;
+  /** What it is to the entry it hangs off ("side story", "summary"): said on the card, not on the line. */
+  relation?: string | null;
+};
+type FrameData = { name: string; width: number; height: number; tone: string; own: boolean; /** The whole heading, in place of "Collection: <name>". */ heading?: string };
+type MangaData = { item: LinkedManga; /** The anime it is linked to, said on the card in place of a line to it. */ anime?: string };
 type EntryNode = Node<EntryData, 'entry'>;
 type MangaNode = Node<MangaData, 'manga'>;
 /** What can be dragged on the canvas: entries and manga; frames follow their entries. */
@@ -216,7 +223,14 @@ function sequelOrder(ids: number[], sequels: Map<number, number[]>, byId: Map<nu
   return { order: done, layer };
 }
 
-type Layout = { positions: Map<number, Point>; spine: Set<number>; frames: { id: number; name: string; own: boolean }[] };
+type Layout = {
+  positions: Map<number, Point>;
+  spine: Set<number>;
+  frames: { id: number; name: string; own: boolean }[];
+  /** Each entry off the main line: the one it hangs off, and what it is to it. */
+  parent: Map<number, number>;
+  relation: Map<number, string>;
+};
 
 /**
  * Where each entry goes.
@@ -403,7 +417,12 @@ function layout(graph: Graph): Layout {
     }
     frames.push({ id: collection, name: byId.get(ids[0])!.collection_name ?? 'Another collection', own: false });
   }
-  return { positions, spine, frames };
+  const relation = new Map<number, string>();
+  for (const [child, from] of parent) {
+    const link = graph.edges.find((edge) => (edge.from === from && edge.to === child) || (edge.from === child && edge.to === from));
+    if (link) relation.set(child, link.label);
+  }
+  return { positions, spine, frames, parent, relation };
 }
 
 /**
@@ -496,6 +515,7 @@ function EntryCard({ data }: NodeProps<EntryNode>) {
           <span className={cn('rounded border px-1 py-px text-[0.6rem] font-medium uppercase tracking-wide', kind.chip)}>{kind.label}</span>
           <span className='truncate font-mono text-[0.64rem] text-muted-foreground'>{meta(node)}</span>
         </span>
+        {data.relation && <span className='truncate text-[0.7rem] text-foreground-soft'>{data.relation[0].toUpperCase() + data.relation.slice(1)}</span>}
         <span className='mt-auto flex flex-wrap gap-1'>
           {!node.owned && <Slashed icon={Download} label='Not downloaded' />}
           {!node.in_collection && node.collection_id === null && (
@@ -529,7 +549,7 @@ function CollectionFrame({ data }: NodeProps<Node<FrameData, 'frame'>>) {
     >
       <span className='flex items-center gap-2 truncate px-4 pt-2.5 text-[22px] font-semibold leading-7 text-foreground'>
         <span className='size-3 shrink-0 rounded-[4px]' style={{ background: data.tone }} aria-hidden='true' />
-        {data.own ? 'This collection' : 'Collection'}: {data.name}
+        {data.heading ?? `${data.own ? 'This collection' : 'Collection'}: ${data.name}`}
       </span>
     </div>
   );
@@ -567,6 +587,7 @@ function MangaCard({ data }: NodeProps<MangaNode>) {
           {item.year && <span className='truncate font-mono text-[0.64rem] text-muted-foreground'>{item.year}</span>}
         </span>
         <span className={cn('truncate text-[0.7rem]', state.tone)}>{state.label}</span>
+        {data.anime && <span className='line-clamp-2 text-[0.68rem] leading-snug text-fuchsia-200/80'>{data.item.relation.toLowerCase().replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())} of {data.anime}</span>}
         <span className='mt-auto flex items-center gap-1 text-[0.7rem] text-fuchsia-200'>
           <BookOpen className='size-3.5 shrink-0' aria-hidden='true' /> Open in the manga library
         </span>
@@ -643,14 +664,15 @@ function Canvas({
   onClear: () => void;
   onOpenManga: (id: number) => void;
 }) {
-  const { positions, spine, frames } = useMemo(() => layout(graph), [graph]);
+  const { positions, spine, frames, parent, relation } = useMemo(() => layout(graph), [graph]);
+  const titleOf = useMemo(() => new Map(graph.nodes.map((node) => [node.anilist_id, node.title])), [graph]);
   const mangaAt = useMemo(() => mangaLayout(manga, positions), [manga, positions]);
   const [nodes, setNodes, onNodesChange] = useNodesState<Movable>(
     graph.nodes.map((node) => ({
       id: String(node.anilist_id),
       type: 'entry' as const,
       position: positions.get(node.anilist_id) ?? { x: 0, y: 0 },
-      data: { node, selected: false },
+      data: { node, selected: false, relation: spine.has(node.anilist_id) ? null : relation.get(node.anilist_id) ?? null },
     })),
   );
   // The manga arrive after the graph: their cards join the canvas then.
@@ -661,14 +683,14 @@ function Canvas({
         id: mangaNodeId(entry.item.anilist_id),
         type: 'manga',
         position: mangaAt.get(entry.item.anilist_id) ?? { x: 0, y: 0 },
-        data: { item: entry.item },
+        data: { item: entry.item, anime: titleOf.get(entry.anime) },
       })),
     ]);
-  }, [manga, mangaAt, setNodes]);
+  }, [manga, mangaAt, setNodes, titleOf]);
   // Each frame drawn round wherever its cards are now, so it follows them when dragged.
   const shown = useMemo<FlowNode[]>(() => {
     const entries = nodes.filter((item): item is EntryNode => item.type === 'entry');
-    const boxes = frames.flatMap((frame, index) => {
+    const boxes: Node<FrameData, 'frame'>[] = frames.flatMap((frame, index) => {
       const members = entries.filter((item) => (frame.own ? item.data.node.in_collection : !item.data.node.in_collection && item.data.node.collection_id === frame.id));
       if (!members.length) return [];
       const left = Math.min(...members.map((item) => item.position.x)) - FRAME_PAD;
@@ -694,40 +716,41 @@ function Canvas({
         zIndex: -1,
       }];
     });
+    // The manga and light novels framed together on the left, no line to each anime: those crossed
+    // every row between (each card says its anime instead).
+    const books = nodes.filter((item) => item.type === 'manga');
+    if (books.length) {
+      const left = Math.min(...books.map((item) => item.position.x)) - FRAME_PAD;
+      const top = Math.min(...books.map((item) => item.position.y)) - FRAME_PAD - FRAME_HEAD;
+      const right = Math.max(...books.map((item) => item.position.x + CARD_W)) + FRAME_PAD;
+      const bottom = Math.max(...books.map((item) => item.position.y + CARD_H)) + FRAME_PAD;
+      boxes.push({
+        id: 'frame-manga',
+        type: 'frame' as const,
+        position: { x: left, y: top },
+        width: right - left,
+        height: bottom - top,
+        data: { name: '', heading: 'Manga & light novels', width: right - left, height: bottom - top, own: false, tone: MANGA_TONE },
+        draggable: false,
+        selectable: false,
+        zIndex: -1,
+      });
+    }
     return [...boxes, ...nodes.map((item): Movable => (item.type === 'entry' ? {
       ...item,
       data: { ...item.data, selected: selected.includes(Number(item.id)), draft: drafts.get(Number(item.id)) ?? null },
     } : item))];
   }, [frames, nodes, selected, drafts]);
-  // Each manga joined to its entry by a line in the manga's own colour, pointing at the anime made from it.
-  const mangaEdges = useMemo<Edge[]>(() => manga.map((entry) => {
-    const from = mangaAt.get(entry.item.anilist_id) ?? { x: 0, y: 0 };
-    const to = positions.get(entry.anime) ?? { x: 0, y: 0 };
-    const [sourceHandle, targetHandle] = joins(from, to);
-    const relation = entry.item.relation.toLowerCase().replace(/_/g, ' ');
-    return {
-      id: `${mangaNodeId(entry.item.anilist_id)}-${entry.anime}`,
-      source: mangaNodeId(entry.item.anilist_id),
-      target: String(entry.anime),
-      sourceHandle,
-      targetHandle,
-      type: Math.abs(from.y - to.y) < 1 || Math.abs(from.x - to.x) < 1 ? 'straight' : 'smoothstep',
-      label: relation,
-      markerEnd: relation === 'alternative' ? undefined : { type: MarkerType.ArrowClosed, width: 18, height: 18, color: MANGA_TONE },
-      style: { stroke: MANGA_TONE, strokeWidth: 2.5 },
-      labelStyle: { fill: MANGA_TONE, fontSize: 11 },
-      labelBgStyle: { fill: 'var(--card)' },
-      labelBgPadding: [6, 3] as [number, number],
-      labelBgBorderRadius: 6,
-      zIndex: 0,
-    };
-  }), [manga, mangaAt, positions]);
-  const edges = useMemo<Edge[]>(() => [...mangaEdges, ...graph.edges.map((item) => {
+  // Lines without labels -- stacked on one another they could not be read; a side entry says on its
+  // card what it is. Links the layout does not hang anything by (between two side entries, across)
+  // are faint.
+  const edges = useMemo<Edge[]>(() => graph.edges.map((item) => {
     const from = positions.get(item.from) ?? { x: 0, y: 0 };
     const to = positions.get(item.to) ?? { x: 0, y: 0 };
     const [sourceHandle, targetHandle] = joins(from, to);
     const main = item.label === 'sequel' && spine.has(item.from) && spine.has(item.to);
     const sequel = item.label === 'sequel';
+    const tree = main || parent.get(item.to) === item.from || parent.get(item.from) === item.to;
     const color = main ? 'var(--foreground)' : sequel ? 'var(--foreground-soft)' : 'var(--muted-foreground)';
     return {
       id: `${item.from}-${item.to}-${item.label}`,
@@ -737,22 +760,19 @@ function Canvas({
       targetHandle,
       // Straight when the cards line up, along a row or down a column; round the corner otherwise.
       type: Math.abs(from.y - to.y) < 1 || Math.abs(from.x - to.x) < 1 ? 'straight' : 'smoothstep',
-      label: main ? undefined : item.label,
-      markerEnd: sequel || item.label === 'side story' || item.label === 'summary'
+      markerEnd: tree && (sequel || item.label === 'side story' || item.label === 'summary')
         ? { type: MarkerType.ArrowClosed, width: 18, height: 18, color }
         : undefined,
       style: main
         ? { stroke: color, strokeWidth: 3.5 }
-        : sequel
-          ? { stroke: color, strokeWidth: 2.5 }
-          : { stroke: color, strokeWidth: 1.5, strokeDasharray: '6 5' },
-      labelStyle: { fill: 'var(--foreground-soft)', fontSize: 11 },
-      labelBgStyle: { fill: 'var(--card)' },
-      labelBgPadding: [6, 3] as [number, number],
-      labelBgBorderRadius: 6,
+        : !tree
+          ? { stroke: color, strokeWidth: 1, strokeDasharray: '4 6', opacity: 0.35 }
+          : sequel
+            ? { stroke: color, strokeWidth: 2.5 }
+            : { stroke: color, strokeWidth: 1.5, strokeDasharray: '6 5' },
       zIndex: main ? 1 : 0,
     };
-  })], [graph, positions, spine, mangaEdges]);
+  }), [graph, positions, spine, parent]);
 
   return (
     <ReactFlow
@@ -1586,7 +1606,7 @@ export function CollectionGraph({
           <DialogDescription>
             {rootAid !== null
               ? 'This entry is in no collection. Its related entries are around it; move it into one of their collections.'
-              : 'The main line runs left to right, sequel collections continuing it; side stories, recaps and movies stand above and below the entry they belong to. Each collection is shaded; the manga and light novels stand on the left.'}
+              : 'The main line runs left to right, sequel collections continuing it; side stories, recaps and movies stand above and below the entry they belong to. Each collection is shaded; a side entry says on its card what it is. The manga and light novels stand framed on the left, each saying its anime.'}
           </DialogDescription>
         </DialogHeader>
         <div className='flex min-h-0 flex-1 flex-col'>

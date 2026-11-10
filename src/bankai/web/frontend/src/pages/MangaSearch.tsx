@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { BookOpen, Download, ExternalLink, Search, Star } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { inBackground, toast } from '@/lib/toast';
 import { api, type MangaEntry, type MangaSearchRow } from '@/lib/api';
 import { anilistName } from '@/lib/anilist';
 import { formatBytes } from '@/lib/utils';
@@ -8,11 +8,11 @@ import { MangaPickDialog } from '@/components/MangaPickDialog';
 import { StatusTag } from '@/components/status-tag';
 import { TruncatedText } from '@/components/TruncatedText';
 import { releaseSpan } from '@/pages/MangaReview';
-import { Button } from '@/zon/ui/button';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Spinner } from '@/zon/ui/spinner';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { Button } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
 
 const KNOWN: Record<string, string> = {
   review: 'In the review',
@@ -133,15 +133,13 @@ export default function MangaSearch() {
         action='Download'
         onClose={() => setDownloadFor(null)}
         onPick={async (entry: MangaEntry) => {
-          if (!downloadFor) return;
-          try {
-            await api.downloadManga(downloadFor, entry.anilist_id);
-            toast.success('Downloading ' + downloadFor.title);
-            setRows((current) => current.map((row) => row.info_hash === downloadFor.info_hash ? { ...row, status: 'queued' } : row));
-            setDownloadFor(null);
-          } catch (error: any) {
-            toast.error(error.message);
-          }
+          const release = downloadFor;
+          if (!release) return;
+          setDownloadFor(null);
+          void inBackground(api.downloadManga(release, entry.anilist_id), {
+            loading: 'Queuing ' + release.title + '…',
+            success: 'Downloading ' + release.title,
+          }).then(() => setRows((current) => current.map((row) => row.info_hash === release.info_hash ? { ...row, status: 'queued' } : row)), () => undefined);
         }}
       />
       <MangaPickDialog
@@ -151,13 +149,11 @@ export default function MangaSearch() {
         action='Follow'
         onClose={() => setFollow(null)}
         onPick={async (entry: MangaEntry) => {
-          try {
-            await api.followMangaSeries(entry.anilist_id);
-            toast.success('Following ' + anilistName(entry));
-            setFollow(null);
-          } catch (error: any) {
-            toast.error(error.message);
-          }
+          setFollow(null);
+          void inBackground(api.followMangaSeries(entry.anilist_id), {
+            loading: 'Following ' + anilistName(entry) + '…',
+            success: 'Following ' + anilistName(entry),
+          }).catch(() => undefined);
         }}
       />
     </div>

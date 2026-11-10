@@ -12,9 +12,10 @@ episode itself instead, three ways:
   dates -- the AniList entry's start against TMDB's episodes -- since TMDB often
   keeps a show as one long season (Re:Zero's 85 episodes) where AniList has five
   entries, and Fribb's list then names season 1 for all of them.
-- **Length.** The file's duration against TMDB's runtime of that episode (else
-  AniList's minutes per episode): a recap, an OVA or a double-length premiere
-  filed as a plain episode stands out.
+- **Length.** The picture's length against TMDB's runtime of that episode (else
+  AniList's minutes per episode; ``judge_length``): a recap, an OVA, a
+  double-length premiere filed as a plain episode, or half of one, stands out --
+  and is shown on its own, whatever the picture says (``length_off``).
 - **Count.** Two files on one episode, an episode past the entry's end, two files
   whose pictures are the same episode.
 
@@ -49,6 +50,7 @@ import httpx
 
 from bankai.cli import bgjobs
 from bankai.logging import get_logger
+from bankai.web import stopping
 
 log = get_logger(__name__)
 
@@ -74,6 +76,8 @@ WHOLE_SHOW = 400
 WINDOW = 80
 # Length: off by more than this share and more than 3 minutes.
 SHORT, LONG = 0.75, 1.35
+# AniList gives one length for every episode of an entry (an average): only far off counts.
+LOOSE_SHORT, LOOSE_LONG = 0.5, 2.0
 _TTL = 30 * 86400
 _LOCK = threading.RLock()
 
@@ -412,6 +416,9 @@ def frames(path: Path, *, enough: Callable[[bytes], bool] | None = None) -> list
     try:
         assert process.stdout is not None
         while True:
+            if stopping.requested():
+                # The process is stopping: this file's reading ends here and is not judged.
+                raise stopping.Stopped
             raw = process.stdout.read(SIZE)
             if len(raw) < SIZE:
                 break
@@ -426,6 +433,8 @@ def frames(path: Path, *, enough: Callable[[bytes], bool] | None = None) -> list
             except OSError:
                 pass
         process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
     return out
 
 
@@ -556,6 +565,83 @@ def _duration(path: Path) -> float | None:
         return None
 
 
+def _picture_seconds(path: Path, container: float) -> float | None:
+    """Where the picture ends: its last frames, read from the last keyframe before its start
+    (a picture shorter than the container is found by reading from the top)."""
+    from bankai.web import track_cleanup
+
+    end = track_cleanup._picture_end(path, max(0.0, container - 60.0))
+    return end if end is not None else track_cleanup._picture_end(path, 0.0)
+
+
+def _off(seconds: float, minutes: float, short: float, long: float) -> bool:
+    ratio = seconds / (minutes * 60)
+    return (ratio < short or ratio > long) and abs(seconds - minutes * 60) > 180
+
+
+def judge_length(
+    seconds: float | None,
+    wanted: list[dict | None],
+    episodes: list[dict],
+    anilist_minutes: object,
+    pairs: list[tuple[int, int]],
+) -> dict[str, Any] | None:
+    """The file's length against what its episode runs, and whether it fits.
+
+    TMDB has each episode's own runtime, AniList one length for all of an entry's. A file off from
+    TMDB's that fits AniList's is taken as fitting (TMDB counts some specials as one: Kaguya-sama's
+    "Stairway to Adulthood" is AniList's two episodes of 26 minutes, TMDB's one of 53), unless TMDB
+    gives this episode another length than its season's others (Re:Zero's double first episode, 50
+    minutes among 25s: the file of it held only its second half, Nov 2026). An episode 0 is a
+    prologue or recap of any length: not judged.
+    """
+    if not seconds or any(number == 0 for _aid, number in pairs):
+        return None
+    tmdb = float(sum(e["runtime"] for e in wanted)) if wanted and all(e and e.get("runtime") for e in wanted) else 0.0  # type: ignore[index]
+    try:
+        per_episode = float(anilist_minutes or 0)
+    except (TypeError, ValueError):
+        per_episode = 0.0
+    anilist_total = per_episode * len(pairs)
+    if not tmdb and not anilist_total:
+        return None
+    row: dict[str, Any] = {"seconds": round(seconds)}
+    if tmdb:
+        row.update(expected_minutes=tmdb, source="TMDB", ok=not _off(seconds, tmdb, SHORT, LONG))
+        if not row["ok"] and anilist_total and not _off(seconds, anilist_total, LOOSE_SHORT, LOOSE_LONG):
+            if not _unusual(wanted, episodes):
+                row.update(ok=True, fits="AniList", anilist_minutes=anilist_total)
+        return row
+    row.update(expected_minutes=anilist_total, source="AniList", ok=not _off(seconds, anilist_total, LOOSE_SHORT, LOOSE_LONG))
+    return row
+
+
+def _unusual(wanted: list[dict | None], episodes: list[dict]) -> bool:
+    """Does TMDB give these episodes another length than the rest of their season (not specials,
+    whose lengths vary anyway)?"""
+    for episode in wanted:
+        if not episode or not episode.get("season"):
+            return False
+        others = sorted(
+            float(e["runtime"]) for e in episodes
+            if e.get("season") == episode["season"] and e.get("runtime") and e is not episode
+        )
+        if len(others) < 3:
+            return False
+        typical = others[len(others) // 2]
+        if not _off(float(episode["runtime"]) * 60, typical, SHORT, LONG):
+            return False
+    return True
+
+
+def length_off(result: dict[str, Any]) -> str | None:
+    """A file's length that does not fit its episode, in words; None when it fits or is unknown."""
+    length = result.get("length")
+    if not length or length.get("ok", True):
+        return None
+    return f"runs {round(length['seconds'] / 60)} min, {length['source']} says {length['expected_minutes']:g}"
+
+
 def _tmdb_show(aid: int) -> int | None:
     from bankai.metadata import animelists
 
@@ -591,17 +677,15 @@ def check(rel: str, pairs: list[tuple[int, int]], *, http: httpx.Client | None =
     wanted = [expected(a, n, episodes) for a, n in pairs] if episodes else []
     # Length.
     seconds = _duration(path)
-    minutes = 0.0
-    if wanted and all(e and e.get("runtime") for e in wanted):
-        minutes, source = float(sum(e["runtime"] for e in wanted)), "TMDB"  # type: ignore[index]
-    elif anilist.media(aid).get("duration"):
-        minutes, source = float(anilist.media(aid)["duration"]) * len(pairs), "AniList"
-    if seconds and minutes:
-        ratio = seconds / (minutes * 60)
-        result["length"] = {
-            "seconds": round(seconds), "expected_minutes": minutes, "source": source,
-            "ok": not ((ratio < SHORT or ratio > LONG) and abs(seconds - minutes * 60) > 180),
-        }
+    length = judge_length(seconds, wanted, episodes, anilist.media(aid).get("duration"), pairs)
+    if length is not None and not length["ok"] and seconds:
+        # A track running past the picture (a late subtitle line) makes the container longer:
+        # SPY x FAMILY S02E11 and Black Clover 162 "ran" 60 minutes of a 24-minute picture.
+        picture_end = _picture_seconds(path, seconds)
+        if picture_end and abs(picture_end - seconds) > 60:
+            length = judge_length(picture_end, wanted, episodes, anilist.media(aid).get("duration"), pairs)
+    if length is not None:
+        result["length"] = length
     # Picture.
     target = wanted[0] if wanted else None
     if not episodes:
@@ -715,7 +799,7 @@ def annotate(episodes: list[dict]) -> dict[str, int]:
         if rel and row.get("anilist_id") is not None and row.get("anilist_episode") is not None:
             rows[rel] = [(int(row["anilist_id"]), int(row["anilist_episode"]))]
     extra = issues(rows, found)
-    counts = {"verify_checked": 0, "verify_wrong": 0, "verify_unsure": 0, "verify_files": len(rows)}
+    counts = {"verify_checked": 0, "verify_wrong": 0, "verify_unsure": 0, "verify_length": 0, "verify_files": len(rows)}
     for row in episodes:
         rel = anime_files.key(row["path"]) if row.get("path") and not row.get("missing") else None
         if rel not in rows:
@@ -725,11 +809,15 @@ def annotate(episodes: list[dict]) -> dict[str, int]:
         confirmed = rel in sure and _same(sure[rel], row.get("size"), row.get("mtime"))
         if not current and not confirmed and not extra.get(rel):
             continue
+        result = result or {}
         shown = dict(result) if current else {"verdict": "unchecked"}
         if current:
             # Today's rules over the verdict saved with the result.
             shown["verdict"] = verdict(result)
-        notes = extra.get(rel) or []
+        notes = list(extra.get(rel) or [])
+        off = length_off(result) if current else None
+        if off:
+            notes.append(off)
         if confirmed:
             # The user's word over the check's: its findings stay readable, the verdict is theirs.
             shown.update(verdict="confirmed", confirmed_at=sure[rel].get("at"))
@@ -745,6 +833,7 @@ def annotate(episodes: list[dict]) -> dict[str, int]:
             counts["verify_checked"] += 1
         counts["verify_wrong"] += shown["verdict"] == "wrong"
         counts["verify_unsure"] += shown["verdict"] == "unsure"
+        counts["verify_length"] += bool(off) and shown["verdict"] != "wrong"
     return counts
 
 
@@ -796,7 +885,7 @@ def run(*, seconds: float = 240.0) -> dict[str, int]:
     started = time.monotonic()
     with _client() as http:
         for rel in todo:
-            if time.monotonic() - started > seconds:
+            if time.monotonic() - started > seconds or stopping.requested():
                 break
             path = anime_files.anime_root() / rel
             try:
@@ -807,6 +896,8 @@ def run(*, seconds: float = 240.0) -> dict[str, int]:
             progress.update(file=rel, at=time.time())
             try:
                 result = check(rel, [tuple(pair) for pair in index[rel]], http=http)  # type: ignore[misc]
+            except stopping.Stopped:
+                break
             except Exception as exc:  # noqa: BLE001 - one bad file never stops the pass
                 log.warning("verify %s: %s", rel, exc)
                 failed += 1

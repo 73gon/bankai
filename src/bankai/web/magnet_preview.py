@@ -67,8 +67,18 @@ def known(info_hash: str) -> dict[str, Any] | None:
     return out or None
 
 
-def plan(files: list[dict[str, Any]], paths: list[str], scope: str) -> list[dict[str, Any]]:
-    """Each of the torrent's files with the ticked file it would replace (``replaces``), or why it stays out."""
+def missing_label(row: dict[str, Any]) -> str:
+    """How a ticked episode with no file is named in the preview: "S01E05"."""
+    return f"S{int(row['season_number']):02d}E{int(row['episode']):02d}"
+
+
+def plan(
+    files: list[dict[str, Any]], paths: list[str], scope: str, missing: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Each of the torrent's files with the ticked file it would replace (``replaces``), or why it stays out.
+
+    ``missing``: ticked anime episodes with no file ({season_number, episode}, the library's numbers):
+    a torrent file of that episode fills it (``fills``), nothing replaced."""
     from bankai.processor.anime import episode_number
     from bankai.torrent.matcher import parse_se
     from bankai.web import direct
@@ -98,6 +108,12 @@ def plan(files: list[dict[str, Any]], paths: list[str], scope: str) -> list[dict
             if span:
                 for number in range(span[1], (span[2] or span[1]) + 1):
                     wanted[(span[0], number)] = name
+    filling: set[str] = set()
+    if scope == "anime":
+        for row in missing or []:
+            label = missing_label(row)
+            wanted.setdefault(int(row["episode"]), label)
+            filling.add(label)
     for row in rows:
         if row not in videos:
             row.update(replaces=None, why="not a video")
@@ -110,12 +126,13 @@ def plan(files: list[dict[str, Any]], paths: list[str], scope: str) -> list[dict
             key = (span[0], span[1]) if span else None
             row["episode"] = f"S{span[0]:02d}E{span[1]:02d}" if span else None
         row["replaces"] = wanted.get(key) if key is not None else None
+        row["fills"] = row["replaces"] in filling
         if row["replaces"] is None:
             row["why"] = "no episode number in its name" if key is None else "not one of the ticked episodes"
     return rows
 
 
-async def preview(magnet: str, paths: list[str], scope: str) -> dict[str, Any]:
+async def preview(magnet: str, paths: list[str], scope: str, missing: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     from bankai.web import erai
 
     info_hash, name = erai.magnet_parts(magnet)
@@ -124,7 +141,8 @@ async def preview(magnet: str, paths: list[str], scope: str) -> dict[str, Any]:
     if meta is None:
         return {**out, "pending": True}
     files = files_of(meta)
-    rows = await asyncio.to_thread(plan, files, paths, scope)
+    missing = missing if scope == "anime" else []
+    rows = await asyncio.to_thread(plan, files, paths, scope, missing)
     # What would replace something first, in episode order; then the rest by name.
     rows.sort(key=lambda row: (row.get("replaces") is None, str(row.get("episode") or "").zfill(6), row["name"]))
     covered = {row["replaces"] for row in rows if row.get("replaces")}
@@ -136,7 +154,9 @@ async def preview(magnet: str, paths: list[str], scope: str) -> dict[str, Any]:
         "private": bool((meta.get("info") or {}).get("private")),
         "trackers": len(meta.get("trackers") or []),
         "files": rows,
-        "ticked": len(paths),
+        "ticked": len(paths) + len(missing or []),
         "covered": len(covered),
-        "uncovered": [Path(raw).name for raw in paths if Path(raw).name not in covered],
+        "filled": len({row["replaces"] for row in rows if row.get("fills")}),
+        "uncovered": [Path(raw).name for raw in paths if Path(raw).name not in covered]
+        + [label for label in map(missing_label, missing or []) if label not in covered],
     }

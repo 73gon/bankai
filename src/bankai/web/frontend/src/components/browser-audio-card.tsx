@@ -3,12 +3,12 @@ import { Clock, Loader2 } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type BrowserAudio, type BrowserAudioFile, type BrowserAudioTrack, type TrackScopeName } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
-import { Button } from '@/zon/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Switch } from '@/zon/ui/switch';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { Button } from '@zonsh/ui';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Switch } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
 
 const CODECS: Record<string, string> = { ac3: 'AC3', eac3: 'E-AC3', dts: 'DTS', truehd: 'TrueHD', aac: 'AAC', opus: 'Opus', flac: 'FLAC', mp3: 'MP3' };
 

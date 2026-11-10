@@ -1,6 +1,6 @@
 import type * as React from 'react';
-import { cn } from '@/zon/lib/cn';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { cn } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
 
 /* zon's Tag geometry (22px, Licht Mono 11px, 7px radius) with the status
    tints bankai keeps: a job's phase, an encode, a transfer. Counts use zon's

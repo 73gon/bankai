@@ -1,4 +1,4 @@
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 /** A segmented meter: discrete steps, each able to carry its own colour, so one
  *  meter can show a composition (the encode mix) as well as a ratio. */

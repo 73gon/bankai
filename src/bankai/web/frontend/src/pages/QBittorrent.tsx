@@ -32,15 +32,15 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/zon/ui/alert-dialog';
-import { Button } from '@/zon/ui/button';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Popover, PopoverContent, PopoverTrigger } from '@/zon/ui/popover';
-import { Separator } from '@/zon/ui/separator';
-import { Spinner } from '@/zon/ui/spinner';
-import { Table, TableBody, TableCell, TableHeader, TableRow } from '@/zon/ui/table';
-import { cn } from '@/zon/lib/cn';
+} from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Popover, PopoverContent, PopoverTrigger } from '@zonsh/ui';
+import { Separator } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHeader, TableRow } from '@zonsh/ui';
+import { cn } from '@zonsh/ui';
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B';

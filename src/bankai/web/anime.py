@@ -327,10 +327,40 @@ def feed_url(query: str, category: str, page: int, user: str | None = None) -> s
     return f"{_NYAA_BASE}/?{urlencode(_feed_params(query, category, page, user))}"
 
 
+class RateLimited(RuntimeError):
+    """A site answered 429 Too Many Requests, also after waiting as it asked: try again later."""
+
+    def __init__(self, site: str, retry_after: float) -> None:
+        super().__init__(f"{site} is limiting requests; try again in {int(retry_after)} s")
+        self.site = site
+        self.retry_after = retry_after
+
+
+def retry_after(response: httpx.Response, default: float = 5.0) -> float:
+    """The wait a 429 asks for, in seconds (Retry-After as seconds; else ``default``)."""
+    try:
+        return max(1.0, float(response.headers.get("Retry-After", default)))
+    except ValueError:
+        return default
+
+
+# Nyaa answers several searches typed one after another, and a search's title variants asked at
+# once, with 429 (four failed searches in two days, Nov 2026): at most two at a time.
+_NYAA_SLOTS = asyncio.Semaphore(2)
+
+
 async def _fetch_rss(
     client: httpx.AsyncClient, query: str, category: str, page: int, *, user: str | None = None
 ) -> list[NyaaEntry]:
-    response = await client.get("/", params=_feed_params(query, category, page, user))
+    for attempt in range(3):
+        async with _NYAA_SLOTS:
+            response = await client.get("/", params=_feed_params(query, category, page, user))
+        if response.status_code != 429:
+            break
+        wait = retry_after(response, default=2.0 * (attempt + 1))
+        if attempt == 2 or wait > 10:
+            raise RateLimited("nyaa.si", wait)
+        await asyncio.sleep(wait)
     response.raise_for_status()
     return parse_listing(response.text) if page > 0 else parse_rss(response.text)
 
@@ -388,6 +418,170 @@ def season_pack_name(title: str) -> str | None:
     return f"{name} Season {int(match['season'])}" if name else None
 
 
+# What a release name carries besides the title: where a bracket or parenthesis opens on one of
+# these, the title has ended.
+_TECH = (
+    r"\d{3,4}p|\d{3,4}x\d{3,4}|4k|uhd|hdr|web|bd|blu-?ray|bdrip|bdmv|dvd|hdtv|remux|x26[45]|h\.?26[45]|hevc"
+    r"|avc|av1|vp9|aac|e?-?ac-?3|ddp?|flac|opus|dts|truehd|dual|multi|batch|complete|vostfr|subfrench"
+    r"|eng|sub|raw|v\d|end|hi10p?|10-?bit|8-?bit|repack|uncensored|weekly|cr|amzn|nf"
+)
+_TECH_GROUP = re.compile(r"[\[({](?:[^\])}]*?\b)?(?:" + _TECH + r")\b", re.I)
+_YEAR = re.compile(r"(?:^|[\s(])((?:19[5-9]|20[0-4])\d)\)?(?=[\s)\].,]|$)")
+_SE = re.compile(r"(?<![a-z0-9])S(\d{1,2})\s?E(\d{1,4})(?:v\d+)?(?:\s?-\s?E?\d{1,4})?(?![a-z0-9])", re.I)
+_SEASON_TAG = re.compile(r"(?<![a-z0-9])S(\d{1,2})(?:v\d+)?(?![a-z0-9])", re.I)
+_SEASON_WORDS = re.compile(
+    r"(?<![a-z0-9])(?:(?:season|saison|staffel)\s*(\d{1,2})|(\d{1,2})(?:st|nd|rd|th)\s+season)(?![a-z0-9])", re.I
+)
+_EPISODE_WORD = re.compile(r"(?<![a-z0-9])(?:E|EP|Ep\.?|Episode)\s?(\d{1,4})(?:v\d+)?(?![a-z0-9])", re.I)
+# "01-13", "(001-152)", "01 ~ 13"; not "Title 2 - 06", whose spaced hyphen ends the title.
+_RANGE = re.compile(r"(?:^|\s)(?:-\s+)?\(?(\d{1,4})(?:\.\d)?(?:\s*[~–]\s*|-)(\d{1,4})\)?(?![a-z0-9.])", re.I)
+_DASH_NUMBER = re.compile(r"\s-\s+(\d{1,4})(?:v\d+)?(?![a-z0-9.])", re.I)
+_BARE_NUMBER = re.compile(r"\s(\d{1,4})(?:v\d+)?(?=\s*(?:[\[({]|$|END\b|-\s))", re.I)
+# Words in a trailing "(Other Name, Multi-Subs)" that are no name.
+_NOT_A_NAME = re.compile(r"^(?:" + _TECH + r"|multi-?subs?|dual-?audio|multi-?audio|vf|french|japanese \w+|.*\bsubs?\b.*)$", re.I)
+
+
+def _cut(value: str, *patterns: re.Pattern[str]) -> int:
+    starts = [match.start() for pattern in patterns if (match := pattern.search(value))]
+    return min(starts, default=len(value))
+
+
+@functools.lru_cache(maxsize=65536)
+def release_readings(title: str) -> tuple[tuple[str, int | None, int | None, int | None], ...]:
+    """The names a release could go by, best first, each with what the name says of it:
+    (name, season, episode, year). Season 0 is a special; a batch has its first episode, a season
+    pack none.
+
+    Other uploaders than Erai write the title in many ways -- "Title - S04E02v2", "Romaji
+    (English) - 05", "Title S01E06 1080p ... (Other Name, Multi-Subs)", "Title Season 2 (BD ...)
+    | Other Name", "Movie (2019)", "Title 01-13 (...)" -- and the cleaner, written for "Title - 05",
+    read most of them as no title at all (Nov 2026: 882 of 2334 nyaa and nekobt names).
+    """
+    value = re.sub(r"^(?:\s*[\[【][^\]】]*[\]】])+\s*", "", title).strip()
+    value = re.sub(r"\.(?:mkv|mp4|avi|m4v|mov|ts|webm)\b", "", value, flags=re.I)
+    value = re.sub(r"^[-\s]+", "", value)
+    if value.count(" ") < 2:
+        value = re.sub(r"(?<=\w)[._](?=\w)", " ", value)
+    value = value.replace("_", " ")
+    segments = [part.strip() for part in re.split(r"\s+[|/]\s+|\s*\|\s*", value) if part.strip()]
+    if not segments:
+        return ()
+    head = segments[0]
+    season = episode = year = None
+    batch = False
+    # What the name says of season and episode, wherever it says it: "Title S02 / 標題 第二季 - 18".
+    for index, segment in enumerate(segments):
+        se = _SE.search(segment)
+        if index and episode is not None and season is None and not se:
+            # "Title - 53 | Other Name S3": the number counts from the first season, not the third.
+            break
+        if season is None and (tag := se or _SEASON_TAG.search(segment) or _SEASON_WORDS.search(segment)):
+            season = int(next(group for group in tag.groups() if group))
+        if year is None and (year_match := _YEAR.search(segment)):
+            year = int(year_match[1])
+        span = _RANGE.search(segment)
+        if episode is None and span and int(span[2]) > int(span[1]) and not se:
+            episode, batch = int(span[1]), True
+        if episode is None:
+            word = se and re.search(r"E(\d{1,4})", se[0], re.I) or _EPISODE_WORD.search(segment) or _DASH_NUMBER.search(segment)
+            episode = int(word[1]) if word else None
+    span = _RANGE.search(head)
+    end = _cut(head, _SE, _SEASON_TAG, _SEASON_WORDS, _EPISODE_WORD, _DASH_NUMBER, _TECH_GROUP, _YEAR, _RANGE)
+    names: list[str] = []
+    bare = None
+    if not batch and episode is None and not (span and span.start() <= end):
+        bare = _BARE_NUMBER.search(head[: max(end, 1)] + " (")
+        if bare and bare.start() < end:
+            # A number ending the title may be the title's own: "Mob Psycho 100", "Elf 17".
+            names.append(head[:end])
+            end = bare.start()
+    names.append(head[:end])
+    for segment in segments[1:]:
+        names.append(segment[: _cut(segment, _SE, _SEASON_TAG, _SEASON_WORDS, _EPISODE_WORD, _DASH_NUMBER, _TECH_GROUP, _YEAR)])
+    # A parenthesis inside the title is the other name: "Dia no Ace (Ace of the Diamond)".
+    found: list[str] = []
+    for name in names:
+        inner = re.findall(r"[({]([^(){}]+)\)", name)
+        found.append(re.sub(r"\s*[({][^(){}]*\)", " ", name))
+        found.extend(inner)
+    # The last parenthesis of a scene name lists other names among its tags.
+    tail = re.search(r"\(([^()]+)\)\s*$", head)
+    if tail and tail.start() >= end:
+        found.extend(part for part in re.split(r"\s*,\s*", tail[1]) if not _NOT_A_NAME.match(part.strip()))
+    # ... or its last bracket: "[1080p IQIYI WEB-DL] [Golden Curse]".
+    bracket = re.search(r"\[([^\[\]]+)\]\s*$", head)
+    if bracket and bracket.start() >= end and not _TECH_GROUP.match(bracket[0]) and not _NOT_A_NAME.match(bracket[1].strip()):
+        found.append(bracket[1])
+    readings: list[tuple[str, int | None, int | None, int | None]] = []
+    for index, name in enumerate(found):
+        name = re.sub(r"\s+(?:v\d+|repack\d*|the\s+movie)\s*$", "", name.strip(), flags=re.I)
+        name = re.sub(r"\s{2,}", " ", name).strip(" -–:~([{.,") or ""
+        if len(normalise_name := _normalise(name)) < 2 or normalise_name.isdigit():
+            continue
+        number = episode
+        if bare is not None and index == 0 and len(names) > 1 and name == names[0].strip(" -–:~([{.,"):
+            number = None
+        elif bare is not None:
+            number = int(bare[1])
+        readings.append((name, season, number, year))
+    return tuple(dict.fromkeys(readings))
+
+
+def _season_entry(table: Any, name: str, season: int | None, year: int | None) -> Any:
+    """The entry a reading names, or None; strict where a looser guess would be another season."""
+    from bankai.metadata import anilist
+    from bankai.web import erai
+
+    def lookup(value: str) -> Any:
+        if year:
+            # "Hunter x Hunter (2011)": AniList names a remake by its year; the bare name is the first.
+            dated_name = anilist.resolve_in(table, f"{value} ({year})").anime
+            if dated_name is not None:
+                return dated_name
+        found = anilist.resolve_in(table, value)
+        if found.anime is None and found.candidates and year:
+            dated = [aid for aid in found.candidates if anilist.year(aid) == year]
+            if len(dated) == 1:
+                return table.anime.get(dated[0])
+        return found.anime
+
+    if season == 0:
+        # A special: only an entry that is no season, else a special numbered into the show.
+        entry = lookup(name)
+        return entry if entry is not None and anilist.kind(entry.id) not in anilist.SEASON_FORMATS else None
+    if season and season > 1:
+        if not erai._SHOW_SEASON_SUFFIX.search(name):
+            entry = lookup(f"{name} Season {season}")
+            if entry is not None:
+                return entry
+        entry = lookup(name)
+        # The name alone may be the season itself ("Dr. STONE SCIENCE FUTURE", season 4), never the first.
+        is_sequel = entry is not None and any(
+            kind == "PREQUEL" and form in anilist.SEASON_FORMATS for _other, kind, form in anilist.relations(entry.id)
+        )
+        return entry if is_sequel else None
+    return lookup(name)
+
+
+def _counted_from_start(entry: Any, number: int) -> tuple[int]:
+    """A number past a later season's end counted from the show's first episode, made the season's:
+    "Black Clover Season 2 - 176" is its episode 6, the first season having 170."""
+    from bankai.metadata import anilist
+
+    count = anilist.episode_count(entry.id)
+    if not count or number <= count:
+        return (number,)
+    before, current = 0, entry.id
+    for _ in range(12):
+        prequels = [other for other, kind, form in anilist.relations(current) if kind == "PREQUEL" and form in anilist.SEASON_FORMATS]
+        if not prequels or not (earlier := anilist.episode_count(prequels[0])):
+            break
+        before, current = before + earlier, prequels[0]
+    fits = number - before <= count or anilist._next_season(entry.id) is not None
+    # Unless it then fits: a running show's count lags its newest episodes (One Piece's 1169).
+    return (number - before,) if before and number > before and fits else (number,)
+
+
 def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict | None:
     """The AniList entry and episode a release is, from the title index; no network.
 
@@ -403,6 +597,9 @@ def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict |
     # A batch's name too ("2nd Season - 01 ~ 13"): read by the cleaner alone it lost its season,
     # and Re:Zero's second season was taken for the first and replaced it (Nov 2026).
     parsed = erai._erai_identity_name(title)
+    if parsed and (pack := erai._ERAI_SEASON_PACK.match(erai._erai_value(title))) and int(pack["season"]) != 1:
+        # "Kusuriya no Hitorigoto - S02": the pack's name without its season is the first season.
+        parsed = None
     if parsed:
         name, number = parsed
     else:
@@ -410,18 +607,46 @@ def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict |
         season, number = release_episode_info(title)
         if season and season > 1 and not erai._SHOW_SEASON_SUFFIX.search(name):
             name = f"{name} Season {season}"
-    saved = mappings.get(erai._mapping_key(title)) or {}
-    if str(saved.get("anilist_id") or "").isdigit():
+    key = erai._mapping_key(title)
+    saved = mappings.get(key) or {}
+    readings = release_readings(title)
+
+    def read() -> tuple[Any, int | None, bool]:
+        for reading, season, episode, year in readings:
+            if (found := _season_entry(table, reading, season, year)) is not None:
+                return found, episode, season == 0
+        return None, number, False
+
+    entry, special = None, False
+    if not parsed and readings and readings[0][1] not in (None, 1) and not erai._SHOW_SEASON_SUFFIX.search(key):
+        # A choice made for "Honzuki no Gekokujou" may not be one for its "S04E23": the key lost
+        # the season. What the name itself says goes first then, the choice after.
+        entry, number, special = read()
+    if entry is not None:
+        pass
+    elif str(saved.get("anilist_id") or "").isdigit():
         entry = table.anime.get(int(saved["anilist_id"]))
         if number is not None:
             number += int(saved.get("anilist_episode_offset") or 0)
     else:
-        entry = anilist.resolve_in(table, name).anime
+        entry = anilist.resolve_in(table, name).anime if parsed else None
+        if entry is None:
+            entry, found_number, special = read()
+            if entry is not None:
+                number = found_number
+        if entry is None and readings and readings[0][1] == 0:
+            # Specials no special entry answers for are not the show's episodes.
+            return None
+        if entry is None:
+            entry = anilist.resolve_in(table, name).anime
         if entry is None:
             pack = season_pack_name(title)
             entry = anilist.resolve_in(table, pack).anime if pack else None
-        if entry is not None and number is not None:
-            entry, number = anilist.settle_in(entry, number)
+    if entry is not None and special:
+        # A special's number is the show's count of specials, not the entry's.
+        number = 1 if number is not None and anilist.episode_count(entry.id) == 1 else None
+    elif entry is not None and number is not None and not str(saved.get("anilist_id") or "").isdigit():
+        entry, number = anilist.settle_in(entry, *_counted_from_start(entry, number))
     if entry is None:
         return None
     return {
@@ -529,16 +754,55 @@ def mark_owned(rows: list[dict]) -> list[dict]:
     return rows
 
 
-async def _enrich_anilist(entries: list[NyaaEntry]) -> list[NyaaEntry]:
+async def anilist_matches(titles: list[str]) -> list[dict | None]:
+    """``anilist_match`` of each name, after asking AniList for the season chains they walk.
+
+    "Kusuriya no Hitorigoto - S03E04" is traced from the first season by its sequels, and AniList's
+    links are kept only for the anime bankai has had to do with (1,900 of 20,700, Nov 2026): every
+    other show's later seasons went unmatched in search. Their chains are fetched, a few AniList
+    requests at most, and kept for a week; a failure leaves the names as they were.
+    """
     from bankai.metadata import anilist
     from bankai.web import erai
 
     table = await anilist.index()
     mappings = await asyncio.to_thread(erai._load_mappings)
+    found = [anilist_match(title, table=table, mappings=mappings) for title in titles]
+    if table is None:
+        return found
+    chain: set[int] = set()
+    for title, match in zip(titles, found):
+        if match is not None:
+            continue
+        for name, season, _episode, _year in release_readings(title):
+            if season and season > 1:
+                for lookup, key in ((table.primary, anilist.normalise), (table.exact, anilist.normalise),
+                                    (table.loose, anilist.loose), (table.compact, anilist.compact)):
+                    if hits := lookup.get(key(name)):
+                        chain |= {aid for aid in hits if not anilist.media(aid).get("relations")}
+                        break
+    if not chain:
+        return found
+    try:
+        async with asyncio.timeout(20):
+            for _ in range(6):
+                await anilist.ensure(chain, refresh=False, max_batches=1)
+                more = {other for aid in chain for other, kind, _form in anilist.relations(aid) if kind == "SEQUEL"}
+                if not more - chain:
+                    break
+                chain |= more
+    except Exception as exc:  # noqa: BLE001 -- the names stay as the offline pass left them
+        log.info("AniList season chains not fetched: %s", exc)
+    table = await anilist.index()
     return [
-        replace(entry, anilist=anilist_match(entry.title, table=table, mappings=mappings))
-        for entry in entries
+        match or anilist_match(title, table=table, mappings=mappings)
+        for title, match in zip(titles, found)
     ]
+
+
+async def _enrich_anilist(entries: list[NyaaEntry]) -> list[NyaaEntry]:
+    matches = await anilist_matches([entry.title for entry in entries])
+    return [replace(entry, anilist=match) for entry, match in zip(entries, matches)]
 
 
 def _matches_filters(
@@ -611,6 +875,9 @@ async def search(
         )
         batches = [batch for batch in fetched if isinstance(batch, list)]
         if not batches:
+            limited = next((item for item in fetched if isinstance(item, RateLimited)), None)
+            if limited is not None:
+                raise limited
             failure = next((item for item in fetched if isinstance(item, Exception)), None)
             raise RuntimeError(f"Nyaa did not return a usable feed: {failure}")
         by_hash: dict[str, NyaaEntry] = {}

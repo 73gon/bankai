@@ -6,7 +6,9 @@ entries a pass, and keeps what it found: only a release carrying German
 subtitles, by the rule the automation takes releases by -- or one Erai-raws
 uploaded a German file for later, which is downloaded with it. The library tags a
 show "N available" from it, and the drawer offers them in one dialog. Nothing
-is downloaded until they are picked there.
+is downloaded until they are picked there -- but a newly aired episode of a show
+being followed (its episode before is on disk), searched for every few hours
+while new, which is queued as soon as one is found (``anime.auto_download_new``).
 """
 
 from __future__ import annotations
@@ -38,6 +40,10 @@ _MAX_AGE = 7 * 86400
 # Entries whose search failed (AniList refusing, Nyaa down), by when: tried
 # again a day later, so they do not take the front of every pass.
 _FAILED: dict[int, float] = {}
+# An episode aired this recently is new: looked for again every few hours, not weekly, and
+# queued by itself once found (anime.auto_download_new). Older ones wait for a click.
+_NEW_DAYS = 14
+_NEW_RECHECK = 3 * 3600
 # Releases looked at per missing episode before it is given up for this pass:
 # each German check can be a Nyaa page of its own.
 _GERMAN_TRIES = 4
@@ -153,6 +159,32 @@ def _aired_missing(aid: int, have: set[int]) -> list[int]:
         and ep.number not in have
         and ((ep.aired and ep.aired[:10] <= today) or (not ep.aired and ended))
     ]
+
+
+def _new_episodes(aid: int, have: set[int], held: dict[int, Any]) -> set[int]:
+    """Of an entry's missing episodes, those aired in the last two weeks of a show being followed:
+    the episode before is on disk, or for a first episode the season before has files."""
+    from datetime import timedelta
+
+    from bankai.web.anime_library import roster
+
+    listed = roster(aid)
+    if not listed:
+        return set()
+    today = date.today()
+    since = (today - timedelta(days=_NEW_DAYS)).isoformat()
+    prequel_held = any(
+        other in held for other, kind, form in anilist.relations(aid)
+        if kind == "PREQUEL" and form in anilist.SEASON_FORMATS
+    )
+    return {
+        ep.number
+        for ep in listed
+        if ep.number >= 1
+        and ep.number not in have
+        and ep.aired and since <= ep.aired[:10] <= today.isoformat()
+        and ((ep.number - 1) in have or (ep.number == 1 and prequel_held))
+    }
 
 
 def _release_row(item: anime_mod.NyaaEntry, first: int, last: int) -> dict[str, Any]:
@@ -310,16 +342,36 @@ async def check_missing_episodes(*, entries: int = 3) -> dict[str, int]:
     busy = on_their_way(state)
     held = anime_files.by_entry(rows)
     now = time.time()
+    queued = 0
+    if get_settings().anime.auto_download_new:
+        # Found by an earlier pass, while still new: queued now, not after the next search.
+        waiting: dict[int, list[dict[str, Any]]] = {}
+        for (aid, episode), row in available(state).items():
+            if aid in held and aid not in blocked and row.get("first") == row.get("last") == episode:
+                waiting.setdefault(aid, []).append({**row, "episode": episode})
+        for aid, found_rows in waiting.items():
+            fresh = _new_episodes(aid, set(held[aid]), held)
+            new = [
+                {**row, "anilist_id": aid, "batch": False,
+                 "episodes": [{"anilist_id": aid, "anilist_episode": row["episode"]}]}
+                for row in found_rows if row["episode"] in fresh
+            ]
+            if new:
+                try:
+                    queued += (await queue_releases(new))["episodes"]
+                except Exception as exc:  # noqa: BLE001 -- offered in the drawer as before
+                    log.warning("New episodes of AniList %s not queued: %s", aid, exc)
     oldest: dict[int, float] = {}
     for aid in sorted(held):
         if aid in blocked or now - _FAILED.get(aid, 0.0) < 86400:
             continue
+        fresh = _new_episodes(aid, set(held[aid]), held)
         for episode in _aired_missing(aid, set(held[aid])):
             if (aid, episode) in busy:
                 continue
             row = looked.get((aid, episode)) or {}
             at = max(float(row.get("checked_at") or 0.0), float(row.get("queued_at") or 0.0))
-            if now - at >= _MAX_AGE:
+            if now - at >= (_NEW_RECHECK if episode in fresh and not row.get("queued_at") else _MAX_AGE):
                 oldest[aid] = min(oldest.get(aid, at), at)
     due = sorted(oldest, key=oldest.__getitem__)[:entries]
     found = done = 0
@@ -336,6 +388,7 @@ async def check_missing_episodes(*, entries: int = 3) -> dict[str, int]:
                 # Exact for the entries searched: the index says what the files
                 # are, the disk whether they are still there.
                 have = set(await asyncio.to_thread(anime_files.on_disk, aid, rows=rows))
+                fresh = _new_episodes(aid, have, held)
                 wanted = {
                     (aid, episode)
                     for episode in _aired_missing(aid, have)
@@ -352,9 +405,116 @@ async def check_missing_episodes(*, entries: int = 3) -> dict[str, int]:
             await asyncio.to_thread(_record, aid, result)
             done += 1
             found += len(picked)
+            new = [
+                {**row, "anilist_id": aid, "batch": False,
+                 "episodes": [{"anilist_id": aid, "anilist_episode": episode}]}
+                for (_aid, episode), row in picked.items()
+                if episode in fresh and row.get("first") == row.get("last") == episode
+            ]
+            if new and get_settings().anime.auto_download_new:
+                try:
+                    taken = await queue_releases(new)
+                except Exception as exc:  # noqa: BLE001 -- offered in the drawer as before
+                    log.warning("New episodes of AniList %s not queued: %s", aid, exc)
+                else:
+                    queued += taken["episodes"]
+                    log.info("Queued %s new episode(s) of %s by themselves", taken["episodes"], name)
     finally:
         progress.clear()
-    return {"checked": done, "episodes_found": found, "remaining": max(0, len(oldest) - done)}
+    return {"checked": done, "episodes_found": found, "new_queued": queued, "remaining": max(0, len(oldest) - done)}
+
+
+async def enqueue_download(
+    entry: Any,
+    *,
+    title: str,
+    torrent_url: str,
+    detail_url: str,
+    magnet_uri: str,
+    info_hash: str,
+    kind: str,
+    episode: int | None,
+    publish: bool,
+    job_title: str | None = None,
+    german_sub_url: str | None = None,
+) -> dict:
+    """Queue one Nyaa release as this AniList entry: the drawer's download, the dialog's and a new episode's.
+
+    ``german_sub_url``: German Erai-raws uploaded beside the release, put
+    beside the episode when it is published.
+    """
+    from bankai.web import jobs as webjobs
+
+    english = entry.name
+    if kind == "show":
+        # Further releases under this name are this entry too.
+        choice = {**entry.as_dict(), "title": entry.title, "poster_url": anilist.cover(entry.id)}
+        await asyncio.to_thread(erai.save_anilist_mapping, title, choice)
+    args = [
+        "anime-download",
+        "--release-title", title,
+        "--torrent-url", torrent_url,
+        "--detail-url", detail_url,
+        "--magnet-uri", magnet_uri,
+        "--info-hash", info_hash,
+        "--kind", kind,
+        "--anilist-id", str(entry.id),
+        "--anilist-title", entry.name,
+        "--english-title", english,
+    ]
+    year = anilist.year(entry.id)
+    if kind == "movie" and year:
+        args.extend(["--year", str(year)])
+    if episode is not None:
+        args.extend(["--episode", str(episode)])
+    if publish and kind == "show":
+        args.append("--publish")
+    if german_sub_url and kind == "show" and episode is not None:
+        args.extend(["--german-sub-url", german_sub_url])
+    return await asyncio.to_thread(
+        webjobs.enqueue,
+        kind=kind,
+        title=job_title or (f"{english} - {episode:02d}" if episode is not None else english),
+        args=args,
+    )
+
+
+async def queue_releases(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Queue releases found for missing episodes, each as the drawer's own download of one goes.
+
+    Each item is a release row as ``releases_for`` lists it: ``anilist_id``, ``batch``, ``first``,
+    ``last``, its links, and the ``episodes`` it covers.
+    """
+    queued = duplicates = 0
+    taken: list[tuple[int, int]] = []
+    for item in items:
+        entry = await anilist.anime(int(item["anilist_id"]))
+        if entry is None:
+            raise LookupError("AniList has no such anime")
+        first, last = int(item["first"]), int(item["last"])
+        span = f"{first:02d}-{last:02d}" if last < erai.SEASON_PACK_LAST else "season pack"
+        job = await enqueue_download(
+            entry,
+            title=item["title"],
+            torrent_url=item["torrent_url"],
+            detail_url=item["detail_url"],
+            magnet_uri=item["magnet_uri"],
+            info_hash=item["info_hash"],
+            kind="show",
+            # A batch numbers each file by its name.
+            episode=None if item["batch"] else first,
+            publish=True,
+            job_title=f"{entry.name} - {span}" if item["batch"] else None,
+            german_sub_url=None if item["batch"] else item.get("german_sub_url"),
+        )
+        # Already queued under that name: on its way all the same.
+        if job.get("status") == "duplicate":
+            duplicates += 1
+        else:
+            queued += 1
+        taken.extend((int(row["anilist_id"]), int(row["anilist_episode"])) for row in item["episodes"])
+    await asyncio.to_thread(mark_queued, taken)
+    return {"ok": True, "queued": queued, "duplicates": duplicates, "episodes": len(taken)}
 
 
 def releases_for(episodes: list[dict[str, Any]], state: dict[str, Any]) -> list[dict[str, Any]]:

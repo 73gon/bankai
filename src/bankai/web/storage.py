@@ -243,6 +243,27 @@ def _install_root() -> Path:
     return package.parents[1] if package.parent.name == "src" else package
 
 
+def _more_roots() -> list[tuple[str, str, Path, Any]]:
+    """The libraries' roots past the first (as Tracks has them: the Server page's), and the manga
+    and light novel folders, each an area of its own on whichever drive it is."""
+    from bankai.web import track_cleanup
+
+    settings = get_settings()
+    found: list[tuple[str, str, Path, Any]] = []
+    for kind, label in (("anime", "Anime library"), ("movies", "Movies"), ("shows", "Shows")):
+        try:
+            roots = track_cleanup.roots(kind)
+        except Exception:  # noqa: BLE001 - an unreadable root list leaves the first root alone
+            continue
+        for root in roots:
+            name = label + (" (English)" if root.rstrip("/").endswith("_en") else "")
+            found.append((f"{kind}:{root}", name, Path(root), None))
+    for kind, label, root in (("manga", "Manga", settings.manga.library_dir), ("novels", "Light novels", settings.manga.novels_dir)):
+        if root:
+            found.append((kind, label, Path(root), None))
+    return found
+
+
 def scan() -> dict[str, Any]:
     """Walk every area and add them up per volume. Takes a while: run it in the background."""
     from bankai.cli import bgjobs
@@ -255,6 +276,8 @@ def scan() -> dict[str, Any]:
         ("anime", "Anime library", settings.transfer.anime_shows_dir, None),
         ("movies", "Movies", settings.transfer.movies_dir, None),
         ("shows", "Shows", settings.transfer.shows_dir, None),
+        # Every other root of a library (E:'s movies and anime, the English folders), and the books.
+        *_more_roots(),
         ("staging", "Staging (waiting for review or transfer)", settings.output.directory, None),
         ("downloads", "qBittorrent downloads", settings.paths.downloads_dir, None),
         ("state", "bankai data", state_root, _state_part(state_root)),

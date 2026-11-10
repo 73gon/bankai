@@ -119,3 +119,20 @@ def test_files_are_named_the_way_the_library_names_them():
 def test_what_a_series_holds_is_described_briefly():
     assert names.describe({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14}, {138, 139, 140}) == "Vol 1–12, 14 · Ch 138–140"
     assert names.describe(set(), {10.5}) == "Ch 10.5"
+
+
+def test_a_comic_archive_is_named_by_what_it_holds_not_as_it_came(tmp_path):
+    """Tanya the Evil's Vol 29-34 came as .cbz holding RAR and 7-Zip; OpenPanel opened none."""
+    from bankai.web import manga_names
+
+    rar, seven, zipped, epub = (tmp_path / name for name in ("a.cbz", "b.cbz", "c.cbr", "d.epub"))
+    rar.write_bytes(b"Rar!\x1a\x07\x01\x00rest")
+    seven.write_bytes(b"7z\xbc\xaf\x27\x1c\x00\x04rest")
+    zipped.write_bytes(b"PK\x03\x04rest")
+    epub.write_bytes(b"PK\x03\x04rest")
+    assert manga_names.archive_extension(rar, ".cbz") == ".cbr"
+    assert manga_names.archive_extension(seven, ".cbz") == ".cb7"
+    assert manga_names.archive_extension(zipped, ".cbr") == ".cbz"
+    # An EPUB is a ZIP too, and stays an EPUB.
+    assert manga_names.archive_extension(epub, ".epub") == ".epub"
+    assert ".cb7" in manga_names.BOOK_EXTENSIONS

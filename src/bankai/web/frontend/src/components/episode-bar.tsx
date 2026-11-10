@@ -1,4 +1,4 @@
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 /** What one letter of a show's strip is: its name, and its colour on the bar. */
 export type StripTier = { label: string; className: string };

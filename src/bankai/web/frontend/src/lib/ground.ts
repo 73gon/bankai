@@ -22,7 +22,10 @@ export async function bakeGround(): Promise<void> {
   canvas.width = canvas.height = size;
   const context = canvas.getContext('2d');
   if (!context) return;
-  context.fillStyle = getComputedStyle(document.body).backgroundColor;
+  // The ground under the grain: html::before since zon/ui 0.3.0 (body has none of its own any more,
+  // and grain blended onto nothing showed as bare, bright noise); body's before it.
+  const ground = getComputedStyle(root, '::before').backgroundColor;
+  context.fillStyle = ground && ground !== 'rgba(0, 0, 0, 0)' ? ground : getComputedStyle(document.body).backgroundColor;
   context.fillRect(0, 0, size, size);
   const layer = (style: CSSStyleDeclaration) => {
     const [dx = 0, dy = 0] = style.backgroundPosition.split(' ').map((part) => parseFloat(part) % size || 0);

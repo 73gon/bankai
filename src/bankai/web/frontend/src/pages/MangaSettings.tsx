@@ -3,12 +3,12 @@ import { BookOpen, RefreshCw, Save } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type MangaStatus, type SettingRow } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Input } from '@/zon/ui/input';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Switch } from '@/zon/ui/switch';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Switch } from '@zonsh/ui';
 
 const LABELS: Record<string, { label: string; description: string; suffix?: string }> = {
   'manga.enabled': { label: 'Look for releases', description: 'Read nyaa’s English literature uploads and search the series you follow. Nothing is ever downloaded without your approval in the review.' },

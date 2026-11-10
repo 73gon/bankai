@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Download, Replace } from 'lucide-react';
+import { Download, Pencil, Replace } from 'lucide-react';
 import { toast } from '@/lib/toast';
-import { Button } from '@/zon/ui/button';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Button } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
 import { api, type ReplacementPlan } from '@/lib/api';
+import { AniListPickDialog } from '@/components/AniListPickDialog';
 
 // A season pack ("Show - S01") names no last episode: every one it has.
 const SEASON_PACK_LAST = 999;
@@ -35,7 +36,8 @@ export interface ReplaceCandidate {
  * card (``cardKey`` empty, ``verb`` "Download"), straight from the Erai-raws page for the
  * AniList entry its name says.
  *
- * Shows what it would change before anything is queued. On confirm the dialog
+ * Shows what it would change before anything is queued. Without a card, the entry the name was
+ * matched to can be changed (Change), for this release alone. On confirm the dialog
  * closes at once and the queueing runs in the background: ``onStart`` and
  * ``onSettled`` bracket it, ``onQueued`` follows a success.
  */
@@ -62,6 +64,13 @@ export function ReplaceDialog({
   const [planError, setPlanError] = useState<string | null>(null);
   // Files with German replaced by a release without: only once confirmed.
   const [loseGerman, setLoseGerman] = useState(false);
+  // The entry picked by hand instead of the one the name says; for this release alone.
+  const [chosen, setChosen] = useState<number | undefined>(undefined);
+  const [picking, setPicking] = useState(false);
+
+  useEffect(() => {
+    setChosen(undefined);
+  }, [candidate]);
 
   useEffect(() => {
     if (!candidate) return;
@@ -70,13 +79,13 @@ export function ReplaceDialog({
     setPlanError(null);
     setLoseGerman(false);
     api
-      .replacementPlan(cardKey, candidate.info_hash)
+      .replacementPlan(cardKey, candidate.info_hash, chosen)
       .then((answer) => current && setPlan(answer))
       .catch((error: any) => current && setPlanError(error.message));
     return () => {
       current = false;
     };
-  }, [cardKey, candidate]);
+  }, [cardKey, candidate, chosen]);
 
   async function confirm() {
     if (!candidate) return;
@@ -84,7 +93,7 @@ export function ReplaceDialog({
     onClose();
     onStart?.(row.info_hash);
     try {
-      const result = await api.replaceFromErai(cardKey, row.info_hash, label, loseGerman);
+      const result = await api.replaceFromErai(cardKey, row.info_hash, label, loseGerman, chosen);
       toast.success(`Queued ${result.queued}`);
       onQueued?.();
     } catch (error: any) {
@@ -103,8 +112,23 @@ export function ReplaceDialog({
         ? `Download ${episodesLabel(candidate.episodes)}`
         : `Download batch: ${episodesLabel(candidate.episodes)}`;
 
+  const change = !cardKey && (
+    <Button variant='ghost' size='sm' className='ml-1 h-6 px-2 align-baseline' onClick={() => setPicking(true)}>
+      <Pencil data-icon='inline-start' /> Change
+    </Button>
+  );
+
   return (
-    <Dialog open={candidate !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
+    <>
+    <AniListPickDialog
+      query={picking && candidate ? candidate.name.replace(/^\[[^\]]*\]\s*/, '').replace(/\s+-\s+\d.*$/, '') : null}
+      onClose={() => setPicking(false)}
+      onPick={async (anime) => { setChosen(anime.anilist_id); setPicking(false); }}
+      title='Which anime is this release?'
+      description='For this download alone; what other releases of this name are matched to stays as it is.'
+      action='Choose'
+    />
+    <Dialog open={candidate !== null && !picking} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className='max-w-xl'>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
@@ -112,7 +136,10 @@ export function ReplaceDialog({
         </DialogHeader>
         <DialogBody>
         {planError ? (
-          <p className='rounded-control border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{planError}</p>
+          <div className='flex flex-col items-start gap-2'>
+            <p className='rounded-control border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive'>{planError}</p>
+            {change}
+          </div>
         ) : !plan ? (
           <p className='text-sm text-muted-foreground'>Working out what it would change…</p>
         ) : (
@@ -120,8 +147,11 @@ export function ReplaceDialog({
             <li>
               Downloads {episodesLabel([plan.first, plan.last])} of{' '}
               <span className='font-medium text-foreground'>{plan.anilist_title}</span>
+              {plan.anilist_year ? <span className='text-muted-foreground'> ({plan.anilist_year})</span> : null}
+              {change}
               {plan.german ? ', with German subtitles as listed for it.' : '. No German subtitles are listed for it; it is taken as it is.'}
             </li>
+            {plan.chosen && <li className='text-muted-foreground'>Picked by hand for this download.</li>}
             <li>{plan.held_count ? `Replaces ${plan.held_count} held release${plan.held_count === 1 ? '' : 's'} in review.` : `No release held in review falls in its episodes.`}</li>
             <li>
               {plan.file_count
@@ -157,5 +187,6 @@ export function ReplaceDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    </>
   );
 }

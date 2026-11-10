@@ -58,6 +58,10 @@ query ($q: String, $n: Int, $formats: [MediaFormat]) {
 """
 
 _MEDIA: tuple[float, dict[int, dict]] | None = None
+# The store's mtime looked at once a second at most, as anilist.media_all (a page reads it in bursts).
+_MEDIA_CHECKED = 0.0
+_MEDIA_RECHECK_SECONDS = 1.0
+_MEDIA_PATH: Path | None = None
 _LOCK = asyncio.Lock()
 
 
@@ -72,18 +76,23 @@ def _store() -> Path:
 
 def media_all() -> dict[int, dict]:
     """Everything kept from AniList's API about manga and light novels, by AniList id."""
-    global _MEDIA
+    global _MEDIA, _MEDIA_CHECKED, _MEDIA_PATH
+    now = time.monotonic()
     path = _store()
+    if _MEDIA is not None and _MEDIA_PATH == path and now - _MEDIA_CHECKED < _MEDIA_RECHECK_SECONDS:
+        return _MEDIA[1]
     try:
         mtime = path.stat().st_mtime
     except OSError:
         return {}
-    if _MEDIA is None or _MEDIA[0] != mtime:
+    _MEDIA_CHECKED = now
+    if _MEDIA is None or _MEDIA[0] != mtime or _MEDIA_PATH != path:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         _MEDIA = (mtime, {int(key): row for key, row in raw.items() if str(key).isdigit()})
+        _MEDIA_PATH = path
     return _MEDIA[1]
 
 

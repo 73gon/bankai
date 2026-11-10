@@ -3,11 +3,11 @@ import { ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type TrackScopeName, type UnknownTrackFile, type UnknownTrackTitle } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
-import { Button } from '@/zon/ui/button';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Input } from '@/zon/ui/input';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Spinner } from '@/zon/ui/spinner';
+import { Button } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
 
 /** The languages offered first; any other code works too. */
 const LANGUAGES: [string, string][] = [

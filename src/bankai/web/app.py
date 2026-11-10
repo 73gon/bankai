@@ -750,6 +750,7 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.erai_username",
     "anime.erai_password",
     "anime.german_avc_fallback",
+    "anime.auto_download_new",
     "anime.thumbs_enabled",
     "anime.thumb_mode",
     "anime.thumb_percent",
@@ -773,6 +774,7 @@ SAFE_SETTING_KEYS: set[str] = {
     "manga.openpanel_password",
     "metadata.tmdb_api_key",
     "scraper.interactive_pick",
+    "selector.german_release_first",
     "selector.max_size_gib",
     "selector.min_seeders",
     "selector.min_size_gib",
@@ -941,6 +943,16 @@ def create_app() -> Any:
         erai_task: asyncio.Task | None = None
         queue_task: asyncio.Task | None = None
         snapshot_task: asyncio.Task | None = None
+        # asyncio.to_thread's pool: Python's default is cores + 4 (10 here), and the passes that read
+        # for minutes (episode check, library walk, track inventory) held them while requests and
+        # snapshot builds queued behind -- builds with no network of their own took 76-86 s (Nov 2026).
+        from concurrent.futures import ThreadPoolExecutor
+
+        from bankai.web import stopping as stopping_mod
+
+        stopping_mod.reset()
+        executor = ThreadPoolExecutor(max_workers=48, thread_name_prefix="bankai")
+        asyncio.get_running_loop().set_default_executor(executor)
         try:
             import anyio.to_thread
 
@@ -978,6 +990,10 @@ def create_app() -> Any:
             yield
         finally:
             from bankai.web import availability as availability_mod
+            from bankai.web import stopping
+
+            # First: the passes in worker threads end at their next file, so the process can exit.
+            stopping.stop()
 
             if migration_task is not None:
                 with suppress(Exception):
@@ -996,6 +1012,12 @@ def create_app() -> Any:
                 erai_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await erai_task
+            # Work not started yet is dropped; what runs finishes on its own.
+            executor.shutdown(wait=False, cancel_futures=True)
+            from bankai.web import server as server_mod
+
+            if server_mod.exit_after_shutdown:
+                server_mod._exit_soon()
 
     app = FastAPI(
         title="bankai",
@@ -1856,8 +1878,11 @@ def create_app() -> Any:
                 description_filters=description_filters,
                 min_seeders=min_seeders,
             )
+        except anime_mod.RateLimited as exc:
+            # Said as what it is, with when to try again, not as a failure of bankai's.
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": str(int(exc.retry_after))}) from exc
         except Exception as exc:
-            log.warning("Nyaa search failed: %s", exc)
+            log.warning("Nyaa search failed: %r", exc)
             raise HTTPException(status_code=502, detail=f"Nyaa search failed: {exc}") from exc
         items = [anime_mod.entry_to_dict(item) for item in result.items]
         return {
@@ -2653,9 +2678,22 @@ def create_app() -> Any:
         await asyncio.to_thread(manga_series.clear_policy, anilist_id)
         return {"followed": False}
 
+    @app.post("/api/manga/series/{anilist_id}/move/plan")
+    async def manga_series_move_plan(anilist_id: int, req: dict) -> dict:
+        """Where ``{"files": [...], "anilist_id": n}`` would go in series n (this one: renumbered),
+        each with a suggested volume or chapter, and what that series has and lacks. Nothing moves."""
+        from bankai.metadata import anilist_manga
+        from bankai.web import manga_views
+
+        target = _manga_aid(req)
+        files = [str(name) for name in req.get("files") or []]
+        await anilist_manga.ensure([target], refresh=False)
+        return await asyncio.to_thread(manga_views.move_plan, anilist_id, files, target)
+
     @app.post("/api/manga/series/{anilist_id}/move")
     async def manga_series_move(anilist_id: int, req: dict) -> dict:
-        """Books that are another series: ``{"files": [...], "anilist_id": n, "names": {old: new}}``."""
+        """Books that are another series, or renumbered in this one (``anilist_id`` its own):
+        ``{"files": [...], "anilist_id": n, "names": {old: new}}``."""
         from bankai.metadata import anilist_manga
         from bankai.web import manga_library, openpanel
 
@@ -2679,12 +2717,29 @@ def create_app() -> Any:
 
         return await manga_views.series_detail(anilist_id)
 
-    @app.get("/api/manga/library")
-    async def manga_library_view() -> dict:
-        """The series on disk, those followed with nothing yet, folders to match, downloads."""
+    async def _manga_library_payload() -> dict:
         from bankai.web import manga_views
 
         return await asyncio.to_thread(manga_views.library)
+
+    _manga_files = _anime_state_files(
+        "manga_library.json", "manga_releases.json", "manga_collections.json", "manga_policies.json", "manga_contents.json",
+    )
+    # 2.4 s a build (537 folders looked at over 9p, Nov 2026) and the page asks every 15 s: kept built,
+    # rebuilt when bankai's own manga files change, and once a minute for what changes on disk alone.
+    snaps.add(
+        "manga_library",
+        _manga_library_payload,
+        inputs=lambda: (_manga_files(), int(time.time() // 60)),
+        tags={"manga"},
+        min_interval=5.0,
+        max_age=120.0,
+    )
+
+    @app.get("/api/manga/library", response_model=None)
+    async def manga_library_view(request: Request):
+        """The series on disk, those followed with nothing yet, folders to match, downloads."""
+        return snapshots_mod.response(await snaps["manga_library"].get(), request)
 
     @app.post("/api/manga/library/match")
     async def manga_library_match(req: dict) -> dict:
@@ -2894,10 +2949,11 @@ def create_app() -> Any:
         )
 
     @app.get("/api/anime/review/replace-plan")
-    async def anime_review_replace_plan(info_hash: str, key: str = "") -> dict:
-        """What taking an Erai-raws release for a review card would change (no card: straight from the Erai-raws page)."""
+    async def anime_review_replace_plan(info_hash: str, key: str = "", anilist_id: int | None = None) -> dict:
+        """What taking an Erai-raws release for a review card would change (no card: straight from the
+        Erai-raws page, as the entry its name says or ``anilist_id`` picked in the dialog)."""
         try:
-            return await erai_mod.replacement_plan(key, info_hash)
+            return await erai_mod.replacement_plan(key, info_hash, anilist_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2911,9 +2967,11 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail="info_hash is required")
 
         lose_german = bool(req.get("lose_german"))
+        chosen = req.get("anilist_id")
+        anilist_id = int(chosen) if str(chosen or "").isdigit() else None
 
         async def replace(action: Any) -> dict:
-            return await erai_mod.replace_from_erai(key, info_hash, lose_german=lose_german)
+            return await erai_mod.replace_from_erai(key, info_hash, lose_german=lose_german, anilist_id=anilist_id)
 
         return await _run_action(
             req, kind="replace", title=("Replace: " if key else "Download: ") + _label(req, key or info_hash),
@@ -3102,7 +3160,7 @@ def create_app() -> Any:
         with suppress(Exception):
             from bankai.torrent.qbittorrent import QBittorrentClient
 
-            async with QBittorrentClient() as client:
+            async with QBittorrentClient(timeout=6.0) as client:
                 torrents = {str(t.hash).casefold(): t for t in await client.list_torrents(category=get_settings().qbittorrent.category)}
         return [*rows, *await asyncio.to_thread(erai_mod.release_queue_rows, None, torrents)]
 
@@ -3384,39 +3442,12 @@ def create_app() -> Any:
 
     async def _queue_missing_releases(items: list[dict]) -> dict:
         """Queue releases found for missing episodes, each as the drawer's own download of one goes."""
-        from bankai.metadata import anilist
         from bankai.web import anime_missing
 
-        queued = duplicates = 0
-        taken: list[tuple[int, int]] = []
-        for item in items:
-            entry = await anilist.anime(int(item["anilist_id"]))
-            if entry is None:
-                raise HTTPException(status_code=422, detail="AniList has no such anime")
-            first, last = int(item["first"]), int(item["last"])
-            span = f"{first:02d}-{last:02d}" if last < erai_mod.SEASON_PACK_LAST else "season pack"
-            job = await _enqueue_anime_download(
-                entry,
-                title=item["title"],
-                torrent_url=item["torrent_url"],
-                detail_url=item["detail_url"],
-                magnet_uri=item["magnet_uri"],
-                info_hash=item["info_hash"],
-                kind="show",
-                # A batch numbers each file by its name.
-                episode=None if item["batch"] else first,
-                publish=True,
-                job_title=f"{entry.name} - {span}" if item["batch"] else None,
-                german_sub_url=None if item["batch"] else item.get("german_sub_url"),
-            )
-            # Already queued under that name: on its way all the same.
-            if job.get("status") == "duplicate":
-                duplicates += 1
-            else:
-                queued += 1
-            taken.extend((int(row["anilist_id"]), int(row["anilist_episode"])) for row in item["episodes"])
-        await asyncio.to_thread(anime_missing.mark_queued, taken)
-        return {"ok": True, "queued": queued, "duplicates": duplicates, "episodes": len(taken)}
+        try:
+            return await anime_missing.queue_releases(items)
+        except LookupError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # -- Every show at once: "Upgrade all" and "Download all available" -------
 
@@ -4283,67 +4314,11 @@ def create_app() -> Any:
             publish=req.publish,
         )
 
-    async def _enqueue_anime_download(
-        entry: Any,
-        *,
-        title: str,
-        torrent_url: str,
-        detail_url: str,
-        magnet_uri: str,
-        info_hash: str,
-        kind: str,
-        episode: int | None,
-        publish: bool,
-        job_title: str | None = None,
-        german_sub_url: str | None = None,
-    ) -> dict:
-        """Queue one Nyaa release as this AniList entry: the drawer's download and the dialog's.
+    async def _enqueue_anime_download(entry: Any, **kwargs: Any) -> dict:
+        """Queue one Nyaa release as this AniList entry: the drawer's download and the dialog's."""
+        from bankai.web import anime_missing
 
-        ``german_sub_url``: German Erai-raws uploaded beside the release, put
-        beside the episode when it is published.
-        """
-        from bankai.metadata import anilist
-
-        english = entry.name
-        if kind == "show":
-            # Further releases under this name are this entry too.
-            await asyncio.to_thread(erai_mod.save_anilist_mapping, title, _anime_choice(entry))
-        args = [
-            "anime-download",
-            "--release-title",
-            title,
-            "--torrent-url",
-            torrent_url,
-            "--detail-url",
-            detail_url,
-            "--magnet-uri",
-            magnet_uri,
-            "--info-hash",
-            info_hash,
-            "--kind",
-            kind,
-            "--anilist-id",
-            str(entry.id),
-            "--anilist-title",
-            entry.name,
-            "--english-title",
-            english,
-        ]
-        year = anilist.year(entry.id)
-        if kind == "movie" and year:
-            args.extend(["--year", str(year)])
-        if episode is not None:
-            args.extend(["--episode", str(episode)])
-        if publish and kind == "show":
-            args.append("--publish")
-        if german_sub_url and kind == "show" and episode is not None:
-            args.extend(["--german-sub-url", german_sub_url])
-        return await asyncio.to_thread(
-            webjobs.enqueue,
-            kind=kind,
-            title=job_title or (f"{english} - {episode:02d}" if episode is not None else english),
-            args=args,
-        )
+        return await anime_missing.enqueue_download(entry, **kwargs)
 
     @app.get("/api/torrent-actions/{job_id}")
     def torrent_action_get(job_id: str) -> dict:
@@ -5000,11 +4975,12 @@ def create_app() -> Any:
         status = str((release or {}).get("status") or "")
         if status in erai_mod._ACTIVE_RELEASE_STATES:
             return f"The release is already {status}"
-        if release is None:
-            # Picked by hand: no reconciler publishes its torrent, only this
-            # job. Fullmetal Alchemist's finished 21 GB batch had its retry
-            # dropped as "still in qBittorrent", and nothing else would ever
-            # have filed it. A job for a torrent qBittorrent has follows it.
+        if release is None or status == "failed":
+            # Picked by hand, or a release the automation gave up on: no reconciler publishes its
+            # torrent, only this job. Fullmetal Alchemist's finished 21 GB batch had its retry
+            # dropped as "still in qBittorrent", and nothing else would ever have filed it; so did
+            # Dr. STONE New World Part 2's, its release failed after five publishing attempts
+            # (Nov 2026). A job for a torrent qBittorrent has follows it.
             return None
 
         with suppress(Exception):
@@ -5627,10 +5603,10 @@ def create_app() -> Any:
         from bankai.torrent.qbittorrent import QBittorrentClient
 
         try:
-            async with QBittorrentClient() as client:
+            async with QBittorrentClient(timeout=8.0) as client:
                 torrents = await client.list_torrents()
         except Exception as exc:
-            log.warning("qBittorrent listing failed: %s", exc)
+            log.warning("qBittorrent listing failed: %r", exc)
             raise
         return {
             "items": [
@@ -6464,7 +6440,8 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail="scope must be anime, show or movie")
         paths = [str(path) for path in req.get("paths") or [] if path]
         try:
-            return await preview_mod.preview(str(req.get("magnet") or ""), paths, scope)
+            missing = [row for row in req.get("missing") or [] if isinstance(row, dict)]
+            return await preview_mod.preview(str(req.get("magnet") or ""), paths, scope, missing)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:  # qBittorrent unreachable or refusing: said, not a 500
@@ -6474,10 +6451,13 @@ def create_app() -> Any:
     async def anime_replace_magnet(req: dict) -> dict:
         """Replace the ticked episodes of the anime library with a magnet link's torrent."""
         paths = [str(path) for path in req.get("paths") or [] if path]
-        if not paths:
-            raise HTTPException(status_code=422, detail="tick the episodes to replace")
+        missing = [row for row in req.get("missing") or [] if isinstance(row, dict)]
+        if not paths and not missing:
+            raise HTTPException(status_code=422, detail="tick the episodes to replace or download")
         try:
-            return await erai_mod.replace_from_magnet(paths, str(req.get("magnet") or ""), lose_german=bool(req.get("lose_german")))
+            return await erai_mod.replace_from_magnet(
+                paths, str(req.get("magnet") or ""), lose_german=bool(req.get("lose_german")), missing=missing,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:

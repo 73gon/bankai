@@ -525,3 +525,108 @@ async def test_extract_attempts_skip_repeating_a_completed_browser_failure(
         ("https://vidsonic.net/e/dead", "ytdlp"),
         ("https://voe.sx/working", "ytdlp"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("title", "german"),
+    [
+        ("Inception.2010.German.DL.1080p.BluRay.x264-DETAiLS", True),
+        ("Inception 2010 German AC3 1080p BluRay x265", True),
+        ("Inception.2010.GERMAN.DUBBED.720p.WEB.h264", True),
+        ("Inception.2010.German.Subbed.1080p.WEB", False),
+        ("Inception.2010.1080p.BluRay.x264.GerSub", False),
+        ("Inception.2010.German.DL.Subbed.1080p", True),
+        ("Inception 2010 1080p BluRay x264", False),
+        ("Germany 2010 1080p", False),
+    ],
+)
+def test_a_release_name_says_german_audio_not_german_subtitles(title: str, german: bool) -> None:
+    from bankai.processor.pipeline import german_audio_named
+
+    assert german_audio_named(title) is german
+
+
+def _german_job(tmp_path: Path) -> WorkerContext:
+    settings = get_settings()
+    initialize(settings.paths.state_db)
+    repo = StateRepository(settings.paths.state_db)
+    job = repo.create_job(
+        Job(
+            kind=JobKind.PIPELINE,
+            status=JobStatus.RUNNING,
+            payload={
+                "query": "Inception 2010",
+                "stream_url": "https://x/y",
+                "stream_site": "filmpalast",
+                "kind": "movie",
+                "out": str(tmp_path / "out.mkv"),
+            },
+        )
+    )
+    return WorkerContext(job=job, repo=repo, work_dir=tmp_path / "work", cancel_token=asyncio.Event())
+
+
+def _german_search(monkeypatch: pytest.MonkeyPatch, titles: list[str]) -> list[str]:
+    from bankai.torrent.prowlarr import TorrentCandidate
+
+    asked: list[str] = []
+
+    class Prowlarr:
+        async def search(self, query: str, categories=None):
+            asked.append(query)
+            return [
+                TorrentCandidate(title=title, indexer="x", indexer_id=1, download_url="http://x/1.torrent",
+                                 info_url=None, magnet_uri=None, info_hash="a" * 40, size_bytes=8 * 1024**3,
+                                 seeders=50, leechers=0, publish_date=None)
+                for title in titles
+            ]
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("bankai.torrent.prowlarr.ProwlarrClient", Prowlarr)
+    monkeypatch.setattr("bankai.processor.pipeline._german_title", lambda payload: asyncio.sleep(0, result=None))
+    return asked
+
+
+async def test_a_release_with_german_audio_is_taken_without_stream_or_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = _german_search(monkeypatch, ["Inception.2010.German.DL.1080p.BluRay.x264-GRP", "Inception.2010.1080p.BluRay.x264-GRP"])
+    copied: list[tuple[Path, Path]] = []
+
+    async def copy(source: Path, out: Path) -> None:
+        copied.append((source, out))
+
+    monkeypatch.setattr("bankai.processor.pipeline._copy_into_mkv", copy)
+    monkeypatch.setattr("bankai.web.direct.has_german", lambda path, title="", probe=True: True)
+    extract = _FakeWorker(JobKind.EXTRACT, {"path": "/tmp/audio.aac"})
+    torrent = _FakeWorker(JobKind.TORRENT, {"path": "/tmp/german.mkv", "torrent_hash": "a" * 40})
+    pipeline = PipelineWorker(extractor=extract, torrent=torrent)  # type: ignore[arg-type]
+
+    result = await pipeline.run(_german_job(tmp_path))
+
+    assert asked == ["Inception 2010 German"]
+    assert result is not None and result["german_release"].startswith("Inception.2010.German.DL")
+    assert torrent.calls[0]["manual_candidate"]["title"].startswith("Inception.2010.German.DL")
+    assert copied == [(Path("/tmp/german.mkv"), tmp_path / "out.mkv")]
+    assert extract.calls == []
+
+
+async def test_a_release_whose_tracks_hold_no_german_falls_back_to_the_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _german_search(monkeypatch, ["Inception.2010.German.DL.1080p.BluRay.x264-GRP"])
+    monkeypatch.setattr("bankai.web.direct.has_german", lambda path, title="", probe=True: False)
+    removed: list[str | None] = []
+
+    async def remove(self, torrent_hash):
+        removed.append(torrent_hash)
+
+    monkeypatch.setattr(PipelineWorker, "_remove_torrent", remove)
+    extract = _FakeWorker(JobKind.EXTRACT, {"path": "/tmp/audio.aac"})
+    torrent = _SequenceWorker(JobKind.TORRENT, [{"path": "/tmp/german.mkv", "torrent_hash": "b" * 40}, {"path": "/tmp/video.mkv"}])
+    sync = _FakeWorker(JobKind.SYNC, {"path": "/tmp/synced.aac"})
+    remux = _FakeWorker(JobKind.REMUX, {"path": "/tmp/final.mkv"})
+    pipeline = PipelineWorker(extractor=extract, torrent=torrent, sync=sync, remux=remux)  # type: ignore[arg-type]
+
+    result = await pipeline.run(_german_job(tmp_path))
+
+    assert removed == ["b" * 40]
+    assert result is not None and result["final_path"] == "/tmp/final.mkv" and len(extract.calls) == 1

@@ -3,13 +3,13 @@ import { Check, ImageOff, MoreHorizontal, RefreshCw, RotateCcw } from 'lucide-re
 import { toast } from '@/lib/toast';
 import { api, type ArtworkCandidate, type ArtworkSlot } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Input } from '@/zon/ui/input';
-import { Menu, MenuContent, MenuGroup, MenuGroupLabel, MenuItem, MenuTrigger } from '@/zon/ui/menu';
-import { Spinner } from '@/zon/ui/spinner';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Menu, MenuContent, MenuGroup, MenuGroupLabel, MenuItem, MenuTrigger } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
 
 /** How a slot's pictures are shaped: posters upright, backdrops and thumbs wide, banners wider, logos as they are. */
 function shape(slot: string) {

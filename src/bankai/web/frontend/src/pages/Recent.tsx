@@ -5,15 +5,15 @@ import { api, type DiscoverItem, type FilmpalastDetails, type FilmpalastFeed, ty
 import { POSTER_IMG, posterSources } from '@/lib/posters';
 import { GermanRelease } from '@/components/GermanRelease';
 import { StatusTag } from '@/components/status-tag';
-import { Button } from '@/zon/ui/button';
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Input } from '@/zon/ui/input';
-import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/zon/ui/input-group';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Switch } from '@/zon/ui/switch';
-import { Tabs, TabsList, TabsTab } from '@/zon/ui/tabs';
+import { Button } from '@zonsh/ui';
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Switch } from '@zonsh/ui';
+import { Tabs, TabsList, TabsTab } from '@zonsh/ui';
 
 const FILMPALAST_HIDE_DOWNLOADED_KEY = 'bankai:filmpalast-hide-downloaded';
 const pageCache = new Map<string, RecentReleasePage>();

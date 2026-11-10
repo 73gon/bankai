@@ -66,11 +66,13 @@ class TorrentStalled(QBittorrentError):
 
 
 class QBittorrentClient:
-    def __init__(self, settings: QBittorrentSettings | None = None) -> None:
+    def __init__(self, settings: QBittorrentSettings | None = None, *, timeout: float = 30.0) -> None:
+        """``timeout``: per request; listings the pages wait on take a short one, so a stalled
+        qBittorrent costs the sidebar seconds, not the full 30 (it held it 279 s once, Nov 2026)."""
         self._settings = settings or get_settings().qbittorrent
         self._client = httpx.AsyncClient(
             base_url=self._settings.url.rstrip("/"),
-            timeout=30.0,
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
             follow_redirects=True,
         )
         self._logged_in = False

@@ -30,8 +30,8 @@ import { AniListPickDialog } from '@/components/AniListPickDialog';
 import { AnimePoster } from '@/components/AnimePoster';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
 import {
   Dialog,
   DialogBody,
@@ -40,17 +40,17 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/zon/ui/dialog';
-import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '@/zon/ui/drawer';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Input } from '@/zon/ui/input';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Spinner } from '@/zon/ui/spinner';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { Tag } from '@/zon/ui/tag';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+} from '@zonsh/ui';
+import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { Tag } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
 
 /** What both sources filter on. Every term is matched ignoring case. */
 type Common = {
@@ -139,6 +139,15 @@ function loadSaved(): Saved {
   } catch {
     return structuredClone(DEFAULT_SAVED);
   }
+}
+
+const COMMON_KEYS = Object.keys(COMMON) as (keyof Common)[];
+
+/** ``into`` with ``from``'s search and the filters both sources have; its own filters kept. */
+function shared<V extends SourceView<Common>>(from: SourceView<Common>, into: V): V {
+  const filters: Common = { ...into.filters };
+  for (const key of COMMON_KEYS) filters[key] = from.filters[key];
+  return { ...into, query: from.query, filters };
 }
 
 function store(saved: Saved) {
@@ -582,8 +591,14 @@ export default function Anime() {
   const draft = drafts[source];
 
   function switchSource(next: AnimeSource) {
+    if (next === source) return;
+    // The search and the filters both sources have go along: the other source shows the same search.
+    const sameSearch = shared(searched[source], searched[next]);
+    const changed = JSON.stringify(sameSearch) !== JSON.stringify(searched[next]);
+    setDrafts((old) => ({ ...old, [next]: shared(old[source], old[next]) }));
+    setSearched((old) => ({ ...old, [next]: sameSearch }));
     setSource(next);
-    setPage(pages[next]);
+    setPage(changed ? 0 : pages[next]);
   }
 
   function setQuery(query: string) {

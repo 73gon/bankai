@@ -43,3 +43,6 @@ config.toml
 # OS
 .DS_Store
 Thumbs.db
+
+# Browser screenshots and logs from Playwright runs
+.playwright-mcp/

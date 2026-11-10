@@ -1,12 +1,11 @@
-import { Fragment, useDeferredValue, useEffect, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { HardDrive, RefreshCw, ArrowLeft, ArrowRight, Columns2, CircleArrowUp, ExternalLink, Search, Download, FileVideo, Images, LayoutGrid, Rows3, Trash2, Ban, Link2, Network, Pencil, RotateCcw, TextCursorInput, Split, Unlink, X, Magnet, ShieldCheck } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { Fragment, useDeferredValue, useEffect, useMemo, useState, useRef } from 'react';
+import { ArrowRight, CircleArrowUp, ExternalLink, Search, Download, FileVideo, Images, Trash2, Ban, Link2, Network, Pencil, RotateCcw, TextCursorInput, Split, Unlink, X, Magnet, ShieldCheck } from 'lucide-react';
+import { inBackground, toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AniListAnime, type AnimeLibraryEntry, type AnimeLibraryShow, type AnimeLibraryEpisode, type AnimeEntry, type AnimeBulkKind, type AnimeBulkShow, type HevcUpgradePlan, type MissingRelease } from '@/lib/api';
 import { anilistName, anilistUrl } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { AniListPickDialog } from '@/components/AniListPickDialog';
-import { MagnetReplaceDialog } from '@/components/MagnetReplaceDialog';
+import { MagnetReplaceDialog, type MagnetMissing } from '@/components/MagnetReplaceDialog';
 import { HevcUpgradePlans, approvedOf } from '@/components/hevc-upgrade-plans';
 import { ArtworkDialog } from '@/components/ArtworkDialog';
 import { SeasonArcsDialog } from '@/components/SeasonArcsDialog';
@@ -14,31 +13,21 @@ import { CollectionGraph, type GraphTarget } from '@/components/CollectionGraph'
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { SegmentMeter, rampParts } from '@/components/segment-meter';
 import { EpisodeBar, airedCount, airedStrip, describeStrip, type StripTier } from '@/components/episode-bar';
-import { LibrarySplit } from '@/components/library-split';
-import { useRememberedOpen } from '@/lib/prefs';
+import { CORNER_TAG, FooterStat, LibraryBody, LibraryFooter, LibraryHeader, PosterCard, TitlePage, formatSize, useLibraryAddress, useLibraryView } from '@/components/library/library-page';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card } from '@/zon/ui/card';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Input } from '@/zon/ui/input';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Spinner } from '@/zon/ui/spinner';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
-import { Toggle } from '@/zon/ui/toggle';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
+import { Toggle } from '@zonsh/ui';
 
-function formatSize(bytes: number) {
-  const tib = bytes / 1024 ** 4;
-  if (tib >= 1) return tib.toFixed(2) + ' TiB';
-  const gib = bytes / 1024 ** 3;
-  return gib >= 1 ? gib.toFixed(2) + ' GiB' : (bytes / 1024 ** 2).toFixed(0) + ' MiB';
-}
 
 type LibrarySortKey = 'title' | 'seasons' | 'episodes' | 'size' | 'state';
 
@@ -55,7 +44,6 @@ const LIBRARY_FIRST_DIRECTION: Record<LibrarySortKey, SortDir> = {
 };
 
 // 'split': the table beside the open show, to try out against the show's own page.
-type View = 'grid' | 'table' | 'split';
 
 // The library table's lesser columns, by the table's own width (not the window's).
 /** The day a release came out, from Nyaa's RFC date ("Thu, 05 Sep 2024 12:00:00 -0000"). */
@@ -74,7 +62,6 @@ function isHevc(title: string): boolean {
 const PREFETCH_DELAY_MS = 90;
 const PREFETCH_MS = 15_000;
 
-const VIEW_KEY = 'bankai.anime.library.view';
 const FILTERS_KEY = 'bankai.anime.library.filters';
 
 type StoredFilters = {
@@ -100,27 +87,6 @@ function storedFilters(): StoredFilters {
   }
 }
 
-function storedView(): View {
-  try {
-    const saved = localStorage.getItem(VIEW_KEY);
-    return saved === 'table' || saved === 'split' ? saved : 'grid';
-  } catch {
-    // Private windows and blocked site data both throw here; the grid is a
-    // perfectly good default to fall back on.
-    return 'grid';
-  }
-}
-
-// The split view needs the room; narrower, a show opens as its page.
-const WIDE_QUERY = '(min-width: 64rem)';
-function subscribeWide(onChange: () => void) {
-  const query = window.matchMedia(WIDE_QUERY);
-  query.addEventListener('change', onChange);
-  return () => query.removeEventListener('change', onChange);
-}
-function useWide(): boolean {
-  return useSyncExternalStore(subscribeWide, () => window.matchMedia(WIDE_QUERY).matches, () => true);
-}
 
 const COMPLETION: Record<string, { label: string; className: string }> = {
   complete: { label: 'Complete', className: 'bg-success' },
@@ -187,6 +153,7 @@ function StateTags({ show }: { show: AnimeLibraryShow }) {
       {(show.missing_available_count ?? 0) > 0 && <StatusTag variant='info' title='Missing episodes with a German-subtitled release found. Open the show and choose Download remaining episodes.'>{show.missing_available_count} available</StatusTag>}
       {(show.no_german_count ?? 0) > 0 && <StatusTag variant='warning' title='Episodes on disk with neither German subtitles nor a German dub'>{show.no_german_count} without German</StatusTag>}
       {(show.verify_wrong ?? 0) > 0 && <StatusTag variant='destructive' title='The episode check found files whose picture is another episode than the one they are filed as. Open the show to see which.'>{show.verify_wrong} wrong episode{show.verify_wrong === 1 ? '' : 's'}</StatusTag>}
+      {(show.verify_length ?? 0) > 0 && <StatusTag variant='warning' title='The episode check found files whose length does not fit their episode: half of one, two in one, a recap. Open the show to see which.'>{show.verify_length} length off</StatusTag>}
       {show.staged_count > 0 && <StatusTag variant='warning'>{show.staged_count} staged</StatusTag>}
       {show.blacklisted && <StatusTag variant='destructive'>Blacklisted</StatusTag>}
       {isUnmatched(show) && <StatusTag variant='warning' title='No AniList entry is known for these files: match it from its details'>Unmatched</StatusTag>}
@@ -214,8 +181,9 @@ function UpgradeTag({ show }: { show: AnimeLibraryShow }) {
 /** What the episode check says of one file, beside its State: only a wrong one. The check runs in the
  *  background; a file found right needs no mark (a green shield on every row was noise, Nov 2026). */
 function VerifyTag({ verify }: { verify?: AnimeLibraryEpisode['verify'] }) {
-  if (verify?.verdict !== 'wrong') return null;
-  return <StatusTag variant='destructive' title={verifyWhy(verify)}>Wrong episode</StatusTag>;
+  if (verify?.verdict === 'wrong') return <StatusTag variant='destructive' title={verifyWhy(verify)}>Wrong episode</StatusTag>;
+  if (verify && verify.verdict !== 'confirmed' && verify.length?.ok === false) return <StatusTag variant='warning' title={verifyWhy(verify)}>Length off</StatusTag>;
+  return null;
 }
 
 /** The check's findings in words, for a tag's title and the row's note. */
@@ -276,7 +244,7 @@ function VerifyNote({ show, episode, busy, onRefile, onDelete, onConfirm }: {
           <Link2 data-icon='inline-start' /> Make it {title} ep {is[1]}
         </Button>
       ))}
-      {verify.verdict === 'wrong' && (
+      {(verify.verdict === 'wrong' || verify.length?.ok === false) && (
         <Button size='sm' variant='ghost' className='h-5 px-1.5 text-[0.7rem]' disabled={busy} onClick={() => onConfirm(episode, true)} title='You checked: it is the episode it is filed as. Kept while the file stays as it is.'>
           <ShieldCheck data-icon='inline-start' /> It's the right episode
         </Button>
@@ -353,6 +321,18 @@ function hasFile(episode: AnimeLibraryEpisode) {
   return !episode.missing && Boolean(episode.path);
 }
 
+/** A missing episode that has aired and is an AniList entry's: ticked to be filled by a magnet's torrent. */
+function fillable(episode: AnimeLibraryEpisode) {
+  return Boolean(episode.missing) && !episode.tba && episode.anilist_id != null && episode.anilist_episode != null
+    && episode.season_number != null && episode.episode != null;
+}
+
+/** What a row is ticked as: its file, or for a missing episode its AniList entry and number. */
+function tickKey(episode: AnimeLibraryEpisode): string | null {
+  if (hasFile(episode)) return episode.path;
+  return fillable(episode) ? `missing:${episode.anilist_id}:${episode.anilist_episode}` : null;
+}
+
 /** The entry "Change AniList entry" swaps: the open tab's, when the tab is one entry. */
 function tabEntry(show: AnimeLibraryShow, tab: string): EntryRef | null {
   const here = show.season_anilist?.[tab] ?? [];
@@ -397,7 +377,7 @@ export default function AnimeLibrary() {
   const [onlyBlacklisted, setOnlyBlacklisted] = useState(() => storedFilters().onlyBlacklisted);
   // Only the cards no AniList entry is known for.
   const [onlyUnmatched, setOnlyUnmatched] = useState(() => storedFilters().onlyUnmatched);
-  const [view, setView] = useState<View>(storedView);
+  const { view, setView, wide, split } = useLibraryView('anime');
   const [sort, setSort] = useState<SortState<LibrarySortKey> | null>(() => storedFilters().sort);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedShow, setSelectedShow] = useState<AnimeLibraryShow | null>(null);
@@ -408,7 +388,6 @@ export default function AnimeLibrary() {
   // The collection being renamed, and the name typed for it.
   const [renameFor, setRenameFor] = useState<AnimeLibraryShow | null>(null);
   const [renameValue, setRenameValue] = useState('');
-  const [renaming, setRenaming] = useState(false);
   // The season being named: its card, its tab, the entry it opens with, and the name typed.
   const [seasonRename, setSeasonRename] = useState<{ show: AnimeLibraryShow; season: number; entry: EntryRef; label: string } | null>(null);
   const [seasonName, setSeasonName] = useState('');
@@ -416,7 +395,6 @@ export default function AnimeLibrary() {
   // Only a spinner with nothing to show: otherwise the held answer stays up while it refreshes.
   const [loading, setLoading] = useState(() => recall(pagePaths.animeLibrary) === undefined);
   const [transferring, setTransferring] = useState<string | null>(null);
-  const [upgrading, setUpgrading] = useState<string | null>(null);
   // The approval an upgrade waits for: what each release would replace (null while it is looked up).
   const [upgradeFor, setUpgradeFor] = useState<{ show: AnimeLibraryShow; plans: HevcUpgradePlan[] | null; note: string | null } | null>(null);
   const [upgradePicked, setUpgradePicked] = useState<Set<string>>(new Set());
@@ -431,13 +409,13 @@ export default function AnimeLibrary() {
     [results, only1080, onlyHevc],
   );
   const [searchQuery, setSearchQuery] = useState('');
-  const [downloading, setDownloading] = useState<string | null>(null);
   // The show to remove, and whether it is blacklisted too.
   const [removeTarget, setRemoveTarget] = useState<{ show: AnimeLibraryShow; blacklist: boolean } | null>(null);
   // The episode files ticked in the show, and the card they are of.
   const [checked, setChecked] = useState<{ key: string; paths: string[] }>({ key: '', paths: [] });
   // The ticked files, while the Replace with magnet link dialog is open.
-  const [magnetFor, setMagnetFor] = useState<string[] | null>(null);
+  const opening = useRef(0);
+  const [magnetFor, setMagnetFor] = useState<{ paths: string[]; missing: MagnetMissing[] } | null>(null);
   // "Match to AniList entry…": the files, the entry, the first episode and each file's episode.
   const [assignFor, setAssignFor] = useState<AssignTarget | null>(null);
   const [assignEntry, setAssignEntry] = useState<EntryRef | null>(null);
@@ -445,7 +423,6 @@ export default function AnimeLibrary() {
   const [assignEpisodes, setAssignEpisodes] = useState<string[]>([]);
   const [assigning, setAssigning] = useState(false);
   const [episodeTarget, setEpisodeTarget] = useState<{ show: AnimeLibraryShow; episode: AnimeLibraryEpisode } | null>(null);
-  const [deletingEpisode, setDeletingEpisode] = useState(false);
   const [titling, setTitling] = useState(false);
   // The collection whose relation graph is open.
   const [graphFor, setGraphFor] = useState<GraphTarget>(null);
@@ -460,7 +437,6 @@ export default function AnimeLibrary() {
   const [missingFor, setMissingFor] = useState<AnimeLibraryShow | null>(null);
   const [missingReleases, setMissingReleases] = useState<MissingRelease[] | null>(null);
   const [missingPicked, setMissingPicked] = useState<Set<string>>(new Set());
-  const [missingQueuing, setMissingQueuing] = useState(false);
   // "Upgrade all" / "Download all available": which one the dialog is open for,
   // the shows it would take (all ticked to begin with), and the one running.
   const [bulkKind, setBulkKind] = useState<AnimeBulkKind | null>(null);
@@ -470,14 +446,6 @@ export default function AnimeLibrary() {
   // Upgrade all: each show's releases and what they replace, by show key (null while looked up), and the ticked ones.
   const [bulkPlans, setBulkPlans] = useState<Record<string, HevcUpgradePlan[] | null>>({});
   const [bulkPlanPicked, setBulkPlanPicked] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(VIEW_KEY, view);
-    } catch {
-      /* remembering the choice is a convenience, not a requirement */
-    }
-  }, [view]);
 
   useEffect(() => {
     try {
@@ -517,9 +485,9 @@ export default function AnimeLibrary() {
     if (card) {
       if (card.key !== showKey) {
         // Renamed: the address follows, without a step to go back to.
-        const next = new URLSearchParams(params);
+        const next = new URLSearchParams(address.search);
         next.set('show', card.key);
-        setParams(next, { replace: true, state: location.state });
+        address.setSearch(next, { replace: true, state: address.location.state });
       }
       await openShow(card.key);
     } else {
@@ -610,6 +578,9 @@ export default function AnimeLibrary() {
   }
 
   async function openShow(key: string, clicked = false) {
+    // Only the newest opening may answer: clicked through quickly, an earlier show's slower
+    // answer would show it under the newer one's address.
+    const mine = ++opening.current;
     // Another show: the one open goes at once, so it neither lingers nor moves while the next loads.
     if (selectedShow?.key !== key) {
       setSelectedShow(null);
@@ -621,6 +592,7 @@ export default function AnimeLibrary() {
     try {
       const ready = clicked ? takePrefetched(key) : null;
       const found = ready ? await ready : (await api.animeLibraryShow(key)).shows[0] ?? null;
+      if (mine !== opening.current) return;
       setSelectedShow(found);
       // Gone since (deleted, renamed): closed, so a remembered one is forgotten too.
       if (!found) {
@@ -628,10 +600,11 @@ export default function AnimeLibrary() {
         closeShow();
       }
     } catch (error: any) {
+      if (mine !== opening.current) return;
       toast.error(error.message);
       setSelectedShow(null);
     } finally {
-      setDetailLoading(false);
+      if (mine === opening.current) setDetailLoading(false);
     }
   }
 
@@ -658,30 +631,21 @@ export default function AnimeLibrary() {
     }
   }
 
-  async function approveUpgrade() {
+  function approveUpgrade() {
     if (!upgradeFor?.plans) return;
     const { show, plans } = upgradeFor;
-    setUpgrading(show.key);
-    try {
-      const result = await api.upgradeShowToHevc(show.anilist_ids ?? [], approvedOf(plans, upgradePicked));
-      setUpgradeFor(null);
-      if (result.queued === 0) {
-        toast.info(result.changed
+    // The dialog closes at once; a toast follows the queueing.
+    setUpgradeFor(null);
+    void inBackground(api.upgradeShowToHevc(show.anilist_ids ?? [], approvedOf(plans, upgradePicked)), {
+      loading: 'Queuing HEVC replacements for ' + show.title + '…',
+      success: (result) => result.queued === 0
+        ? (result.changed
           ? 'Nothing queued: the files changed since you looked; look again'
-          : 'Nothing queued: no approved release carries German subtitles any more');
-      } else {
-        toast.success(
-          'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')
+          : 'Nothing queued: no approved release carries German subtitles any more')
+        : 'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')
           + (result.changed ? ' · ' + result.changed + ' left out, their files changed' : '')
           + (result.german_dub_kept ? ' · ' + result.german_dub_kept + ' German dub kept' : ''),
-        );
-      }
-      await load();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setUpgrading(null);
-    }
+    }).then(() => load(), () => undefined);
   }
 
   async function removeShow() {
@@ -742,17 +706,11 @@ export default function AnimeLibrary() {
     const target = seasonRename;
     if (!target || target.show.collection_id == null) return;
     const cid = target.show.collection_id;
-    setRenaming(true);
-    try {
-      await api.animeSeasonName(cid, target.entry.anilist_id, name);
-      toast.success(name ? 'Season renamed to ' + name : 'Season named after its entry again');
-      setSeasonRename(null);
-      await reopen((card) => card.collection_id === cid);
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setRenaming(false);
-    }
+    setSeasonRename(null);
+    void inBackground(api.animeSeasonName(cid, target.entry.anilist_id, name), {
+      loading: 'Renaming the season…',
+      success: name ? 'Season renamed to ' + name : 'Season named after its entry again',
+    }).then(() => reopen((card) => card.collection_id === cid), () => undefined);
   }
 
   /** A name of the user's own for the collection; null gives it back AniList's. */
@@ -760,17 +718,11 @@ export default function AnimeLibrary() {
     const show = renameFor;
     if (!show || show.collection_id == null) return;
     const cid = show.collection_id;
-    setRenaming(true);
-    try {
-      const result = await api.collectionName(cid, name);
-      toast.success(name ? 'Collection renamed to ' + name : 'Collection named after AniList again' + (result.name ? ': ' + result.name : ''));
-      setRenameFor(null);
-      await reopen((card) => card.collection_id === cid);
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setRenaming(false);
-    }
+    setRenameFor(null);
+    void inBackground(api.collectionName(cid, name), {
+      loading: 'Renaming the collection…',
+      success: (result) => name ? 'Collection renamed to ' + name : 'Collection named after AniList again' + (result.name ? ': ' + result.name : ''),
+    }).then(() => reopen((card) => card.collection_id === cid), () => undefined);
   }
 
   /** The ticked files of the open card that are still on disk, in the card's order. */
@@ -778,6 +730,13 @@ export default function AnimeLibrary() {
     if (!show || checked.key !== show.key || !checked.paths.length) return [];
     const ticked = new Set(checked.paths);
     return show.episodes.filter((episode) => hasFile(episode) && ticked.has(episode.path));
+  }
+
+  /** The ticked missing episodes of the open card, in the card's order. */
+  function checkedMissing(show: AnimeLibraryShow | null): AnimeLibraryEpisode[] {
+    if (!show || checked.key !== show.key || !checked.paths.length) return [];
+    const ticked = new Set(checked.paths);
+    return show.episodes.filter((episode) => fillable(episode) && ticked.has(tickKey(episode)!));
   }
 
   function toggleChecked(show: AnimeLibraryShow, paths: string[], on: boolean) {
@@ -825,27 +784,22 @@ export default function AnimeLibrary() {
       toast.error('Two files cannot be the same episode');
       return;
     }
-    setAssigning(true);
-    try {
-      const result = await api.assignFiles(target.show.key, target.rows.map((row) => row.path), entry.anilist_id, numbers);
-      const count = result.assigned ?? target.rows.length;
-      toast.success(
-        count + ' file' + (count === 1 ? '' : 's') + ' matched to ' + entry.title
-        + (result.moved ? ' · ' + result.moved + ' moved into place' : ''),
-      );
-      setAssignFor(null);
-      clearChecked();
-      const id = entry.anilist_id;
+    // The dialog closes at once; a toast follows the matching and the moves.
+    setAssignFor(null);
+    clearChecked();
+    const id = entry.anilist_id;
+    void inBackground(api.assignFiles(target.show.key, target.rows.map((row) => row.path), entry.anilist_id, numbers), {
+      loading: 'Matching ' + target.rows.length + ' file' + (target.rows.length === 1 ? '' : 's') + ' to ' + entry.title + '…',
+      success: (result) => {
+        const count = result.assigned ?? target.rows.length;
+        return count + ' file' + (count === 1 ? '' : 's') + ' matched to ' + entry.title
+          + (result.moved ? ' · ' + result.moved + ' moved into place' : '');
+      },
+    }).then(() => reopen(
       // The card stays open while files are left on it; else the card the files went to.
-      await reopen(
-        (card) => card.key === target.show.key,
-        (card) => card.anilist_id === id || Boolean(card.anilist_ids?.includes(id)),
-      );
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setAssigning(false);
-    }
+      (card) => card.key === target.show.key,
+      (card) => card.anilist_id === id || Boolean(card.anilist_ids?.includes(id)),
+    ), () => undefined);
   }
 
   /** The user's word on a file the check calls wrong: it is the episode it is filed as (or taken back). */
@@ -899,18 +853,11 @@ export default function AnimeLibrary() {
   async function deleteEpisode() {
     const target = episodeTarget;
     if (!target) return;
-    setDeletingEpisode(true);
-    try {
-      const result = await api.deleteAnimeEpisodes(target.show.key, [target.episode.path]);
-      toast.success('Deleted ' + target.episode.name + (result.freed_bytes ? ' (' + formatSize(result.freed_bytes) + ')' : ''));
-      setEpisodeTarget(null);
-      await openShow(target.show.key);
-      void load();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setDeletingEpisode(false);
-    }
+    setEpisodeTarget(null);
+    void inBackground(api.deleteAnimeEpisodes(target.show.key, [target.episode.path]), {
+      loading: 'Deleting ' + target.episode.name + '…',
+      success: (result) => 'Deleted ' + target.episode.name + (result.freed_bytes ? ' (' + formatSize(result.freed_bytes) + ')' : ''),
+    }).then(() => { void openShow(target.show.key); void load(); }, () => undefined);
   }
 
   /** The AniList entry a row of the show is an episode of: its own, else its tab's first entry. */
@@ -943,17 +890,13 @@ export default function AnimeLibrary() {
   async function downloadMissing(entry: AnimeEntry) {
     const anilistId = searchTarget ? entryOf(searchTarget.show, searchTarget.episode) : null;
     if (!searchTarget || anilistId == null) return;
-    setDownloading(entry.info_hash);
-    try {
-      // A missing episode of a show in the library: straight into it, as the automation's go.
-      await api.animeDownload(entry, anilistId, 'show', searchTarget.episode.episode, true);
-      toast.success('Episode added to the Anime queue');
-      setSearchTarget(null);
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setDownloading(null);
-    }
+    // A missing episode of a show in the library: straight into it, as the automation's go.
+    const episode = searchTarget.episode.episode;
+    setSearchTarget(null);
+    void inBackground(api.animeDownload(entry, anilistId, 'show', episode, true), {
+      loading: 'Queuing episode ' + (episode ?? '') + '…',
+      success: 'Episode added to the Anime queue',
+    }).catch(() => undefined);
   }
 
   async function openMissing(show: AnimeLibraryShow) {
@@ -976,22 +919,13 @@ export default function AnimeLibrary() {
     if (!show || !missingReleases) return;
     const hashes = missingReleases.map((item) => item.info_hash).filter((hash) => missingPicked.has(hash));
     if (!hashes.length) return;
-    setMissingQueuing(true);
-    try {
-      const result = await api.downloadMissingReleases(show.key, hashes);
-      toast.success(
-        'Queued ' + result.queued + ' download' + (result.queued === 1 ? '' : 's')
+    setMissingFor(null);
+    void inBackground(api.downloadMissingReleases(show.key, hashes), {
+      loading: 'Queuing ' + hashes.length + ' download' + (hashes.length === 1 ? '' : 's') + ' for ' + show.title + '…',
+      success: (result) => 'Queued ' + result.queued + ' download' + (result.queued === 1 ? '' : 's')
         + ' for ' + result.episodes + ' episode' + (result.episodes === 1 ? '' : 's')
         + (result.duplicates ? ' · ' + result.duplicates + ' already queued' : ''),
-      );
-      setMissingFor(null);
-      await openShow(show.key);
-      void load();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setMissingQueuing(false);
-    }
+    }).then(() => { void openShow(show.key); void load(); }, () => undefined);
   }
 
   async function openBulk(kind: AnimeBulkKind) {
@@ -1042,30 +976,20 @@ export default function AnimeLibrary() {
     setBulkKind(null);
     setBulkRunning(kind);
     const shows = keys.length + ' show' + (keys.length === 1 ? '' : 's');
-    toast.info((kind === 'upgrade' ? 'Upgrading ' : 'Downloading the available episodes of ') + shows + ' in the background…');
-    try {
-      const result = await api.runAnimeBulk(kind, keys, kind === 'upgrade' ? approvedOf(allPlans, bulkPlanPicked) : undefined);
-      const failed = result.failed.length ? ' · failed for ' + result.failed.join(', ') : '';
-      if (kind === 'upgrade') {
-        const message = 'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')
-          + ' in ' + (result.downloads ?? 0) + ' download' + (result.downloads === 1 ? '' : 's')
-          + (result.no_replacement ? ' · ' + result.no_replacement + ' without a replacement now' : '')
-          + (result.changed ? ' · ' + result.changed + ' left out, their files changed' : '') + failed;
-        if (result.queued) toast.success(message);
-        else toast.info(message);
-      } else {
-        toast.success(
-          'Queued ' + result.queued + ' download' + (result.queued === 1 ? '' : 's')
-          + ' for ' + (result.episodes ?? 0) + ' episode' + (result.episodes === 1 ? '' : 's')
-          + (result.duplicates ? ' · ' + result.duplicates + ' already queued' : '') + failed,
-        );
-      }
-      await load();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setBulkRunning(null);
-    }
+    void inBackground(api.runAnimeBulk(kind, keys, kind === 'upgrade' ? approvedOf(allPlans, bulkPlanPicked) : undefined), {
+      loading: (kind === 'upgrade' ? 'Upgrading ' : 'Downloading the available episodes of ') + shows + '…',
+      success: (result) => {
+        const failed = result.failed.length ? ' · failed for ' + result.failed.join(', ') : '';
+        return kind === 'upgrade'
+          ? 'Queued ' + result.queued + ' HEVC replacement' + (result.queued === 1 ? '' : 's')
+            + ' in ' + (result.downloads ?? 0) + ' download' + (result.downloads === 1 ? '' : 's')
+            + (result.no_replacement ? ' · ' + result.no_replacement + ' without a replacement now' : '')
+            + (result.changed ? ' · ' + result.changed + ' left out, their files changed' : '') + failed
+          : 'Queued ' + result.queued + ' download' + (result.queued === 1 ? '' : 's')
+            + ' for ' + (result.episodes ?? 0) + ' episode' + (result.episodes === 1 ? '' : 's')
+            + (result.duplicates ? ' · ' + result.duplicates + ' already queued' : '') + failed;
+      },
+    }).then(() => load(), () => undefined).finally(() => setBulkRunning(null));
   }
 
   useEffect(() => { void load(); }, []);
@@ -1112,41 +1036,16 @@ export default function AnimeLibrary() {
     setSort((current) => nextSort(current, key, LIBRARY_FIRST_DIRECTION));
   }
 
-  // The open show lives in the address (?show=<key>), so Back closes it and a
-  // show can be linked to. Opened from the list it was pushed, and closing it
-  // goes back there; opened by a link, closing replaces it with the list.
-  const [params, setParams] = useSearchParams();
-  const navigate = useNavigate();
-  const location = useLocation();
-  const wide = useWide();
-  const split = view === 'split' && wide;
-  const showKey = params.get('show');
+  // The open show lives in the address (?show=<key>): see useLibraryAddress.
+  const address = useLibraryAddress('anime', ['show'], { split });
+  const showKey = address.current?.key ?? null;
+  const closeShow = address.close;
 
   function goShow(key: string) {
     if (key === showKey) return;
-    const next = new URLSearchParams(params);
-    next.set('show', key);
-    // Clicking through shows in the split view is not a trail to walk back.
-    setParams(next, { replace: split && Boolean(showKey), state: { fromList: true } });
+    address.open('show', key);
     void openShow(key, true);
   }
-
-  function closeShow() {
-    if ((location.state as { fromList?: boolean } | null)?.fromList) {
-      navigate(-1);
-      return;
-    }
-    const next = new URLSearchParams(params);
-    next.delete('show');
-    setParams(next, { replace: true });
-  }
-
-  // The show open in the split view is opened again on coming back from another tab.
-  useRememberedOpen('anime', showKey, split, (key) => {
-    const next = new URLSearchParams(params);
-    next.set('show', key);
-    setParams(next, { replace: true });
-  });
 
   useEffect(() => {
     if (showKey) {
@@ -1166,7 +1065,9 @@ export default function AnimeLibrary() {
   const openTab = tab && tab.key === active?.key && seasons.map(String).includes(tab.value) ? tab.value : String(seasons[0]);
   // The open card's ticked files, across its tabs.
   const activeChecked = checkedRows(active);
-  const checkedPaths = new Set(activeChecked.map((entry) => entry.path));
+  const activeMissing = checkedMissing(active);
+  // Ticked rows of the open card: files by path, missing episodes by their entry and number.
+  const checkedPaths = new Set([...activeChecked, ...activeMissing].map((entry) => tickKey(entry)!));
   // Read absolutely, a season tab is one of the user's own arc folders: named after it.
   const seasonLabel = (season: number | null) => {
     if (season === null) return 'Other files';
@@ -1305,12 +1206,12 @@ export default function AnimeLibrary() {
                     <Button
                       size='sm'
                       variant='secondary'
-                      disabled={!active.anilist_ids?.length || upgrading === active.key}
+                      disabled={!active.anilist_ids?.length}
                       onClick={() => void upgradeToHevc(active)}
                       title='See the HEVC versions found (Erai-raws, with German subtitles) and the AVC files they would replace; nothing is downloaded until you approve'
                     >
                       <FileVideo data-icon='inline-start' />
-                      {upgrading === active.key ? 'Queueing…' : `Upgrade ${active.upgrade_available_count} to HEVC`}
+                      {`Upgrade ${active.upgrade_available_count} to HEVC`}
                     </Button>
                   )}
                   {/* Likewise only once found; it opens the list, it downloads nothing. */}
@@ -1352,6 +1253,11 @@ export default function AnimeLibrary() {
           {!isUnmatched(active) && (active.verify_wrong ?? 0) > 0 && (
             <p className='text-xs text-destructive'>
               {active.verify_wrong} file{active.verify_wrong === 1 ? ' is' : 's are'} another episode than {active.verify_wrong === 1 ? 'it is' : 'they are'} filed as: marked below.
+            </p>
+          )}
+          {!isUnmatched(active) && (active.verify_length ?? 0) > 0 && (
+            <p className='text-xs text-warning'>
+              {active.verify_length} file{active.verify_length === 1 ? '' : 's'} run{active.verify_length === 1 ? 's' : ''} longer or shorter than {active.verify_length === 1 ? 'its episode' : 'their episodes'}: marked below.
             </p>
           )}
           <Tabs value={openTab} onValueChange={(value) => setTab({ key: active.key, value: String(value) })} className='gap-3'>
@@ -1413,8 +1319,8 @@ export default function AnimeLibrary() {
                 })()}
                 <Table variant='plain' dense containerProps={{ className: 'shrink-0' }}>
                     <TableHeader><TableRow><TableHead className='w-7 pr-2'>{(() => {
-                      // "Select all in this tab": every row of it that is a file.
-                      const files = active.episodes.filter((entry) => entry.season_number === season && hasFile(entry)).map((entry) => entry.path);
+                      // "Select all in this tab": every row of it that is a file, or a missing episode to fill.
+                      const files = active.episodes.filter((entry) => entry.season_number === season).map(tickKey).filter((key): key is string => key !== null);
                       const ticked = files.filter((path) => checkedPaths.has(path)).length;
                       return (
                         <Checkbox
@@ -1423,8 +1329,8 @@ export default function AnimeLibrary() {
                           nativeButton
                           render={<button type='button' />}
                           className='align-middle'
-                          aria-label='Select every file in this tab'
-                          title='Select every file in this tab'
+                          aria-label='Select every episode in this tab'
+                          title='Select every episode in this tab, missing ones too'
                           disabled={files.length === 0}
                           checked={files.length > 0 && ticked === files.length}
                           indeterminate={ticked > 0 && ticked < files.length}
@@ -1470,16 +1376,17 @@ export default function AnimeLibrary() {
                           </TableCell>
                         </TableRow>
                       )}
-                      <TableRow data-selected={hasFile(entry) && checkedPaths.has(entry.path) ? '' : undefined}>
+                      <TableRow data-selected={tickKey(entry) !== null && checkedPaths.has(tickKey(entry)!) ? '' : undefined}>
                         <TableCell className='w-7 pr-2'>
-                          {hasFile(entry) && (
+                          {tickKey(entry) !== null && (
                             <Checkbox
                               nativeButton
                               render={<button type='button' />}
                               className='align-middle'
-                              aria-label={'Select ' + entry.name}
-                              checked={checkedPaths.has(entry.path)}
-                              onCheckedChange={(on) => toggleChecked(active, [entry.path], on)}
+                              aria-label={'Select ' + (hasFile(entry) ? entry.name : `missing episode ${entry.episode}`)}
+                              title={hasFile(entry) ? undefined : 'Select this missing episode, to download it with a magnet link'}
+                              checked={checkedPaths.has(tickKey(entry)!)}
+                              onCheckedChange={(on) => toggleChecked(active, [tickKey(entry)!], on)}
                             />
                           )}
                         </TableCell>
@@ -1522,14 +1429,17 @@ export default function AnimeLibrary() {
               </TabsPanel>
             ))}
             {/* Under the rows and kept in sight at the bottom, so ticking a file never moves them. */}
-            {activeChecked.length > 0 && (
+            {activeChecked.length + activeMissing.length > 0 && (
               <div className='sticky bottom-4 z-10 flex flex-wrap items-center gap-2 rounded-control surface-container px-3 py-2 shadow-overlay transition-[opacity,translate] duration-150 ease-out starting:translate-y-2 starting:opacity-0'>
                 <span className='text-xs text-muted-foreground'>
-                  <span className='font-mono tabular-nums text-foreground'>{activeChecked.length}</span> file{activeChecked.length === 1 ? '' : 's'} selected
+                  {activeChecked.length > 0 && <><span className='font-mono tabular-nums text-foreground'>{activeChecked.length}</span> file{activeChecked.length === 1 ? '' : 's'}</>}
+                  {activeChecked.length > 0 && activeMissing.length > 0 && ' and '}
+                  {activeMissing.length > 0 && <><span className='font-mono tabular-nums text-foreground'>{activeMissing.length}</span> missing</>}
+                  {' selected'}
                 </span>
                 <Button
                   size='sm'
-                  disabled={assigning}
+                  disabled={assigning || activeChecked.length === 0}
                   onClick={() => openAssign(active, activeChecked)}
                   title='Make the selected files episodes of one AniList entry, numbered as you set; they are moved into place'
                 >
@@ -1540,17 +1450,23 @@ export default function AnimeLibrary() {
                     size='sm'
                     variant='secondary'
                     disabled={assigning}
-                    onClick={() => setMagnetFor(activeChecked.map((entry) => entry.path))}
-                    title='Replace the selected episodes with the torrent of a magnet link'
+                    onClick={() => setMagnetFor({
+                      paths: activeChecked.map((entry) => entry.path),
+                      missing: activeMissing.map((entry) => ({
+                        anilist_id: entry.anilist_id!, anilist_episode: entry.anilist_episode!,
+                        season_number: entry.season_number!, episode: entry.episode!,
+                      })),
+                    })}
+                    title='Replace the selected episodes, and download the missing ones, from the torrent of a magnet link'
                   >
-                    <Magnet data-icon='inline-start' /> Replace with magnet link…
+                    <Magnet data-icon='inline-start' /> {activeChecked.length ? 'Replace' : 'Download'} with magnet link…
                   </Button>
                 )}
                 {!isUnmatched(active) && (
                   <Button
                     size='sm'
                     variant='secondary'
-                    disabled={assigning}
+                    disabled={assigning || activeChecked.length === 0}
                     onClick={() => void unmatch(active, activeChecked)}
                     title='Take the selected files off their AniList entry: they move to an Unmatched card'
                   >
@@ -1653,7 +1569,7 @@ export default function AnimeLibrary() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={Boolean(episodeTarget)} onOpenChange={(open) => { if (!open && !deletingEpisode) setEpisodeTarget(null); }}>
+      <Dialog open={Boolean(episodeTarget)} onOpenChange={(open) => { if (!open) setEpisodeTarget(null); }}>
         <DialogContent size='sm'>
           <DialogHeader>
             <DialogTitle>Delete episode {episodeTarget?.episode.episode ?? ''}?</DialogTitle>
@@ -1664,9 +1580,9 @@ export default function AnimeLibrary() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant='secondary' onClick={() => setEpisodeTarget(null)} disabled={deletingEpisode}>Cancel</Button>
-            <Button variant='destructive' onClick={() => void deleteEpisode()} disabled={deletingEpisode}>
-              <Trash2 data-icon='inline-start' /> {deletingEpisode ? 'Deleting…' : 'Delete episode'}
+            <Button variant='secondary' onClick={() => setEpisodeTarget(null)}>Cancel</Button>
+            <Button variant='destructive' onClick={() => void deleteEpisode()}>
+              <Trash2 data-icon='inline-start' /> Delete episode
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1719,7 +1635,7 @@ export default function AnimeLibrary() {
                       <TableCell>
                         <div className='flex items-center justify-end gap-1.5'>
                           <Button size='icon-sm' variant='ghost' aria-label={'Description of ' + entry.title} nativeButton={false} render={<a href={entry.detail_url} target='_blank' rel='noreferrer' />}><ExternalLink /></Button>
-                          <Button size='sm' variant='secondary' disabled={Boolean(downloading)} onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> {downloading === entry.info_hash ? 'Queuing…' : 'Download'}</Button>
+                          <Button size='sm' variant='secondary' onClick={() => void downloadMissing(entry)}><Download data-icon='inline-start' /> Download</Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -1738,7 +1654,7 @@ export default function AnimeLibrary() {
       </Dialog>
       {/* What the background search found for the open show's missing episodes;
           nothing is downloaded until "Download N" is clicked. */}
-      <Dialog open={Boolean(missingFor)} onOpenChange={(open) => { if (!open && !missingQueuing) setMissingFor(null); }}>
+      <Dialog open={Boolean(missingFor)} onOpenChange={(open) => { if (!open) setMissingFor(null); }}>
         <DialogContent size='xl' className='max-h-[90dvh]'>
           <DialogHeader>
             <DialogTitle>Download remaining episodes of {missingFor?.title}</DialogTitle>
@@ -1815,9 +1731,9 @@ export default function AnimeLibrary() {
             )}
           </DialogBody>
           <DialogFooter>
-            <Button variant='secondary' onClick={() => setMissingFor(null)} disabled={missingQueuing}>Cancel</Button>
-            <Button onClick={() => void downloadMissingReleases()} disabled={missingQueuing || missingPicked.size === 0}>
-              <Download data-icon='inline-start' /> {missingQueuing ? 'Queuing…' : 'Download ' + missingPicked.size}
+            <Button variant='secondary' onClick={() => setMissingFor(null)}>Cancel</Button>
+            <Button onClick={() => void downloadMissingReleases()} disabled={missingPicked.size === 0}>
+              <Download data-icon='inline-start' /> {'Download ' + missingPicked.size}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1830,15 +1746,21 @@ export default function AnimeLibrary() {
       />
       <MagnetReplaceDialog
         open={magnetFor !== null}
-        count={magnetFor?.length ?? 0}
+        count={magnetFor?.paths.length ?? 0}
         what='episode'
-        paths={magnetFor ?? []}
+        paths={magnetFor?.paths ?? []}
+        missing={magnetFor?.missing ?? []}
         scope='anime'
         onClose={() => setMagnetFor(null)}
         onSubmit={async (magnet, force) => {
           try {
-            const result = await api.animeReplaceMagnet(magnetFor ?? [], magnet, force);
-            toast.success(`${result.anilist_title}: ${result.episodes.length} episode${result.episodes.length === 1 ? '' : 's'} to be replaced by ${result.queued}`);
+            const result = await api.animeReplaceMagnet(magnetFor?.paths ?? [], magnet, force, magnetFor?.missing ?? []);
+            const replaced = result.episodes.length - result.episodes_to_fill;
+            const parts = [
+              replaced > 0 && `${replaced} episode${replaced === 1 ? '' : 's'} to be replaced`,
+              result.episodes_to_fill > 0 && `${result.episodes_to_fill} to be downloaded`,
+            ].filter(Boolean).join(', ');
+            toast.success(`${result.anilist_title}: ${parts} by ${result.queued}`);
             clearChecked();
             return { ok: true };
           } catch (error: any) {
@@ -1855,7 +1777,7 @@ export default function AnimeLibrary() {
         onChanged={() => void load()}
       />
       {/* An upgrade replaces files: what each release is taken for and every file it replaces, approved first. */}
-      <Dialog open={upgradeFor !== null} onOpenChange={(open) => { if (!open && !upgrading) setUpgradeFor(null); }}>
+      <Dialog open={upgradeFor !== null} onOpenChange={(open) => { if (!open) setUpgradeFor(null); }}>
         <DialogContent size='xl' className='max-h-[90dvh]'>
           <DialogHeader>
             <DialogTitle>Upgrade {upgradeFor?.show.title ?? ''} to HEVC</DialogTitle>
@@ -1878,14 +1800,14 @@ export default function AnimeLibrary() {
             )}
           </DialogBody>
           <DialogFooter>
-            <Button variant='secondary' onClick={() => setUpgradeFor(null)} disabled={upgrading !== null}>Cancel</Button>
+            <Button variant='secondary' onClick={() => setUpgradeFor(null)}>Cancel</Button>
             {(() => {
               const plans = (upgradeFor?.plans ?? []).filter((plan) => upgradePicked.has(plan.info_hash));
               const files = plans.reduce((sum, plan) => sum + plan.replaces.length, 0);
               return (
-                <Button onClick={() => void approveUpgrade()} disabled={!plans.length || upgrading !== null}>
+                <Button onClick={() => void approveUpgrade()} disabled={!plans.length}>
                   <FileVideo data-icon='inline-start' />
-                  {upgrading ? 'Queueing…' : 'Replace ' + files + ' file' + (files === 1 ? '' : 's') + ' with ' + plans.length + ' download' + (plans.length === 1 ? '' : 's')}
+                  {'Replace ' + files + ' file' + (files === 1 ? '' : 's') + ' with ' + plans.length + ' download' + (plans.length === 1 ? '' : 's')}
                 </Button>
               );
             })()}
@@ -2125,7 +2047,7 @@ export default function AnimeLibrary() {
             : "This card's files become the picked entry's episodes, by the number in each file name, and are moved into place."}
         action={pickFor?.mode === 'rematch' ? 'Change' : pickFor?.mode === 'assign' ? 'Choose' : 'Match'}
       />
-      <Dialog open={seasonRename !== null} onOpenChange={(open) => { if (!open && !renaming) setSeasonRename(null); }}>
+      <Dialog open={seasonRename !== null} onOpenChange={(open) => { if (!open) setSeasonRename(null); }}>
         <DialogContent size='sm'>
           <DialogHeader>
             <DialogTitle>Rename season</DialogTitle>
@@ -2147,22 +2069,22 @@ export default function AnimeLibrary() {
           <DialogFooter className='sm:justify-between'>
             <Button
               variant='secondary'
-              disabled={renaming || !seasonRename?.show.season_names?.[String(seasonRename.entry.anilist_id)]}
+              disabled={!seasonRename?.show.season_names?.[String(seasonRename.entry.anilist_id)]}
               onClick={() => void renameSeason(null)}
               title='Drop your name: the season is named after its entry again'
             >
               <RotateCcw data-icon='inline-start' /> Automatic name
             </Button>
             <div className='flex gap-2'>
-              <Button variant='secondary' onClick={() => setSeasonRename(null)} disabled={renaming}>Cancel</Button>
-              <Button type='submit' form='rename-season' disabled={renaming || !seasonName.trim() || seasonName.trim() === seasonRename?.label}>
-                {renaming ? 'Saving…' : 'Save'}
+              <Button variant='secondary' onClick={() => setSeasonRename(null)}>Cancel</Button>
+              <Button type='submit' form='rename-season' disabled={!seasonName.trim() || seasonName.trim() === seasonRename?.label}>
+                Save
               </Button>
             </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={renameFor !== null} onOpenChange={(open) => { if (!open && !renaming) setRenameFor(null); }}>
+      <Dialog open={renameFor !== null} onOpenChange={(open) => { if (!open) setRenameFor(null); }}>
         <DialogContent size='sm'>
           <DialogHeader>
             <DialogTitle>Rename collection</DialogTitle>
@@ -2184,16 +2106,16 @@ export default function AnimeLibrary() {
           <DialogFooter className='sm:justify-between'>
             <Button
               variant='secondary'
-              disabled={renaming || !renameFor?.collection_name_custom}
+              disabled={!renameFor?.collection_name_custom}
               onClick={() => void renameCollection(null)}
               title={renameFor?.collection_name_custom ? 'Drop your name: the collection is named after its title entry on AniList again' : 'It already carries AniList\'s name'}
             >
               <RotateCcw data-icon='inline-start' /> Use AniList&apos;s name
             </Button>
             <div className='flex gap-2'>
-              <Button variant='secondary' onClick={() => setRenameFor(null)} disabled={renaming}>Cancel</Button>
-              <Button type='submit' form='rename-collection' disabled={renaming || !renameValue.trim() || renameValue.trim() === renameFor?.title}>
-                {renaming ? 'Saving…' : 'Save'}
+              <Button variant='secondary' onClick={() => setRenameFor(null)}>Cancel</Button>
+              <Button type='submit' form='rename-collection' disabled={!renameValue.trim() || renameValue.trim() === renameFor?.title}>
+                Save
               </Button>
             </div>
           </DialogFooter>
@@ -2219,29 +2141,27 @@ export default function AnimeLibrary() {
   // A show opened outside the split view is a page of its own.
   if (showKey && !split) {
     return (
-      <div className='flex min-h-0 flex-1 flex-col gap-6'>
-        <div>
-          <Button variant='ghost' size='sm' onClick={closeShow}><ArrowLeft data-icon='inline-start' /> Library</Button>
-        </div>
+      <TitlePage onBack={closeShow}>
         {showDetail}
         {dialogs}
-      </div>
+      </TitlePage>
     );
   }
 
   return (
     // As tall as the window: the grid, the table and the split view's panes scroll inside it.
     <div className='flex h-full min-h-0 flex-col gap-5'>
-      <div className='flex flex-wrap items-end justify-between gap-3'>
-        <div className='flex flex-col gap-1'>
-          <h1 className='font-heading text-3xl font-light'>Library</h1>
-          <p className='break-all font-mono text-xs text-muted-foreground'>{root || 'Dedicated anime destination'}</p>
-        </div>
-        <div className='flex flex-wrap items-center gap-2'>
-          <InputGroup className='w-60'>
-            <InputGroupAddon align='inline-start'><Search /></InputGroupAddon>
-            <InputGroupInput aria-label='Search Anime library' placeholder='Search your Anime…' value={query} onChange={(event) => setQuery(event.target.value)} />
-          </InputGroup>
+      <LibraryHeader
+        title='Library'
+        subtitle={<p className='break-all font-mono text-xs text-muted-foreground'>{root || 'Dedicated anime destination'}</p>}
+        search={{ value: query, onChange: setQuery, placeholder: 'Search your Anime…', label: 'Search Anime library' }}
+        view={view}
+        onView={setView}
+        wide={wide}
+        onRescan={() => void load(true)}
+        rescanning={loading}
+        actions={
+          <>
           {(unmatchedCount > 0 || onlyUnmatched) && (
             <Button
               variant={onlyUnmatched ? 'primary' : 'secondary'}
@@ -2282,83 +2202,57 @@ export default function AnimeLibrary() {
               <Ban data-icon='inline-start' /> Blacklisted ({blacklistedCount})
             </Button>
           )}
-          <ToggleGroup
-            aria-label='Library view'
-            value={[view]}
-            onValueChange={(values) => { if (values[0]) setView(values[0] as View); }}
-          >
-            {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table'], ...(wide ? [['split', Columns2, 'Split']] as const : [])] as const).map(([value, Icon, label]) => (
-              <ToggleGroupItem key={value} value={value} icon={<Icon />}>{label}</ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <Button variant='secondary' onClick={() => void load(true)} disabled={loading}><RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan</Button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
-      {loading ? <div className='flex min-h-40 items-center justify-center'><Spinner /></div> : visible.length === 0 ? (
-        <Empty>
-          <EmptyMedia><HardDrive /></EmptyMedia>
-          <EmptyTitle>{shows.length ? 'No matching Anime' : 'No Anime in your library yet'}</EmptyTitle>
-          <EmptyDescription>Completed and staged episodes are grouped into collections of AniList entries.</EmptyDescription>
-        </Empty>
-      ) : view === 'grid' ? (
-        // The ground painted in, as the app's scrolling area: opaque, it scrolls on the compositor (App.tsx).
-        <div className='page-ground min-h-0 flex-1 overflow-y-auto'>
-        <div className='grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
-          {visible.map((show) => {
-            const tone = COMPLETION[show.completion_state] ?? COMPLETION.unknown;
-            return (
-              <button key={show.key} type='button' onClick={() => goShow(show.key)} onPointerEnter={() => prefetchShow(show.key)} onPointerLeave={stopPrefetch} onFocus={() => prefetchShow(show.key)} aria-label={'View ' + show.title} className='block w-full cursor-pointer rounded-card text-left focus-ring'>
-                <Card className='poster-card h-full gap-0 overflow-hidden [--card-padding:0]'>
-                  <div className='relative block w-full'>
-                    <AnimePoster url={show.poster_url} title={show.title} />
-                    {show.blacklisted && <StatusTag variant='destructive' className='absolute left-2 top-2 bg-background/85 backdrop-blur-sm'>Blacklisted</StatusTag>}
-                    {isUnmatched(show) && (
-                      <span className='absolute right-2 top-2'>
-                        <StatusTag variant='warning' className='bg-background/85 backdrop-blur-sm' title='No AniList entry is known for these files: match it from its details'>Unmatched</StatusTag>
-                      </span>
-                    )}
-                    <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/75 to-transparent px-3 pb-2.5 pt-10 text-left text-sm font-medium leading-tight text-white'>{show.title}</span>
-                  </div>
-                  {/* The completion colour, as the rule between the cover and
-                      what is written under it. */}
-                  <span className={cn('block h-0.5 w-full', tone.className)} title={tone.label} aria-hidden='true' />
-                  <div className='flex flex-col gap-2 p-3'>
-                    <div className='flex items-center gap-2'>
-                      <Progress show={show} fill />
-                      <span className='shrink-0 whitespace-nowrap font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatSize(show.size)}</span>
-                    </div>
-                  </div>
-                </Card>
-              </button>
-            );
-          })}
-        </div>
-        </div>
-      ) : split ? (
-        // The page's whole width, the open show beside the table; the divider is dragged.
-        <LibrarySplit
-          id='anime'
-          list={showTable}
-          open={Boolean(selected)}
-          onClose={closeShow}
-          empty={{ title: 'Pick a show', description: 'Its seasons and episodes open here, beside the list.' }}
-        >
-          {showDetail}
-        </LibrarySplit>
-      ) : (
-        showTable
-      )}
+      <LibraryBody
+        loading={loading}
+        count={visible.length}
+        empty={{
+          title: shows.length ? 'No matching Anime' : 'No Anime in your library yet',
+          description: 'Completed and staged episodes are grouped into collections of AniList entries.',
+        }}
+        view={view}
+        split={split}
+        grid={() => visible.map((show) => (
+          <PosterCard
+            key={show.key}
+            cover={show.poster_url}
+            title={show.title}
+            onOpen={() => goShow(show.key)}
+            onIntent={() => prefetchShow(show.key)}
+            onLeave={stopPrefetch}
+            topLeft={show.blacklisted ? <StatusTag variant='destructive' className={CORNER_TAG}>Blacklisted</StatusTag> : null}
+            topRight={isUnmatched(show)
+              ? <StatusTag variant='warning' className={CORNER_TAG} title='No AniList entry is known for these files: match it from its details'>Unmatched</StatusTag>
+              : null}
+            // The completion colour, as the rule between the cover and what is written under it.
+            rule={COMPLETION[show.completion_state] ?? COMPLETION.unknown}
+          >
+            <div className='flex items-center gap-2'>
+              <Progress show={show} fill />
+              <span className='shrink-0 whitespace-nowrap font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatSize(show.size)}</span>
+            </div>
+          </PosterCard>
+        ))}
+        table={() => showTable}
+        detail={showDetail}
+        splitId='anime'
+        open={Boolean(selected)}
+        onClose={closeShow}
+        splitEmpty={{ title: 'Pick a show', description: 'Its seasons and episodes open here, beside the list.' }}
+      />
 
       {!loading && visible.length > 0 && (
-        <footer className='flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 border-t border-border pt-2.5 text-xs text-muted-foreground'>
-          <span><span className='font-mono tabular-nums text-foreground'>{visible.length}</span> series{visible.length !== shows.length ? ` of ${shows.length}` : ''}</span>
-          <span><span className='font-mono tabular-nums text-foreground'>{totals.episodes.toLocaleString()}</span> episodes</span>
-          <span><span className='font-mono tabular-nums text-foreground'>{formatSize(totals.size)}</span> stored</span>
-          <span className='flex items-center gap-1.5'><span className='size-1.5 rounded-full bg-success' /><span className='font-mono tabular-nums text-foreground'>{totals.hevc}</span> HEVC</span>
-          <span className='flex items-center gap-1.5'><span className='size-1.5 rounded-full bg-warning' /><span className='font-mono tabular-nums text-foreground'>{totals.avc}</span> AVC</span>
-          {totals.dubbed > 0 && <span className='flex items-center gap-1.5'><span className='size-1.5 rounded-full bg-transfer' /><span className='font-mono tabular-nums text-foreground'>{totals.dubbed}</span> German dub</span>}
-        </footer>
+        <LibraryFooter>
+          <FooterStat value={visible.length}>series{visible.length !== shows.length ? ` of ${shows.length}` : ''}</FooterStat>
+          <FooterStat value={totals.episodes.toLocaleString()}>episodes</FooterStat>
+          <FooterStat value={formatSize(totals.size)}>stored</FooterStat>
+          <FooterStat value={totals.hevc} dot='bg-success'>HEVC</FooterStat>
+          <FooterStat value={totals.avc} dot='bg-warning'>AVC</FooterStat>
+          {totals.dubbed > 0 && <FooterStat value={totals.dubbed} dot='bg-transfer'>German dub</FooterStat>}
+        </LibraryFooter>
       )}
 
       {/* Deleting a whole show is not undoable, so it is never one click. */}

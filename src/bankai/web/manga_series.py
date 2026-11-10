@@ -80,12 +80,24 @@ def blacklisted() -> set[int]:
     return {aid for aid, row in policies().items() if row.get("mode") == "blacklisted"}
 
 
+# anime_links as built last: one page asked for it five times (0.75 s of the manga drawer's 1.5).
+_LINKS: tuple[float, object, dict[int, list[tuple[int, str, str | None]]]] | None = None
+_LINKS_SECONDS = 2.0
+
+
 def anime_links() -> dict[int, list[tuple[int, str, str | None]]]:
-    """Each manga or light novel an anime on disk links to: {manga id: [(anime id, relation, format)]}."""
+    """Each manga or light novel an anime on disk links to: {manga id: [(anime id, relation, format)]}.
+    Kept two seconds while AniList's store is the same; not to be changed by the caller."""
+    global _LINKS
+    store = anilist.media_all()
+    now = time.monotonic()
+    if _LINKS is not None and _LINKS[1] is store and now - _LINKS[0] < _LINKS_SECONDS:
+        return _LINKS[2]
     links: dict[int, list[tuple[int, str, str | None]]] = {}
     for anime_id in anime_files.by_entry():
         for manga_id, relation, format_ in anilist.media(anime_id).get("manga") or []:
             links.setdefault(int(manga_id), []).append((int(anime_id), str(relation), format_))
+    _LINKS = (now, store, links)
     return links
 
 

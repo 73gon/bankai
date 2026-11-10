@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, type LinkedManga as Linked } from '@/lib/api';
 import { formatLabel } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 function state(item: Linked): { label: string; tone: string } {
   if (item.blacklisted) return { label: 'Blacklisted', tone: 'text-destructive' };

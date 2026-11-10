@@ -2,10 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefO
 import { useGroupRef, type Layout } from 'react-resizable-panels';
 import { HardDrive, X } from 'lucide-react';
 import { adoptServerPref, localPref, saveSharedPref, serverPrefs } from '@/lib/prefs';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/zon/ui/resizable';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@zonsh/ui/resizable';
 
 /** A saved divider: both panes' shares, in percent. */
 function layoutOf(value: unknown): Layout | null {

@@ -144,6 +144,10 @@ class AnimeAutomationSettings(BaseModel):
     # them for another encode of it (AVC), take that one: German is required,
     # HEVC only preferred.
     german_avc_fallback: bool = True
+    # A newly aired episode of a show being followed (its episode before on disk), aired in the
+    # last two weeks: queued as soon as the missing-episode search finds a release with German,
+    # not left as "1 available" for a click (web.anime_missing). Older missing episodes still wait.
+    auto_download_new: bool = True
     # Episode pictures (see web.anime_thumbs), taken from each episode's own
     # video beside it as <episode>-thumb.jpg. Where in the episode: a share of
     # its length, or a fixed time into it (an episode shorter than that is
@@ -185,10 +189,14 @@ class AnimeAutomationSettings(BaseModel):
 
 class MangaSettings(BaseModel):
     """Manga and light novels (see web.manga_releases): found on nyaa, matched to
-    AniList, downloaded only once approved, filed for OpenPanel."""
+    AniList, downloaded once approved (by hand, or by auto_review), filed for OpenPanel."""
 
-    # Looking for releases at all. Nothing is ever downloaded unapproved.
+    # Looking for releases at all.
     enabled: bool = True
+    # The review resolved without a click where the plan decides (web.manga_releases.auto_review):
+    # the plan downloaded, releases that bring nothing set aside, one with a name that says
+    # nothing tried at a time. Guessed matches always wait for the user. Off: all of it by hand.
+    auto_review: bool = True
     # Where they are filed: a folder per series, "Vol 01.cbz" inside.
     library_dir: Path = Path("/mnt/d/books/manga")
     novels_dir: Path = Path("/mnt/d/books/light_novels")
@@ -259,6 +267,9 @@ class SelectorSettings(BaseModel):
     # tokens may still be picked, but matching ones get a bonus. Use an
     # empty list to disable the bonus entirely.
     preferred_audio_languages: list[str] = Field(default_factory=lambda: ["english"])
+    # Before the German track is taken from a stream and synced, look for a torrent that carries
+    # German audio itself ("German DL"): taken as it is, nothing to sync (processor.pipeline).
+    german_release_first: bool = True
     min_seeders: int = Field(default=1, ge=0)
     max_size_gib: float = Field(default=80.0, gt=0)
     min_size_gib: float = Field(default=0.5, ge=0)

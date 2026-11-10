@@ -1,21 +1,26 @@
 import { useEffect, useState } from 'react';
 import { Magnet } from 'lucide-react';
 import { StatusTag } from '@/components/status-tag';
-import { api, type MagnetPreview } from '@/lib/api';
+import { api, type MagnetMissingEpisode, type MagnetPreview } from '@/lib/api';
 import { formatBytes, timeAgo } from '@/lib/utils';
-import { Button } from '@/zon/ui/button';
-import { Spinner } from '@/zon/ui/spinner';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Textarea } from '@/zon/ui/textarea';
+import { Button } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Textarea } from '@zonsh/ui';
 
 /**
  * Replace ticked library files with a magnet link's torrent. ``onSubmit`` queues it and returns
  * whether it went; a refusal that can be confirmed (files with German would go) is answered by
  * ``confirm`` being set, and the second press sends ``force``.
  */
-export function MagnetReplaceDialog({ open, count, what, paths, scope, onClose, onSubmit }: {
+export type MagnetMissing = MagnetMissingEpisode;
+
+export function MagnetReplaceDialog({ open, count, what, paths, missing = [], scope, onClose, onSubmit }: {
   open: boolean;
+  /** The ticked files. */
   count: number;
+  /** Ticked anime episodes with no file: downloaded from the same torrent. */
+  missing?: MagnetMissingEpisode[];
   /** The ticked files and their library: with them the dialog shows what the magnet is and what each of
    *  its files would replace, read from the swarm before anything is downloaded. */
   paths?: string[];
@@ -36,7 +41,13 @@ export function MagnetReplaceDialog({ open, count, what, paths, scope, onClose, 
   }, [open]);
 
   const valid = /^magnet:\?.*xt=urn:btih:/i.test(magnet.trim());
-  const preview = useMagnetPreview(open && valid && scope ? magnet.trim() : '', paths ?? [], scope ?? 'anime');
+  const preview = useMagnetPreview(open && valid && scope ? magnet.trim() : '', paths ?? [], scope ?? 'anime', missing);
+  const filling = missing.length;
+  const heading = count && filling
+    ? `Replace ${count} ${what}${count === 1 ? '' : 's'} and download ${filling} with a magnet link`
+    : filling
+      ? `Download ${filling} missing ${what}${filling === 1 ? '' : 's'} with a magnet link`
+      : `Replace ${count} ${what}${count === 1 ? '' : 's'} with a magnet link`;
   async function submit() {
     setBusy(true);
     try {
@@ -52,11 +63,11 @@ export function MagnetReplaceDialog({ open, count, what, paths, scope, onClose, 
     <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onClose(); }}>
       <DialogContent size='xl'>
         <DialogHeader>
-          <DialogTitle>Replace {count} {what}{count === 1 ? '' : 's'} with a magnet link</DialogTitle>
+          <DialogTitle>{heading}</DialogTitle>
           <DialogDescription>
-            Paste the magnet link of a torrent that holds {count === 1 ? `this ${what}` : `these ${what}s`} — one episode for one
-            episode, a season pack for a season. Each file of the torrent replaces the ticked one of its episode; the rest of
-            the torrent is left out. The old files go once the new ones are in the library.
+            Paste the magnet link of a torrent that holds {count + filling === 1 ? `this ${what}` : `these ${what}s`} — one episode for one
+            episode, a season pack for a season. Each file of the torrent replaces the ticked one of its episode{filling ? ', or fills a ticked missing one' : ''};
+            the rest of the torrent is left out. The old files go once the new ones are in the library.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className='flex flex-col gap-3'>
@@ -75,7 +86,7 @@ export function MagnetReplaceDialog({ open, count, what, paths, scope, onClose, 
         <DialogFooter>
           <Button variant='ghost' onClick={onClose} disabled={busy}>Cancel</Button>
           <Button variant={confirm ? 'destructive' : 'primary'} onClick={() => void submit()} disabled={!valid || busy}>
-            <Magnet data-icon='inline-start' /> {confirm ? 'Replace anyway' : 'Replace'}
+            <Magnet data-icon='inline-start' /> {confirm ? 'Replace anyway' : count ? 'Replace' : 'Download'}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -90,9 +101,9 @@ type PreviewState =
   | { state: 'failed'; error: string };
 
 /** The magnet looked at, asked again every few seconds while the swarm has not answered (up to two minutes). */
-function useMagnetPreview(magnet: string, paths: string[], scope: 'anime' | 'show' | 'movie'): PreviewState {
+function useMagnetPreview(magnet: string, paths: string[], scope: 'anime' | 'show' | 'movie', missing: MagnetMissingEpisode[] = []): PreviewState {
   const [result, setResult] = useState<PreviewState>({ state: 'idle' });
-  const key = paths.join('\n');
+  const key = paths.join('\n') + '|' + missing.map((row) => `${row.anilist_id}:${row.anilist_episode}`).join(',');
   useEffect(() => {
     if (!magnet) {
       setResult({ state: 'idle' });
@@ -103,7 +114,7 @@ function useMagnetPreview(magnet: string, paths: string[], scope: 'anime' | 'sho
     setResult({ state: 'asking', since });
     const ask = async () => {
       try {
-        const data = await api.magnetPreview(magnet, paths, scope);
+        const data = await api.magnetPreview(magnet, paths, scope, missing);
         if (!alive) return;
         if (!data.pending) setResult({ state: 'ready', data });
         else if (Date.now() - since > 120_000) setResult({ state: 'failed', error: 'No peer answered with the torrent\'s files in two minutes: it may be dead.' });
@@ -150,8 +161,11 @@ function PreviewPanel({ preview }: { preview: PreviewState }) {
       </p>
       <p className={replacing.length ? 'text-xs text-foreground' : 'text-xs text-warning'}>
         {replacing.length
-          ? `Replaces ${data.covered} of the ${data.ticked} ticked file${data.ticked === 1 ? '' : 's'}`
-          : 'None of its files is one of the ticked episodes: nothing would be replaced.'}
+          ? [
+              data.covered! - (data.filled ?? 0) > 0 && `Replaces ${data.covered! - (data.filled ?? 0)}`,
+              (data.filled ?? 0) > 0 && `downloads ${data.filled} missing`,
+            ].filter(Boolean).join(', ') + ` of the ${data.ticked} ticked episode${data.ticked === 1 ? '' : 's'}`
+          : 'None of its files is one of the ticked episodes: nothing would be taken.'}
         {(data.uncovered?.length ?? 0) > 0 && replacing.length > 0 && <span className='text-warning'> · not in it: {data.uncovered!.join(', ')}</span>}
       </p>
       <ul className='flex max-h-56 flex-col gap-0.5 overflow-y-auto text-xs'>
@@ -160,7 +174,7 @@ function PreviewPanel({ preview }: { preview: PreviewState }) {
             <span className={'min-w-0 flex-1 truncate font-mono ' + (file.replaces ? 'text-foreground' : 'text-muted-foreground')} title={file.path}>{file.name}</span>
             <span className='shrink-0 tabular-nums text-muted-foreground'>{formatBytes(file.size)}</span>
             <span className={'w-56 shrink-0 truncate text-right ' + (file.replaces ? 'text-success' : 'text-muted-foreground')} title={file.replaces ?? file.why}>
-              {file.replaces ? '→ ' + file.replaces : file.why}
+              {file.replaces ? (file.fills ? '→ ' + file.replaces + ' (new)' : '→ ' + file.replaces) : file.why}
             </span>
           </li>
         ))}

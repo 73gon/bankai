@@ -95,7 +95,7 @@ def test_a_missing_episode_with_a_german_release_is_recorded_and_counted(client,
 
     result = asyncio.run(anime_missing.check_missing_episodes())
 
-    assert result == {"checked": 1, "episodes_found": 1, "remaining": 0}
+    assert result == {"checked": 1, "episodes_found": 1, "new_queued": 0, "remaining": 0}
     found = anime_missing.checked()
     assert found[(555, 3)]["info_hash"] == german.info_hash  # the one without seeders is none
     assert found[(555, 3)]["hevc"] is True and found[(555, 3)]["first"] == 3

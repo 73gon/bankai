@@ -1,0 +1,143 @@
+diff --git a/node_modules/@zonsh/ui/dist/components/table.js b/node_modules/@zonsh/ui/dist/components/table.js
+index 94ffd59..9253a30 100644
+--- a/node_modules/@zonsh/ui/dist/components/table.js
++++ b/node_modules/@zonsh/ui/dist/components/table.js
+@@ -95,6 +95,9 @@ function FitTable({ dense = false, variant = "card", containerProps, className,
+     const layerRef = React.useRef(null);
+     const flipRef = React.useRef(null);
+     const remeasureRef = React.useRef(null);
++    // bankai: the last measurements, kept across a hide and show (a page kept in an Activity):
++    // shown again at the same width with the same rows, the table is not measured again.
++    const keptRef = React.useRef(null);
+     // The header row's `TableHead`s register their columns as they mount and change.
+     const registered = React.useRef(new Map());
+     const [version, setVersion] = React.useState(0);
+@@ -190,13 +193,22 @@ function FitTable({ dense = false, variant = "card", containerProps, className,
+             else
+                 commit();
+         };
++        const rowCount = () => body.querySelectorAll("[data-slot=table-row]").length;
+         const remeasure = (from) => {
+             metrics = measureMetrics(container, body, latest.current.columns);
++            keptRef.current = { metrics, rows: rowCount(), width: container.clientWidth };
+             evaluate(from);
+         };
+         remeasureRef.current = remeasure;
+         // Before the first paint: measure, and start in the layout that fits, without a glide.
+-        remeasure("effect");
++        const kept = keptRef.current;
++        if (kept && kept.rows === rowCount() && kept.width === container.clientWidth) {
++            metrics = kept.metrics;
++            evaluate("effect");
++        }
++        else {
++            remeasure("effect");
++        }
+         const ro = new ResizeObserver(() => evaluate("resize"));
+         ro.observe(container);
+         // New, sorted or filtered rows and changed cell content are measured again. The cells a
+diff --git a/node_modules/@zonsh/ui/dist/components/toggle-group.js b/node_modules/@zonsh/ui/dist/components/toggle-group.js
+index 79985ae..0b2e395 100644
+--- a/node_modules/@zonsh/ui/dist/components/toggle-group.js
++++ b/node_modules/@zonsh/ui/dist/components/toggle-group.js
+@@ -126,7 +126,7 @@ export function ToggleGroup({ allowEmpty = false, reveal, multiple, onValueChang
+  */
+ export function ToggleGroupItem({ icon, className, children, ...props }) {
+     return (_jsx(BaseToggle, { "data-slot": "toggle-group-item", className: sx([
+-            "relative inline-flex min-h-(--control-h-sm) flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-item border border-transparent px-3 font-body text-[13px] leading-none font-medium whitespace-nowrap text-control-muted select-none",
++            "relative inline-flex min-h-(--control-h-sm) flex-auto cursor-pointer items-center justify-center gap-1.5 rounded-item border border-transparent px-3 font-body text-[13px] leading-none font-medium whitespace-nowrap text-control-muted select-none",
+             "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+             // Hover only brightens the label; the raised material means "selected".
+             "hover:not-data-disabled:text-foreground",
+diff --git a/node_modules/@zonsh/ui/dist/lib/table-fit.js b/node_modules/@zonsh/ui/dist/lib/table-fit.js
+index 2cfca9c..6f10d75 100644
+--- a/node_modules/@zonsh/ui/dist/lib/table-fit.js
++++ b/node_modules/@zonsh/ui/dist/lib/table-fit.js
+@@ -51,11 +51,47 @@ const UNCLIP = "position:static;display:inline-flex;width:max-content;min-width:
+  */
+ export function measuredRows(body) {
+     const virtual = !!body.querySelector("[data-slot=table-sizer]");
+-    return [
++    const rows = [
+         ...body.querySelectorAll(virtual
+             ? "[data-slot=table-header] [data-slot=table-row], [data-slot=table-sizer] [data-slot=table-row]"
+             : "[data-slot=table-row]"),
+     ];
++    return virtual ? rows : sampledRows(rows);
++}
++// bankai: at most 48 body rows of a table that is not virtual are measured -- the rows whose text is
++// longest, column by column, and the first few drawn (all of a 243-row library took seconds).
++const MEASURED_ROWS = 48;
++function sampledRows(all) {
++    if (all.length <= MEASURED_ROWS)
++        return all;
++    const picked = new Set();
++    const longest = new Map();
++    const note = (key, length, row) => {
++        const list = longest.get(key) ?? [];
++        list.push([length, row]);
++        longest.set(key, list);
++    };
++    const bodyRows = [];
++    for (const row of all) {
++        if (row.closest("[data-slot=table-header]")) {
++            picked.add(row);
++            continue;
++        }
++        bodyRows.push(row);
++        note("title", row.querySelector("[data-slot=table-title-text]")?.textContent?.length ?? 0, row);
++        for (const cell of row.querySelectorAll("[data-column]")) {
++            note(cell.getAttribute("data-column"), cell.textContent?.length ?? 0, row);
++        }
++    }
++    const each = Math.max(2, Math.ceil(MEASURED_ROWS / Math.max(1, longest.size)));
++    for (const list of longest.values()) {
++        list.sort((a, b) => b[0] - a[0]);
++        for (const [, row] of list.slice(0, each))
++            picked.add(row);
++    }
++    for (const row of bodyRows.slice(0, 8))
++        picked.add(row);
++    return all.filter((row) => picked.has(row));
+ }
+ /**
+  * Clones every measured title and cell (`measuredRows`) into a hidden probe with
+@@ -297,7 +333,19 @@ export class Flip {
+     measure(offsets) {
+         const box = this.body.getBoundingClientRect();
+         const content = { x: box.left - this.body.scrollLeft, y: box.top - this.body.scrollTop };
+-        const els = [...this.root.querySelectorAll("[data-flip]")].filter(isDrawn);
++        // bankai: only what is within a view's height of the view glides; the rest of a long table moves
++        // at once, unseen (hundreds of rows animated made every step of a drag stutter).
++        const near = (r) => r.bottom >= box.top - box.height && r.top <= box.bottom + box.height;
++        const rows = new Map();
++        const els = [...this.root.querySelectorAll("[data-flip]")].filter(isDrawn).filter((el) => {
++            const row = el.closest("[data-flip=row],[data-flip=band]") ?? el;
++            let ok = rows.get(row);
++            if (ok === undefined) {
++                ok = near(row.getBoundingClientRect());
++                rows.set(row, ok);
++            }
++            return ok;
++        });
+         const rects = new Map(els.map((el) => [el, el.getBoundingClientRect()]));
+         const rel = new Map();
+         for (const el of els) {
+diff --git a/node_modules/@zonsh/ui/dist/styles/parts/navigation.css b/node_modules/@zonsh/ui/dist/styles/parts/navigation.css
+index ecba58e..855220a 100644
+--- a/node_modules/@zonsh/ui/dist/styles/parts/navigation.css
++++ b/node_modules/@zonsh/ui/dist/styles/parts/navigation.css
+@@ -90,11 +90,11 @@
+ /* ── Sidebar: scrolls, never shows a scrollbar ─────────────────────────────────
+  * Covers a Sidebar that scrolls itself and the element that directly wraps it.  */
+ 
+-:where([data-slot="sidebar"], :has(> [data-slot="sidebar"])) {
++:where([data-slot="sidebar"], [data-slot="sidebar-shell"], [data-slot="sidebar-sheet"] [data-slot="drawer-body"]) {
+   scrollbar-width: none;
+ }
+ 
+-:where([data-slot="sidebar"], :has(> [data-slot="sidebar"]))::-webkit-scrollbar {
++:where([data-slot="sidebar"], [data-slot="sidebar-shell"], [data-slot="sidebar-sheet"] [data-slot="drawer-body"])::-webkit-scrollbar {
+   display: none;
+ }
+ 

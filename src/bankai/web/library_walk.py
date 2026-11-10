@@ -334,7 +334,11 @@ def refresh_all() -> set[str]:
         roots = list(_TREES)
     changed: set[str] = set()
     added: list[Path] = []
+    from bankai.web import stopping
+
     for root in roots:
+        if stopping.requested():
+            break
         with _root_lock(root):
             with _LOCK:
                 before = _TREES.get(root)

@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { Search } from 'lucide-react';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { cn } from '@/zon/lib/cn';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { cn } from '@zonsh/ui';
 
 export interface Suggestion {
   /** What a pick puts into the field. */

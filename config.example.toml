@@ -86,6 +86,11 @@ backfill_request_delay_seconds = 2
 # episodes without German get it added. Leave either empty to turn this off.
 erai_username = ""
 erai_password = ""
+# A newly aired episode (the last two weeks) of a show whose episode before is
+# in the library: downloaded as soon as a release with German subtitles is
+# found, instead of waiting in the library as "1 available". Older missing
+# episodes are still only offered.
+auto_download_new = true
 # Episode pictures for Jellyfin (<episode>-thumb.jpg), taken from the video.
 # thumb_mode "percent" takes the frame thumb_percent into the episode, "time"
 # thumb_time_seconds into it. Changing either takes every picture again.
@@ -103,10 +108,14 @@ nekobt_languages = ["de", "en", "ja"]
 
 [manga]
 # Manga and light novels from nyaa's English literature category, matched to
-# AniList. Every release found waits in Manga -> Review; nothing downloads
-# unapproved. Followed: the manga/light novels AniList links to anime on disk,
+# AniList. Followed: the manga/light novels AniList links to anime on disk,
 # the series in the folders below, and those followed by hand.
 enabled = true
+# The review resolved without a click where the plan decides: the plan
+# downloaded, releases that bring nothing set aside, one whose name says nothing
+# tried at a time (only the files the library lacks are downloaded). Guessed
+# matches always wait in Manga -> Review. false: every release waits there.
+auto_review = true
 # OpenPanel's libraries: a folder per series ("Title (Year)", bankai's own
 # "Title (Year) - <AniList id>"), "Vol 01.cbz" / "Chapter 0001.cbz" inside.
 library_dir = "/mnt/d/books/manga"
@@ -159,6 +168,9 @@ preferred_codecs = ["x265", "h265", "x264", "h264"]
 preferred_sources = ["BluRay", "WEB-DL", "WEBRip"]
 preferred_groups = ["FraMeSToR", "DON", "TayTO", "FoRM"]
 min_seeders = 3
+# Before the German track is taken from a stream and synced, look for a torrent
+# that carries German audio itself ("German DL"); taken as it is, no sync.
+german_release_first = true
 # Hard size bounds, GiB.
 max_size_gib = 80
 min_size_gib = 0.5

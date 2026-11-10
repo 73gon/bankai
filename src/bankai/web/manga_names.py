@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 _NUM = r"\d+(?:\.\d+)?"
 _VOLUME = re.compile(
@@ -61,9 +62,13 @@ _PLAIN_TAGS = {"digital", "digital-compilation", "completed", "complete", "ongoi
 _NOVEL_PER_VOLUME = 25 * 2**20
 _MANGA_PER_VOLUME = 40 * 2**20
 
-BOOK_EXTENSIONS = {".cbz", ".zip", ".cbr", ".rar", ".pdf", ".epub"}
-# What the library keeps a file as: a ZIP of pictures is a CBZ, a RAR a CBR.
-_RENAMED_EXTENSION = {".zip": ".cbz", ".rar": ".cbr"}
+BOOK_EXTENSIONS = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z", ".pdf", ".epub"}
+# What the library keeps a file as: a ZIP of pictures is a CBZ, a RAR a CBR, a 7-Zip a CB7.
+_RENAMED_EXTENSION = {".zip": ".cbz", ".rar": ".cbr", ".7z": ".cb7"}
+# A comic archive is named by what it is, read from its first bytes: Tanya the Evil's Vol 29-34
+# came as ".cbz" holding RAR and 7-Zip, and OpenPanel, taking them for ZIPs, could open none (Nov 2026).
+_COMIC_ARCHIVES = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z"}
+_MAGIC = ((b"PK\x03\x04", ".cbz"), (b"Rar!\x1a\x07", ".cbr"), (b"7z\xbc\xaf\x27\x1c", ".cb7"))
 
 
 @dataclass(frozen=True)
@@ -239,6 +244,19 @@ def target_name(kind: str, number: float, extension: str) -> str:
 
 def library_extension(extension: str) -> str:
     return _RENAMED_EXTENSION.get(extension.lower(), extension.lower())
+
+
+def archive_extension(path: Path, extension: str) -> str:
+    """The extension a comic archive is filed under: by its first bytes (ZIP, RAR, 7-Zip), else as
+    named. Anything else (an EPUB is a ZIP too, a PDF) keeps its own."""
+    if extension.lower() not in _COMIC_ARCHIVES:
+        return library_extension(extension)
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(8)
+    except OSError:
+        return library_extension(extension)
+    return next((suffix for magic, suffix in _MAGIC if head.startswith(magic)), library_extension(extension))
 
 
 def describe(volumes: set[float], chapters: set[float]) -> str:

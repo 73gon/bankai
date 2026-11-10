@@ -19,15 +19,15 @@ import {
 } from '@/lib/api';
 import { formatBytes, timeAgo } from '@/lib/utils';
 import { StatusTag, type StatusVariant } from '@/components/status-tag';
-import { Button } from '@/zon/ui/button';
-import { Checkbox } from '@/zon/ui/checkbox';
+import { Button } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
 import { MagnetReplaceDialog } from '@/components/MagnetReplaceDialog';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Spinner } from '@/zon/ui/spinner';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
 
 const QUALITIES: FollowQuality[] = ['2160p', '1080p', '720p', '480p'];
 const QUALITY_ITEMS = QUALITIES.map((value) => ({ value, label: value }));

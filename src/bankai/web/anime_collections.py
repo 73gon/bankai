@@ -405,7 +405,8 @@ def _after(title: str, base: str) -> str | None:
         at += 1
     if matched < len(want) or (at < len(title) and title[at].isalnum() and title[at - 1].isalnum()):
         return None
-    return title[at:].lstrip(" :-–~,.").strip()
+    # The bracket the base sat in closes after it: "[Oshi no Ko] Final Season" read "] Final Season".
+    return title[at:].lstrip(" :-–~,.])}】」』").strip()
 
 
 def short_label(title: str, collection: str | None, *, also: str | None = None) -> str:

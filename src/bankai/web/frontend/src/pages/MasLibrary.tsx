@@ -1,59 +1,27 @@
-import { useDeferredValue, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { Film, Tv, RefreshCw, Search, LayoutGrid, Rows3, Columns2, ArrowLeft, ExternalLink, HardDrive, Magnet, Link2, Undo2, Image, X } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { Film, Tv, Search, ExternalLink, HardDrive, Magnet, Link2, Undo2, Image, X } from 'lucide-react';
+import { inBackground, toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AnimeLibraryEpisode, type DiscoverItem, type FollowOverview, type MasMovie, type MasShow } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
-import { Button } from '@/zon/ui/button';
-import { Card } from '@/zon/ui/card';
-import { cn } from '@/zon/lib/cn';
+import { Button } from '@zonsh/ui';
+import { cn } from '@zonsh/ui';
 import { SortHeader, nextSort, type SortState } from '@/components/sort-header';
 import { SegmentMeter, rampParts } from '@/components/segment-meter';
 import { EpisodeBar, airedCount, airedStrip, describeStrip, type StripTier } from '@/components/episode-bar';
-import { LibrarySplit } from '@/components/library-split';
-import { useRememberedOpen } from '@/lib/prefs';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Spinner } from '@/zon/ui/spinner';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Table, TableBody, TableCell, TableHeader, TableRow } from '@/zon/ui/table';
+import { CORNER_TAG, FooterStat, LibraryBody, LibraryFooter, LibraryHeader, PosterCard, TitlePage, formatSize, useLibraryAddress, useLibraryView } from '@/components/library/library-page';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHeader, TableRow } from '@zonsh/ui';
 import { AnimePoster } from '@/components/AnimePoster';
 import { FollowPanel, FollowedShowView } from '@/components/EnglishTorrent';
 import { ArtworkDialog, type MasArtworkTarget } from '@/components/ArtworkDialog';
 import { MagnetReplaceDialog } from '@/components/MagnetReplaceDialog';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Checkbox } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle } from '@zonsh/ui';
 
-function formatSize(bytes: number) {
-  const tib = bytes / 1024 ** 4;
-  if (tib >= 1) return tib.toFixed(2) + ' TiB';
-  const gib = bytes / 1024 ** 3;
-  return gib >= 1 ? gib.toFixed(2) + ' GiB' : (bytes / 1024 ** 2).toFixed(0) + ' MiB';
-}
-
-// 'split': the table beside the open title, to try out against the title's own page.
-type View = 'grid' | 'table' | 'split';
-const VIEW_KEY = 'bankai.mas.library.view';
-
-function storedView(): View {
-  try {
-    const saved = localStorage.getItem(VIEW_KEY);
-    return saved === 'table' || saved === 'split' ? saved : 'grid';
-  } catch {
-    return 'grid';
-  }
-}
-
-// The split view needs the room; narrower, a title opens as its page.
-const WIDE_QUERY = '(min-width: 64rem)';
-function subscribeWide(onChange: () => void) {
-  const query = window.matchMedia(WIDE_QUERY);
-  query.addEventListener('change', onChange);
-  return () => query.removeEventListener('change', onChange);
-}
-function useWide(): boolean {
-  return useSyncExternalStore(subscribeWide, () => window.matchMedia(WIDE_QUERY).matches, () => true);
-}
 
 type Row = MasMovie | MasShow;
 
@@ -158,7 +126,6 @@ function MatchDialog({ row, onClose, onMatched }: { row: Row | null; onClose: ()
   const kind = row && isShow(row) ? 'show' : 'movie';
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<DiscoverItem[] | null>(null);
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!row) return;
@@ -181,20 +148,15 @@ function MatchDialog({ row, onClose, onMatched }: { row: Row | null; onClose: ()
 
   async function choose(item: DiscoverItem | null) {
     if (!row) return;
-    setBusy(true);
-    try {
-      await api.masLibraryMatch({
-        kind, key: row.key, tmdb_id: item?.tmdb_id ?? null,
-        name: item?.name, year: item?.year ?? null, poster_url: item?.poster_url ?? null,
-      });
-      toast.success(item ? `${row.folders[0] ?? row.title} is ${item.name}${item.year ? ' (' + item.year + ')' : ''}` : 'Back to the automatic match');
-      onMatched();
-      onClose();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setBusy(false);
-    }
+    // The dialog closes at once; a toast follows the match.
+    onClose();
+    void inBackground(api.masLibraryMatch({
+      kind, key: row.key, tmdb_id: item?.tmdb_id ?? null,
+      name: item?.name, year: item?.year ?? null, poster_url: item?.poster_url ?? null,
+    }), {
+      loading: 'Matching ' + (row.folders[0] ?? row.title) + '…',
+      success: item ? `${row.folders[0] ?? row.title} is ${item.name}${item.year ? ' (' + item.year + ')' : ''}` : 'Back to the automatic match',
+    }).then(onMatched, () => undefined);
   }
 
   return (
@@ -225,7 +187,6 @@ function MatchDialog({ row, onClose, onMatched }: { row: Row | null; onClose: ()
                   <li key={item.tmdb_id}>
                     <button
                       type='button'
-                      disabled={busy}
                       onClick={() => void choose(item)}
                       className={cn(
                         'flex w-full flex-col gap-1.5 rounded-item p-1.5 text-left transition-colors hover:bg-muted disabled:opacity-60',
@@ -243,7 +204,7 @@ function MatchDialog({ row, onClose, onMatched }: { row: Row | null; onClose: ()
           )}
           {row?.matched_by_hand && (
             <div>
-              <Button variant='ghost' size='sm' disabled={busy} onClick={() => void choose(null)}>
+              <Button variant='ghost' size='sm' onClick={() => void choose(null)}>
                 <Undo2 data-icon='inline-start' /> Back to the automatic match
               </Button>
             </div>
@@ -270,42 +231,34 @@ function followHint(show: MasShow): { label: string; title: string } | null {
   return null;
 }
 
-function PosterCard({ row, onOpen, following }: { row: Row; onOpen: () => void; following?: boolean }) {
+function TitleCard({ row, onOpen, following }: { row: Row; onOpen: () => void; following?: boolean }) {
   const show = isShow(row) ? row : null;
   const tone = show ? COMPLETION[show.completion_state] ?? COMPLETION.unknown : null;
   return (
-    <button type='button' onClick={onOpen} aria-label={'View ' + row.title} className='block w-full cursor-pointer rounded-card text-left focus-ring'>
-      <Card className='poster-card h-full gap-0 overflow-hidden [--card-padding:0]'>
-        <div className='relative block w-full'>
-          <AnimePoster url={row.poster_url} title={row.title} />
-          {following && <StatusTag variant='torrent' className='absolute left-2 top-2 bg-background/85 backdrop-blur-sm'>Following</StatusTag>}
-          {/* Two roots means the same title is stored twice over (a followed show keeps German and English apart). */}
-          {row.roots.length > 1 && !following && <StatusTag variant='warning' className='absolute right-2 top-2 bg-background/85 backdrop-blur-sm'>{row.roots.length} copies</StatusTag>}
-          {!row.tmdb_id && !following && <StatusTag variant='muted' className='absolute left-2 top-2 bg-background/85 backdrop-blur-sm'>Not matched</StatusTag>}
-          <span className='absolute inset-x-0 bottom-0 bg-linear-to-t from-black via-black/75 to-transparent px-3 pb-2.5 pt-10 text-left text-sm font-medium leading-tight text-white'>
-            {row.title}
-            {row.year ? <span className='ml-1.5 font-mono text-[0.68rem] font-normal tabular-nums text-white/70'>{row.year}</span> : null}
-          </span>
-        </div>
-        {tone && <span className={cn('block h-0.5 w-full', tone.className)} title={tone.label} aria-hidden='true' />}
-        <div className='flex flex-col gap-2 p-3'>
-          {show ? (
-            <div className='flex items-center justify-between gap-2'>
-              <ShowEpisodes show={show} className='w-[96px]' />
-              <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatSize(row.size)}</span>
-            </div>
-          ) : (
-            <div className='flex items-center justify-between gap-2'>
-              <div className='flex items-center gap-3'>
-                <Quality value={(row as MasMovie).quality} />
-                <Dub german={(row as MasMovie).german} />
-              </div>
-              <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatSize(row.size)}</span>
-            </div>
-          )}
-        </div>
-      </Card>
-    </button>
+    <PosterCard
+      cover={row.poster_url}
+      title={row.title}
+      year={row.year}
+      onOpen={onOpen}
+      rule={tone}
+      topLeft={following
+        ? <StatusTag variant='torrent' className={CORNER_TAG}>Following</StatusTag>
+        : !row.tmdb_id ? <StatusTag variant='muted' className={CORNER_TAG}>Not matched</StatusTag> : null}
+      // Two roots means the same title is stored twice over (a followed show keeps German and English apart).
+      topRight={row.roots.length > 1 && !following ? <StatusTag variant='warning' className={CORNER_TAG}>{row.roots.length} copies</StatusTag> : null}
+    >
+      <div className='flex items-center justify-between gap-2'>
+        {show ? (
+          <ShowEpisodes show={show} className='w-[96px]' />
+        ) : (
+          <div className='flex items-center gap-3'>
+            <Quality value={(row as MasMovie).quality} />
+            <Dub german={(row as MasMovie).german} />
+          </div>
+        )}
+        <span className='font-mono text-[0.68rem] tabular-nums text-muted-foreground'>{formatSize(row.size)}</span>
+      </div>
+    </PosterCard>
   );
 }
 
@@ -371,7 +324,7 @@ export default function MasLibrary() {
   // This visit's own answer is in (the held one may be older than a title opened from it).
   const [fresh, setFresh] = useState(false);
   const [query, setQuery] = useState('');
-  const [view, setView] = useState<View>(storedView);
+  const { view, setView, wide, split } = useLibraryView('mas');
   const [follows, setFollows] = useState<FollowOverview[]>([]);
   // Until the follow list is in, a followed show would flash Match and Follow buttons it does not have.
   const [followsLoaded, setFollowsLoaded] = useState(false);
@@ -388,49 +341,17 @@ export default function MasLibrary() {
   const [tab, setTab] = useState<'movies' | 'shows'>(() => (Number(new URLSearchParams(window.location.search).get('follow')) ? 'shows' : 'movies'));
   const [movieSort, setMovieSort] = useState<SortState<MovieSort> | null>(null);
   const [showSort, setShowSort] = useState<SortState<ShowSort> | null>(null);
-  // The open title lives in the address (?movie=<key> or ?show=<key>), so Back
-  // closes it and a title can be linked to. Opened from the list it was pushed,
-  // and closing it goes back there; opened by a link, closing replaces it.
+  // The open title lives in the address (?movie=<key> or ?show=<key>): see useLibraryAddress.
   // ?follow=<tmdb id>: the Torrent tab's "Open in library" lands on that show.
-  const [params, setParams] = useSearchParams();
-  const navigate = useNavigate();
-  const location = useLocation();
-  const wide = useWide();
-  const split = view === 'split' && wide;
-  const opening = Number(params.get('follow')) || null;
-  const movieKey = params.get('movie');
-  const showKey = params.get('show');
+  const [followParams] = useSearchParams();
+  const opening = Number(followParams.get('follow')) || null;
+  const address = useLibraryAddress('mas', ['movie', 'show'], { split, ready: !opening });
+  const { search: params, setSearch: setParams, location } = address;
+  const movieKey = address.current?.param === 'movie' ? address.current.key : null;
+  const showKey = address.current?.param === 'show' ? address.current.key : null;
   const openKey = movieKey ?? showKey;
-
-  function goRow(row: Row) {
-    const param = isShow(row) ? 'show' : 'movie';
-    if (params.get(param) === row.key) return;
-    const next = new URLSearchParams(params);
-    next.delete('movie');
-    next.delete('show');
-    next.set(param, row.key);
-    // Clicking through titles in the split view is not a trail to walk back.
-    setParams(next, { replace: split && Boolean(openKey), state: { fromList: true } });
-  }
-
-  function closeRow() {
-    if ((location.state as { fromList?: boolean } | null)?.fromList) {
-      navigate(-1);
-      return;
-    }
-    const next = new URLSearchParams(params);
-    next.delete('movie');
-    next.delete('show');
-    setParams(next, { replace: true });
-  }
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(VIEW_KEY, view);
-    } catch {
-      /* a remembered view is a convenience, not state worth failing over */
-    }
-  }, [view]);
+  const goRow = (row: Row) => address.open(isShow(row) ? 'show' : 'movie', row.key);
+  const closeRow = address.close;
 
   async function loadFollows() {
     try {
@@ -501,15 +422,6 @@ export default function MasLibrary() {
     setParams(next, { replace: true });
   }, [opening, allShows]);
 
-  // The title open in the split view is opened again when the page is left for
-  // another tab and come back to; closing it forgets it.
-  useRememberedOpen('mas', movieKey ? 'movie:' + movieKey : showKey ? 'show:' + showKey : null, split && !opening, (stored) => {
-    const at = stored.indexOf(':');
-    const next = new URLSearchParams(params);
-    next.set(stored.slice(0, at) === 'movie' ? 'movie' : 'show', stored.slice(at + 1));
-    setParams(next, { replace: true });
-  });
-
   // A title in the split view that is not in the library (removed, matched to another,
   // remembered from before) is closed rather than left open on nothing -- and so forgotten.
   useEffect(() => {
@@ -535,43 +447,23 @@ export default function MasLibrary() {
 
   // A plain function, not a component: one defined in here is a new type on every render, and
   // React then rebuilt the table -- scrolled back to the top whenever a dialog opened or closed.
-  function panel(rows: Row[], empty: string, children: React.ReactNode) {
-    if (loading) return <div className='flex min-h-40 items-center justify-center'><Spinner /></div>;
-    if (rows.length === 0) {
-      return (
-        <Empty>
-          <EmptyMedia><HardDrive /></EmptyMedia>
-          <EmptyTitle>{empty}</EmptyTitle>
-          <EmptyDescription>Add a directory in Settings, then rescan.</EmptyDescription>
-        </Empty>
-      );
-    }
-    if (view === 'grid') {
-      return (
-        // The ground painted in, as the app's scrolling area: opaque, it scrolls on the compositor (App.tsx).
-        <div className='page-ground min-h-0 flex-1 overflow-y-auto'>
-          <div className='grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-7'>
-            {rows.map((row) => <PosterCard key={row.key} row={row} following={isShow(row) && !!row.tmdb_id && followed.has(row.tmdb_id)} onOpen={() => goRow(row)} />)}
-          </div>
-        </div>
-      );
-    }
-    if (split) {
-      return (
-        // The page's whole width, the open title beside the table; the divider is dragged,
-        // and where it sits is kept for every device.
-        <LibrarySplit
-          id='mas'
-          list={children}
-          open={Boolean(active)}
-          onClose={closeRow}
-          empty={{ title: 'Pick a title', description: 'Its files, or its seasons and episodes, open here beside the list.' }}
-        >
-          {showDetail}
-        </LibrarySplit>
-      );
-    }
-    return <>{children}</>;
+  function panel(rows: Row[], empty: string, table: React.ReactNode) {
+    return (
+      <LibraryBody
+        loading={loading}
+        count={rows.length}
+        empty={{ title: empty, description: 'Add a directory in Settings, then rescan.' }}
+        view={view}
+        split={split}
+        grid={() => rows.map((row) => <TitleCard key={row.key} row={row} following={isShow(row) && !!row.tmdb_id && followed.has(row.tmdb_id)} onOpen={() => goRow(row)} />)}
+        table={() => table}
+        detail={showDetail}
+        splitId='mas'
+        open={Boolean(active)}
+        onClose={closeRow}
+        splitEmpty={{ title: 'Pick a title', description: 'Its files, or its seasons and episodes, open here beside the list.' }}
+      />
+    );
   }
 
   const isUnmatched = (row: Row) => !row.tmdb_id && !row.key.startsWith('follow:');
@@ -937,10 +829,7 @@ export default function MasLibrary() {
   // A title opened outside the split view is a page of its own.
   if (openKey && !split) {
     return (
-      <div className='flex min-h-0 flex-1 flex-col gap-6'>
-        <div>
-          <Button variant='ghost' size='sm' onClick={closeRow}><ArrowLeft data-icon='inline-start' /> Library</Button>
-        </div>
+      <TitlePage onBack={closeRow}>
         {active ? showDetail : loading ? (
           <div className='flex min-h-40 items-center justify-center'><Spinner /></div>
         ) : (
@@ -951,29 +840,21 @@ export default function MasLibrary() {
           </Empty>
         )}
         {dialogs}
-      </div>
+      </TitlePage>
     );
   }
 
   return (
     <div className='flex h-full min-h-0 flex-col gap-4'>
-      <div className='flex flex-wrap items-end justify-between gap-3'>
-        <div className='flex flex-col gap-1'>
-          <h1 className='font-heading text-3xl font-light'>Library</h1>
-        </div>
-        <div className='flex items-center gap-2'>
-          <InputGroup className='w-60'>
-            <InputGroupAddon><Search /></InputGroupAddon>
-            <InputGroupInput aria-label='Search the library' placeholder='Search titles…' value={query} onChange={(event) => setQuery(event.target.value)} />
-          </InputGroup>
-          <Button variant={view === 'grid' ? 'secondary' : 'ghost'} size='icon' aria-label='Grid view' aria-pressed={view === 'grid'} title='Grid view' onClick={() => setView('grid')}><LayoutGrid /></Button>
-          <Button variant={view === 'table' ? 'secondary' : 'ghost'} size='icon' aria-label='Table view' aria-pressed={view === 'table'} title='Table view' onClick={() => setView('table')}><Rows3 /></Button>
-          {wide && <Button variant={view === 'split' ? 'secondary' : 'ghost'} size='icon' aria-label='Split view' aria-pressed={view === 'split'} title='Split view: the table beside the open title' onClick={() => setView('split')}><Columns2 /></Button>}
-          <Button variant='secondary' onClick={() => void load(true)} disabled={loading}>
-            <RefreshCw data-icon='inline-start' className={loading ? 'animate-spin' : ''} /> Rescan
-          </Button>
-        </div>
-      </div>
+      <LibraryHeader
+        title='Library'
+        search={{ value: query, onChange: setQuery, placeholder: 'Search titles…', label: 'Search the library' }}
+        view={view}
+        onView={setView}
+        wide={wide}
+        onRescan={() => void load(true)}
+        rescanning={loading}
+      />
 
       <Tabs value={tab} onValueChange={(value) => { setTab(value as 'movies' | 'shows'); setOnly(null); }} className='min-h-0 flex-1 gap-3'>
         <div className='flex flex-wrap items-center gap-2'>
@@ -998,12 +879,14 @@ export default function MasLibrary() {
       </Tabs>
 
       {!loading && (
-        <footer className='flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 border-t border-border pt-2.5 text-xs text-muted-foreground'>
-          <span><span className='font-mono tabular-nums text-foreground'>{totals.movies}</span> movies</span>
-          <span><span className='font-mono tabular-nums text-foreground'>{totals.shows}</span> shows</span>
-          <span><span className='font-mono tabular-nums text-foreground'>{formatSize(totals.size)}</span> stored</span>
-          <span className='flex items-center gap-1.5'><span className='size-1.5 rounded-full bg-transfer' /><span className='font-mono tabular-nums text-foreground'>{totals.germanMovies}</span> films and <span className='font-mono tabular-nums text-foreground'>{totals.germanEpisodes.toLocaleString()}</span> episodes German dub</span>
-        </footer>
+        <LibraryFooter>
+          <FooterStat value={totals.movies}>movies</FooterStat>
+          <FooterStat value={totals.shows}>shows</FooterStat>
+          <FooterStat value={formatSize(totals.size)}>stored</FooterStat>
+          <FooterStat value={totals.germanMovies} dot='bg-transfer'>
+            films and <span className='font-mono tabular-nums text-foreground'>{totals.germanEpisodes.toLocaleString()}</span> episodes German dub
+          </FooterStat>
+        </LibraryFooter>
       )}
 
       {dialogs}

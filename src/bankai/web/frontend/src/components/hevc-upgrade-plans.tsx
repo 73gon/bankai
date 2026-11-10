@@ -1,7 +1,7 @@
 import { ExternalLink } from 'lucide-react';
 import type { HevcUpgradePlan } from '@/lib/api';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { Checkbox } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
 
 function formatSize(bytes: number) {
   if (!bytes) return '—';

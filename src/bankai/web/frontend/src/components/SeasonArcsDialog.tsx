@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react';
 import { Plus, Save, Sparkles, Trash2, Undo2 } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type AnimeArc, type AnimeArcSeason } from '@/lib/api';
-import { Button } from '@/zon/ui/button';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Input } from '@/zon/ui/input';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { Button } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 
 /** An entry's arcs as rows: each arc's first episode and name; its last is the next one's first - 1. */
 function Rows({ arcs, total, onChange }: { arcs: AnimeArc[]; total: number; onChange: (arcs: AnimeArc[]) => void }) {

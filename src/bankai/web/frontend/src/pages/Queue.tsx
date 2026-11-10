@@ -3,11 +3,11 @@ import { ListVideo, Loader2, X, RotateCcw, CheckCircle2, AlertCircle, Clock, Wif
 import { toast } from '@/lib/toast';
 import { api, type Job } from '@/lib/api';
 import { useJobStream } from '@/hooks/useJobStream';
-import { Button } from '@/zon/ui/button';
+import { Button } from '@zonsh/ui';
 import { StatusTag } from '@/components/status-tag';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
 import { timeAgo } from '@/lib/utils';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 function statusBadge(job: Job) {
   if (job.pending) return <StatusTag variant='muted'>Pending</StatusTag>;

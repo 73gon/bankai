@@ -3,17 +3,17 @@ import { Compass, Loader2, Plus, Film, Tv, Search as SearchIcon, Check, Link2 } 
 import { toast } from '@/lib/toast';
 import { api, type DiscoverItem, type PagedDiscover, type SearchResult } from '@/lib/api';
 import { POSTER_IMG, posterSources } from '@/lib/posters';
-import { Tabs, TabsList, TabsTab, TabsPanel } from '@/zon/ui/tabs';
-import { Button } from '@/zon/ui/button';
+import { Tabs, TabsList, TabsTab, TabsPanel } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
 import { StatusTag } from '@/components/status-tag';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Input } from '@/zon/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { Skeleton } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
 import { GermanRelease } from '@/components/GermanRelease';
-import { Separator } from '@/zon/ui/separator';
+import { Separator } from '@zonsh/ui';
 import { CATALOG_PAGE_SIZES, loadCatalogPageSize, saveCatalogPageSize, type CatalogPageSize } from '@/lib/catalog';
 
 const PAGE_SIZE_ITEMS = CATALOG_PAGE_SIZES.map((size) => ({ value: String(size), label: `${size} per page` }));

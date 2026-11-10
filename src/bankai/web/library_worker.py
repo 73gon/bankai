@@ -182,7 +182,9 @@ def _write_heartbeat(*, draining: bool = False, stopped: bool = False, waiting: 
     }
     path = _path("library_worker.json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    # Per thread: the heartbeat thread and the main loop both write it, and one's replace took the
+    # other's file away mid-write ("heartbeat not written: [Errno 2]", Nov 2026).
+    tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(json.dumps(beat, default=str), encoding="utf-8")
         tmp.replace(path)

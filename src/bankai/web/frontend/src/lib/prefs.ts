@@ -61,12 +61,14 @@ export function adoptServerPref(key: string, value: unknown): void {
  */
 export function useRememberedOpen(scope: string, value: string | null, enabled: boolean, restore: (value: string) => void): void {
   const key = 'bankai:open:' + scope;
-  const first = useRef(true);
+  // Tried once the view is a split view: the view itself may come a moment after the page (a
+  // setting read from the server), and the manga library never opened its series again.
+  const tried = useRef(false);
   const previous = useRef<string | null>(null);
   useEffect(() => {
     try {
-      if (first.current) {
-        first.current = false;
+      if (!tried.current && (enabled || value != null)) {
+        tried.current = true;
         const stored = localStorage.getItem(key);
         if (value == null && enabled && stored) restore(stored);
       } else if (value == null && previous.current != null) {

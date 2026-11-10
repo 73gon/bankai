@@ -153,6 +153,9 @@ def test_qbittorrent_torrents_returns_all_dashboard_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeQBittorrent:
+        def __init__(self, *args, **kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 
@@ -209,6 +212,9 @@ def test_qbittorrent_torrent_actions(
     calls: list[tuple] = []
 
     class FakeQBittorrent:
+        def __init__(self, *args, **kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 

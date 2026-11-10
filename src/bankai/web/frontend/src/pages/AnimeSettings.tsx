@@ -3,17 +3,17 @@ import { AlertTriangle, Bot, HardDrive, Image, Images, Info, Play, RefreshCw, Rs
 import { toast } from '@/lib/toast';
 import { api, type AnimeAutomationStatus, type SettingRow } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card } from '@/zon/ui/card';
-import { Input } from '@/zon/ui/input';
-import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/zon/ui/item';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Spinner } from '@/zon/ui/spinner';
-import { Switch } from '@/zon/ui/switch';
-import { Textarea } from '@/zon/ui/textarea';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
+import { Switch } from '@zonsh/ui';
+import { Textarea } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
 
 /** A setting's name, one line saying what it does, and -- behind the info mark -- the rest. */
 type Meta = { label: string; hint: string; more?: string; suffix?: string };
@@ -33,6 +33,11 @@ const META: Record<string, Meta> = {
     label: 'AVC when HEVC lacks German',
     hint: 'Take the AVC encode when only it lists German subtitles.',
     more: "Erai-raws does not give every encode the same subtitles. German is required; HEVC is only preferred.",
+  },
+  'anime.auto_download_new': {
+    label: 'New episodes by themselves',
+    hint: 'Download an episode aired in the last two weeks once a release with German is found.',
+    more: 'Only for shows whose episode before is in the library. Older missing episodes stay as "N available" until you download them.',
   },
   'anime.max_hevc_upgrades_per_cycle': {
     label: 'HEVC upgrades per cycle',
@@ -83,7 +88,7 @@ const META: Record<string, Meta> = {
 type Section = { id: string; title: string; description: string; icon: LucideIcon; keys?: string[] };
 
 const SECTIONS: Section[] = [
-  { id: 'automation', title: 'Automation', description: 'What bankai downloads by itself.', icon: Bot, keys: ['anime.enabled', 'anime.backfill_enabled', 'anime.german_avc_fallback', 'anime.max_hevc_upgrades_per_cycle'] },
+  { id: 'automation', title: 'Automation', description: 'What bankai downloads by itself.', icon: Bot, keys: ['anime.enabled', 'anime.auto_download_new', 'anime.backfill_enabled', 'anime.german_avc_fallback', 'anime.max_hevc_upgrades_per_cycle'] },
   { id: 'sources', title: 'Sources', description: 'Where releases and their subtitle lists come from.', icon: Rss, keys: ['anime.rss_url', 'anime.erai_feed_token', 'anime.erai_username', 'anime.erai_password'] },
   { id: 'storage', title: 'Library & storage', description: 'Where episodes go, and the space kept free.', icon: HardDrive, keys: ['transfer.anime_shows_dir', 'anime.min_free_space_gib', 'anime.max_concurrent_transfers'] },
   { id: 'pacing', title: 'Pacing', description: 'How often each cycle runs, and how much it does.', icon: Timer, keys: ['anime.poll_interval_seconds', 'anime.settle_minutes', 'anime.max_enqueues_per_cycle', 'anime.backfill_request_delay_seconds'] },

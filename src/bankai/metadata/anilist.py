@@ -114,6 +114,11 @@ query ($q: String, $n: Int) {
 _STREAMING = re.compile(r"^Episode\s+(\d+)\s*[-–:]\s*(.+)$", re.IGNORECASE)
 
 _MEDIA: tuple[float, dict[int, dict]] | None = None
+# When the store's mtime was last looked at: a page reads media() a thousand times in a burst,
+# and a stat each time cost the manga drawer 0.6 s of its 1.5 (Nov 2026).
+_MEDIA_CHECKED = 0.0
+_MEDIA_RECHECK_SECONDS = 1.0
+_MEDIA_PATH: Path | None = None
 _LOCK = asyncio.Lock()
 # The last time AniList could not be asked and what it said, for the dashboard;
 # cleared by the next answer. Without it a refused pass reads as "nothing to do".
@@ -126,18 +131,23 @@ def _media_store() -> Path:
 
 def media_all() -> dict[int, dict]:
     """Everything kept from AniList's API, by AniList id."""
-    global _MEDIA
+    global _MEDIA, _MEDIA_CHECKED, _MEDIA_PATH
+    now = time.monotonic()
     path = _media_store()
+    if _MEDIA is not None and _MEDIA_PATH == path and now - _MEDIA_CHECKED < _MEDIA_RECHECK_SECONDS:
+        return _MEDIA[1]
     try:
         mtime = path.stat().st_mtime
     except OSError:
         return {}
-    if _MEDIA is None or _MEDIA[0] != mtime:
+    _MEDIA_CHECKED = now
+    if _MEDIA is None or _MEDIA[0] != mtime or _MEDIA_PATH != path:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         _MEDIA = (mtime, {int(key): row for key, row in raw.items() if str(key).isdigit()})
+        _MEDIA_PATH = path
     return _MEDIA[1]
 
 
@@ -429,6 +439,37 @@ def _placeholder(title: object) -> bool:
     return not isinstance(title, str) or title.strip().casefold() in _PLACEHOLDER_TITLES
 
 
+_SHARED_STREAMING: tuple[int, dict[int, int]] | None = None
+
+
+def _streaming_owner() -> dict[int, int]:
+    """Entries whose streaming list another entry carries too, to the one it belongs to.
+
+    AniList gave Dr. STONE's first season the streaming list of SCIENCE FUTURE, its fourth --
+    "Ryusui vs. Senku" as episode 1 -- and both tabs read the same (Nov 2026). The sites list the
+    season they stream now, so an identical list is the newest entry's.
+    """
+    global _SHARED_STREAMING
+    rows = media_all()
+    if _SHARED_STREAMING is not None and _SHARED_STREAMING[0] == id(rows):
+        return _SHARED_STREAMING[1]
+    by_list: dict[tuple, list[int]] = {}
+    for aid, row in rows.items():
+        titles = tuple(sorted(str(title).casefold() for title in (row.get("streaming") or {}).values() if title))
+        if len(titles) >= 3:
+            by_list.setdefault(titles, []).append(aid)
+    owner: dict[int, int] = {}
+    for aids in by_list.values():
+        if len(aids) > 1:
+            # A season's, not a film's or a special's (One Piece's list is the series', not Episode of
+            # Skypiea's); the other seasons take MyAnimeList's titles, which are their own.
+            seasons = [aid for aid in aids if kind(aid) in SEASON_FORMATS]
+            newest = max(seasons or aids, key=lambda aid: (str(rows[aid].get("start") or ""), aid))
+            owner.update({aid: newest for aid in aids if aid != newest})
+    _SHARED_STREAMING = (id(rows), owner)
+    return owner
+
+
 def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
     """(number, title, air date) of each of its episodes, as far as known.
 
@@ -438,9 +479,11 @@ def episodes(anilist_id: object) -> list[tuple[int, str | None, str | None]]:
     kept = media(anilist_id)
     count = episode_count(anilist_id) or 0
     airing = _own_numbers(kept.get("airing") or {}, count)
+    # Another entry's list (_streaming_owner) names none of this one's episodes.
+    shared = _streaming_owner().get(int(anilist_id)) if str(anilist_id).isdigit() else None
     streaming = {
         number: title
-        for number, title in _own_numbers(kept.get("streaming") or {}, count).items()
+        for number, title in _own_numbers({} if shared else kept.get("streaming") or {}, count).items()
         if not _placeholder(title)
     }
     # Where the streaming sites name none, MyAnimeList's titles, as far as they are kept.
@@ -628,6 +671,15 @@ def _first_season(found: _Index, hits: set[int]) -> int | None:
     return min(pool, key=lambda aid: (year(aid) or 9999, aid)) if pool else None
 
 
+_LATER_PART = re.compile(r"\b(?:part|cour)\s*(?:[2-9]|ii)\b|\b(?:2nd|second|3rd|third)\s+(?:part|cour)\b", re.IGNORECASE)
+
+
+def _is_later_part(found: _Index, anilist_id: int) -> bool:
+    """Whether an entry is a season's second (or later) part, by its titles."""
+    entry = found.anime.get(anilist_id)
+    return entry is not None and any(_LATER_PART.search(value) for value in (entry.romaji, entry.english) if value)
+
+
 def _resolve_season(found: _Index, value: str) -> Resolution:
     """A sequel named by season number, found by walking the show's sequels on AniList.
 
@@ -656,6 +708,23 @@ def _resolve_season(found: _Index, value: str) -> Resolution:
     else:
         season = int(match["season"] or match["nth"] or _SPELLED.get((match["spelled"] or "").casefold(), 1))
         steps = season - 1 + (part - 1)
+    if not match["base_only"] and not match["final"]:
+        # A season's second part is its own entry on AniList ("Shingeki no Kyojin Season 3 Part 2"):
+        # walked as a season, "S04" of Attack on Titan was Season 3 Part 2 and Re:Zero's 4th season
+        # its 3rd (Nov 2026). Seasons step past parts; the parts asked for come after.
+        # Where that reaches no season, the parts are what the name counts: Chitose-kun's "S2" is its
+        # "2nd Cour".
+        seasons, start = steps - (part - 1), current
+        for _ in range(seasons):
+            after = _next_season(current)
+            while after is not None and _is_later_part(found, after):
+                after = _next_season(after)
+            if after is None:
+                current = start
+                break
+            current = after
+        else:
+            steps = part - 1
     for _ in range(steps):
         after = _next_season(current)
         if after is None:

@@ -787,3 +787,98 @@ def test_an_episode_map_files_each_number_as_the_ticked_entry_and_leaves_the_res
     )
     assert [(aid, episode) for _path, aid, episode in placed] == [(1001, 12), (1002, 1)]
     assert [reason for _source, reason in left] == ["not ticked to be replaced"]
+
+
+def test_a_torrent_numbered_by_its_entry_is_matched_to_the_episodes_ticked_by_the_library_s_numbers(world, copies, tmp_path):
+    """Dr. STONE New World Part 2 is the library's S03E12-E22, Erai's batch 01-11: none was "ticked",
+    and the download failed five times as holding no anime files (Nov 2026)."""
+    placed = organize(
+        sources(tmp_path, "Dr. Stone Science Future", [1, 2, 3]), 1001,
+        episode_map={12: (1001, 1), 13: (1001, 2), 14: (1001, 3)},
+    )
+    assert sorted((aid, episode) for _path, aid, episode in placed) == [(1001, 1), (1001, 2), (1001, 3)]
+
+
+def test_the_part_of_an_episode_a_file_is():
+    assert processor.part_number("[Erai-raws] Re.Zero kara Hajimeru Isekai Seikatsu - 01 (Part One) [1080p].mkv") == 1
+    assert processor.part_number("[Erai-raws] Re.Zero kara Hajimeru Isekai Seikatsu - 01 (Part Two) [1080p].mkv") == 2
+    assert processor.part_number("Show - 05 Pt.2.mkv") == 2
+    assert processor.part_number("[Erai-raws] Re.Zero kara Hajimeru Isekai Seikatsu - 02 [1080p].mkv") is None
+    assert processor.part_number("Party Time - 03.mkv") is None
+
+
+def test_an_episode_in_two_parts_is_joined_not_written_over(world, copies, monkeypatch, tmp_path):
+    """Erai's Re:Zero batch has "01 (Part One)" and "01 (Part Two)": both were S01E01, Part Two over Part One (Nov 2026)."""
+    folder = tmp_path / "dl"
+    folder.mkdir()
+    names = ["Sousou no Frieren - 05 (Part One) [1080p].mkv", "Sousou no Frieren - 05 (Part Two) [1080p].mkv",
+             "Sousou no Frieren - 06 [1080p].mkv"]
+    files = []
+    for name in names:
+        (folder / name).write_bytes(name.encode())
+        files.append(folder / name)
+    joined: list = []
+    monkeypatch.setattr(processor, "_join_parts", lambda parts, dst: (joined.append([p.name for p in parts]), dst.write_bytes(b"both")))
+
+    placed = organize(list(reversed(files)), FRIEREN)
+
+    assert sorted(episode for _path, _aid, episode in placed) == [5, 6]
+    assert joined == [names[:2]]
+    five = next(path for path, _aid, episode in placed if episode == 5)
+    assert five.read_bytes() == b"both"
+
+
+def test_a_second_file_of_an_episode_waits_to_be_matched(world, copies, tmp_path):
+    folder = tmp_path / "dl"
+    folder.mkdir()
+    files = []
+    for name in ["[Erai-raws] Sousou no Frieren - 05 [1080p].mkv", "[Erai-raws] Sousou no Frieren - 05v2 [1080p].mkv"]:
+        (folder / name).write_bytes(name.encode())
+        files.append(folder / name)
+    left: list = []
+
+    placed = organize(files, FRIEREN, leftover=left)
+
+    assert [(path.read_bytes(), episode) for path, _aid, episode in placed] == [(files[0].name.encode(), 5)]
+    assert [(source.name, reason) for source, reason in left] == [(files[1].name, "a second file of episode 5")]
+
+
+def test_the_parts_subtitle_scripts_are_joined_with_their_own_styles():
+    def script(look: str, line: str) -> str:
+        return (
+            "[Script Info]\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname\n"
+            f"Style: Default,Arial\nStyle: Title,{look}\n\n[Events]\n"
+            "Format: Layer, Start, End, Style, Text\n"
+            f"Dialogue: 0,0:00:01.00,0:00:02.50,Title,{line}\nComment: 0,0:00:03.00,0:00:04.00,Default,note, with comma\n"
+        )
+
+    merged = processor.merge_ass([script("Times", "one"), script("Verdana", "two")], [0.0, 1500.25])
+
+    assert "Style: Title,Times" in merged and "Style: Title 2,Verdana" in merged
+    assert merged.count("Style: Default,Arial") == 1
+    assert "Dialogue: 0,0:00:01.00,0:00:02.50,Title,one" in merged
+    assert "Dialogue: 0,0:25:01.25,0:25:02.75,Title 2,two" in merged
+    assert "Comment: 0,0:25:03.25,0:25:04.25,Default,note, with comma" in merged
+    # Another resolution: not joined script by script.
+    other = script("Times", "x").replace("PlayResY: 1080", "PlayResY: 720")
+    assert processor.merge_ass([script("Times", "one"), other], [0.0, 10.0]) is None
+
+
+def test_a_replacement_with_an_episode_map_downloads_only_the_ticked_episodes(world, monkeypatch, tmp_path):
+    show = "Frieren Beyond Journey's End"
+    filed(world["library"], f"{show}/Season 01/{show} - S01E05.mkv", [(FRIEREN, 5)])
+
+    download(
+        monkeypatch, tmp_path, {
+            "[Erai-raws] Sousou no Frieren - 05 [1080p][HEVC].mkv": b"new five",
+            "[Erai-raws] Sousou no Frieren - 06 [1080p][HEVC].mkv": b"six",
+            "[Erai-raws] Sousou no Frieren - 06 [1080p][HEVC].en.ass": b"subs",
+        },
+        release_title="[Erai-raws] Sousou no Frieren - 05 ~ 06 [1080p][HEVC]", publish=True,
+        replace_existing=True, episode_map={5: (FRIEREN, 5)},
+    )
+
+    assert download.qbit.left_out == {
+        "[Erai-raws] Sousou no Frieren - 06 [1080p][HEVC].mkv",
+        "[Erai-raws] Sousou no Frieren - 06 [1080p][HEVC].en.ass",
+    }

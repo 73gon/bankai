@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ExternalLink, Pencil, RefreshCw, Search, Undo2 } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { inBackground, toast } from '@/lib/toast';
 import { api, type AgeRatingPlan, type AgeRatingTitle } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Input } from '@/zon/ui/input';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Popover, PopoverContent, PopoverTrigger } from '@/zon/ui/popover';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Popover, PopoverContent, PopoverTrigger } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 
 type Kind = 'all' | 'anime' | 'show';
 type From = 'all' | 'de' | 'estimate' | 'hand' | 'none' | 'search' | 'due';
@@ -156,19 +156,14 @@ export function AgeRatingsPanel() {
   }
 
   async function write(keys: string[]) {
-    setBusy(true);
-    try {
-      const result = await api.applyAgeRatings(keys);
-      toast.success(`${result.anime} anime and ${result.shows} show${result.shows === 1 ? '' : 's'} written`);
-      if (result.failed.length) toast.error(result.failed.join('\n'));
-      setPicked(new Set());
-      await load();
-    } catch (error: any) {
-      toast.error(error.message);
-    } finally {
-      setBusy(false);
-      setConfirm(null);
-    }
+    // The confirmation closes at once; a toast follows the writing.
+    setConfirm(null);
+    setPicked(new Set());
+    void inBackground(api.applyAgeRatings(keys), {
+      loading: `Writing ${keys.length} age rating${keys.length === 1 ? '' : 's'}…`,
+      success: (result) => `${result.anime} anime and ${result.shows} show${result.shows === 1 ? '' : 's'} written`
+        + (result.failed.length ? ` · failed: ${result.failed.join(', ')}` : ''),
+    }).then(() => load(), () => undefined);
   }
 
   async function undo(keys: string[]) {

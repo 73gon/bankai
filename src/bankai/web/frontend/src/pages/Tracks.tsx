@@ -5,13 +5,13 @@ import { api, type TrackLanguage, type TrackRules, type TrackScope, type TrackSc
 import { StatusTag } from '@/components/status-tag';
 import { UnknownTracksDialog } from '@/components/UnknownTracksDialog';
 import { BrowserAudioCard } from '@/components/browser-audio-card';
-import { Button } from '@/zon/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Switch } from '@/zon/ui/switch';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
+import { Button } from '@zonsh/ui';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Switch } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
 
 const SCOPES: Array<{ key: TrackScopeName; label: string }> = [
   { key: 'anime', label: 'Anime' },

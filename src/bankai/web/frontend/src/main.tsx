@@ -2,8 +2,8 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
-import { Toaster } from '@/zon/ui/toast';
-import { TooltipProvider } from '@/zon/ui/tooltip';
+import { Toaster } from '@zonsh/ui';
+import { TooltipProvider } from '@zonsh/ui';
 import { bakeGround } from '@/lib/ground';
 import './index.css';
 

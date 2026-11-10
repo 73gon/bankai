@@ -345,6 +345,8 @@ def test_a_tab_is_named_without_the_collections_own_name() -> None:
     assert collections.short_label("Attack on Titan Season 2", None) == "Attack on Titan Season 2"
     # Not inside a word.
     assert collections.short_label("Attack on Titans", "Attack on Titan") == "Attack on Titans"
+    # The bracket the show's name sits in closes after it; the tab read "] Final Season".
+    assert collections.short_label("[Oshi no Ko] Final Season", "OSHI NO KO") == "Final Season"
 
 
 def test_a_collection_named_like_its_folder_still_leaves_its_seasons_just_season_n() -> None:

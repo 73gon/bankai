@@ -9,15 +9,15 @@ import { AnimePoster } from '@/components/AnimePoster';
 import { MangaPickDialog, mangaFacts } from '@/components/MangaPickDialog';
 import { StatusTag } from '@/components/status-tag';
 import { TruncatedText } from '@/components/TruncatedText';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card } from '@/zon/ui/card';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
 
 /** "Vol 1–14 · Ch 138–147" for what a release says it holds. */
 export function releaseSpan(release: Pick<MangaRelease, 'volumes' | 'chapters'>): string {
@@ -533,9 +533,10 @@ export default function MangaReview({ blacklist = false }: { blacklist?: boolean
         onPick={async (entry: MangaEntry) => {
           if (!matchFor) return;
           const { card, hashes } = matchFor;
-          await act('series:' + card.anilist_id, () => api.matchMangaReleases(hashes, entry.anilist_id), 'Moved to ' + anilistName(entry));
-          setTicked((current) => ({ ...current, [card.anilist_id]: new Set() }));
+          // The dialog closes at once; the card shows itself busy while the releases move.
           setMatchFor(null);
+          setTicked((current) => ({ ...current, [card.anilist_id]: new Set() }));
+          void act('series:' + card.anilist_id, () => api.matchMangaReleases(hashes, entry.anilist_id), 'Moved to ' + anilistName(entry));
         }}
       />
     </div>

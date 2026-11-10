@@ -90,3 +90,62 @@ def test_a_review_card_recheck_names_its_releases_for_the_worker(monkeypatch, tm
     erai._request_cycle(retries_only=True, only=["c"])
     request = erai._read_json(path)
     assert request["retries_only"] is True and request["only"] == ["a", "b", "c"]
+
+
+def test_one_batch_replaces_the_episode_on_disk_and_fills_the_missing_ones(tmp_path, monkeypatch):
+    """One episode on disk and two not: one batch for all three, not a replace and a download."""
+    on_disk = tmp_path / "Show - S01E01.mkv"
+    on_disk.write_bytes(b"x")
+    saved: dict = {}
+
+    class Qbit:
+        async def login(self):
+            pass
+
+        async def add(self, **kwargs):
+            pass
+
+        async def aclose(self):
+            pass
+
+    async def index():
+        return None
+
+    async def anime(aid):
+        return SimpleNamespace(id=aid, name="Show", episodes=12)
+
+    monkeypatch.setattr(anime_files, "of", lambda path: [(5, 1)] if Path(path) == on_disk else [])
+    monkeypatch.setattr(erai, "_has_german", lambda path: False)
+    monkeypatch.setattr(erai.anilist, "index", index)
+    monkeypatch.setattr(erai.anilist, "anime", anime)
+    monkeypatch.setattr(erai, "_load_state", lambda: {"releases": {}, "canonical": {}})
+    monkeypatch.setattr(erai, "_save_state", lambda state: saved.update(state))
+    monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", Qbit)
+    missing = [
+        {"anilist_id": 5, "anilist_episode": number, "season_number": 1, "episode": number} for number in (2, 3)
+    ]
+
+    result = asyncio.run(erai.replace_from_magnet([str(on_disk)], MAGNET, missing=missing))
+
+    assert result["episodes"] == [1, 2, 3] and result["files_to_replace"] == 1 and result["episodes_to_fill"] == 2
+    args = saved["releases"]["a" * 40]["args"]
+    assert [args[i + 1] for i, arg in enumerate(args) if arg == "--episode-map"] == ["1=5:1", "2=5:2", "3=5:3"]
+    # Only missing ones ticked: a download alone.
+    saved.clear()
+    result = asyncio.run(erai.replace_from_magnet([], MAGNET, missing=missing))
+    assert result["episodes"] == [2, 3] and result["files_to_replace"] == 0
+
+
+def test_the_preview_shows_which_torrent_files_fill_missing_episodes():
+    from bankai.web import magnet_preview
+
+    files = [{"path": f"Show/[Group] Show - {number:02d} [1080p].mkv", "size": 1} for number in (1, 2, 3, 4)]
+    rows = magnet_preview.plan(
+        files, ["/lib/Show/Season 01/Show - S01E01.mkv"], "anime",
+        [{"anilist_id": 5, "anilist_episode": 2, "season_number": 1, "episode": 2}],
+    )
+
+    by_episode = {row["episode"]: row for row in rows}
+    assert by_episode[1]["replaces"] == "Show - S01E01.mkv" and not by_episode[1]["fills"]
+    assert by_episode[2]["replaces"] == "S01E02" and by_episode[2]["fills"]
+    assert by_episode[3]["replaces"] is None

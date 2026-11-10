@@ -5,15 +5,15 @@ import { Activity, BookOpen, Clock, Download, Film, Layers, ListVideo, RefreshCw
 import { AnimePoster } from '@/components/AnimePoster';
 import { DiskUsage } from '@/components/DiskUsage';
 import { StatusTag } from '@/components/status-tag';
-import { Button } from '@/zon/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Input } from '@/zon/ui/input';
-import { Meter } from '@/zon/ui/meter';
-import { NativeSelect, NativeSelectOption } from '@/zon/ui/native-select';
-import { Popover, PopoverContent, PopoverDescription, PopoverTitle, PopoverTrigger } from '@/zon/ui/popover';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Table, TableBody, TableCell, TableGroup, TableGroupHeader, TableRow } from '@/zon/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { Button } from '@zonsh/ui';
+import { Card, CardContent, CardHeader, CardTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Meter } from '@zonsh/ui';
+import { NativeSelect, NativeSelectOption } from '@zonsh/ui';
+import { Popover, PopoverContent, PopoverDescription, PopoverTitle, PopoverTrigger } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableGroup, TableGroupHeader, TableRow } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 import { toast } from '@/lib/toast';
 import {
   api,
@@ -26,7 +26,7 @@ import {
   type SystemUsage,
 } from '@/lib/api';
 import { formatBytes, timeAgo } from '@/lib/utils';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 /** "in 42 s", "in 3 min", "now" -- for work that is scheduled rather than waiting. */
 function timeUntil(ts: number | null | undefined): string {

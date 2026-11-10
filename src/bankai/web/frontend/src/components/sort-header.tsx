@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
-import { cn } from '@/zon/lib/cn';
-import { TableHead, type TableHeadProps } from '@/zon/ui/table';
+import { cn } from '@zonsh/ui';
+import { TableHead, type TableHeadProps } from '@zonsh/ui';
 
 export type SortDir = 'asc' | 'desc';
 export type SortState<K extends string> = { key: K; dir: SortDir };

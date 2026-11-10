@@ -5,11 +5,11 @@ import { api, type AniListAnime } from '@/lib/api';
 import { anilistName, anilistUrl, formatLabel } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
 import { TruncatedText } from '@/components/TruncatedText';
-import { Button } from '@/zon/ui/button';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Input } from '@/zon/ui/input';
-import { Spinner } from '@/zon/ui/spinner';
+import { Button } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
 
 /** How long typing pauses before the search runs. */
 const DEBOUNCE_MS = 400;

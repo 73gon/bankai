@@ -4,15 +4,15 @@ import { toast } from '@/lib/toast';
 import { api, type EncodeCandidate, type EncodeOverview, type EncodeScope, type TrackScopeName } from '@/lib/api';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { StatusTag } from '@/components/status-tag';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Progress } from '@/zon/ui/progress';
-import { ScrollArea } from '@/zon/ui/scroll-area';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Progress } from '@zonsh/ui';
+import { ScrollArea } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
 
 const SCOPES: Array<{ key: TrackScopeName; label: string }> = [
   { key: 'anime', label: 'Anime' },

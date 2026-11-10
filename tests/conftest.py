@@ -27,12 +27,20 @@ def _never_the_live_instance(tmp_path_factory, monkeypatch):
 
     root = tmp_path_factory.mktemp("isolated")
     config = root / "config.toml"
-    config.write_text('[qbittorrent]\nurl = "http://127.0.0.1:9"\n', encoding="utf-8")
+    # Prowlarr too: the pipeline's German-release search would ask the live one.
+    config.write_text(
+        '[qbittorrent]\nurl = "http://127.0.0.1:9"\n\n[prowlarr]\nurl = "http://127.0.0.1:9"\n', encoding="utf-8"
+    )
     monkeypatch.setenv("BANKAI_CONFIG", str(config))
     monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
     reset_settings_cache()
+    # A test that started and stopped the app left the stop signal set for every test after it.
+    from bankai.web import stopping
+
+    stopping.reset()
     yield
+    stopping.reset()
     reset_settings_cache()
 
 
@@ -146,6 +154,13 @@ def _isolated_anime_state(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(anime_collections, "_path", lambda: root / "anime_collections.json")
     monkeypatch.setattr(anime_layout, "moves_dir", lambda: root / "anime_layout_moves")
     monkeypatch.setattr(anime_layout, "_pictures_path", lambda: root / "anime_layout_pictures.json")
+    # Tests write these stores and read them back at once; the server looks again within a second.
+    from bankai.metadata import anilist_manga
+    from bankai.web import manga_series
+
+    monkeypatch.setattr(anilist, "_MEDIA_RECHECK_SECONDS", 0.0)
+    monkeypatch.setattr(anilist_manga, "_MEDIA_RECHECK_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(manga_series, "_LINKS_SECONDS", 0.0)
     reset_anilist_caches()
 
     async def no_ensure(*args, **kwargs):

@@ -16,15 +16,20 @@ import { Check } from 'lucide-react';
 import type { MangaDetail, MangaGraphNode } from '@/lib/api';
 import { formatLabel } from '@/lib/anilist';
 import { AnimePoster } from '@/components/AnimePoster';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 const CARD_W = 150;
 const CARD_H = 296;
-const GAP_X = 150;
-const GAP_Y = 32;
-const GAP_COLUMN = 36;
-// Cards a column holds before the next column out: a tall column zooms the graph out to nothing.
-const ROWS = 3;
+// Between the collection's own entries along their row.
+const GAP_X = 90;
+// A band of related entries: cards side by side, at most this many a row.
+const BAND_COLS = 6;
+const BAND_GAP = 18;
+const BAND_PAD = 16;
+const BAND_HEAD = 34;
+// Between bands beside each other, and between the row and the bands above and below it.
+const BANDS_APART = 40;
+const ROW_TO_BANDS = 90;
 
 /** AniList's relation types, as the edges say them. */
 const RELATIONS: Record<string, string> = {
@@ -45,7 +50,8 @@ const RELATIONS: Record<string, string> = {
 // What bankai follows a series by: drawn solid, the rest dashed.
 const FOLLOWED_BY = new Set(['ADAPTATION', 'SOURCE', 'ALTERNATIVE']);
 
-type CardData = { node: MangaGraphNode; root: boolean; side: 'left' | 'right' | 'root'; selected: boolean };
+type CardData = { node: MangaGraphNode; root: boolean; selected: boolean };
+type BandData = { label: string; count: string; width: number; height: number; tone: string; faint: boolean };
 
 function stripe(node: MangaGraphNode): string {
   if (node.type === 'ANIME') return 'bg-cyan-400';
@@ -80,6 +86,8 @@ function GraphCard({ data }: NodeProps<Node<CardData, 'card'>>) {
       <Handle id='left-out' type='source' position={Position.Left} isConnectable={false} className='opacity-0' />
       <Handle id='right-in' type='target' position={Position.Right} isConnectable={false} className='opacity-0' />
       <Handle id='right-out' type='source' position={Position.Right} isConnectable={false} className='opacity-0' />
+      <Handle id='top-out' type='source' position={Position.Top} isConnectable={false} className='opacity-0' />
+      <Handle id='bottom-out' type='source' position={Position.Bottom} isConnectable={false} className='opacity-0' />
       <div className='relative'>
         <AnimePoster url={node.cover} title={node.title} className={cn('w-full rounded-lg', !have && 'opacity-45 grayscale')} />
         <span
@@ -106,6 +114,24 @@ function GraphCard({ data }: NodeProps<Node<CardData, 'card'>>) {
   );
 }
 
+/** A band: the entries one relation joins to one of the collection's, under its name, joined to that
+ *  entry by one line -- not a line and a label per card, which crossed each other and the cards. */
+function GraphBand({ data }: NodeProps<Node<BandData, 'band'>>) {
+  return (
+    <div
+      className={cn('relative rounded-2xl border bg-card/30', data.faint ? 'border-dashed border-muted-foreground/35' : 'border-border')}
+      style={{ width: data.width, height: data.height }}
+    >
+      <Handle id='top-in' type='target' position={Position.Top} isConnectable={false} className='opacity-0' />
+      <Handle id='bottom-in' type='target' position={Position.Bottom} isConnectable={false} className='opacity-0' />
+      <div className='flex items-baseline gap-2 px-4 pt-2.5'>
+        <span className='text-[0.8rem] font-medium' style={{ color: data.tone }}>{data.label}</span>
+        <span className='font-mono text-[0.66rem] text-muted-foreground'>{data.count}</span>
+      </div>
+    </div>
+  );
+}
+
 function Legend() {
   return (
     <div className='flex flex-col gap-1.5 rounded-lg border border-border bg-card/90 p-2.5 text-[0.68rem] text-muted-foreground backdrop-blur-sm'>
@@ -117,13 +143,26 @@ function Legend() {
   );
 }
 
-const nodeTypes = { card: GraphCard };
+const nodeTypes = { card: GraphCard, band: GraphBand };
+
+const TONE = { anime: 'var(--color-cyan-400)', manga: 'var(--color-orange-400)', novel: 'var(--color-violet-400)' };
+const toneOf = (node: MangaGraphNode) => (node.type === 'ANIME' ? TONE.anime : node.format === 'NOVEL' ? TONE.novel : TONE.manga);
+
+function countLabel(items: MangaGraphNode[]): string {
+  const kinds = [
+    ['anime', items.filter((node) => node.type === 'ANIME').length],
+    ['manga', items.filter((node) => node.type === 'MANGA' && node.format !== 'NOVEL').length],
+    ['light novel', items.filter((node) => node.format === 'NOVEL').length],
+  ] as const;
+  return kinds.filter(([, count]) => count > 0).map(([noun, count]) => `${count} ${noun}${count === 1 || noun === 'anime' || noun === 'manga' ? '' : 's'}`).join(' · ');
+}
 
 /**
  * A series' collection and what AniList relates its entries to -- the same from each of them, as
  * the anime library's: the entries left to right in their order (framed), the one open now ringed;
- * their anime on the left, other manga and light novels on the right. The lines are AniList's links,
- * the collection's own among them. A manga card is picked with a click (Shift adds to what is
+ * what relates to them in bands, one per entry and relation (anime above, manga and light novels
+ * below), each joined to its entry by one line and named once (Nov 2026: a line and a label per card
+ * crossed each other and ran behind the cards). A manga card is picked with a click (Shift adds to what is
  * picked) when ``onPick`` is given; otherwise, and for anime, a click opens it.
  */
 export function MangaGraph({ graph, onOpen, onPick, selected = [] }: {
@@ -134,71 +173,97 @@ export function MangaGraph({ graph, onOpen, onPick, selected = [] }: {
 }) {
   const { nodes, edges } = useMemo(() => {
     const byId = new Map(graph.nodes.map((node) => [node.anilist_id, node]));
-    // The main line: the collection's entries left to right in their order, the same from each of them.
+    // The collection's entries left to right in their order, the same from each of them.
     const line = (graph.members ?? [graph.root]).map((member) => byId.get(member)).filter((node): node is MangaGraphNode => Boolean(node));
-    const onLine = new Set(line);
-    const others = graph.nodes.filter((node) => !onLine.has(node));
-    // What the library has nearest the middle, then what is followed, then the rest; each by year.
-    const rank = (node: MangaGraphNode) => (has(node) ? 0 : node.followed ? 1 : 2);
-    const order = (a: MangaGraphNode, b: MangaGraphNode) => rank(a) - rank(b) || (a.year ?? 9999) - (b.year ?? 9999);
-    const anime = others.filter((node) => node.type === 'ANIME').sort(order);
-    const manga = others.filter((node) => node.type === 'MANGA').sort(order);
+    const lineIndex = new Map(line.map((node, index) => [node.anilist_id, index]));
     const id = (node: MangaGraphNode) => node.type + '-' + node.anilist_id;
-    const lineEnd = Math.max(0, line.length - 1) * (CARD_W + GAP_X);
-    const columns = (items: MangaGraphNode[], side: 'left' | 'right'): Node<CardData, 'card'>[] => items.map((node, index) => {
-      const column = Math.floor(index / ROWS);
-      const inColumn = Math.min(ROWS, items.length - column * ROWS);
-      const top = -((inColumn * (CARD_H + GAP_Y) - GAP_Y) - CARD_H) / 2;
-      const out = CARD_W + GAP_X + column * (CARD_W + GAP_COLUMN);
-      return {
-        id: id(node),
-        type: 'card',
-        position: { x: side === 'left' ? -out : lineEnd + out, y: top + (index % ROWS) * (CARD_H + GAP_Y) },
-        data: { node, root: false, side, selected: selected.includes(node.anilist_id) },
-        draggable: false,
-      };
+    const cardNode = (node: MangaGraphNode, x: number, y: number): Node<CardData, 'card'> => ({
+      id: id(node),
+      type: 'card',
+      position: { x, y },
+      data: { node, root: node.anilist_id === graph.root, selected: selected.includes(node.anilist_id) },
+      draggable: false,
     });
-    const laid: Node<CardData, 'card'>[] = [
-      ...line.map((node, index): Node<CardData, 'card'> => ({
-        id: id(node),
-        type: 'card',
-        position: { x: index * (CARD_W + GAP_X), y: 0 },
-        // The entry open now stands out; the graph is the collection's.
-        data: { node, root: node.anilist_id === graph.root, side: 'root', selected: selected.includes(node.anilist_id) },
-        draggable: false,
-      })),
-      ...columns(anime, 'left'),
-      ...columns(manga, 'right'),
-    ];
-    const root = byId.get(graph.root);
-    const placed = new Map(laid.map((item) => [item.data.node.anilist_id, item]));
-    const lines: Edge[] = graph.edges.flatMap((link) => {
-      const from = placed.get(link.from);
-      const to = placed.get(link.to);
-      if (!from || !to) return [];
-      const node = to.data.node === root ? from.data.node : to.data.node;
-      const followedBy = FOLLOWED_BY.has(link.label);
-      const color = node.type === 'ANIME' ? 'var(--color-cyan-400)' : node.format === 'NOVEL' ? 'var(--color-violet-400)' : 'var(--color-orange-400)';
-      // What the library does not have is drawn faint, line and all.
-      const faint = has(from.data.node) && has(to.data.node) ? 1 : 0.35;
-      const rightward = from.position.x <= to.position.x;
-      return [{
-        id: from.id + '>' + to.id,
-        source: from.id,
-        target: to.id,
-        sourceHandle: rightward ? 'right-out' : 'left-out',
-        targetHandle: rightward ? 'left-in' : 'right-in',
-        label: RELATIONS[link.label] ?? link.label,
-        markerEnd: { type: MarkerType.ArrowClosed, color },
-        style: followedBy
-          ? { stroke: color, strokeWidth: 2.5, opacity: faint }
-          : { stroke: color, strokeWidth: 1.5, strokeDasharray: '6 5', opacity: faint },
-        labelStyle: { fill: 'var(--foreground-soft)', fontSize: 11 },
-        labelBgStyle: { fill: 'var(--card)' },
-        labelBgPadding: [6, 3] as [number, number],
-        labelBgBorderRadius: 6,
-      }];
+    const laid: Node[] = line.map((node, index) => cardNode(node, index * (CARD_W + GAP_X), 0));
+    const lines: Edge[] = [];
+
+    // Between the collection's entries: only neighbours, along the row (the order says the rest).
+    for (const link of graph.edges) {
+      const a = lineIndex.get(link.from);
+      const b = lineIndex.get(link.to);
+      if (a === undefined || b === undefined || Math.abs(a - b) !== 1) continue;
+      const [left, right] = a < b ? [line[a], line[b]] : [line[b], line[a]];
+      if (lines.some((edge) => edge.id === id(left) + '>' + id(right))) continue;
+      lines.push({ id: id(left) + '>' + id(right), source: id(left), target: id(right), sourceHandle: 'right-out', targetHandle: 'left-in',
+        style: { stroke: 'var(--color-cyan-400)', strokeWidth: 2 }, markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-cyan-400)' } });
+    }
+
+    // Everything else in bands: per entry of the row and relation, anime above, manga and novels below.
+    type Band = { key: string; anchor: number; relation: string; above: boolean; items: MangaGraphNode[] };
+    const bands = new Map<string, Band>();
+    const placed = new Set(line.map((node) => node.anilist_id));
+    const join = (anchor: number, other: MangaGraphNode, relation: string) => {
+      if (placed.has(other.anilist_id)) return;
+      placed.add(other.anilist_id);
+      const above = other.type === 'ANIME';
+      const key = `${anchor}:${relation}:${above}`;
+      const band = bands.get(key) ?? { key, anchor, relation, above, items: [] };
+      band.items.push(other);
+      bands.set(key, band);
+    };
+    // Links to the entry open now first, then along the row.
+    const links = [...graph.edges].sort((a, b) => {
+      const at = (link: typeof a) => Math.min(link.from === graph.root || link.to === graph.root ? -1 : 99, lineIndex.get(link.from) ?? 99, lineIndex.get(link.to) ?? 99);
+      return at(a) - at(b);
     });
+    for (const link of links) {
+      const fromLine = lineIndex.has(link.from);
+      const toLine = lineIndex.has(link.to);
+      if (fromLine === toLine) continue;
+      const anchor = fromLine ? link.from : link.to;
+      const other = byId.get(fromLine ? link.to : link.from);
+      if (other) join(anchor, other, link.label);
+    }
+    // Two steps away (related to a related entry): with the entry open now, as "Related".
+    for (const node of graph.nodes) join(graph.root, node, 'OTHER');
+
+    const rank = (node: MangaGraphNode) => (has(node) ? 0 : node.followed ? 1 : 2);
+    for (const side of [true, false]) {
+      const mine = [...bands.values()].filter((band) => band.above === side)
+        .sort((a, b) => (lineIndex.get(a.anchor) ?? 0) - (lineIndex.get(b.anchor) ?? 0) || Number(!FOLLOWED_BY.has(a.relation)) - Number(!FOLLOWED_BY.has(b.relation)));
+      let right = -Infinity;
+      for (const band of mine) {
+        band.items.sort((a, b) => rank(a) - rank(b) || (a.year ?? 9999) - (b.year ?? 9999));
+        const cols = Math.min(BAND_COLS, band.items.length);
+        const rows = Math.ceil(band.items.length / BAND_COLS);
+        const width = cols * CARD_W + (cols - 1) * BAND_GAP + 2 * BAND_PAD;
+        const height = BAND_HEAD + rows * CARD_H + (rows - 1) * BAND_GAP + BAND_PAD;
+        const anchorX = (lineIndex.get(band.anchor) ?? 0) * (CARD_W + GAP_X) + CARD_W / 2;
+        const x = Math.max(anchorX - width / 2, right + BANDS_APART);
+        right = x + width;
+        const y = side ? -ROW_TO_BANDS - height : CARD_H + ROW_TO_BANDS;
+        const faint = !band.items.some(has);
+        const tone = toneOf(band.items[0]);
+        laid.push({ id: 'band-' + band.key, type: 'band', position: { x, y }, zIndex: -1, draggable: false, selectable: false,
+          data: { label: RELATIONS[band.relation] ?? band.relation, count: countLabel(band.items), width, height, tone, faint } });
+        band.items.forEach((node, index) => {
+          laid.push(cardNode(node, x + BAND_PAD + (index % BAND_COLS) * (CARD_W + BAND_GAP), y + BAND_HEAD + Math.floor(index / BAND_COLS) * (CARD_H + BAND_GAP)));
+        });
+        const anchorNode = byId.get(band.anchor)!;
+        lines.push({
+          id: id(anchorNode) + '>band-' + band.key,
+          source: id(anchorNode),
+          target: 'band-' + band.key,
+          sourceHandle: side ? 'top-out' : 'bottom-out',
+          targetHandle: side ? 'bottom-in' : 'top-in',
+          type: 'smoothstep',
+          style: FOLLOWED_BY.has(band.relation)
+            ? { stroke: tone, strokeWidth: 2.5, opacity: faint ? 0.4 : 1 }
+            : { stroke: tone, strokeWidth: 1.5, strokeDasharray: '6 5', opacity: faint ? 0.4 : 1 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: tone },
+        });
+      }
+    }
     return { nodes: laid, edges: lines };
   }, [graph, selected]);
 
@@ -209,6 +274,7 @@ export function MangaGraph({ graph, onOpen, onPick, selected = [] }: {
         edges={edges}
         nodeTypes={nodeTypes}
         onNodeClick={(event, node) => {
+          if (node.type !== 'card') return;
           const card = (node.data as CardData).node;
           if (onPick && card.type === 'MANGA') onPick(card, event.shiftKey || event.metaKey || event.ctrlKey);
           else onOpen(card);

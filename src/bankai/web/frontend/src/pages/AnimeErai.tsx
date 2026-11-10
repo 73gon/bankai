@@ -7,14 +7,14 @@ import { SuggestField, type Suggestion } from '@/components/suggest-field';
 
 import { StatusTag } from '@/components/status-tag';
 import { ReplaceDialog, replaceLabel, type ReplaceCandidate } from '@/components/ReplaceDialog';
-import { Button } from '@/zon/ui/button';
-import { Empty, EmptyActions, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { Button } from '@zonsh/ui';
+import { Empty, EmptyActions, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 import { api, eraiPath, recall, type EraiCodec, type EraiKind, type EraiPage, type EraiRelease, type EraiResolution } from '@/lib/api';
 import { timeAgo } from '@/lib/utils';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 
 type GermanFilter = 'all' | 'yes' | 'no';
 

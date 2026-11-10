@@ -1,7 +1,7 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRightToLine, Ban, BookOpen, Columns2, Download, ExternalLink, FolderInput, FolderSearch, FolderTree, LayoutGrid, Link2, Merge, Network, PanelRightOpen, Pencil, Plus, RotateCcw, Rows3, Scissors, Search, Star, StarOff, Trash2, X } from 'lucide-react';
-import { toast } from '@/lib/toast';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { ArrowRightToLine, Ban, BookOpen, Download, ExternalLink, FolderInput, FolderSearch, FolderTree, Link2, ListOrdered, Merge, Network, PanelRightOpen, Pencil, Plus, RotateCcw, Scissors, Search, Star, StarOff, Trash2, X } from 'lucide-react';
+import { inBackground, toast } from '@/lib/toast';
 import {
   api, pagePaths, recall,
   type MangaBreakdown, type MangaChapterRun, type MangaCollection, type MangaDetail, type MangaEntry, type MangaFolder, type MangaGraphNode,
@@ -17,29 +17,26 @@ import { SegmentMeter, rampParts } from '@/components/segment-meter';
 import { SortHeader, nextSort, type SortDir, type SortState } from '@/components/sort-header';
 import { StatusTag, type StatusVariant } from '@/components/status-tag';
 import { TruncatedText } from '@/components/TruncatedText';
-import { releaseSpan, whyLabels } from '@/pages/MangaReview';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card } from '@/zon/ui/card';
-import { Checkbox } from '@/zon/ui/checkbox';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Input } from '@/zon/ui/input';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/zon/ui/input-group';
-import { Progress } from '@/zon/ui/progress';
+import { releaseSpan } from '@/pages/MangaReview';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card } from '@zonsh/ui';
+import { Checkbox } from '@zonsh/ui';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@zonsh/ui';
+import { Progress } from '@zonsh/ui';
 import { LibrarySplit } from '@/components/library-split';
-import { useRememberedOpen } from '@/lib/prefs';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/zon/ui/table';
-import { Tabs, TabsList, TabsPanel, TabsTab } from '@/zon/ui/tabs';
-import { ToggleGroup, ToggleGroupItem } from '@/zon/ui/toggle-group';
+import { CORNER_TAG, FooterStat, LibraryFooter, PosterCard, PosterGrid, TitlePage, ViewSwitch, formatSize, useLibraryAddress, useLibraryView } from '@/components/library/library-page';
+import { Skeleton } from '@zonsh/ui';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@zonsh/ui';
 
 type Tab = 'library' | 'followed' | 'downloads' | 'match';
 // 'split': the table beside the open series, to try out against the series' own page.
-type View = 'grid' | 'table' | 'split';
 type SortKey = 'title' | 'volumes' | 'chapters' | 'size' | 'state';
 
-const VIEW_KEY = 'bankai.manga.library.view';
 const FIRST_DIRECTION: Record<SortKey, SortDir> = { title: 'asc', volumes: 'desc', chapters: 'desc', size: 'desc', state: 'asc' };
 // The table's lesser columns, by the table's own width.
 const COLUMN_CHAPTERS = 'hidden @3xl:table-cell';
@@ -78,30 +75,8 @@ export function ReleaseStatus({ release }: { release: MangaRelease }) {
   return <StatusTag variant={status.variant} title={release.error || release.reason || undefined}>{status.label}</StatusTag>;
 }
 
-function storedView(): View {
-  try {
-    const saved = localStorage.getItem(VIEW_KEY);
-    return saved === 'table' || saved === 'split' ? saved : 'grid';
-  } catch {
-    return 'grid';
-  }
-}
 
-// The split view needs the room; narrower, a series opens as its page.
-const WIDE_QUERY = '(min-width: 64rem)';
-function subscribeWide(onChange: () => void) {
-  const query = window.matchMedia(WIDE_QUERY);
-  query.addEventListener('change', onChange);
-  return () => query.removeEventListener('change', onChange);
-}
-function useWide(): boolean {
-  return useSyncExternalStore(subscribeWide, () => window.matchMedia(WIDE_QUERY).matches, () => true);
-}
 
-function formatSize(bytes: number) {
-  const gib = bytes / 1024 ** 3;
-  return gib >= 1 ? gib.toFixed(2) + ' GiB' : bytes > 0 ? (bytes / 1024 ** 2).toFixed(0) + ' MiB' : '—';
-}
 
 type Holding = { label: string; variant: StatusVariant; order: number; title: string };
 
@@ -184,7 +159,7 @@ function rowFiles(names: string[]) {
 
 /** Every chapter and how the library has it, and every file of the folder in a row: a row moves to
  *  another series by its own button, ticked rows together by the drawer's bar. */
-function ChapterBreakdown({ breakdown, sizes, waiting, picked, onPick, onReview, onMove }: {
+function ChapterBreakdown({ breakdown, sizes, waiting, picked, onPick, onReview, onMove, onRenumber }: {
   breakdown: MangaBreakdown;
   sizes: Map<string, number>;
   waiting: number;
@@ -192,6 +167,7 @@ function ChapterBreakdown({ breakdown, sizes, waiting, picked, onPick, onReview,
   onPick: (names: string[], on: boolean) => void;
   onReview: () => void;
   onMove: (names: string[]) => void;
+  onRenumber: (names: string[]) => void;
 }) {
   const byVolume = breakdown.unit === 'volume';
   const files = useMemo(() => [...new Set(breakdown.rows.flatMap((run) => run.names))], [breakdown]);
@@ -273,16 +249,26 @@ function ChapterBreakdown({ breakdown, sizes, waiting, picked, onPick, onReview,
                   <TableCell className='w-0 py-0 pl-0'>
                     {/* Shown on the row's hover or focus; always where there is no hover. */}
                     {run.names.length > 0 && (
-                      <Button
-                        size='sm'
-                        variant='ghost'
-                        className='opacity-0 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100'
-                        aria-label={`Move ${rowFiles(run.names)} to another series`}
-                        title={`Move ${run.names.length > 1 ? 'these ' + run.names.length + ' files' : 'this file'} into another series (a prequel, a spin-off)`}
-                        onClick={() => onMove(run.names)}
-                      >
-                        <FolderInput data-icon='inline-start' /> Move
-                      </Button>
+                      <div className='flex opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100'>
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          aria-label={`Renumber ${rowFiles(run.names)}`}
+                          title={`Give ${run.names.length > 1 ? 'these ' + run.names.length + ' files' : 'this file'} another volume or chapter number in this series`}
+                          onClick={() => onRenumber(run.names)}
+                        >
+                          <ListOrdered data-icon='inline-start' /> Renumber
+                        </Button>
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          aria-label={`Move ${rowFiles(run.names)} to another series`}
+                          title={`Move ${run.names.length > 1 ? 'these ' + run.names.length + ' files' : 'this file'} into another series (a prequel, a spin-off)`}
+                          onClick={() => onMove(run.names)}
+                        >
+                          <FolderInput data-icon='inline-start' /> Move
+                        </Button>
+                      </div>
                     )}
                   </TableCell>
                 </TableRow>
@@ -383,13 +369,19 @@ function memberLabel(member: string, collection: string) {
 }
 
 /** One series: its own page (?series=<id>), or the right half of the split view. */
+// Series answers kept while the page is open: a series opened again, or another entry of the
+// collection, shows at once while its fresh answer comes (a click between entries waited 1-2 s).
+const seen = new Map<number, MangaDetail>();
+
 function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id: number) => void; onChanged: () => void }) {
   const [detail, setDetail] = useState<MangaDetail | null>(null);
-  const [tab, setTab] = useState('chapters');
+  const [releasesOpen, setReleasesOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // Books ticked in the Chapters tab, and those being moved to another series.
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [moving, setMoving] = useState<string[] | null>(null);
+  // Moved to another series, or renumbered in this one.
+  const [renumbering, setRenumbering] = useState(false);
   // The relations graph's dialog, and the question before the series is removed.
   const [graphOpen, setGraphOpen] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -401,20 +393,34 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
   const [armed, setArmed] = useState<number | null>(null);
   const loads = useRef(0);
   const navigate = useNavigate();
+  // Why the open series could not be loaded: shown with Retry instead of a skeleton that never ends.
+  const [failed, setFailed] = useState<string | null>(null);
 
   async function load(which: number) {
     const mine = ++loads.current;
+    setFailed(null);
     try {
       const answer = await api.mangaSeries(which);
+      seen.set(which, answer);
       if (mine === loads.current) setDetail(answer);
+      // The collection's other entries fetched behind it, one after another, so a click on one is instant.
+      for (const member of answer.collection?.members ?? []) {
+        if (mine !== loads.current) break;
+        if (member.anilist_id === which || seen.has(member.anilist_id)) continue;
+        try {
+          seen.set(member.anilist_id, await api.mangaSeries(member.anilist_id));
+        } catch {
+          // A failed look-ahead costs nothing: the click loads it as before.
+        }
+      }
     } catch (error: any) {
-      toast.error(error.message);
+      if (mine === loads.current) setFailed(error.message || 'The series could not be loaded');
     }
   }
 
   useEffect(() => {
-    setDetail(null);
-    setTab('chapters');
+    setDetail(id !== null ? seen.get(id) ?? null : null);
+    setReleasesOpen(false);
     setPicked(new Set());
     // A move left open (Back while its dialog was up) must not open on the next series with these names.
     setMoving(null);
@@ -505,7 +511,13 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
   const state = holding(breakdown?.have ?? 0, total, detail?.files.length ?? 0, detail?.status === 'FINISHED', noun);
   return (
     <>
-        {detail === null ? (
+        {detail === null && failed !== null ? (
+          <Empty>
+            <EmptyTitle>This series could not be loaded</EmptyTitle>
+            <EmptyDescription>{failed}</EmptyDescription>
+            {id !== null && <Button variant='secondary' onClick={() => void load(id)}>Try again</Button>}
+          </Empty>
+        ) : detail === null ? (
           <div className='flex flex-col gap-4'>
             <Skeleton className='h-24 w-full' />
             <Skeleton className='h-96 w-full' />
@@ -546,28 +558,11 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
                     </h2>
                     <StatusTag variant={state.variant} title={state.title}>{state.label}</StatusTag>
                   </div>
-                  {collection && (
-                    <Tabs value={String(detail.anilist_id)} onValueChange={(value) => onOpen(Number(value))}>
-                      <TabsList className='h-auto max-w-full flex-wrap'>
-                        {collection.members.map((member) => (
-                          <TabsTab
-                            key={member.anilist_id}
-                            value={String(member.anilist_id)}
-                            className={cn(!member.on_disk && 'text-muted-foreground')}
-                            title={member.name + (member.year ? ' (' + member.year + ')' : '') + (member.on_disk ? '' : ': not in your library')}
-                          >
-                            {memberLabel(member.name, collection.name)}
-                          </TabsTab>
-                        ))}
-                      </TabsList>
-                    </Tabs>
-                  )}
                   {collection && <p className='text-sm text-foreground'>{name}{detail.year ? ' (' + detail.year + ')' : ''}</p>}
                   <p className='font-mono text-[0.7rem] text-muted-foreground'>
                     {[mangaFacts(detail), detail.status?.toLowerCase().replace('_', ' '), detail.authors.join(', ')].filter(Boolean).join(' · ')}
                   </p>
                   <div className='flex flex-wrap gap-1'>
-                    {whyLabels(detail).map((label) => <StatusTag key={label} variant='muted'>{label}</StatusTag>)}
                     {blacklisted && <StatusTag variant='destructive'>Blacklisted</StatusTag>}
                     {detail.genres.map((genre) => <StatusTag key={genre} variant='outline'>{genre}</StatusTag>)}
                   </div>
@@ -580,6 +575,16 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
                     >
                       <Network data-icon='inline-start' /> Relations
                     </Button>
+                    {/* A finished series the library has whole is not looked for: no releases to see, unless some still wait. */}
+                    {(state.label !== 'Complete' || (detail.waiting ?? 0) > 0) && <Button
+                      size='sm'
+                      variant='secondary'
+                      onClick={() => setReleasesOpen(true)}
+                      title='Every release bankai found on nyaa for this series, and what became of it'
+                    >
+                      <Download data-icon='inline-start' /> Releases
+                      <span className='font-mono text-[0.68rem] text-muted-foreground'>{detail.releases.length}</span>
+                    </Button>}
                     {blacklisted ? (
                       <Button size='sm' variant='secondary' disabled={busy} onClick={() => void act(() => api.restoreMangaSeries(detail.anilist_id), name + ' restored')}>
                         <RotateCcw data-icon='inline-start' /> Restore
@@ -611,26 +616,41 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
                 </div>
               </div>
             </div>
-            <Tabs value={tab} onValueChange={(value) => setTab(String(value))} className='gap-4'>
-              <TabsList>
-                <TabsTab value='chapters'>
-                  {detail.breakdown.unit === 'volume' ? 'Volumes' : 'Chapters'}{' '}
-                  <span className='ml-1.5 font-mono text-[0.68rem] text-muted-foreground'>{detail.breakdown.have}/{detail.breakdown.last ? detail.breakdown.last - detail.breakdown.first + 1 : 0}</span>
-                </TabsTab>
-                <TabsTab value='releases'>Releases <span className='ml-1.5 font-mono text-[0.68rem] text-muted-foreground'>{detail.releases.length}</span></TabsTab>
-              </TabsList>
-              <TabsPanel value='chapters'>
-                <ChapterBreakdown
-                  breakdown={detail.breakdown}
-                  sizes={sizes}
-                  waiting={detail.waiting ?? 0}
-                  picked={picked}
-                  onPick={pick}
-                  onReview={() => navigate('/m/review')}
-                  onMove={setMoving}
-                />
-              </TabsPanel>
-              <TabsPanel value='releases'>
+            {/* The collection's entries, where the Chapters / Releases tabs were: the chapters are the
+                page itself, the releases a dialog beside Relations. */}
+            {collection && (
+              <Tabs value={String(detail.anilist_id)} onValueChange={(value) => onOpen(Number(value))}>
+                <TabsList className='h-auto max-w-full flex-wrap'>
+                  {collection.members.map((member) => (
+                    <TabsTab
+                      key={member.anilist_id}
+                      value={String(member.anilist_id)}
+                      className={cn(!member.on_disk && 'text-muted-foreground')}
+                      title={member.name + (member.year ? ' (' + member.year + ')' : '') + (member.on_disk ? '' : ': not in your library')}
+                    >
+                      {memberLabel(member.name, collection.name)}
+                    </TabsTab>
+                  ))}
+                </TabsList>
+              </Tabs>
+            )}
+            <ChapterBreakdown
+              breakdown={detail.breakdown}
+              sizes={sizes}
+              waiting={detail.waiting ?? 0}
+              picked={picked}
+              onPick={pick}
+              onReview={() => navigate('/m/review')}
+              onMove={(names) => { setRenumbering(false); setMoving(names); }}
+              onRenumber={(names) => { setRenumbering(true); setMoving(names); }}
+            />
+            <Dialog open={releasesOpen} onOpenChange={setReleasesOpen}>
+              <DialogContent size='lg' className='max-h-[90vh] max-w-4xl overflow-y-auto'>
+                <DialogHeader>
+                  <DialogTitle>Releases of {name}</DialogTitle>
+                  <DialogDescription>Every release found on nyaa for this series: waiting for review, downloading, filed (and what went into the library), discarded or already had.</DialogDescription>
+                </DialogHeader>
+                <DialogBody>
                 {detail.releases.length === 0 ? (
                   <p className='text-sm text-muted-foreground'>No release of it found on nyaa yet.</p>
                 ) : (
@@ -683,16 +703,20 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
                     </TableBody>
                   </Table>
                 )}
-              </TabsPanel>
-            </Tabs>
+                </DialogBody>
+              </DialogContent>
+            </Dialog>
             {/* Under the rows and kept in sight at the bottom, as the anime library's: ticking never moves them. */}
-            {tab === 'chapters' && ticked.length > 0 && (
+            {ticked.length > 0 && (
               <div className='sticky bottom-4 z-10 flex flex-wrap items-center gap-2 rounded-control surface-container px-3 py-2 shadow-overlay transition-[opacity,translate] duration-150 ease-out starting:translate-y-2 starting:opacity-0'>
                 <span className='text-xs text-muted-foreground'>
                   <span className='font-mono tabular-nums text-foreground'>{ticked.length}</span> file{ticked.length === 1 ? '' : 's'} ticked
                 </span>
-                <Button size='sm' onClick={() => setMoving(ticked)} title='Files that are another manga (a prequel, a spin-off): move them into that series'>
+                <Button size='sm' onClick={() => { setRenumbering(false); setMoving(ticked); }} title='Files that are another manga (a prequel, a spin-off): move them into that series'>
                   <FolderInput data-icon='inline-start' /> Move to another series
+                </Button>
+                <Button size='sm' variant='secondary' onClick={() => { setRenumbering(true); setMoving(ticked); }} title='Give the ticked files other volume or chapter numbers in this series'>
+                  <ListOrdered data-icon='inline-start' /> Renumber
                 </Button>
                 <Button size='sm' variant='ghost' className='ml-auto' onClick={() => setPicked(new Set())}>
                   <X data-icon='inline-start' /> Clear
@@ -706,8 +730,8 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
                   <DialogTitle className='flex items-center gap-2'><Network className='size-4' /> {collection ? collection.name : name}</DialogTitle>
                   <DialogDescription>
                     {collection
-                      ? 'Its collection framed, beside the series; anime on the left, other manga and light novels on the right. Pick entries to split them off, or related ones to pull in or merge their collection.'
-                      : 'In no collection. Anime on the left, other manga and light novels on the right: pick a related manga to put the two together, or to move this one into its collection.'}
+                      ? 'Its collection in the middle row; what relates to it in bands, anime above, other manga and light novels below. Pick entries to split them off, or related ones to pull in or merge their collection.'
+                      : 'In no collection. What relates to it in bands, anime above, other manga and light novels below: pick a related manga to put the two together, or to move this one into its collection.'}
                   </DialogDescription>
                 </DialogHeader>
                 <div className='relative min-h-0 flex-1 overflow-hidden border-t border-border'>
@@ -811,6 +835,7 @@ function SeriesView({ id, onOpen, onChanged }: { id: number | null; onOpen: (id:
             <MoveMangaFiles
               from={{ id: detail.anilist_id, name }}
               files={moving}
+              renumber={renumbering}
               onClose={() => setMoving(null)}
               onMoved={() => {
                 // Only what moved leaves the ticked: another row ticked meanwhile stays.
@@ -893,35 +918,25 @@ function isOpen(row: Row, current: number | null) {
 
 function SeriesGrid({ items, onOpen }: { items: Row[]; onOpen: (id: number) => void }) {
   return (
-    <div className='grid grid-cols-[repeat(auto-fill,minmax(min(9.5rem,calc(50%_-_0.5rem)),1fr))] gap-x-4 gap-y-6'>
-      {items.map((series) => {
-        const name = anilistName(series);
-        return (
-          <button key={series.anilist_id} type='button' className='group flex flex-col gap-2 text-left focus-visible:outline-none' onClick={() => onOpen(series.anilist_id)}>
-            <div className='relative'>
-              <AnimePoster url={series.cover} title={name} className='w-full rounded-lg ring-offset-2 ring-offset-background transition group-hover:ring-2 group-hover:ring-foreground/30 group-focus-visible:ring-2 group-focus-visible:ring-info' />
-              {series.kind === 'novel' && (
-                <span className='absolute left-1.5 top-1.5 rounded border border-violet-400/50 bg-background/85 px-1.5 py-px text-[0.6rem] font-medium text-violet-200 backdrop-blur-sm'>Light novel</span>
-              )}
-              {(series.waiting ?? 0) > 0 && (
-                <span className='absolute right-1.5 top-1.5 rounded border border-warning/50 bg-background/85 px-1.5 py-px text-[0.6rem] font-medium text-warning backdrop-blur-sm'>{series.waiting} to review</span>
-              )}
-              {series.collection && (
-                <span className='absolute bottom-1.5 left-1.5 rounded border border-border bg-background/85 px-1.5 py-px font-mono text-[0.6rem] text-foreground backdrop-blur-sm'>{series.collection.members.length} entries</span>
-              )}
-            </div>
-            <div className='flex min-w-0 flex-col gap-0.5'>
-              <span className='line-clamp-2 text-sm font-medium leading-tight'>{name}</span>
-              <span className='truncate font-mono text-[0.66rem] text-muted-foreground'>
-                {series.collection
-                  ? `${series.owned_volumes} vols · ${formatSize(series.size ?? 0)}`
-                  : series.owned || [series.year, series.volumes ? series.volumes + ' vols' : null].filter(Boolean).join(' · ') || ' '}
-              </span>
-            </div>
-          </button>
-        );
-      })}
-    </div>
+    <PosterGrid>
+      {items.map((series) => (
+        <PosterCard
+          key={series.anilist_id}
+          cover={series.cover}
+          title={anilistName(series)}
+          onOpen={() => onOpen(series.anilist_id)}
+          topLeft={series.kind === 'novel' ? <StatusTag variant='outline' className={CORNER_TAG}>Light novel</StatusTag> : null}
+          topRight={(series.waiting ?? 0) > 0 ? <StatusTag variant='warning' className={CORNER_TAG}>{series.waiting} to review</StatusTag> : null}
+          bottomLeft={series.collection ? <StatusTag variant='outline' className={CORNER_TAG}>{series.collection.members.length} entries</StatusTag> : null}
+        >
+          <span className='truncate font-mono text-[0.68rem] text-muted-foreground'>
+            {series.collection
+              ? `${series.owned_volumes} vols · ${formatSize(series.size ?? 0)}`
+              : series.owned || [series.year, series.volumes ? series.volumes + ' vols' : null].filter(Boolean).join(' · ') || ' '}
+          </span>
+        </PosterCard>
+      ))}
+    </PosterGrid>
   );
 }
 
@@ -992,16 +1007,19 @@ function SeriesTable({ items, sort, onSort, onOpen, split = false, current = nul
 export default function MangaLibrary() {
   const [data, setData] = useState<Library | null>(() => recall<Library>(pagePaths.mangaLibrary) ?? null);
   const [tab, setTab] = useState<Tab>('library');
-  const [view, setView] = useState<View>(storedView);
+  const { view, setView, wide, split } = useLibraryView('manga');
+  // The split view holds the Library and Followed lists; from another tab a series opens as its page.
+  const splitHere = split && (tab === 'library' || tab === 'followed');
+  // The open series lives in the address (?series=<id>): see useLibraryAddress.
+  const address = useLibraryAddress('manga', ['series'], { split: splitHere });
   const [sort, setSort] = useState<SortState<SortKey> | null>(null);
   const [query, setQuery] = useState('');
-  const [params, setParams] = useSearchParams();
   const [matchFolder, setMatchFolder] = useState<MangaFolder | null>(null);
   // What laying the manga out by collection would move (nothing moves until asked), and its dialog.
   const [layout, setLayout] = useState<MangaLayoutPlan | null>(null);
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [laying, setLaying] = useState(false);
-  const selected = params.get('series') ? Number(params.get('series')) : null;
+  const selected = address.current ? Number(address.current.key) : null;
 
   async function load() {
     try {
@@ -1044,48 +1062,11 @@ export default function MangaLibrary() {
     return () => window.clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(VIEW_KEY, view);
-    } catch {
-      /* the view is simply not remembered */
-    }
-  }, [view]);
-
-  // The open series lives in the address (?series=<id>), so Back closes it and
-  // a series can be linked to. Opened from the list it was pushed, and closing
-  // it goes back there; opened by a link, closing replaces it with the list.
-  const navigate = useNavigate();
-  const location = useLocation();
-  const wide = useWide();
-  const split = view === 'split' && wide;
-  // The split view holds the Library and Followed lists; from another tab a series opens as its page.
-  const splitHere = split && (tab === 'library' || tab === 'followed');
 
   function open(id: number) {
-    if (id === selected) return;
-    const next = new URLSearchParams(params);
-    next.set('series', String(id));
-    // Clicking through series in the split view is not a trail to walk back.
-    setParams(next, { replace: splitHere && selected !== null, state: { fromList: true } });
+    if (id !== selected) address.open('series', String(id));
   }
-
-  // The series open in the split view is opened again on coming back from another tab.
-  useRememberedOpen('manga', selected === null ? null : String(selected), splitHere, (id) => {
-    const next = new URLSearchParams(params);
-    next.set('series', id);
-    setParams(next, { replace: true });
-  });
-
-  function close() {
-    if ((location.state as { fromList?: boolean } | null)?.fromList) {
-      navigate(-1);
-      return;
-    }
-    const next = new URLSearchParams(params);
-    next.delete('series');
-    setParams(next, { replace: true });
-  }
+  const close = address.close;
 
   // The list follows the typing a moment behind, so the search field never waits for it.
   const needle = useDeferredValue(query.trim().toLocaleLowerCase());
@@ -1183,15 +1164,13 @@ export default function MangaLibrary() {
       action='Match'
       onClose={() => setMatchFolder(null)}
       onPick={async (entry: MangaEntry) => {
-        if (!matchFolder) return;
-        try {
-          await api.matchMangaFolder(matchFolder.kind, matchFolder.folder, entry.anilist_id);
-          toast.success(matchFolder.folder + ' is ' + anilistName(entry));
-          setMatchFolder(null);
-          await load();
-        } catch (error: any) {
-          toast.error(error.message);
-        }
+        const folder = matchFolder;
+        if (!folder) return;
+        setMatchFolder(null);
+        void inBackground(api.matchMangaFolder(folder.kind, folder.folder, entry.anilist_id), {
+          loading: 'Matching ' + folder.folder + '…',
+          success: folder.folder + ' is ' + anilistName(entry),
+        }).then(() => load(), () => undefined);
       }}
     />
     </>
@@ -1200,13 +1179,10 @@ export default function MangaLibrary() {
   // A series opened outside the split view is a page of its own.
   if (selected !== null && !splitHere) {
     return (
-      <div className='flex flex-col gap-6'>
-        <div>
-          <Button variant='ghost' size='sm' onClick={close}><ArrowLeft data-icon='inline-start' /> Library</Button>
-        </div>
+      <TitlePage onBack={close}>
         <SeriesView id={selected} onOpen={open} onChanged={() => void refresh()} />
         {dialogs}
-      </div>
+      </TitlePage>
     );
   }
 
@@ -1251,11 +1227,7 @@ export default function MangaLibrary() {
                 <InputGroupAddon><Search /></InputGroupAddon>
                 <InputGroupInput placeholder='Filter series' value={query} onChange={(event) => setQuery(event.target.value)} />
               </InputGroup>
-              <ToggleGroup aria-label='Library view' value={[view]} onValueChange={(values) => { if (values[0]) setView(values[0] as View); }}>
-                {([['grid', LayoutGrid, 'Grid'], ['table', Rows3, 'Table'], ...(wide ? [['split', Columns2, 'Split']] as const : [])] as const).map(([value, Icon, label]) => (
-                  <ToggleGroupItem key={value} value={value} icon={<Icon />}>{label}</ToggleGroupItem>
-                ))}
-              </ToggleGroup>
+              <ViewSwitch view={view} onView={setView} wide={wide} />
             </div>
           </div>
           <TabsPanel value='library' className='flex flex-col gap-3'>
@@ -1268,12 +1240,12 @@ export default function MangaLibrary() {
             ) : (
               <>
                 {listing(shown.series)}
-                <footer className='flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 border-t border-border pt-2.5 text-xs text-muted-foreground'>
-                  <span><span className='font-mono tabular-nums text-foreground'>{shown.series.length}</span> series{shown.series.length !== data.series.length ? ` of ${data.series.length}` : ''}</span>
-                  <span><span className='font-mono tabular-nums text-foreground'>{totals.volumes.toLocaleString()}</span> volumes</span>
-                  <span><span className='font-mono tabular-nums text-foreground'>{totals.chapters.toLocaleString()}</span> chapter files</span>
-                  <span><span className='font-mono tabular-nums text-foreground'>{formatSize(totals.size)}</span> stored</span>
-                </footer>
+                <LibraryFooter>
+                  <FooterStat value={shown.series.length}>series{shown.series.length !== data.series.length ? ` of ${data.series.length}` : ''}</FooterStat>
+                  <FooterStat value={totals.volumes.toLocaleString()}>volumes</FooterStat>
+                  <FooterStat value={totals.chapters.toLocaleString()}>chapter files</FooterStat>
+                  <FooterStat value={formatSize(totals.size)}>stored</FooterStat>
+                </LibraryFooter>
               </>
             )}
           </TabsPanel>

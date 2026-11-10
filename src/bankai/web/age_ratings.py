@@ -219,9 +219,14 @@ async def _names(ids: set[int], kept: dict[str, dict]) -> dict[int, str]:
 
 async def plan() -> dict[str, Any]:
     """Every anime collection and show with the rating bankai would give it, where from, and what it has."""
-    rows = _anime_titles() + await _show_titles()
-    with _LOCK:
-        store = load()
+    # The collections and layout read from disk, off the event loop (1.2 s on it, Nov 2026).
+    rows = await asyncio.to_thread(_anime_titles) + await _show_titles()
+
+    def read() -> dict[str, Any]:
+        with _LOCK:
+            return load()
+
+    store = await asyncio.to_thread(read)
     changed = False
     for row in rows:
         chosen = store["tmdb"].get(row["key"])
@@ -244,11 +249,14 @@ async def plan() -> dict[str, Any]:
                 entry["name"] = names[row["tmdb_id"]]
                 changed = True
     if changed:
-        with _LOCK:
-            fresh = load()
-            fresh["tmdb"] = {**fresh["tmdb"], **store["tmdb"]}
-            save(fresh)
-            store = fresh
+        def merge() -> dict[str, Any]:
+            with _LOCK:
+                fresh = load()
+                fresh["tmdb"] = {**fresh["tmdb"], **store["tmdb"]}
+                save(fresh)
+                return fresh
+
+        store = await asyncio.to_thread(merge)
     await tmdb.ensure_content_ratings([row["tmdb_id"] for row in rows if row["tmdb_id"]])
     out = []
     for row in rows:

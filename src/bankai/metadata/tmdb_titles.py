@@ -79,7 +79,17 @@ def year(date: object) -> int | None:
 async def get(http: httpx.AsyncClient, path: str, **params: Any) -> dict | None:
     """One TMDB answer, or None: a search must not fail as a whole over one call."""
     try:
-        response = await http.get(path.lstrip("/"), params={k: v for k, v in params.items() if v is not None})
+        for attempt in range(3):
+            response = await http.get(path.lstrip("/"), params={k: v for k, v in params.items() if v is not None})
+            # TMDB allows about 50 requests a second; a search with its details asked at once went
+            # over and came back empty (search/movie 429, 40 times in three days, Nov 2026).
+            if response.status_code != 429 or attempt == 2:
+                break
+            try:
+                wait = float(response.headers.get("Retry-After", 1))
+            except ValueError:
+                wait = 1.0
+            await asyncio.sleep(min(max(wait, 0.5), 5.0))
         if response.status_code == 404:
             return None
         response.raise_for_status()

@@ -1,6 +1,6 @@
 import { useRef, useState, type ElementType } from 'react';
 
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
 import { cn } from '@/lib/utils';
 
 /**

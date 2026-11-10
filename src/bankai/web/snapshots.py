@@ -170,7 +170,8 @@ class Snapshot:
             raise
         except Exception as exc:
             self.error = exc
-            log.warning("could not build the %s snapshot: %s", self.name, exc)
+            # %r: a timeout's own text is empty, and the line said nothing (Nov 2026).
+            log.warning("could not build the %s snapshot: %r", self.name, exc)
             return False
         if encoded is not None:
             self.body, self.gzipped, self.etag = encoded

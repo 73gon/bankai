@@ -393,7 +393,11 @@ def read_tracks(*, limit: int = READ_BATCH) -> dict[str, int]:
         or any(track.get("kind") == "audio" and "channels" not in track for track in entry.get("tracks") or [])
     )
     read: dict[str, dict] = {}
+    from bankai.web import stopping
+
     for path in todo[:limit]:
+        if stopping.requested():
+            break
         scope, row = listed[path]
         read[path] = _entry(scope, row["size"], row["mtime"], inspect_file(Path(path)))
     with _LOCK:

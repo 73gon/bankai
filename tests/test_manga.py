@@ -765,6 +765,51 @@ def test_books_of_another_series_move_into_its_folder_under_their_new_names(libr
     assert (result["copied"], result["left"]) == (["Vol 02.cbz"], [["Frieren v00 (2021) (Digital) (1r0n).cbz", "moved to another series"]])
 
 
+def test_books_are_renumbered_in_their_own_series_and_may_swap_names(library):
+    folder = manga_library.ensure_folder(OSHI, "manga")
+    for name in ("Chapter 0168.1.cbz", "Vol 01.cbz", "Vol 02.cbz", "Vol 03.cbz"):
+        (folder / name).write_bytes(name.encode())
+
+    result = manga_library.move(OSHI, ["Chapter 0168.1.cbz", "Vol 01.cbz", "Vol 02.cbz"], OSHI, {
+        "Chapter 0168.1.cbz": "Chapter 0001.cbz", "Vol 01.cbz": "Vol 02.cbz", "Vol 02.cbz": "Vol 01.cbz",
+    })
+
+    assert result["moved"] == 3
+    assert sorted(path.name for path in folder.iterdir()) == ["Chapter 0001.cbz", "Vol 01.cbz", "Vol 02.cbz", "Vol 03.cbz"]
+    assert (folder / "Vol 01.cbz").read_bytes() == b"Vol 02.cbz"
+    assert (folder / "Chapter 0001.cbz").read_bytes() == b"Chapter 0168.1.cbz"
+    # Onto a book that stays: nothing is renamed.
+    with pytest.raises(ValueError, match="already"):
+        manga_library.move(OSHI, ["Vol 01.cbz"], OSHI, {"Vol 01.cbz": "Vol 03.cbz"})
+    assert (folder / "Vol 01.cbz").read_bytes() == b"Vol 02.cbz"
+    assert "moved" not in manga_library.series()[OSHI]
+
+
+def test_a_book_is_suggested_the_first_number_its_new_series_lacks_when_its_own_does_not_fit(library):
+    from bankai.web import manga_views
+
+    store = manga_meta._store()
+    data = json.loads(store.read_text(encoding="utf-8"))
+    data[str(OSHI)].update(volumes=3, chapters=None)
+    store.write_text(json.dumps(data), encoding="utf-8")
+    manga_meta._MEDIA = None
+    source = manga_library.ensure_folder(FRIEREN, "manga")
+    for name in ("Vol 00.cbz", "Vol 02.cbz", "Chapter 0168.1.cbz"):
+        (source / name).write_bytes(b"x")
+    target = manga_library.ensure_folder(OSHI, "manga")
+    (target / "Vol 01.cbz").write_bytes(b"x")
+
+    plan = manga_views.move_plan(FRIEREN, ["Vol 02.cbz", "Vol 00.cbz", "Chapter 0168.1.cbz"], OSHI)
+
+    suggested = {file["name"]: file["suggested"]["name"] for file in plan["files"]}
+    # Vol 02 fits and keeps its number; Vol 00 takes the gap left, Vol 03; a chapter with no count keeps its own.
+    assert suggested == {"Vol 00.cbz": "Vol 03.cbz", "Vol 02.cbz": "Vol 02.cbz", "Chapter 0168.1.cbz": "Chapter 0168.1.cbz"}
+    assert plan["names"] == ["Vol 01.cbz"] and plan["counts"] == {"volume": 3, "chapter": None}
+    # Renumbered in place, a file's own number is free again.
+    renumbered = manga_views.move_plan(OSHI, ["Vol 01.cbz"], OSHI)
+    assert renumbered["same"] and renumbered["files"][0]["suggested"]["name"] == "Vol 01.cbz"
+
+
 def test_a_removed_series_loses_its_folder_and_downloads_and_is_blacklisted(library, monkeypatch):
     from bankai.torrent import qbittorrent
 
@@ -845,6 +890,56 @@ def test_taking_a_plan_approves_its_releases_and_never_a_guessed_match(library):
     assert [rows[key]["status"] for key in (whole, single, guessed)] == ["queued", "queued", "review"]
     (card,) = manga_releases.review()
     assert roles_of(card) == {guessed: "extra"}
+
+
+def test_the_review_resolves_itself_where_the_plan_decides_and_guesses_wait(library):
+    """54 series waited for a click (Nov 2026); auto_review takes what needs no judgement."""
+    whole, older = found(library, "Frieren v01-14 (Digital) (1r0n)", "Frieren v01-10 (Digital) (LuCaZ)")
+    guessed, = found(library, "Frieren v15 (Digital)")
+    state = manga_releases._read()
+    state["releases"][guessed]["guess"] = True
+    manga_releases._write(state)
+
+    assert manga_releases.auto_review() == {"approved": 1, "owned": 0, "waiting": 0}
+    rows = manga_releases.releases()
+    # The plan downloads; its other version waits behind it; the guess waits for the user.
+    assert (rows[whole]["status"], rows[whole]["auto"]) == ("queued", True)
+    assert [rows[key]["status"] for key in (older, guessed)] == ["review", "review"]
+
+    # Once nothing of it downloads, what brings nothing is set aside; the guess still waits.
+    manga_releases._change(whole, status="done")
+    folder = manga_library.ensure_folder(FRIEREN, "manga")
+    for number in range(1, 15):
+        (folder / f"Vol {number:02d}.cbz").write_bytes(b"x")
+    manga_library.forget(FRIEREN)
+    assert manga_releases.auto_review()["owned"] == 1
+    rows = manga_releases.releases()
+    assert [rows[key]["status"] for key in (older, guessed)] == ["owned", "review"]
+
+
+def test_releases_whose_names_say_nothing_are_tried_one_at_a_time(library):
+    pack, other = found(library, "Sousou no Frieren (2020-2026) (Digital) (1r0n)", "Frieren [LuCaZ]")
+
+    assert manga_releases.auto_review()["approved"] == 1
+    rows = manga_releases.releases()
+    assert sorted(rows[key]["status"] for key in (pack, other)) == ["queued", "review"]
+    # Nothing more while that one downloads.
+    assert manga_releases.auto_review() == {"approved": 0, "owned": 0, "waiting": 0}
+
+
+def test_auto_review_switched_off_leaves_everything_waiting(library, monkeypatch):
+    whole, = found(library, "Frieren v01-14 (Digital) (1r0n)")
+    monkeypatch.setattr(manga_releases.get_settings().manga, "auto_review", False)
+    assert manga_releases.auto_review() == {}
+    assert manga_releases.releases()[whole]["status"] == "review"
+
+
+def test_a_bare_number_after_the_name_is_a_chapter_unless_the_title_ends_so(library, monkeypatch):
+    weekly, = found(library, "Sousou no Frieren 141 (2024) (Digital) (danke-Empire)")
+    assert manga_releases.releases()[weekly]["chapters"] == [141.0, 141.0]
+    monkeypatch.setattr(manga_releases.manga_meta, "titles", lambda aid: ["Mob Psycho 100"])
+    release = manga_releases.manga_names.parse("Mob Psycho 100 (2023) (Digital)")
+    assert manga_releases._read_numbers(release, 1) == (None, None)
 
 
 def test_a_volume_the_folder_holds_as_chapter_files_is_still_wanted_to_replace_them(library):

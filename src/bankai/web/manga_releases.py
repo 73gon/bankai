@@ -1,4 +1,5 @@
-"""Manga and light novel releases: found on nyaa, matched to AniList, downloaded only once approved.
+"""Manga and light novel releases: found on nyaa, matched to AniList, downloaded once approved -- by
+hand, or by ``auto_review`` where the series' plan decides (``manga.auto_review``).
 
 Anime's held releases, with nothing automatic at the end:
 
@@ -11,7 +12,10 @@ Anime's held releases, with nothing automatic at the end:
 2. Review: every match waits as "review", grouped by series, for its match to
    be confirmed or changed, then Download (approve) or Discard -- never
    offered again. Blacklisting the series discards all of its releases and
-   stops looking for it.
+   stops looking for it. ``auto_review`` resolves what needs no judgement
+   (after each discovery and each download): the plan downloaded, releases
+   that bring nothing set aside, one release whose name says nothing tried
+   (only the files the library lacks are downloaded); guessed matches wait.
 3. ``reconcile`` (pass "Manga downloads"): an approved release goes to
    qBittorrent under ``manga.qbittorrent_category``. Once qBittorrent knows
    the torrent's files, those the library does not need (``wanted``) are left
@@ -70,6 +74,8 @@ _MOVED = "moved to another series"
 _IN_BETWEEN = "in between, outside the count"
 _NO_NUMBER = "no volume or chapter in its name"
 _DEAD = "nobody seeds it"
+# auto_review: a release that brings nothing the plan or the library lacks.
+_NOTHING_NEW = "nothing the library lacks (its books are had, or chapters inside its volumes)"
 # A release nobody has seeded for this long is not offered: it cannot be downloaded.
 _DEAD_AFTER = 30 * 86400
 _LOCK = threading.Lock()
@@ -290,10 +296,13 @@ def replaced_by(found: manga_contents.Holdings, volume: float, chapters: set[int
     return sorted(out)
 
 
-def library_name(filename: str) -> str:
-    """The name a book gets in the library: "Vol 01.cbz", "Chapter 0138.cbz", else its own."""
+def library_name(filename: str, source: Path | None = None) -> str:
+    """The name a book gets in the library: "Vol 01.cbz", "Chapter 0138.cbz", else its own; with
+    ``source`` (the file itself), a comic archive named by what it holds (``archive_extension``)."""
     number = manga_names.file_number(filename)
     suffix = Path(filename).suffix
+    if source is not None:
+        suffix = manga_names.archive_extension(source, suffix)
     if number:
         return manga_names.target_name(number[0], number[1], suffix)
     return sanitise(Path(filename).stem) + manga_names.library_extension(suffix)
@@ -398,10 +407,26 @@ def queries(anilist_id: int) -> list[str]:
     return found
 
 
+def _read_numbers(release: manga_names.ReleaseName, anilist_id: int) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """A release's volumes and chapters; a name with neither that ends in a bare number of three
+    digits or more ("A Couple of Cuckoos 206 (2024) (Digital)") is that chapter -- unless the
+    series' own title ends so ("Mob Psycho 100"), which is why the parser alone does not."""
+    if release.volumes is not None or release.chapters is not None:
+        return release.volumes, release.chapters
+    titles = {anilist.normalise(title) for title in manga_meta.titles(anilist_id)}
+    for name in release.names:
+        bare = manga_names._BARE_CHAPTER.search(name)
+        if bare and anilist.normalise(name) not in titles:
+            number = float(bare[1])
+            return None, (number, number)
+    return None, None
+
+
 def _row(entry: nyaa.NyaaEntry, release: manga_names.ReleaseName, anilist_id: int, *, guess: bool, how: str) -> dict:
     kept = dataclasses.asdict(entry)
     # Not shown anywhere, and the longest part of a row.
     kept.pop("description", None)
+    volumes, chapters = _read_numbers(release, anilist_id)
     return {
         "status": REVIEW,
         "entry": kept,
@@ -410,8 +435,8 @@ def _row(entry: nyaa.NyaaEntry, release: manga_names.ReleaseName, anilist_id: in
         "guess": guess,
         "how": how,
         "group": release.group,
-        "volumes": list(release.volumes) if release.volumes else None,
-        "chapters": list(release.chapters) if release.chapters else None,
+        "volumes": list(volumes) if volumes else None,
+        "chapters": list(chapters) if chapters else None,
         "found_at": time.time(),
         "updated_at": time.time(),
     }
@@ -448,8 +473,24 @@ def consider(
     return kept
 
 
+def whole(anilist_id: int) -> bool:
+    """A finished series the library has whole -- every volume, or every chapter its drawer
+    counts (Complete there): nothing is left to look for."""
+    if manga_meta.media(anilist_id).get("status") != "FINISHED":
+        return False
+    if complete(anilist_id, manga_library.owned(anilist_id)):
+        return True
+    if manga_library.folder_of(anilist_id) is None:
+        return False
+    from bankai.web import manga_views
+
+    shape = manga_views.breakdown(anilist_id)
+    return bool(shape["last"]) and shape["missing"] == 0
+
+
 def _due(state: dict[str, Any], followed: dict[int, list[str]]) -> list[int]:
-    """The followed series to search this pass: never searched first, then the longest ago."""
+    """The followed series to search this pass: never searched first, then the longest ago.
+    A finished series the library has whole is not searched any more."""
     settings = get_settings().manga
     now = time.time()
     searched = state.get("searched") or {}
@@ -458,7 +499,13 @@ def _due(state: dict[str, Any], followed: dict[int, list[str]]) -> list[int]:
         if now - float(searched.get(str(aid)) or 0) >= settings.search_interval_days * 86400
     ]
     due.sort(key=lambda aid: float(searched.get(str(aid)) or 0))
-    return due[: settings.searches_per_pass]
+    picked: list[int] = []
+    for aid in due:
+        if len(picked) >= settings.searches_per_pass:
+            break
+        if not whole(aid):
+            picked.append(aid)
+    return picked
 
 
 def discovering() -> bool:
@@ -535,7 +582,8 @@ async def _discover(settings: Any) -> dict[str, Any]:
     offered = sum(1 for row in found.values() if row["status"] == REVIEW)
     if offered:
         log.info("[manga] %d new release(s) to review", offered)
-    return {"followed": len(followed), "found": offered, "searched": len(searched), "error": error}
+    resolved = await asyncio.to_thread(auto_review)
+    return {"followed": len(followed), "found": offered, "searched": len(searched), "error": error, **({"resolved": resolved} if resolved else {})}
 
 
 def tidy(state: dict[str, Any]) -> int:
@@ -552,9 +600,10 @@ def tidy(state: dict[str, Any]) -> int:
                 del state["releases"][info_hash]
                 changed += 1
                 continue
+            volumes, chapters = _read_numbers(release, int(row["anilist_id"]))
             numbers = {
-                "volumes": list(release.volumes) if release.volumes else None,
-                "chapters": list(release.chapters) if release.chapters else None,
+                "volumes": list(volumes) if volumes else None,
+                "chapters": list(chapters) if chapters else None,
             }
             if any(row.get(key) != value for key, value in numbers.items()):
                 row.update(numbers)
@@ -715,6 +764,61 @@ def take_plan(anilist_id: int) -> list[str]:
     return chosen
 
 
+def auto_review() -> dict[str, int]:
+    """The review resolved where nothing needs a judgement (``manga.auto_review``), per series:
+
+    - its plan approved, as Download plan does;
+    - once nothing of it downloads, releases that bring nothing the library lacks ("covered": its
+      books are had, or the chapters are inside its volumes) set aside as owned;
+    - then one release whose name says nothing usable ("unsure": a whole run, "(2015-2025)") or
+      that the plan left beside it, the best seeded, approved -- a download takes only the files
+      the library lacks and one with none is removed undownloaded, so trying it costs nothing
+      but its file list; the next one on a later turn, once that one is done.
+
+    Guessed matches (a name that only starts the series' title) are never approved here: they
+    wait for the user, as does anything there is not room for."""
+    if not get_settings().manga.auto_review:
+        return {}
+    offers_of: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    busy: set[int] = set()
+    for info_hash, row in releases().items():
+        if row.get("status") == REVIEW:
+            offers_of.setdefault(int(row["anilist_id"]), []).append((info_hash, row))
+        elif row.get("status") in ACTIVE:
+            busy.add(int(row.get("anilist_id") or 0))
+    done = {"approved": 0, "owned": 0, "waiting": 0}
+
+    def take(info_hash: str) -> bool:
+        try:
+            approve(info_hash, auto=True)
+        except (KeyError, ValueError) as exc:
+            log.info("[manga] %s waits: %s", (releases().get(info_hash, {}).get("entry") or {}).get("title"), exc)
+            done["waiting"] += 1
+            return False
+        done["approved"] += 1
+        return True
+
+    for aid, offers in offers_of.items():
+        roles = plan(aid, offers, holdings(aid))
+        for info_hash in sorted((key for key, role in roles.items() if role["role"] == PLAN), key=lambda key: roles[key]["order"]):
+            if take(info_hash):
+                busy.add(aid)
+        if aid in busy:
+            continue
+        rows = dict(offers)
+        for info_hash, role in roles.items():
+            if role["role"] == COVERED:
+                _change(info_hash, only=frozenset({REVIEW}), status=OWNED, reason=_NOTHING_NEW, auto=True)
+                done["owned"] += 1
+        tries = [key for key, role in roles.items() if role["role"] in (UNSURE, EXTRA) and not rows[key].get("guess")]
+        if tries:
+            entry = lambda key: rows[key].get("entry") or {}  # noqa: E731
+            take(max(tries, key=lambda key: (bool(entry(key).get("trusted")), int(entry(key).get("seeders") or 0))))
+    if done["approved"] or done["owned"]:
+        log.info("[manga] review resolved: %d approved, %d set aside as owned", done["approved"], done["owned"])
+    return done
+
+
 def series_card(anilist_id: int, *, followed: dict[int, list[str]], links: dict) -> dict[str, Any]:
     volumes, chapters = manga_library.owned(anilist_id)
     return {
@@ -775,8 +879,8 @@ def _free_enough(row: dict[str, Any]) -> str | None:
     return None
 
 
-def approve(info_hash: str) -> dict[str, Any]:
-    """Download it: the next ``reconcile`` adds it to qBittorrent."""
+def approve(info_hash: str, *, auto: bool = False) -> dict[str, Any]:
+    """Download it: the next ``reconcile`` adds it to qBittorrent. ``auto``: by ``auto_review``."""
     row = releases().get(info_hash)
     if row is None:
         raise KeyError(info_hash)
@@ -785,7 +889,7 @@ def approve(info_hash: str) -> dict[str, Any]:
     short = _free_enough(row)
     if short:
         raise ValueError(f"not enough room: {short}")
-    return _change(info_hash, status=QUEUED, approved_at=time.time(), error=None, reason=None, picked=False, copied=None, left=None)
+    return _change(info_hash, status=QUEUED, approved_at=time.time(), auto=auto, error=None, reason=None, picked=False, copied=None, left=None)
 
 
 def discard(info_hash: str) -> dict[str, Any]:
@@ -944,7 +1048,7 @@ def file_release(row: dict[str, Any], content: Path, *, finished: set[str] | Non
     copied: list[str] = []
     replaced: list[str] = []
     for source in going:
-        name = library_name(source.name)
+        name = library_name(source.name, source)
         target = folder / name
         if target.exists():
             left.append([source.name, _HAS])
@@ -1060,6 +1164,9 @@ async def reconcile() -> dict[str, Any]:
                 filed += 1
     if filed:
         await openpanel.scan()
+    # A download done (filed, or nothing in it needed): the series' next release can be tried.
+    if any((releases().get(key) or {}).get("status") not in ACTIVE for key in active):
+        await asyncio.to_thread(auto_review)
     return {"active": len(active), "filed": filed}
 
 

@@ -1,12 +1,12 @@
 import { Activity, memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { Link, Navigate, Route, Routes, useLocation, type Location } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, type Location } from 'react-router-dom';
 import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink, BookOpen, Tags, Magnet } from 'lucide-react';
 import { toast } from '@/lib/toast';
-import { cn } from '@/zon/lib/cn';
+import { cn } from '@zonsh/ui';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
-import { Separator } from '@/zon/ui/separator';
-import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarItem, SidebarMenuBadge, SidebarProvider, SidebarRail, SidebarSeparator, SidebarTrigger, useSidebar } from '@/zon/ui/sidebar';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
+import { Separator } from '@zonsh/ui';
+import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarItem, SidebarMenuBadge, SidebarProvider, SidebarRail, SidebarSeparator, SidebarTrigger, useSidebar } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
 import { BankaiMark } from '@/components/bankai-mark';
 import Dashboard from '@/pages/Dashboard';
 import Discover from '@/pages/Discover';
@@ -418,19 +418,32 @@ const KeptRoutes = memo(function KeptRoutes({ path, at }: { path: string; at: Lo
  */
 function KeptPages() {
   const location = useLocation();
+  const navigate = useNavigate();
   const active = location.pathname in PAGES ? location.pathname : null;
   // Each visited page and the address it was last shown at, in the order first visited.
   const shown = useRef(new Map<string, Location>());
-  if (active) {
-    // Back at the same address, the page keeps the location it had: nothing of it renders again.
-    const before = shown.current.get(active);
-    if (!before || before.search !== location.search || before.hash !== location.hash || before.state !== location.state) {
-      shown.current.set(active, location);
-    }
-  }
   // Each page's own scroll position: the pages share one scrolling area.
   const scrolls = useRef(new Map<string, number>());
   const previous = useRef<string | null>(null);
+  // Come back to a page by a plain link (the sidebar's "/a/library"): it is shown as it was left,
+  // and the address follows. Handed the bare address, a library closed the title open in its
+  // split view, and forgot it (Nov 2026).
+  let returning: Location | null = null;
+  if (active) {
+    const before = shown.current.get(active);
+    const arriving = previous.current !== null && previous.current !== active;
+    if (arriving && before && before.search && !location.search && !location.hash && location.state == null) {
+      returning = before;
+    } else if (!before || before.search !== location.search || before.hash !== location.hash || before.state !== location.state) {
+      // Back at the same address, the page keeps the location it had: nothing of it renders again.
+      shown.current.set(active, location);
+    }
+  }
+  useEffect(() => {
+    // Without the state it was shown with: "opened from the list" there would make the title's close go
+    // Back -- to the page just left, not to the list (Nov 2026).
+    if (returning) navigate({ pathname: returning.pathname, search: returning.search, hash: returning.hash }, { replace: true });
+  });
   useLayoutEffect(() => {
     const area = document.querySelector<HTMLElement>('[data-slot=sidebar-inset]');
     if (!area || previous.current === active) return;

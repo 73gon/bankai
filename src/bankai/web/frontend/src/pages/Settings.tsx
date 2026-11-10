@@ -2,15 +2,15 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import { Settings as SettingsIcon, Save, Loader2, Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type SettingRow } from '@/lib/api';
-import { Button } from '@/zon/ui/button';
-import { Input } from '@/zon/ui/input';
-import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/zon/ui/input-group';
-import { Switch } from '@/zon/ui/switch';
+import { Button } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@zonsh/ui';
+import { Switch } from '@zonsh/ui';
 import { StatusTag } from '@/components/status-tag';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/zon/ui/select';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
-import { Empty, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
+import { Skeleton } from '@zonsh/ui';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
+import { Empty, EmptyMedia, EmptyTitle } from '@zonsh/ui';
 
 const QUALITY_ITEMS = [
   { value: '1080p', label: '1080p' },
@@ -19,7 +19,7 @@ const QUALITY_ITEMS = [
 
 const SETTING_UI: Record<
   string,
-  { label: string; description: string; kind: 'number' | 'quality' | 'paths'; min?: number; step?: number; suffix?: string }
+  { label: string; description: string; kind: 'number' | 'quality' | 'paths' | 'switch'; min?: number; step?: number; suffix?: string }
 > = {
   'web.server_movie_dirs': {
     label: 'Movie directories',
@@ -52,6 +52,11 @@ const SETTING_UI: Record<
     step: 0.5,
     suffix: 'GiB',
   },
+  'selector.german_release_first': {
+    label: 'German release first',
+    description: 'Before taking the German track from a stream and syncing it, look for a torrent that has German audio itself; taken as it is, nothing to sync.',
+    kind: 'switch',
+  },
   'selector.min_seeders': {
     label: 'Minimum seeders',
     description: 'Only consider torrents with at least this many seeders.',
@@ -62,6 +67,7 @@ const SETTING_UI: Record<
 };
 
 const SELECTOR_ORDER = [
+  'selector.german_release_first',
   'selector.preferred_resolutions',
   'selector.min_size_gib',
   'selector.max_size_gib',

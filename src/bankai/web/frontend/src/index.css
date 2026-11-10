@@ -1,20 +1,12 @@
 @import 'tailwindcss';
-@import './zon/styles/zon/index.css';
-/* After every @import (an @import after any other rule is dropped -- the whole of zon was, once). */
-/* zon components copied but used nowhere: their classes would be generated all the same
-   (button-group's :nth-child(… of …) selectors were matched against every element). */
-@source not "./zon/ui/button-group.tsx";
-@source not "./zon/ui/collapsible.tsx";
-@source not "./zon/ui/field.tsx";
-@source not "./zon/ui/kbd.tsx";
-@source not "./zon/ui/label.tsx";
-@source not "./zon/ui/number-field.tsx";
+/* @zonsh/ui from npm, its stylesheet trimmed for bankai (generated: scripts/zon-styles.mjs). */
+@import './zon.css';
 
 /* ---------------------------------------------------------------------------
    bankai on zon/ui. Everything visual comes from zon: its tokens, the
    material utilities (material-primary / -raised / -row / -field / -menu,
-   surface-card, surface-container), Licht for type and the components in
-   src/zon/ui. The app is always dark (<html class="dark">).
+   surface-card, surface-container), Licht for type and the components of
+   @zonsh/ui (npm). The app is always dark (<html class="dark">).
 
    One departure from zon's monochrome rule, by choice: the few colours that
    carry meaning stay -- completion, the encode badges, transfers, the type

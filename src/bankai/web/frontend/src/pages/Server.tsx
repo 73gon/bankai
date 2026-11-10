@@ -2,14 +2,14 @@ import { useEffect, useState, useRef } from 'react';
 import { Server as ServerIcon, RefreshCw, Film, Tv, Sparkles, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { api, type ServerTitle, type ServerSeason, type ServerDirKind } from '@/lib/api';
-import { Button } from '@/zon/ui/button';
-import { Badge } from '@/zon/ui/badge';
-import { Input } from '@/zon/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/zon/ui/empty';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/zon/ui/tooltip';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/zon/ui/dialog';
+import { Button } from '@zonsh/ui';
+import { Badge } from '@zonsh/ui';
+import { Input } from '@zonsh/ui';
+import { Card, CardContent, CardHeader, CardTitle } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@zonsh/ui';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
 
 // Anime is listed here too: this page is where anything already on the server
 // is added and renamed, whichever library it belongs to.

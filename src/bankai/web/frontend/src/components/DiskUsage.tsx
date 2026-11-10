@@ -2,11 +2,11 @@ import { Fragment, useEffect, useState } from 'react';
 import { ChevronRight, HardDrive, RefreshCw } from 'lucide-react';
 import { api, type StorageArea, type StorageUsage, type StorageVolume } from '@/lib/api';
 import { formatBytes, timeAgo } from '@/lib/utils';
-import { cn } from '@/zon/lib/cn';
-import { Button } from '@/zon/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/zon/ui/card';
-import { Skeleton } from '@/zon/ui/skeleton';
-import { Spinner } from '@/zon/ui/spinner';
+import { cn } from '@zonsh/ui';
+import { Button } from '@zonsh/ui';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@zonsh/ui';
+import { Skeleton } from '@zonsh/ui';
+import { Spinner } from '@zonsh/ui';
 
 /**
  * Each area's colour, fixed by what it is (never by its size or place), from
@@ -23,10 +23,13 @@ const SWATCH: Record<string, string> = {
   state: '#3987e5',
   install: '#d95926',
   work: '#199e70',
+  manga: '#d55181',
+  novels: '#c98500',
 };
 const OTHER = 'color-mix(in oklab, var(--muted-foreground) 55%, transparent)';
 
-const swatchOf = (area: StorageArea) => SWATCH[area.key.startsWith('recycle:') ? 'recycle' : area.key] ?? OTHER;
+// "movies:/mnt/e/media/movies", a library's other root, takes its library's colour.
+const swatchOf = (area: StorageArea) => SWATCH[area.key.split(':')[0]] ?? OTHER;
 
 /** "/mnt/g" reads as "G: drive"; anything else by its path. */
 function volumeName(volume: StorageVolume) {
@@ -245,7 +248,7 @@ export function DiskUsage() {
       ) : usage.volumes.length === 0 ? (
         <p className='text-sm text-muted-foreground'>No scan yet.</p>
       ) : (
-        <div className='grid gap-3 xl:grid-cols-2'>
+        <div className={cn('grid gap-3 xl:grid-cols-2', usage.volumes.length >= 3 && 'min-[100rem]:grid-cols-3', usage.volumes.length >= 4 && 'min-[120rem]:grid-cols-4')}>
           {usage.volumes.map((volume) => (
             <VolumeCard key={volume.path} volume={volume} areas={usage.areas.filter((area) => area.volume === volume.path)} />
           ))}

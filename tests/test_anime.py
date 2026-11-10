@@ -395,3 +395,128 @@ def test_a_nyaa_listing_page_is_read_as_the_feed_is():
     assert (entry.id, entry.publisher, entry.category_id, entry.seeders, entry.downloads) == (9, "Ironclad", "1_2", 45, 1641)
     assert entry.info_hash == "bb59a98ab3a9bff821567f88208c445739b0fc2d" and entry.trusted and not entry.remake
     assert entry.download_url == "https://nyaa.si/download/9.torrent" and entry.quality == "1080p"
+
+
+@pytest.fixture()
+def shows(anilist_data):
+    """A show with a later season split in two parts, a special, and a remake named by its year."""
+    anilist_data.add(1, "Shingeki no Kyojin", english="Attack on Titan", episodes=25, start="2013-04-07",
+                     relations=[(2, "SEQUEL"), (9, "SIDE_STORY")])
+    anilist_data.add(2, "Shingeki no Kyojin Season 2", episodes=12, start="2017-04-01",
+                     relations=[(1, "PREQUEL"), (3, "SEQUEL")])
+    anilist_data.add(3, "Shingeki no Kyojin Season 3", episodes=12, start="2018-07-23",
+                     relations=[(2, "PREQUEL"), (4, "SEQUEL")])
+    anilist_data.add(4, "Shingeki no Kyojin Season 3 Part 2", episodes=10, start="2019-04-29",
+                     relations=[(3, "PREQUEL"), (5, "SEQUEL")])
+    anilist_data.add(5, "Shingeki no Kyojin: The Final Season", episodes=16, start="2020-12-07",
+                     relations=[(4, "PREQUEL")])
+    anilist_data.add(9, "Shingeki no Kyojin OAD", format="OVA", episodes=8, start="2013-12-09",
+                     relations=[(1, "PARENT")])
+    anilist_data.add(20, "Hunter x Hunter", episodes=62, start="1999-10-16")
+    anilist_data.add(21, "Hunter x Hunter (2011)", episodes=148, start="2011-10-02")
+    anilist_data.add(30, "Honzuki no Gekokujou", english="Ascendance of a Bookworm", episodes=14, start="2019-10-03")
+    return anilist_data.index()
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        # Other uploaders than Erai: each read as no title at all before (Nov 2026).
+        ("[FrixySubs] Shingeki no Kyojin - S02E05v2 [1080p CR WEB-DL H.264 AAC] [Napisy PL].mkv", (2, 5)),
+        ("[Judas] Shingeki no Kyojin (Attack on Titan) - S02E07 [1080p][HEVC x265 10bit][Multi-Subs] (Weekly)", (2, 7)),
+        ("Attack on Titan S02E06 1080p CR WEB-DL AAC2.0 H.264-VARYG (Shingeki no Kyojin, Multi-Subs)", (2, 6)),
+        ("[FuyuPOP] Shingeki no Kyojin - Ep03 (1080p x265 AAC WEB)", (1, 3)),
+        ("[ALS] Attack on Titan 08 (1080p BD AAC x264)", (1, 8)),
+        ("[AMT] Attack on Titan 01-25 (1080p BD x264 10bit FLAC)", (1, 1)),
+        ("[Knight-Subs] Attack on Titan - E26 - Title (1080p CR WEB-DL AAC2.0 H.264).mkv", (2, 1)),
+        ("[GJM] Ascendance of a Bookworm (Honzuki no Gekokujou) - 05 (S01E05) (WEB 1080p) [73F346F2].mkv", (30, 5)),
+        ("[Group] Some Show S02 / 進撃の巨人 | Attack on Titan Season 2 - 04 [1080p]", (2, 4)),
+        ("[Moxie] Attack on Titan Season 2 (BD Remux 1080p x264 8-bit FLAC) [Dual Audio] | Shingeki no Kyojin 2", (2, None)),
+        # A season's second part is no season of its own; counted as one, S04 was Season 3 Part 2.
+        ("[PHTM] Attack on Titan - S04 (BD 1080p x265 Opus 2.0) | Shingeki no Kyojin (Season 4)", (5, None)),
+        # A number past a later season's end counts from the show's first episode.
+        ("[ANi] Attack on Titan / 進擊的巨人 Season 2 - 30 [1080P][Baha][WEB-DL]", (2, 5)),
+        # A remake named by its year; the bare name is the first.
+        ("[sam] Hunter x Hunter (2011) (027-038) (BD 1080p HEVC x265 10-bit FLAC) [Dual-Audio]", (21, 27)),
+        ("[VEGETA] Hunter X Hunter (1999) - 01-38", (20, 1)),
+        # A special: its own entry, never the show's episode of that number.
+        ("[PHTM] Attack on Titan - S00E03 (BD 1080p) | Shingeki no Kyojin OAD", (9, None)),
+        ("[Fuchs] Attack on Titan - S00E05 (BD 1080p HEVC Opus 2.0) [Dual-Audio]", None),
+    ],
+)
+def test_release_names_of_every_shape_find_their_entry(shows, title, expected) -> None:
+    match = anime.anilist_match(title, table=shows, mappings={})
+
+    assert (match and (match["anilist_id"], match["episode"])) == expected
+
+
+def test_a_title_s_own_number_is_not_taken_for_the_episode() -> None:
+    readings = anime.release_readings("[GSH] Mob Psycho 100 (BD 1080p HEVC FLAC)")
+
+    assert readings[0][0] == "Mob Psycho 100"
+    assert anime.release_readings("[Group] Cyberpunk Edgerunners 2 - 06 [1080p]")[0][:3] == ("Cyberpunk Edgerunners 2", None, 6)
+
+
+def test_a_choice_for_a_name_is_not_taken_for_a_release_uploaded_before_its_entry_began(anilist_data) -> None:
+    """Erai names a new season as plainly as the first: the choice made for the new season's
+    episodes took the first season's batch, uploaded two years earlier, for the new season."""
+    from datetime import datetime, UTC
+
+    from bankai.web import erai
+
+    anilist_data.add(120120, "Tokyo Revengers", episodes=24, start="2021-04-11")
+    anilist_data.add(178083, "Tokyo Revengers: Santen Sensou-hen", episodes=12, start="2026-10-03")
+    table = anilist_data.index()
+    title = "[Erai-raws] Tokyo Revengers - 01 ~ 24 [1080p][Multiple Subtitle]"
+    mappings = {erai._mapping_key(title): {"anilist_id": 178083}}
+
+    def uploaded(day: str) -> float:
+        return datetime.fromisoformat(day).replace(tzinfo=UTC).timestamp()
+
+    assert erai._release_anilist_id(title, mappings=mappings, table=table, published=uploaded("2024-08-08")) == 120120
+    assert erai._release_anilist_id(title, mappings=mappings, table=table, published=uploaded("2026-10-04")) == 178083
+    assert erai._release_anilist_id(title, mappings=mappings, table=table) == 178083
+
+
+def test_a_streaming_list_two_seasons_carry_is_the_newest_season_s(anilist_data) -> None:
+    """AniList gave Dr. STONE's first season its fourth's streaming list: both tabs read "Ryusui vs. Senku"."""
+    from bankai.metadata import anilist
+
+    names = {1: "Ryusui vs. Senku", 2: "Science Journey", 3: "Light Trap in the Darkness"}
+    anilist_data.add(105333, "Dr. STONE", episodes=24, start="2019-07-05", streaming=names)
+    anilist_data.add(172019, "Dr. STONE SCIENCE FUTURE", episodes=12, start="2025-01-09", streaming=names)
+    anilist_data.add(5, "Dr. STONE Movie", format="MOVIE", episodes=1, start="2026-01-01", streaming=names)
+    anilist_data.index()
+
+    assert anilist.episodes(172019)[0][1] == "Ryusui vs. Senku"
+    assert anilist.episodes(105333)[0][1] is None  # MyAnimeList's title, once fetched
+
+
+def test_nyaa_asking_to_wait_is_waited_for_then_said_plainly(monkeypatch) -> None:
+    import asyncio
+
+    import httpx
+
+    answers = iter([429, 200])
+    rss = '<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel></channel></rss>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        code = next(answers, 429)
+        return httpx.Response(code, headers={"Retry-After": "1"}, text=rss if code == 200 else "")
+
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(anime.asyncio, "sleep", sleep)
+
+    async def go(limit_all: bool):
+        nonlocal answers
+        answers = iter([429, 429, 429] if limit_all else [429, 200])
+        async with httpx.AsyncClient(base_url="https://nyaa.si", transport=httpx.MockTransport(handler)) as client:
+            return await anime._fetch_rss(client, "Frieren", "1_0", 0)
+
+    assert asyncio.run(go(False)) == [] and slept == [1.0]
+    with pytest.raises(anime.RateLimited, match="try again"):
+        asyncio.run(go(True))

@@ -14,6 +14,8 @@ from bankai.logging import get_logger
 log = get_logger(__name__)
 
 SERVICE_NAME = "bankai-web.service"
+# Set when running as the server (not in tests): the app's shutdown arms ``_exit_soon``.
+exit_after_shutdown = False
 
 
 def run_server(*, host: str | None = None, port: int | None = None) -> None:
@@ -30,7 +32,31 @@ def run_server(*, host: str | None = None, port: int | None = None) -> None:
 
     app = create_app()
     log.info("starting bankai web on http://%s:%s", bind_host, bind_port)
+    global exit_after_shutdown
+    exit_after_shutdown = True
     uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+
+
+def _exit_soon(grace: float = 10.0) -> None:
+    """The server has stopped: the process exits within ``grace`` seconds, even while a worker thread runs.
+
+    Python waits for every worker thread before it exits: a pass reading a file over 9p held a restart
+    60 s after the app had shut down (Nov 2026). State files are written beside and renamed into place,
+    so one cut off leaves the last one whole -- as systemd's kill after 90 s did.
+    """
+    import logging
+    import os
+    import threading
+
+    def leave() -> None:
+        busy = [t.name for t in threading.enumerate() if t is not threading.current_thread() and not t.daemon and t.is_alive()]
+        logging.getLogger(__name__).warning("Exiting with %d thread(s) still at work: %s", len(busy), ", ".join(busy[:8]))
+        logging.shutdown()
+        os._exit(0)
+
+    timer = threading.Timer(grace, leave)
+    timer.daemon = True
+    timer.start()
 
 
 def _systemd_user_dir() -> Path:
