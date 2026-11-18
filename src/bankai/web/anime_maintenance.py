@@ -34,6 +34,7 @@ from bankai.web import (
     age_ratings,
     anime_artwork,
     anime_collections,
+    anime_dubs,
     anime_files,
     anime_layout,
     encode_library,
@@ -111,9 +112,13 @@ def fingerprints(layout: anime_layout.Layout, published: set[str]) -> dict[str, 
         # Its approved age rating: approved or changed, tvshow.nfo is written anew. Only once there
         # is one, so the others keep their fingerprints and are not all laid out again.
         rating = age_ratings.nfo_rating(cid)
+        # Its German dub tag (anime_dubs): gained or lost, tvshow.nfo is written anew. Only when
+        # there is one, so the others keep their fingerprints.
+        dubbed = anime_dubs.tags(layout.folders.get(cid))
         material = json.dumps(
             [layout.folders.get(cid), row.as_dict(), plan.seasons, plan.offsets, plan.specials, media, files, pictures, version, art, shown_genres, holding, plan.names]
-            + ([rating] if rating[0] else []),
+            + ([rating] if rating[0] else [])
+            + ([dubbed] if dubbed else []),
             sort_keys=True,
             default=str,
         )
@@ -185,6 +190,12 @@ async def run(*, max_batches: int = 4, layout: bool = True) -> dict[str, Any]:
         }
         if not layout:
             return result
+        # Which collections have German audio, as Jellyfin last read their files (every few hours).
+        try:
+            if await anime_dubs.refresh() is not None:
+                result["dubs_refreshed"] = True
+        except Exception as exc:
+            log.warning("[anime dubs] Jellyfin could not be asked: %s", exc)
         store = await asyncio.to_thread(anime_collections.load)
         rows = await asyncio.to_thread(anime_files.load)
         built = await asyncio.to_thread(anime_layout.Layout.build, store, rows)

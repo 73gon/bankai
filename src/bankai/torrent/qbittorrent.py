@@ -61,6 +61,10 @@ class QBittorrentError(Exception):
     pass
 
 
+# How long a running download waits for qBittorrent to answer again before it fails.
+UNREACHABLE_GIVE_UP_SECONDS = 12 * 3600.0
+
+
 class TorrentStalled(QBittorrentError):
     """A torrent whose progress stopped: no metadata, or nobody to download from."""
 
@@ -120,6 +124,15 @@ class QBittorrentClient:
         ``True`` when it was added, ``False`` when qBittorrent already had it.
         """
         await self._ensure_login()
+        if magnet and not torrent_file:
+            from bankai.torrent import uploads
+            from bankai.torrent.worker import torrent_info_hash
+
+            # A .torrent dropped where a magnet goes stands behind its magnet: a private
+            # tracker's magnet finds nothing, its file does.
+            kept = uploads.stored(torrent_info_hash(magnet, None))
+            if kept is not None:
+                magnet, torrent_file = None, kept
         if not magnet and not torrent_url and not torrent_file:
             raise ValueError("magnet, torrent_url or torrent_file required")
         data: dict[str, Any] = {
@@ -202,11 +215,44 @@ class QBittorrentClient:
         except (TypeError, ValueError):
             return None
 
-    async def remove(self, torrent_hash: str, *, delete_files: bool = False) -> None:
+    async def remove(self, torrent_hash: str, *, delete_files: bool = False, force: bool = False) -> None:
+        """Remove torrents ("|"-joined hashes). A finished private one whose tracker's seeding is
+        not yet done is not removed but handed to ``torrent.seeding`` (its own category), which
+        removes it once it is: AvistaZ and AnimeZ ask 72 h or ratio 1, and every place bankai
+        tidies a torrent away would have left a hit and run there. ``force``: removed whatever
+        (a delete asked for by hand)."""
         await self._ensure_login()
+        hashes = [part for part in torrent_hash.split("|") if part]
+        if not force:
+            from bankai.torrent import seeding
+
+            hashes = await seeding.hold_unseeded(self, hashes)
+            if not hashes:
+                return
         response = await self._client.post(
             "/api/v2/torrents/delete",
-            data={"hashes": torrent_hash, "deleteFiles": str(delete_files).lower()},
+            data={"hashes": "|".join(hashes), "deleteFiles": str(delete_files).lower()},
+        )
+        response.raise_for_status()
+
+    async def info(self, hashes: list[str]) -> list[dict[str, Any]]:
+        """qBittorrent's rows for these torrents, as it gives them (``private``, ``ratio``,
+        ``seeding_time``, ...)."""
+        await self._ensure_login()
+        response = await self._client.get("/api/v2/torrents/info", params={"hashes": "|".join(hashes)})
+        response.raise_for_status()
+        return list(response.json())
+
+    async def set_category(self, hashes: list[str], category: str, *, save_path: str | None = None) -> None:
+        """Move torrents into a category, made first if qBittorrent has none of that name."""
+        await self._ensure_login()
+        made = await self._client.post(
+            "/api/v2/torrents/createCategory", data={"category": category, "savePath": save_path or ""}
+        )
+        if made.status_code not in (200, 409):
+            made.raise_for_status()
+        response = await self._client.post(
+            "/api/v2/torrents/setCategory", data={"hashes": "|".join(hashes), "category": category}
         )
         response.raise_for_status()
 
@@ -283,30 +329,39 @@ class QBittorrentClient:
         """
         interval = self._settings.poll_interval_seconds
         transport_failures = 0
+        unreachable_since: float | None = None
+        missing_since: float | None = None
         best, moved_at = -1.0, time.monotonic()
         while True:
             try:
                 status = await self.get(torrent_hash)
                 transport_failures = 0
-            except httpx.TransportError as exc:
+                unreachable_since = None
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                # qBittorrent not answering, or a login it forgot (403): waited out, logged in again.
+                # Ten failures (a minute and a half) used to fail the job: when the disk was busy on
+                # Nov 17 2026 qBittorrent stopped answering for six minutes and 16 downloads failed.
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in (401, 403, 500, 502, 503, 504):
+                    raise
                 transport_failures += 1
-                if transport_failures >= 10:
+                unreachable_since = unreachable_since or time.monotonic()
+                if time.monotonic() - unreachable_since > UNREACHABLE_GIVE_UP_SECONDS:
                     raise QBittorrentError(
-                        f"qBittorrent status unavailable after {transport_failures} retries: {exc}"
+                        f"qBittorrent did not answer for {round(UNREACHABLE_GIVE_UP_SECONDS / 3600)} h: {exc}"
                     ) from exc
-                # A single dropped HTTP response must not throw away a
-                # multi-hour download. Re-authenticate and keep polling the
-                # same hash; this is what caused Fight Club to fail at 5.6%.
                 self._logged_in = False
-                log.warning(
-                    "temporary qBittorrent status error (%d/10): %s",
-                    transport_failures,
-                    exc,
-                )
-                await asyncio.sleep(min(15.0, max(interval, transport_failures * 2.0)))
+                if transport_failures in (1, 10) or transport_failures % 30 == 0:
+                    log.warning("qBittorrent does not answer (%d tries, waiting): %s", transport_failures, exc)
+                await asyncio.sleep(min(60.0, max(interval, transport_failures * 2.0)))
                 continue
             if status is None:
-                raise QBittorrentError(f"torrent {torrent_hash} disappeared")
+                # Gone for good, or a list qBittorrent gave while it was finding its feet again.
+                missing_since = missing_since or time.monotonic()
+                if time.monotonic() - missing_since > 600:
+                    raise QBittorrentError(f"torrent {torrent_hash} disappeared")
+                await asyncio.sleep(max(interval, 10.0))
+                continue
+            missing_since = None
             if progress_cb is not None:
                 try:
                     progress_cb(status)

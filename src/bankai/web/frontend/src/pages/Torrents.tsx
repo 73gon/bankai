@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, ExternalLink, FolderInput, Search } from 'lucide-react';
+import { Check, Download, ExternalLink, FolderInput, Magnet, Search } from 'lucide-react';
+import { TorrentLinkField } from '@/components/torrent-link-field';
 import { toast } from '@/lib/toast';
-import { api, type DirectKind, type DirectRelease, type DirectSearch, type DirectTarget } from '@/lib/api';
+import { api, type DirectKind, type DirectRelease, type DirectSearch, type DirectTarget, type DiscoverItem } from '@/lib/api';
+import { AnimePoster } from '@/components/AnimePoster';
 import { formatBytes, timeAgo } from '@/lib/utils';
 import { StatusTag } from '@/components/status-tag';
 import { Button } from '@zonsh/ui';
@@ -70,20 +72,46 @@ function DownloadDialog({ release, kind, targets, onClose }: {
   targets: DirectTarget[];
   onClose: () => void;
 }) {
+  // What it is comes from TMDB, as for Review's downloads: the folder is named as TMDB names the
+  // title, so the library and Jellyfin match it. Searched by the release's name first; any search
+  // may be typed. Only a title TMDB does not know is named by hand.
   const [asKind, setAsKind] = useState<DirectKind>(kind);
-  const [root, setRoot] = useState('');
+  const [query, setQuery] = useState('');
+  const [matches, setMatches] = useState<DiscoverItem[] | null>(null);
+  const [tmdb, setTmdb] = useState<DiscoverItem | null>(null);
+  const [byHand, setByHand] = useState(false);
   const [title, setTitle] = useState('');
   const [year, setYear] = useState('');
   const [season, setSeason] = useState('');
+  const [root, setRoot] = useState('');
   const [busy, setBusy] = useState(false);
+
+  async function search(text: string, which: DirectKind, preferYear: number | null, choose: boolean) {
+    if (!text.trim()) return;
+    setMatches(null);
+    try {
+      const found = (await api.discoverSearch(text.trim(), which, 'title', 0, 12)).items.filter((item) => item.tmdb_id);
+      setMatches(found);
+      // Opening: the same year if the name says one (remakes share a name), else the first.
+      if (choose) setTmdb(found.find((item) => preferYear && item.year === preferYear) ?? (preferYear ? null : found[0] ?? null));
+    } catch (error: any) {
+      toast.error(error.message);
+      setMatches([]);
+    }
+  }
 
   useEffect(() => {
     if (!release) return;
     const guessed = release.guess;
     setAsKind(kind);
+    setQuery(guessed.title);
     setTitle(guessed.title);
     setYear(guessed.year ? String(guessed.year) : '');
     setSeason(guessed.season ? String(guessed.season) : '');
+    setTmdb(null);
+    setByHand(false);
+    void search(guessed.title, kind, guessed.year, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [release, kind]);
 
   const library = asKind === 'movie' ? 'movies' : 'shows';
@@ -91,7 +119,6 @@ function DownloadDialog({ release, kind, targets, onClose }: {
   const items = choices.map((row) => ({ value: row.root, label: row.label }));
   useEffect(() => {
     if (!release) return;
-    // English first: what this page is for.
     const remembered = (() => {
       try { return localStorage.getItem(`bankai:torrents:root:${library}`); } catch { return null; }
     })();
@@ -102,10 +129,13 @@ function DownloadDialog({ release, kind, targets, onClose }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [release, library, targets]);
 
+  // The name the folder gets: TMDB's, or typed when TMDB does not know it.
+  const name = byHand ? title.trim() : tmdb?.name ?? '';
+  const yearText = byHand ? year.trim() : tmdb?.year ? String(tmdb.year) : '';
+  const yearNumber = yearText ? Number(yearText) : null;
   const target = choices.find((row) => row.root === root);
-  const yearNumber = year.trim() ? Number(year) : null;
-  const problem = !title.trim()
-    ? 'A title names the folder.'
+  const problem = !name
+    ? byHand ? 'A title names the folder.' : 'Pick the title it is.'
     : yearNumber !== null && !(yearNumber >= 1900 && yearNumber <= 2100)
       ? 'The year is not a year.'
       : !target
@@ -120,13 +150,13 @@ function DownloadDialog({ release, kind, targets, onClose }: {
         id: release.id,
         kind: asKind,
         root: target.root,
-        title: title.trim(),
+        title: name,
         year: yearNumber,
         season: asKind === 'show' && season.trim() ? Number(season) : null,
       });
       try { localStorage.setItem(`bankai:torrents:root:${library}`, target.root); } catch { /* per-browser convenience only */ }
       if (answer.status === 'duplicate') toast.info('That download is already queued.');
-      else toast.success(`${title.trim()} is downloading into ${target.label}.`);
+      else toast.success(`${name} is downloading into ${target.label}.`);
       onClose();
     } catch (error: any) {
       toast.error(error.message);
@@ -137,24 +167,92 @@ function DownloadDialog({ release, kind, targets, onClose }: {
 
   return (
     <Dialog open={release !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent size='lg'>
+      <DialogContent size='lg' className='max-h-[90dvh]'>
         <DialogHeader>
           <DialogTitle>Download as it is</DialogTitle>
           <DialogDescription>
-            The release goes straight into the folder you pick, with its own audio and subtitles: no German dub, no sync, no review.
-            A file the folder already has is never replaced.
+            Into the folder you pick, with its own audio and subtitles: no German dub, no sync, no review. A file the folder
+            already has is never replaced.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className='flex flex-col gap-4'>
-          {release && <p className='break-words rounded-item border border-field-edge bg-field-surface p-3 font-mono text-sm text-foreground'>{release.title}</p>}
-          <div className='grid gap-3 sm:grid-cols-2'>
-            <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
-              Download as
-              <ToggleGroup<DirectKind> aria-label='Download as' value={[asKind]} onValueChange={(values) => values[0] && setAsKind(values[0])}>
-                <ToggleGroupItem<DirectKind> value='movie'>Movie</ToggleGroupItem>
-                <ToggleGroupItem<DirectKind> value='show'>Show</ToggleGroupItem>
-              </ToggleGroup>
-            </label>
+          {release && <p className='break-words rounded-item border border-field-edge bg-field-surface p-3 font-mono text-xs text-muted-foreground'>{release.title}</p>}
+
+          {byHand ? (
+            <div className='flex flex-col gap-2'>
+              <div className='grid gap-3 sm:grid-cols-[1fr_8rem]'>
+                <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
+                  Title
+                  <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder='As Jellyfin should find it' autoFocus />
+                </label>
+                <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
+                  Year
+                  <Input type='number' min='1900' max='2100' value={year} onChange={(event) => setYear(event.target.value)} />
+                </label>
+              </div>
+              <button type='button' className='self-start text-xs text-muted-foreground underline underline-offset-4' onClick={() => setByHand(false)}>
+                Pick it on TMDB instead
+              </button>
+            </div>
+          ) : (
+            <div className='flex flex-col gap-2'>
+              <form className='flex items-center gap-2' onSubmit={(event) => { event.preventDefault(); void search(query, asKind, null, false); }}>
+                <InputGroup className='min-w-0 flex-1'>
+                  <InputGroupAddon><Search aria-hidden='true' /></InputGroupAddon>
+                  <InputGroupInput aria-label='Search TMDB' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Search TMDB' />
+                </InputGroup>
+                <ToggleGroup<DirectKind>
+                  aria-label='Film or show'
+                  value={[asKind]}
+                  onValueChange={(values) => {
+                    const next = values[0];
+                    if (!next || next === asKind) return;
+                    setAsKind(next);
+                    setTmdb(null);
+                    void search(query, next, release?.guess.year ?? null, true);
+                  }}
+                >
+                  <ToggleGroupItem<DirectKind> value='movie'>Film</ToggleGroupItem>
+                  <ToggleGroupItem<DirectKind> value='show'>Show</ToggleGroupItem>
+                </ToggleGroup>
+              </form>
+              <div className='max-h-[min(13rem,30dvh)] overflow-y-auto rounded-item border border-field-edge'>
+                {matches === null ? (
+                  <div className='flex min-h-20 items-center justify-center'><Spinner /></div>
+                ) : matches.length === 0 ? (
+                  <p className='p-3 text-sm text-muted-foreground'>TMDB knows no {asKind === 'movie' ? 'film' : 'show'} of that name. Search another, or name it yourself.</p>
+                ) : (
+                  <ul className='flex flex-col'>
+                    {matches.map((item) => {
+                      const chosen = tmdb?.tmdb_id === item.tmdb_id;
+                      return (
+                        <li key={item.tmdb_id}>
+                          <button
+                            type='button'
+                            aria-pressed={chosen}
+                            onClick={() => setTmdb(item)}
+                            className={'flex w-full items-center gap-3 p-2 text-left focus-ring ' + (chosen ? 'bg-control-pressed' : 'hover:bg-control-hover')}
+                          >
+                            <AnimePoster url={item.poster_url} title={item.name} className='w-9 shrink-0' />
+                            <span className='min-w-0 flex-1'>
+                              <span className='block truncate text-sm text-foreground'>{item.name} <span className='font-mono text-xs text-muted-foreground'>{item.year ?? ''}</span></span>
+                              {item.overview && <span className='line-clamp-1 text-xs text-muted-foreground'>{item.overview}</span>}
+                            </span>
+                            {chosen && <Check className='size-4 shrink-0 text-success' aria-hidden='true' />}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+              <button type='button' className='self-start text-xs text-muted-foreground underline underline-offset-4' onClick={() => { setByHand(true); if (tmdb) { setTitle(tmdb.name); setYear(tmdb.year ? String(tmdb.year) : ''); } }}>
+                Not on TMDB? Name it yourself
+              </button>
+            </div>
+          )}
+
+          <div className='grid gap-3 sm:grid-cols-[1fr_8rem]'>
             <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
               Folder
               <Select items={items} value={root} onValueChange={(value) => setRoot(value ?? '')}>
@@ -170,30 +268,17 @@ function DownloadDialog({ release, kind, targets, onClose }: {
                 </SelectContent>
               </Select>
             </label>
-            <label className='flex flex-col gap-1.5 text-xs text-muted-foreground sm:col-span-2'>
-              Title
-              <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder='As Jellyfin should find it' />
-            </label>
-            <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
-              Year
-              <Input type='number' min='1900' max='2100' value={year} onChange={(event) => setYear(event.target.value)} placeholder='Helps Jellyfin match it' />
-            </label>
             {asKind === 'show' && (
-              <label className='flex flex-col gap-1.5 text-xs text-muted-foreground'>
+              <label className='flex flex-col gap-1.5 text-xs text-muted-foreground' title='Only for files that name an episode alone; SxxEyy names go by themselves'>
                 Season
-                <Input type='number' min='0' value={season} onChange={(event) => setSeason(event.target.value)} placeholder='From each file name' />
+                <Input type='number' min='0' value={season} onChange={(event) => setSeason(event.target.value)} placeholder='From names' />
               </label>
             )}
           </div>
-          <p className='text-xs text-muted-foreground'>
-            {asKind === 'show'
-              ? 'Each episode is filed by the SxxEyy its file name says; the season here is only for files that name an episode alone. A show the folder has already, with or without its year, is filled up.'
-              : 'The largest video of the torrent is the movie; extras and samples stay out.'}
-          </p>
-          {preview(target, asKind, title, year, season) && (
+          {preview(target, asKind, name, yearText, season) && (
             <p className='flex items-start gap-2 break-all font-mono text-xs text-foreground/80'>
               <FolderInput className='mt-0.5 size-3.5 shrink-0 text-muted-foreground' aria-hidden='true' />
-              {preview(target, asKind, title, year, season)}
+              {preview(target, asKind, name, yearText, season)}
             </p>
           )}
         </DialogBody>
@@ -213,6 +298,47 @@ function DownloadDialog({ release, kind, targets, onClose }: {
  * Movies & Shows -> Torrents: any release Prowlarr finds, downloaded and filed as it is into the
  * folder picked for it -- English-only shows, say, which the German pipeline would not take.
  */
+/** A release one has as a magnet link or a .torrent: taken on to the download dialog. */
+function FromMagnetDialog({ open, onClose, onRelease }: { open: boolean; onClose: () => void; onRelease: (release: DirectRelease) => void }) {
+  const [magnet, setMagnet] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (open) setMagnet(''); }, [open]);
+  const valid = /^magnet:\?.*xt=urn:btih:/i.test(magnet.trim());
+  async function next() {
+    setBusy(true);
+    try {
+      onRelease(await api.directMagnet(magnet.trim()));
+    } catch (error: any) {
+      toast.error(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onClose(); }}>
+      <DialogContent size='lg'>
+        <DialogHeader>
+          <DialogTitle>Download from a magnet link or .torrent</DialogTitle>
+          <DialogDescription>
+            A film or show you have the torrent of. Next you pick its name, year and folder, as for a release found here;
+            it is downloaded as it is, each file by its audio when the folder is "by language".
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <TorrentLinkField multiline autoFocus value={magnet} onChange={setMagnet} disabled={busy} />
+          {magnet.trim() && !valid && <p className='mt-2 text-xs text-warning'>That is not a magnet link (magnet:?xt=urn:btih:…).</p>}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant='ghost' onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={() => void next()} disabled={!valid || busy}>
+            {busy ? <Spinner /> : <Download data-icon='inline-start' />} Next
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function Torrents() {
   const [draft, setDraft] = useState<View>(storedView);
   const [view, setView] = useState<View | null>(() => (draft.query.trim() ? draft : null));
@@ -221,6 +347,9 @@ export default function Torrents() {
   const [failed, setFailed] = useState<string | null>(null);
   const [targets, setTargets] = useState<DirectTarget[]>([]);
   const [picked, setPicked] = useState<DirectRelease | null>(null);
+  // A release from a magnet or .torrent: its kind told from its name, not the search's.
+  const [pickedKind, setPickedKind] = useState<DirectKind | null>(null);
+  const [fromMagnet, setFromMagnet] = useState(false);
 
   useEffect(() => {
     api.directTargets().then((answer) => setTargets(answer.targets)).catch((error: any) => toast.error(error.message));
@@ -276,9 +405,14 @@ export default function Torrents() {
 
   return (
     <div className='flex h-full min-h-0 flex-col gap-4 overflow-hidden'>
-      <div className='flex flex-wrap items-baseline gap-2'>
-        <h1 className='font-heading text-2xl font-light tracking-tight'>Torrents</h1>
-        <span className='text-sm text-muted-foreground'>— Any release Prowlarr finds, downloaded as it is into the folder you pick.</span>
+      <div className='flex flex-wrap items-center justify-between gap-2'>
+        <div className='flex flex-wrap items-baseline gap-2'>
+          <h1 className='font-heading text-2xl font-light tracking-tight'>Torrents</h1>
+          <span className='text-sm text-muted-foreground'>— Any release Prowlarr finds, downloaded as it is into the folder you pick.</span>
+        </div>
+        <Button variant='secondary' onClick={() => setFromMagnet(true)}>
+          <Magnet data-icon='inline-start' /> From magnet or .torrent
+        </Button>
       </div>
 
       <div className='flex flex-wrap items-center gap-2'>
@@ -317,7 +451,7 @@ export default function Torrents() {
         )}
       </div>
 
-      <Table variant='plain' dense className='min-w-[900px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto -mx-(--page-gutter) w-auto' }}>
+      <Table variant='plain' size='sm' className='min-w-[900px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto -mx-(--page-gutter) w-auto' }}>
         <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
           <TableRow>
             <TableHead>Release</TableHead>
@@ -376,7 +510,7 @@ export default function Torrents() {
                     <ExternalLink />
                   </Button>
                 )}
-                <Button size='sm' variant='secondary' onClick={() => setPicked(row)}>
+                <Button size='sm' variant='secondary' onClick={() => { setPickedKind(null); setPicked(row); }}>
                   <Download data-icon='inline-start' /> Download
                 </Button>
               </TableCell>
@@ -385,7 +519,12 @@ export default function Torrents() {
         </TableBody>
       </Table>
 
-      <DownloadDialog release={picked} kind={result?.kind ?? draft.kind} targets={targets} onClose={() => setPicked(null)} />
+      <DownloadDialog release={picked} kind={pickedKind ?? result?.kind ?? draft.kind} targets={targets} onClose={() => { setPicked(null); setPickedKind(null); }} />
+      <FromMagnetDialog
+        open={fromMagnet}
+        onClose={() => setFromMagnet(false)}
+        onRelease={(release) => { setFromMagnet(false); setPickedKind(release.guess.kind); setPicked(release); }}
+      />
     </div>
   );
 }

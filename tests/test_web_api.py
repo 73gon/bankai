@@ -227,7 +227,7 @@ def test_qbittorrent_torrent_actions(
         async def pause(self, torrent_hash: str) -> None:
             calls.append(("stop", torrent_hash))
 
-        async def remove(self, torrent_hash: str, *, delete_files: bool = False) -> None:
+        async def remove(self, torrent_hash: str, *, delete_files: bool = False, **_kw) -> None:
             calls.append(("remove", torrent_hash, delete_files))
 
     monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", FakeQBittorrent)
@@ -587,24 +587,27 @@ def test_library_empty(client: TestClient) -> None:
 def test_server_contents_includes_library_directory(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        "bankai.web.media.scan_server",
-        lambda kind, use_cache=True: [
-            SimpleNamespace(
-                name="Bleach" if kind == "show" else "Inception",
-                present=True,
-                location=f"E:\\media\\{kind}s\\title",
-                directory=f"E:\\media\\{kind}s",
-            )
-        ],
-    )
+    """Every title under each root, one row each with its root -- a title in two roots twice, so either
+    can be dragged elsewhere -- and manga beside the video libraries."""
+    roots = {kind: [tmp_path / kind / "a", tmp_path / kind / "b"] for kind in ("movie", "show", "anime", "manga")}
+    for listed in roots.values():
+        for root in listed:
+            root.mkdir(parents=True)
+    (roots["show"][0] / "Bleach").mkdir()
+    (roots["show"][1] / "Bleach").mkdir()
+    (roots["movie"][0] / "Inception (2010)").mkdir()
+    (roots["manga"][1] / "Berserk (1989) - 30002").mkdir()
+    monkeypatch.setattr("bankai.web.library_moves.roots", lambda: roots)
 
-    response = client.get("/api/server/contents")
+    body = client.get("/api/server/contents?rescan=true").json()
 
-    assert response.status_code == 200
-    assert response.json()["shows"][0]["directory"] == "E:\\media\\shows"
-    assert response.json()["movies"][0]["directory"] == "E:\\media\\movies"
+    assert [(row["name"], row["directory"]) for row in body["shows"]] == [
+        ("Bleach", str(roots["show"][0])), ("Bleach", str(roots["show"][1])),
+    ]
+    assert body["movies"][0]["location"] == str(roots["movie"][0] / "Inception (2010)")
+    assert body["manga"][0]["directory"] == str(roots["manga"][1])
 
 
 def test_server_rename_moves_movie_folder_and_matching_files(
@@ -1046,6 +1049,32 @@ def test_titles_redo_reuses_source_and_forces_transactional_output(
     assert "--from-stage" not in args
     assert response.json()["fresh"] is True
     assert response.json()["stages"] == ["extract", "torrent", "sync", "remux"]
+
+
+def test_redo_on_a_download_row_runs_that_job_again(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deleted: list[str] = []
+    failed = SimpleNamespace(
+        id="cc1383b8",
+        kind="movie",
+        title="Valiant One (2025) · German release · Valiant One 2025 German DL 1080p",
+        args=["direct-download", "--magnet", "magnet:?xt=urn:btih:abc"],
+        delete=lambda: deleted.append("cc1383b8") or True,
+    )
+    queued: list[dict[str, object]] = []
+    monkeypatch.setattr("bankai.cli.bgjobs.get_job", lambda job_id: failed if job_id == "cc1383b8" else None)
+    monkeypatch.setattr(
+        "bankai.web.jobs.enqueue",
+        lambda **kwargs: queued.append(kwargs) or {"status": "running", "id": "again1"},
+    )
+
+    response = client.post("/api/titles/redo", json={"path": "cc1383b8"})
+
+    assert response.status_code == 200
+    assert queued == [{"kind": "movie", "title": failed.title, "args": failed.args}]
+    assert deleted == ["cc1383b8"]
 
 
 def test_queue_force_and_priority_endpoints(

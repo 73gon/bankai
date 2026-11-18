@@ -459,3 +459,78 @@ def test_a_torrent_whose_progress_stops_is_given_up(monkeypatch) -> None:
     client.get = get
     with pytest.raises(qb.TorrentStalled, match="no progress"):
         asyncio.run(client.wait_until_complete("h", stall_seconds=3600))
+
+
+def test_a_sample_is_never_the_film(tmp_path: Path) -> None:
+    # A scene release: the film in RAR archives, the sample clip the only video (Nov 2026).
+    (tmp_path / "x.rar").write_bytes(b"0" * 100)
+    (tmp_path / "the.mandalorian.and.grogu.2026.german.dl.2160p.web.h265-wayne-sample.mkv").write_bytes(b"0" * 50)
+    assert pick_movie_file(tmp_path) is None
+    (tmp_path / "Sample").mkdir()
+    (tmp_path / "Sample" / "clip.mkv").write_bytes(b"0" * 80)
+    film = tmp_path / "The.Sample.2020.1080p.mkv"  # a title with the word in it is a film
+    film.write_bytes(b"0" * 60)
+    assert pick_movie_file(tmp_path) == film
+
+
+def test_a_release_whose_link_fails_is_taken_from_another_indexer(monkeypatch) -> None:
+    # 1337x disabled in Prowlarr: every grab 429, and it gives no info hash (Nov 2026).
+    from types import SimpleNamespace
+
+    from bankai.processor import direct as direct_proc
+
+    def row(title, indexer, magnet=None, info_hash=None, seeders=1):
+        return SimpleNamespace(title=title, indexer=indexer, magnet_uri=magnet, info_hash=info_hash, seeders=seeders)
+
+    class Prowlarr:
+        async def search(self, query, categories=None):
+            return [
+                row("Prey 2022 1080p WEB", "Knaben", "magnet:?xt=urn:btih:" + "1" * 40, seeders=90),
+                row("Prey 2021 1080p NF WEB-DL German-Eng DDP5 1 H 264-TombDoc", "kickasstorrents.to", info_hash="2" * 40, seeders=3),
+                row("Prey 2021 1080p NF WEB-DL German Eng DDP5.1 H.264-TombDoc", "1337x"),
+            ]
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("bankai.torrent.prowlarr.ProwlarrClient", Prowlarr)
+    found = asyncio.run(direct_proc._elsewhere("Prey 2021 1080p NF WEB-DL German Eng DDP5.1 H.264-TombDoc", "movie"))
+    assert found == "magnet:?xt=urn:btih:" + "2" * 40
+    assert asyncio.run(direct_proc._elsewhere("Nothing Like It 2020 1080p", "movie")) is None
+    assert "apikey=***" in direct_proc._plain(RuntimeError("http://x/6/download?apikey=abc123&link=y"))
+
+
+def test_a_link_in_a_failure_is_not_read_for_its_words() -> None:
+    from bankai.web.reasons import classify_reason
+
+    raw = "HTTPStatusError: Client error '429 Too Many Requests' for url 'http://127.0.0.1:9696/6/download?link=YThKvOe1'"
+    assert classify_reason(raw)[0] != "extract"
+
+
+def test_a_download_waits_for_qbittorrent_to_answer_again(monkeypatch) -> None:
+    # Nov 17 2026: qBittorrent did not answer for six minutes and 16 downloads failed after ten tries.
+    import httpx
+
+    from bankai.torrent import qbittorrent as qb
+
+    client = qb.QBittorrentClient.__new__(qb.QBittorrentClient)
+    client._settings = type("S", (), {"poll_interval_seconds": 0})()
+    client._logged_in = True
+    answers = iter([httpx.ReadTimeout("slow")] * 40 + [None] * 3 + ["done"])
+    done = qb.TorrentStatus(hash="h", name="x", state="uploading", progress=1.0, save_path="/d", content_path="/d/x",
+                            size_bytes=1, dlspeed=0, eta=0)
+
+    async def get(torrent_hash):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        if answer == "done":
+            return done
+        return None
+
+    async def nap(seconds):
+        return None
+
+    monkeypatch.setattr(client, "get", get)
+    monkeypatch.setattr(qb.asyncio, "sleep", nap)
+    assert asyncio.run(client.wait_until_complete("h")) is done

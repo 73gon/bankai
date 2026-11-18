@@ -344,30 +344,28 @@ function UsageLine({ label, value, max = 100, text, hint, warn, note }: {
   );
 }
 
-// Pages moving between swap and memory faster than this mean memory is short; a full swap alone does
-// not (programs idle for days leave their pages there, and nothing reads them).
-const SWAP_BUSY = 1024 * 1024;
-
-/** Swap: how full, and whether it is in use -- amber only while pages move, not because it is full. */
-function SwapLine({ memory }: { memory: NonNullable<SystemUsage['memory']> }) {
-  const moving = (memory.swap_in_per_second ?? 0) + (memory.swap_out_per_second ?? 0);
-  const known = memory.swap_in_per_second != null;
-  const busy = known && moving >= SWAP_BUSY;
-  const rates = known ? `${formatBytes(memory.swap_in_per_second ?? 0)}/s in, ${formatBytes(memory.swap_out_per_second ?? 0)}/s out` : '';
+/** Download and upload, each a meter against the busiest second seen, and both together over them. */
+function NetworkLines({ network }: { network: SystemUsage['network'] | undefined }) {
+  const down = network?.received_per_second;
+  const up = network?.sent_per_second;
+  const peak = network?.peak_per_second ?? undefined;
+  const rate = (value: number | null | undefined) => (value == null ? '—' : `${formatBytes(value)}/s`);
+  const since = network?.received_total != null && network.sent_total != null
+    ? `${formatBytes(network.received_total)} down, ${formatBytes(network.sent_total)} up since the machine started`
+    : undefined;
+  const scale = peak ? `Meters against the busiest second since bankai started: ${rate(peak)}.` : undefined;
+  const hint = [since, scale].filter(Boolean).join('. ') || undefined;
   return (
-    <UsageLine
-      label='Swap'
-      value={memory.swap_used}
-      max={memory.swap_total}
-      text={`${formatBytes(memory.swap_used)} / ${formatBytes(memory.swap_total)}`}
-      warn={busy}
-      note={known && <span className={cn('text-[10px]', busy ? 'text-warning' : 'text-muted-foreground/70')}>{busy ? 'in use' : 'idle'}</span>}
-      hint={
-        !known ? 'Whether it is in use shows with the next reading'
-        : busy ? `In use: ${rates}. Memory is short; programs wait on the disk.`
-        : `Idle (${rates}): the pages in it belong to programs that have not touched them in a long while. Full is no trouble while nothing moves.`
-      }
-    />
+    <div className='flex flex-col gap-2'>
+      <p className='eyebrow flex items-center gap-2 text-[10px]'>
+        Network
+        <span className='ml-auto font-mono normal-case tracking-normal text-foreground' title={hint}>
+          {down == null || up == null ? '—' : `${rate(down + up)} total`}
+        </span>
+      </p>
+      <UsageLine label='Download' value={down} max={peak} text={rate(down)} hint={hint} warn={false} />
+      <UsageLine label='Upload' value={up} max={peak} text={rate(up)} hint={hint} warn={false} />
+    </div>
   );
 }
 
@@ -411,7 +409,7 @@ function SystemCard() {
   // memory, graphics card) one over the other there; side by side when it has the page's width.
   return (
     <section className='flex min-w-0 flex-col gap-2'>
-      <div className='flex items-baseline gap-2'>
+      <div className='flex items-baseline gap-2 px-(--page-gutter)'>
         <h2 className='font-heading text-lg font-light'>System</h2>
         {usage && (
           <span className='ml-auto text-xs text-muted-foreground'>
@@ -419,7 +417,7 @@ function SystemCard() {
           </span>
         )}
       </div>
-      <Card className='flex-1 gap-3 [--card-padding:14px] xl:h-[26rem] xl:overflow-y-auto'>
+      <Card variant='region' className='flex-1 gap-3 border-x-0 [--card-padding:14px] px-(--page-gutter) xl:h-[26rem] xl:overflow-y-auto xl:border-l'>
         <CardContent className='grid content-start gap-x-8 gap-y-5 sm:grid-cols-2 xl:grid-cols-1'>
           {!usage ? (
             <Skeleton shape='card' className='h-24 sm:col-span-2 xl:col-span-1' />
@@ -440,15 +438,16 @@ function SystemCard() {
                   text={memory ? `${formatBytes(memory.used)} / ${formatBytes(memory.total)}` : '—'}
                   hint={memory ? `${formatBytes(memory.cached)} more is file cache, given back when needed` : undefined}
                 />
-                {memory && memory.swap_total > 0 && <SwapLine memory={memory} />}
-                <div className='flex items-center gap-3 text-xs'>
-                  <span className='w-20 shrink-0 text-muted-foreground'>Network</span>
-                  <span className='font-mono text-[11px] tabular-nums text-foreground'>
-                    ↓ {network?.received_per_second == null ? '—' : `${formatBytes(network.received_per_second)}/s`}
-                    <span className='mx-2 text-muted-foreground'>·</span>
-                    ↑ {network?.sent_per_second == null ? '—' : `${formatBytes(network.sent_per_second)}/s`}
-                  </span>
-                  {cpu && <span className='ml-auto font-mono text-[11px] tabular-nums text-muted-foreground' title='Load average over 1, 5 and 15 minutes'>load {cpu.load.join(' ')}</span>}
+                {memory && memory.swap_total > 0 && (
+                  <UsageLine
+                    label='Swap'
+                    value={memory.swap_used}
+                    max={memory.swap_total}
+                    text={`${formatBytes(memory.swap_used)} / ${formatBytes(memory.swap_total)}`}
+                  />
+                )}
+                <div className='mt-3'>
+                  <NetworkLines network={network} />
                 </div>
               </div>
               <div className='flex flex-col gap-2'>
@@ -548,15 +547,19 @@ export default function Dashboard() {
   const summary = data?.summary;
 
   return (
-    <div className='flex flex-col gap-4'>
-      <h1 className='font-heading text-2xl font-light'>Dashboard</h1>
+    // Edge to edge (Nov 2026): the page's gutter given back, square panels that are part of the page;
+    // headings keep the gutter so they line up with what is inside the panels.
+    <div className='-mx-(--page-gutter) flex flex-col gap-4'>
+      <h1 className='px-(--page-gutter) font-heading text-2xl font-light'>Dashboard</h1>
 
       {!data ? (
         <Skeleton shape='card' className='h-10' />
       ) : (
         <>
+          {/* The numbers and the lanes as one block, no gap between: one border between them. */}
+          <div className='flex flex-col'>
           {/* The four numbers as one thin strip, not four cards: the lanes below are the content. */}
-          <Card className='grid grid-cols-2 gap-0 overflow-hidden [--card-padding:0] lg:grid-cols-5'>
+          <Card variant='region' className='grid grid-cols-2 gap-0 overflow-hidden border-x-0 [--card-padding:0] lg:grid-cols-5'>
             <Stat index={0} icon={Users} label='Workers' value={`${summary!.workers_busy} / ${summary!.workers_total}`} hint='Workers busy, across every lane below' />
             <Stat index={1} icon={Clock} label='Due' value={String(summary!.due_total)} hint='Queued jobs and releases waiting' />
             <Stat
@@ -586,7 +589,7 @@ export default function Dashboard() {
 
           {/* Every lane in one panel: on the left a line each, how busy; on the right only what
               runs, so an idle lane costs one line, not a card. */}
-          <Card className='gap-3 [--card-padding:14px]'>
+          <Card variant='region' className='-mt-px gap-3 border-x-0 [--card-padding:14px] px-(--page-gutter)'>
             <CardHeader className='flex flex-row items-center gap-2'>
               <Users className='size-4 shrink-0 text-muted-foreground' />
               <CardTitle className='text-base sm:text-base'>Workers</CardTitle>
@@ -617,13 +620,14 @@ export default function Dashboard() {
               </div>
             </CardContent>
           </Card>
+          </div>
 
           {/* Recently added across the page: three libraries side by side need the width (beside Up next
               their titles and toggles were cut). */}
           <section className='flex min-w-0 flex-col gap-2'>
-            <h2 className='font-heading text-lg font-light'>Recently added</h2>
+            <h2 className='px-(--page-gutter) font-heading text-lg font-light'>Recently added</h2>
             {/* One card, the three libraries side by side with a rule between (stacked on a narrow screen). */}
-            <Card className='grid min-w-0 gap-4 [--card-padding:14px] md:h-[26rem] md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)_1px_minmax(0,1fr)] [&>*]:max-md:max-h-80'>
+            <Card variant='region' className='grid min-w-0 gap-4 border-x-0 [--card-padding:14px] px-(--page-gutter) md:h-[26rem] md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)_1px_minmax(0,1fr)] [&>*]:max-md:max-h-80'>
               <RecentList
                 title='Movies & Shows'
                 icon={Film}
@@ -645,13 +649,14 @@ export default function Dashboard() {
           </section>
 
           {/* Up next and System side by side, under the workers and Recently added. */}
-          <div className='grid gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]'>
+          <div className='grid gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] xl:gap-0'>
             <section className='flex min-w-0 flex-col gap-2'>
-              <h2 className='font-heading text-lg font-light'>Up next</h2>
+              <h2 className='px-(--page-gutter) font-heading text-lg font-light'>Up next</h2>
               {/* A band per lane (Backlog, Scheduled), pinned while its rows scroll; the task takes what
                   the time leaves and is cut there, so the table never scrolls sideways. A scheduled
                   pass's row opens its interval. */}
-              <Table dense className='table-fixed' containerProps={{ className: 'h-[26rem] overflow-y-auto' }}>
+              <Card variant='region' className='gap-0 border-x-0 [--card-padding:0px]'>
+              <Table size='sm' className='table-fixed' containerProps={{ className: 'h-[26rem] overflow-y-auto rounded-none border-0' }}>
                 {(data.due ?? []).every((group) => group.items.length === 0) && (
                   <TableBody>
                     <TableRow><TableCell colSpan={2} className='py-6 text-center text-muted-foreground'>Nothing due.</TableCell></TableRow>
@@ -690,6 +695,7 @@ export default function Dashboard() {
                   </TableGroup>
                 ))}
               </Table>
+              </Card>
             </section>
             <SystemCard />
           </div>

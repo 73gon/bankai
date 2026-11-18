@@ -14,6 +14,8 @@ title is the folder's name exactly and the year agrees. Kept in
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 import os
 import re
@@ -207,11 +209,13 @@ async def adopt(*, max_searches: int = 10) -> dict[str, int]:
     """Learn which entry each folder is that bankai does not know yet; returns counts."""
     data = _read()
     known = {(row.get("kind"), row.get("folder")) for row in data["series"].values()}
-    openpanel = _openpanel_matches()
+    # Read off the event loop: the library's folders are on a Windows drive, slow while torrents write.
+    openpanel = await asyncio.to_thread(_openpanel_matches)
+    listed = await asyncio.to_thread(lambda: {kind: folders(kind) for kind in KINDS})
     found = searched = 0
     now = time.time()
     for kind in KINDS:
-        for name in folders(kind):
+        for name in listed[kind]:
             if (kind, name) in known:
                 continue
             how, aid = "folder", folder_id(name)

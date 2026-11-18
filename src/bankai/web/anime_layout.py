@@ -445,7 +445,8 @@ def _show_genres(row: collections.Collection, kept: dict) -> list[str]:
     return genre_sync.anime_genres(row.id, list(kept.get("genres") or []))
 
 
-def tvshow_nfo(row: collections.Collection, title: str) -> str:
+def tvshow_nfo(row: collections.Collection, title: str, tags: Iterable[str] = ()) -> str:
+    """``tags``: what the show's files are, as clients filter by it (web.anime_dubs: ``German Dub``)."""
     from bankai.web import age_ratings
 
     main = row.title if row.title is not None else row.members[0]
@@ -462,6 +463,7 @@ def tvshow_nfo(row: collections.Collection, title: str) -> str:
         # bankai's curated genres where writing them is on (web.genre_sync), else AniList's.
         + "".join(_xml("genre", genre) for genre in _show_genres(row, kept))
         + "".join(_xml("studio", studio) for studio in kept.get("studios") or [])
+        + "".join(_xml("tag", tag) for tag in tags)
         # The FSK rating approved in web.age_ratings (Jellyfin's OfficialRating), and the TMDB show it is from.
         + _xml("mpaa", rating)
         + f'  <uniqueid type="anilist" default="true">{main}</uniqueid>\n'
@@ -558,7 +560,7 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
     for ``fetch_pictures``. Staged files get theirs once Transfer has moved
     them, from the next pass.
     """
-    from bankai.web import jellyfin
+    from bankai.web import anime_dubs, jellyfin
 
     written = 0
     pictures: list[Picture] = []
@@ -579,7 +581,7 @@ def write_nfo(layout: Layout, cids: Iterable[int]) -> tuple[int, list[Picture]]:
         if not folder.is_dir():
             continue
         show = collections.name(row)
-        if _write_text(folder / "tvshow.nfo", tvshow_nfo(row, show)):
+        if _write_text(folder / "tvshow.nfo", tvshow_nfo(row, show, anime_dubs.tags(layout.folders[cid]))):
             written += 1
             changed.append(folder)
         plan = layout.plans[cid]

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,6 +11,7 @@ import {
   Magnet,
   Volume2,
   Search,
+  ShieldCheck,
   Tv,
 } from 'lucide-react';
 import { toast } from '@/lib/toast';
@@ -51,6 +53,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tag } from '@zonsh/ui';
 import { ToggleGroup, ToggleGroupItem } from '@zonsh/ui';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
+import { EmptyActions } from '@zonsh/ui';
+import AnimeErai from '@/pages/AnimeErai';
 
 /** What both sources filter on. Every term is matched ignoring case. */
 type Common = {
@@ -63,14 +67,24 @@ type Common = {
 };
 type NyaaFilters = Common & { category: string };
 type NekobtFilters = Common & { subtitles: string[]; audio: string[]; batch: string };
+/** nekobt's filters, and AnimeZ's own: its format, freeleech alone. */
+type AnimezFilters = NekobtFilters & { format: string; freeleech: boolean };
 type SourceView<F> = { query: string; filters: F };
-type Saved = { source: AnimeSource; nyaa: SourceView<NyaaFilters>; nekobt: SourceView<NekobtFilters> };
+/** Search's sources: the three of release rows, and Erai-raws' own listing (its own filters). */
+type SearchSource = AnimeSource | 'erai';
+type Saved = {
+  source: SearchSource;
+  nyaa: SourceView<NyaaFilters>;
+  nekobt: SourceView<NekobtFilters>;
+  animez: SourceView<AnimezFilters>;
+};
 
 const COMMON: Common = { quality: 'all', publisher: '', titleFilters: '', descriptionFilters: '', minSeeders: '' };
 const DEFAULT_SAVED: Saved = {
   source: 'nyaa',
   nyaa: { query: '', filters: { ...COMMON, category: '1_0' } },
   nekobt: { query: '', filters: { ...COMMON, subtitles: [], audio: [], batch: 'any' } },
+  animez: { query: '', filters: { ...COMMON, subtitles: [], audio: [], batch: 'any', format: 'all', freeleech: false } },
 };
 // The source, each source's search and filters: the tab opens where it was left.
 const SAVED_KEY = 'bankai:anime-discover';
@@ -95,11 +109,23 @@ const BATCH_ITEMS = [
   { value: 'batch', label: 'Batches only' },
   { value: 'single', label: 'Single episodes' },
 ];
+// AnimeZ's formats; all of them is every anime one (its manga and novels left out).
+const FORMAT_ITEMS = [
+  { value: 'all', label: 'Format: any' },
+  { value: 'TV', label: 'TV' },
+  { value: 'TV_SHORT', label: 'TV short' },
+  { value: 'MOVIE', label: 'Movie' },
+  { value: 'OVA', label: 'OVA' },
+  { value: 'ONA', label: 'ONA' },
+  { value: 'SPECIAL', label: 'Special' },
+];
 const KIND_ITEMS = [
   { value: 'show', label: 'Show episodes' },
   { value: 'movie', label: 'Movie' },
 ];
-const SOURCE_LABEL: Record<AnimeSource, string> = { nyaa: 'Nyaa', nekobt: 'nekobt' };
+const SOURCE_LABEL: Record<SearchSource, string> = { nyaa: 'Nyaa', nekobt: 'nekobt', animez: 'AnimeZ', erai: 'Erai-raws' };
+const SOURCES: SearchSource[] = ['nyaa', 'nekobt', 'animez', 'erai'];
+const rowSource = (source: SearchSource): AnimeSource => (source === 'erai' ? 'nyaa' : source);
 
 function strings(value: unknown, fallback: string[]): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : fallback;
@@ -116,6 +142,7 @@ function loadSaved(): Saved {
     const old = raw ? null : (JSON.parse(localStorage.getItem(OLD_FILTERS_KEY) || '{}') as Record<string, unknown>);
     const nyaa = (raw?.nyaa?.filters ?? old ?? {}) as Record<string, unknown>;
     const nekobt = (raw?.nekobt?.filters ?? {}) as Record<string, unknown>;
+    const animez = (raw?.animez?.filters ?? {}) as Record<string, unknown>;
     const common = (from: Record<string, unknown>): Common => ({
       quality: text(from.quality, COMMON.quality),
       publisher: text(from.publisher, ''),
@@ -124,7 +151,7 @@ function loadSaved(): Saved {
       minSeeders: text(from.minSeeders, ''),
     });
     return {
-      source: raw?.source === 'nekobt' ? 'nekobt' : 'nyaa',
+      source: SOURCES.includes(raw?.source as SearchSource) ? (raw!.source as SearchSource) : 'nyaa',
       nyaa: { query: text(raw?.nyaa?.query, ''), filters: { ...common(nyaa), category: text(nyaa.category, '1_0') } },
       nekobt: {
         query: text(raw?.nekobt?.query, ''),
@@ -133,6 +160,17 @@ function loadSaved(): Saved {
           subtitles: strings(nekobt.subtitles, []),
           audio: strings(nekobt.audio, []),
           batch: BATCH_ITEMS.some((item) => item.value === nekobt.batch) ? (nekobt.batch as string) : 'any',
+        },
+      },
+      animez: {
+        query: text(raw?.animez?.query, ''),
+        filters: {
+          ...common(animez),
+          subtitles: strings(animez.subtitles, []),
+          audio: strings(animez.audio, []),
+          batch: BATCH_ITEMS.some((item) => item.value === animez.batch) ? (animez.batch as string) : 'any',
+          format: FORMAT_ITEMS.some((item) => item.value === animez.format) ? (animez.format as string) : 'all',
+          freeleech: animez.freeleech === true,
         },
       },
     };
@@ -160,14 +198,16 @@ function store(saved: Saved) {
 
 // Kept while the app runs: the searched view and its page, per source, and what came back.
 let discoverView: Saved = loadSaved();
-const pages: Record<AnimeSource, number> = { nyaa: 0, nekobt: 0 };
+const pages: Record<AnimeSource, number> = { nyaa: 0, nekobt: 0, animez: 0 };
 const resultCache = new Map<string, AnimeSearchPage>();
 
-function cacheKey(source: AnimeSource, view: SourceView<NyaaFilters | NekobtFilters>, page: number) {
+type AnyFilters = NyaaFilters | NekobtFilters | AnimezFilters;
+
+function cacheKey(source: AnimeSource, view: SourceView<AnyFilters>, page: number) {
   return JSON.stringify([source, view, page]);
 }
 
-function fetchPage(source: AnimeSource, view: SourceView<NyaaFilters | NekobtFilters>, page: number) {
+function fetchPage(source: AnimeSource, view: SourceView<AnyFilters>, page: number) {
   const f = view.filters;
   const common = {
     page,
@@ -177,6 +217,14 @@ function fetchPage(source: AnimeSource, view: SourceView<NyaaFilters | NekobtFil
     descriptionFilters: f.descriptionFilters.trim(),
     minSeeders: Math.max(0, Number.parseInt(f.minSeeders, 10) || 0) || undefined,
   };
+  if (source === 'animez') {
+    const z = f as AnimezFilters;
+    const batch = z.batch === 'batch' ? true : z.batch === 'single' ? false : undefined;
+    return api.animeSearchAnimez(view.query, {
+      ...common, subtitles: z.subtitles, audio: z.audio, batch,
+      formats: z.format === 'all' ? undefined : [z.format], freeleech: z.freeleech,
+    });
+  }
   if (source === 'nekobt') {
     const n = f as NekobtFilters;
     const batch = n.batch === 'batch' ? true : n.batch === 'single' ? false : undefined;
@@ -492,7 +540,9 @@ function DescriptionDrawer({ entry, onClose }: { entry: AnimeEntry | null; onClo
     let cancelled = false;
     const load = entry.source === 'nekobt'
       ? api.nekobtDescription(String(entry.id)).then((result) => result.description)
-      : api.animeDetail(entry.detail_url).then((result) => result.description);
+      : entry.source === 'animez'
+        ? api.animezDescription(String(entry.id)).then((result) => result.description)
+        : api.animeDetail(entry.detail_url).then((result) => result.description);
     load
       .then((value) => !cancelled && setBody(value || 'This release has no description.'))
       .catch((error: any) => {
@@ -524,17 +574,22 @@ function DescriptionDrawer({ entry, onClose }: { entry: AnimeEntry | null; onClo
 }
 
 export default function Anime() {
-  const [source, setSource] = useState<AnimeSource>(discoverView.source);
+  const [source, setSource] = useState<SearchSource>(discoverView.source);
+  // The release rows' source; Erai-raws shows its own listing in their place.
+  const rows_ = rowSource(source);
   // What the fields hold, per source, and what was last searched (the results' view).
   const [drafts, setDrafts] = useState<Saved>(() => structuredClone(discoverView));
   const [searched, setSearched] = useState<Saved>(() => structuredClone(discoverView));
-  const [page, setPage] = useState(pages[discoverView.source]);
+  const [page, setPage] = useState(pages[rowSource(discoverView.source)]);
   // The release groups and the nekobt languages set in the anime settings.
   const [publishers, setPublishers] = useState<string[]>([]);
   const [languages, setLanguages] = useState<string[]>([]);
+  // Whether AnimeZ's login is in the anime settings: without it the source says so.
+  const [animezReady, setAnimezReady] = useState<boolean | null>(null);
+  const [params, setParams] = useSearchParams();
   const [sort, setSort] = useState<SortState<SortKey>>({ key: 'seeders', dir: 'desc' });
-  const view = searched[source];
-  const initial = resultCache.get(cacheKey(source, view, page));
+  const view = searched[rows_];
+  const initial = resultCache.get(cacheKey(rows_, view, page));
   const [result, setResult] = useState<AnimeSearchPage | null>(initial ?? null);
   const [loading, setLoading] = useState(!initial);
   const [described, setDescribed] = useState<AnimeEntry | null>(null);
@@ -552,28 +607,42 @@ export default function Anime() {
     api.animePublishers().then((settings) => {
       setPublishers(settings.publishers);
       setLanguages(settings.nekobt_languages ?? []);
+      setAnimezReady(settings.animez ?? false);
     }).catch(() => undefined);
   }, []);
+
+  // /a/erai (the tab it was) and links naming a source open Search on it.
+  useEffect(() => {
+    const asked = params.get('source') as SearchSource | null;
+    if (!asked) return;
+    if (SOURCES.includes(asked)) switchSource(asked);
+    setParams((old) => {
+      const next = new URLSearchParams(old);
+      next.delete('source');
+      return next;
+    }, { replace: true });
+  }, [params]);
 
   // The fields as typed are kept too: back on the tab, nothing has to be typed again.
   useEffect(() => store({ ...drafts, source }), [drafts, source]);
 
   useEffect(() => {
     discoverView = { ...searched, source };
-    pages[source] = page;
-    const key = cacheKey(source, view, page);
+    if (source === 'erai' || (source === 'animez' && animezReady === false)) return;
+    pages[rows_] = page;
+    const key = cacheKey(rows_, view, page);
     const cached = resultCache.get(key);
     setResult(cached ?? null);
     setLoading(!cached);
     let cancelled = false;
-    fetchPage(source, view, page)
+    fetchPage(rows_, view, page)
       .then((response) => {
         if (cancelled) return;
         resultCache.set(key, response);
         setResult(response);
         if (response.has_next) {
-          const next = cacheKey(source, view, page + 1);
-          if (!resultCache.has(next)) fetchPage(source, view, page + 1).then((more) => resultCache.set(next, more)).catch(() => undefined);
+          const next = cacheKey(rows_, view, page + 1);
+          if (!resultCache.has(next)) fetchPage(rows_, view, page + 1).then((more) => resultCache.set(next, more)).catch(() => undefined);
         }
       })
       .catch((error) => !cancelled && toast.error(error.message))
@@ -581,38 +650,43 @@ export default function Anime() {
     return () => {
       cancelled = true;
     };
-  }, [source, view, page]);
+  }, [source, view, page, animezReady]);
 
   const rows = useMemo(() => (result ? sorted(result.items, sort) : []), [result, sort]);
   const aliases = useMemo(
     () => result?.aliases.filter((alias) => alias.toLocaleLowerCase() !== view.query.toLocaleLowerCase()) ?? [],
     [view.query, result],
   );
-  const draft = drafts[source];
+  const draft = drafts[rows_];
 
-  function switchSource(next: AnimeSource) {
+  function switchSource(next: SearchSource) {
     if (next === source) return;
+    setSource(next);
+    // Erai-raws keeps its own search and filters; the row sources keep theirs for coming back.
+    if (next === 'erai' || source === 'erai') {
+      if (next !== 'erai') setPage(pages[next]);
+      return;
+    }
     // The search and the filters both sources have go along: the other source shows the same search.
     const sameSearch = shared(searched[source], searched[next]);
     const changed = JSON.stringify(sameSearch) !== JSON.stringify(searched[next]);
-    setDrafts((old) => ({ ...old, [next]: shared(old[source], old[next]) }));
+    setDrafts((old) => ({ ...old, [next]: shared(old[rowSource(source)], old[next]) }));
     setSearched((old) => ({ ...old, [next]: sameSearch }));
-    setSource(next);
     setPage(changed ? 0 : pages[next]);
   }
 
   function setQuery(query: string) {
-    setDrafts((old) => ({ ...old, [source]: { ...old[source], query } }));
+    setDrafts((old) => ({ ...old, [rows_]: { ...old[rows_], query } }));
   }
 
-  function setFilter<K extends keyof NyaaFilters | keyof NekobtFilters>(key: K, value: unknown) {
-    setDrafts((old) => ({ ...old, [source]: { ...old[source], filters: { ...old[source].filters, [key]: value } } }));
+  function setFilter<K extends keyof NyaaFilters | keyof AnimezFilters>(key: K, value: unknown) {
+    setDrafts((old) => ({ ...old, [rows_]: { ...old[rows_], filters: { ...old[rows_].filters, [key]: value } } }));
   }
 
   function applySearch() {
-    const next = { ...drafts[source], query: drafts[source].query.trim() };
-    setDrafts((old) => ({ ...old, [source]: next }));
-    setSearched((old) => ({ ...old, [source]: structuredClone(next) }));
+    const next = { ...drafts[rows_], query: drafts[rows_].query.trim() };
+    setDrafts((old) => ({ ...old, [rows_]: next }));
+    setSearched((old) => ({ ...old, [rows_]: structuredClone(next) }));
     setPage(0);
   }
 
@@ -698,6 +772,9 @@ export default function Anime() {
   }
 
   const nekobt = source === 'nekobt';
+  const animez = source === 'animez';
+  // Both say per release what audio and subtitles it has: filtered by them.
+  const languaged = nekobt || animez;
   const toggleSort = (key: SortKey) => setSort((current) => nextSort(current, key, FIRST_DIR));
 
   return (
@@ -707,11 +784,30 @@ export default function Anime() {
           <h1 className='font-heading text-2xl font-light tracking-tight'>Search</h1>
           <span className='text-sm text-muted-foreground'>— Browse releases and download them filed by their AniList entry.</span>
         </div>
-        <ToggleGroup aria-label='Source' value={[source]} onValueChange={(values) => { if (values[0]) switchSource(values[0] as AnimeSource); }}>
+        <ToggleGroup aria-label='Source' value={[source]} onValueChange={(values) => { if (values[0]) switchSource(values[0] as SearchSource); }}>
           <ToggleGroupItem value='nyaa'>nyaa.si</ToggleGroupItem>
           <ToggleGroupItem value='nekobt'>nekobt.to</ToggleGroupItem>
+          <ToggleGroupItem value='animez'>AnimeZ</ToggleGroupItem>
+          <ToggleGroupItem value='erai'>Erai-raws</ToggleGroupItem>
         </ToggleGroup>
       </div>
+
+      {source === 'erai' ? (
+        <AnimeErai inSearch />
+      ) : animez && animezReady === false ? (
+        <Empty>
+          <EmptyMedia><ShieldCheck /></EmptyMedia>
+          <EmptyTitle>Connect your AnimeZ account</EmptyTitle>
+          <EmptyDescription>
+            AnimeZ is a private tracker: bankai searches it with your login. In Anime Settings, under Sources, enter your AnimeZ
+            name, password and PID (the passkey on your animez.to profile page). Its downloads keep seeding until
+            the hit-and-run rule is met (74 hours for 1 GB up to 472 for 1000 GB, or 90% uploaded back), then go.
+          </EmptyDescription>
+          <EmptyActions>
+            <Button nativeButton={false} render={<Link to='/a/settings' />}>Open Anime Settings</Button>
+          </EmptyActions>
+        </Empty>
+      ) : (<>
 
       {/* Two rows of filters, then the requests they made: the table gets the height. */}
       <div className='flex shrink-0 flex-col gap-2'>
@@ -725,10 +821,13 @@ export default function Anime() {
             className='min-w-60 flex-1'
           />
           <SimpleSelect label='Quality' items={QUALITY_ITEMS} value={draft.filters.quality} onChange={(value) => setFilter('quality', value)} className='w-28' />
-          {nekobt ? (
+          {languaged ? (
             <>
               <LanguagesField label='Subtitles' languages={languages} value={(draft.filters as NekobtFilters).subtitles} onChange={(value) => setFilter('subtitles', value)} />
               <LanguagesField label='Audio' languages={languages} value={(draft.filters as NekobtFilters).audio} onChange={(value) => setFilter('audio', value)} />
+              {animez && (
+                <SimpleSelect label='Format' items={FORMAT_ITEMS} value={(draft.filters as AnimezFilters).format} onChange={(value) => setFilter('format', value)} className='w-36' />
+              )}
             </>
           ) : (
             <SimpleSelect label='Nyaa category' items={CATEGORY_ITEMS} value={(draft.filters as NyaaFilters).category} onChange={(value) => setFilter('category', value)} className='w-40' />
@@ -736,8 +835,17 @@ export default function Anime() {
         </div>
         <div className='flex flex-wrap gap-2'>
           <PublisherField publishers={publishers} value={draft.filters.publisher} onChange={(value) => setFilter('publisher', value)} />
-          {nekobt && (
+          {languaged && (
             <SimpleSelect label='Batches' items={BATCH_ITEMS} value={(draft.filters as NekobtFilters).batch} onChange={(value) => setFilter('batch', value)} className='w-36' />
+          )}
+          {animez && (
+            <ToggleGroup
+              aria-label='Freeleech only'
+              value={(draft.filters as AnimezFilters).freeleech ? ['free'] : []}
+              onValueChange={(values) => setFilter('freeleech', values.includes('free'))}
+            >
+              <ToggleGroupItem value='free' title='Only releases whose download is not counted against your ratio'>Freeleech</ToggleGroupItem>
+            </ToggleGroup>
           )}
           <Input
             type='number'
@@ -758,14 +866,14 @@ export default function Anime() {
             aria-label='Title contains, any of these, comma separated'
             className='min-w-40 flex-1'
           />
-          <Input
+          {!animez && <Input
             value={draft.filters.descriptionFilters}
             onChange={(event) => setFilter('descriptionFilters', event.target.value)}
             onKeyDown={(event) => event.key === 'Enter' && applySearch()}
             placeholder='Description contains — Deutsch, German subtitles'
             aria-label='Description contains, any of these, comma separated'
             className='min-w-40 flex-1'
-          />
+          />}
           <Button onClick={applySearch} disabled={loading}>
             {loading ? <Spinner label={`Searching ${SOURCE_LABEL[source]}`} /> : <Search data-icon='inline-start' />} Search
           </Button>
@@ -836,6 +944,13 @@ export default function Anime() {
                             </p>
                           )}
                           <p className={cn('truncate font-mono text-xs', name ? 'text-muted-foreground' : 'text-foreground')} title={entry.title}>{entry.title}</p>
+                          {languaged && (entry.audio_langs?.length || entry.sub_langs?.length || entry.freeleech) ? (
+                            <p className='mt-0.5 flex flex-wrap items-center gap-x-2 text-[0.68rem] text-muted-foreground'>
+                              {entry.audio_langs?.length ? <span title={'Audio: ' + entry.audio_langs.map(languageName).join(', ')}><Volume2 className='mr-0.5 inline size-3' />{entry.audio_langs.map((code) => code.toUpperCase()).join(' ')}</span> : null}
+                              {entry.sub_langs?.length ? <span title={'Subtitles: ' + entry.sub_langs.map(languageName).join(', ')}><Captions className='mr-0.5 inline size-3' />{entry.sub_langs.map((code) => code.toUpperCase()).join(' ')}</span> : null}
+                              {entry.freeleech && <span className='text-success'>Freeleech</span>}
+                            </p>
+                          ) : null}
                           <LibraryTags match={match} />
                         </div>
                       </div>
@@ -855,7 +970,7 @@ export default function Anime() {
                       <div className='flex justify-end gap-0.5' onClick={(event) => event.stopPropagation()}>
                         <RowAction label={`Open on ${SOURCE_LABEL[entry.source ?? 'nyaa']}`} href={entry.detail_url}><ExternalLink /></RowAction>
                         <RowAction label='Download' onClick={() => openDownload(entry)}><Download /></RowAction>
-                        <RowAction label='Copy magnet link' onClick={() => void copyMagnet(entry)}><Magnet /></RowAction>
+                        {entry.magnet_uri && <RowAction label='Copy magnet link' onClick={() => void copyMagnet(entry)}><Magnet /></RowAction>}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -882,6 +997,8 @@ export default function Anime() {
           </Button>
         </div>
       </div>
+
+      </>)}
 
       <DescriptionDrawer entry={described} onClose={() => setDescribed(null)} />
 

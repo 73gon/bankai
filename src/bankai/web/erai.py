@@ -2553,6 +2553,11 @@ async def _hevc_releases(
                 parsed = _erai_identity_name(str(release.get("title") or ""))
                 if parsed:
                     names.add(parsed[0])
+    # The catalogue holds every Erai release ever read (10,500 HEVC ones): matched whole, one show's
+    # preview spent 18 s on them (Nov 2026). Only those named like these entries are matched; what
+    # the search below finds is, whatever its name.
+    shows = {_show_name_key(name) for name in names}
+    pool = {key: item for key, item in pool.items() if _show_key(item.title) in shows}
     # Relative to Nyaa: _fetch_rss asks for "/".
     async with httpx.AsyncClient(base_url=_NYAA_BASE, headers=headers, timeout=30, follow_redirects=True) as nyaa:
         for name in sorted(names):
@@ -2929,26 +2934,33 @@ async def check_hevc_upgrades(*, entries: int = 3) -> dict[str, int]:
     from bankai.web import anime_files
     from bankai.web.anime_library import _load_codec_cache
 
-    probes = await asyncio.to_thread(_load_codec_cache)
-    checked = await asyncio.to_thread(hevc_checked)
     upgrading = upgrading_episodes()
-    rows = await asyncio.to_thread(anime_files.load)
-    now = time.time()
-    oldest: dict[int, float] = {}
-    for aid in sorted({aid for pairs in rows.values() for aid, _episode in pairs}):
-        if now - _HEVC_CHECK_FAILED.get(aid, 0.0) < 86400:
-            continue
-        for episode, paths in _entry_episode_files(aid).items():
-            if (aid, episode) in upgrading:
+
+    def stale() -> dict[int, float]:
+        # Every entry's files looked at on G: -- off the event loop: with torrents writing there one look
+        # took minutes, and bankai-web answered nothing meanwhile (Nov 2026).
+        probes = _load_codec_cache()
+        checked = hevc_checked()
+        rows = anime_files.load()
+        now = time.time()
+        oldest: dict[int, float] = {}
+        for aid in sorted({aid for pairs in rows.values() for aid, _episode in pairs}):
+            if now - _HEVC_CHECK_FAILED.get(aid, 0.0) < 86400:
                 continue
-            if "avc" not in {(probes.get(str(path)) or {}).get("codec") for path in paths}:
-                continue
-            # A German dub is never upgraded, so never looked for.
-            if any(_is_german_dub(path) for path in paths):
-                continue
-            at = checked.get((aid, episode), (0.0, False))[0]
-            if now - at >= _HEVC_CHECK_MAX_AGE:
-                oldest[aid] = min(oldest.get(aid, at), at)
+            for episode, paths in _entry_episode_files(aid).items():
+                if (aid, episode) in upgrading:
+                    continue
+                if "avc" not in {(probes.get(str(path)) or {}).get("codec") for path in paths}:
+                    continue
+                # A German dub is never upgraded, so never looked for.
+                if any(_is_german_dub(path) for path in paths):
+                    continue
+                at = checked.get((aid, episode), (0.0, False))[0]
+                if now - at >= _HEVC_CHECK_MAX_AGE:
+                    oldest[aid] = min(oldest.get(aid, at), at)
+        return oldest
+
+    oldest = await asyncio.to_thread(stale)
     due = sorted(oldest, key=oldest.__getitem__)[:entries]
     found = done = 0
     for index, aid in enumerate(due):

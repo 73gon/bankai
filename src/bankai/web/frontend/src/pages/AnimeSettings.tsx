@@ -64,6 +64,20 @@ const META: Record<string, Meta> = {
     hint: 'Kept in config.toml.',
     more: 'After a refused login bankai waits an hour before trying again, or until it is changed here.',
   },
+  'anime.animez_username': {
+    label: 'AnimeZ login',
+    hint: 'Your animez.to member name.',
+    more: "AnimeZ (the AvistaZ network's anime tracker, once AnimeTorrents) is one of Search's sources. Its releases say which audio and subtitle languages they have, so Search filters by both, as it does nekobt's.",
+  },
+  'anime.animez_password': {
+    label: 'AnimeZ password',
+    hint: 'Kept in config.toml.',
+  },
+  'anime.animez_pid': {
+    label: 'AnimeZ PID',
+    hint: 'The passkey on your animez.to profile page.',
+    more: 'A private tracker: a download keeps seeding until the hit-and-run rule is met (74 hours for 1 GB up to 472 for 1000 GB, or 90% uploaded back), then bankai removes it. Leaving earlier counts as a hit and run there.',
+  },
   'transfer.anime_shows_dir': {
     label: 'Library folder',
     hint: 'Where shows are laid out for Jellyfin.',
@@ -89,7 +103,7 @@ type Section = { id: string; title: string; description: string; icon: LucideIco
 
 const SECTIONS: Section[] = [
   { id: 'automation', title: 'Automation', description: 'What bankai downloads by itself.', icon: Bot, keys: ['anime.enabled', 'anime.auto_download_new', 'anime.backfill_enabled', 'anime.german_avc_fallback', 'anime.max_hevc_upgrades_per_cycle'] },
-  { id: 'sources', title: 'Sources', description: 'Where releases and their subtitle lists come from.', icon: Rss, keys: ['anime.rss_url', 'anime.erai_feed_token', 'anime.erai_username', 'anime.erai_password'] },
+  { id: 'sources', title: 'Sources', description: 'Where releases and their subtitle lists come from.', icon: Rss, keys: ['anime.rss_url', 'anime.erai_feed_token', 'anime.erai_username', 'anime.erai_password', 'anime.animez_username', 'anime.animez_password', 'anime.animez_pid'] },
   { id: 'storage', title: 'Library & storage', description: 'Where episodes go, and the space kept free.', icon: HardDrive, keys: ['transfer.anime_shows_dir', 'anime.min_free_space_gib', 'anime.max_concurrent_transfers'] },
   { id: 'pacing', title: 'Pacing', description: 'How often each cycle runs, and how much it does.', icon: Timer, keys: ['anime.poll_interval_seconds', 'anime.settle_minutes', 'anime.max_enqueues_per_cycle', 'anime.backfill_request_delay_seconds'] },
 ];

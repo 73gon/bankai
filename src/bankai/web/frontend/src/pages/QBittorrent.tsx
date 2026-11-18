@@ -522,7 +522,7 @@ export default function QBittorrent() {
           <EmptyDescription>{query ? 'Try another filter.' : 'qBittorrent has no downloads yet.'}</EmptyDescription>
         </Empty>
       ) : (
-          <Table variant='plain' dense style={{ minWidth: tableWidth }} containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+          <Table variant='plain' size='sm' style={{ minWidth: tableWidth }} containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
             <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
               <TableRow>
                 <SortHeader label='Name' column='name' sort={sort} onSort={toggleSort} />

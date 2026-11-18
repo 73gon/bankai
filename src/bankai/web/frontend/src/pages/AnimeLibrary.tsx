@@ -1317,7 +1317,7 @@ export default function AnimeLibrary() {
                     </p>
                   );
                 })()}
-                <Table variant='plain' dense containerProps={{ className: 'shrink-0' }}>
+                <Table variant='plain' size='sm' containerProps={{ className: 'shrink-0' }}>
                     <TableHeader><TableRow><TableHead className='w-7 pr-2'>{(() => {
                       // "Select all in this tab": every row of it that is a file, or a missing episode to fill.
                       const files = active.episodes.filter((entry) => entry.season_number === season).map(tickKey).filter((key): key is string => key !== null);
@@ -1459,7 +1459,7 @@ export default function AnimeLibrary() {
                     })}
                     title='Replace the selected episodes, and download the missing ones, from the torrent of a magnet link'
                   >
-                    <Magnet data-icon='inline-start' /> {activeChecked.length ? 'Replace' : 'Download'} with magnet link…
+                    <Magnet data-icon='inline-start' /> {activeChecked.length ? 'Replace' : 'Download'} with magnet or .torrent…
                   </Button>
                 )}
                 {!isUnmatched(active) && (
@@ -1608,7 +1608,7 @@ export default function AnimeLibrary() {
           </div>
           <DialogBody>
             {searching ? <div className='flex h-40 items-center justify-center'><Spinner label='Searching' /></div> : shownResults.length ? (
-              <Table dense>
+              <Table size='sm'>
                 <TableHeader>
                   <TableRow>
                     <TableHead className='w-full'>Release</TableHead>
@@ -1665,7 +1665,7 @@ export default function AnimeLibrary() {
           </DialogHeader>
           <DialogBody>
             {missingReleases === null ? <div className='flex h-40 items-center justify-center'><Spinner label='Loading the releases' /></div> : missingReleases.length ? (
-              <Table dense>
+              <Table size='sm'>
                 <TableHeader>
                   <TableRow>
                     <TableHead className='w-7 pr-2'>
@@ -1848,7 +1848,7 @@ export default function AnimeLibrary() {
                 })}
               </div>
             ) : bulkShows.length ? (
-              <Table dense>
+              <Table size='sm'>
                 <TableHeader>
                   <TableRow>
                     <TableHead className='w-7 pr-2'>

@@ -108,7 +108,8 @@ def classify_reason(raw: str | None) -> tuple[str, str] | None:
     if not raw:
         return None
     body = _ERROR_PREFIX_RE.sub("", raw).strip()
-    haystack = body.lower()
+    # Links left out: a Prowlarr link's base64 held "vOe", and a 429 from it read "Stream extraction failed".
+    haystack = re.sub(r"\b(?:https?|magnet):\S+", " ", body).lower()
     for code, label, keywords in _RULES:
         if any(kw in haystack for kw in keywords):
             return code, label

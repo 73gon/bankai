@@ -152,12 +152,15 @@ def _aired_missing(aid: int, have: set[int]) -> list[int]:
         return []
     today = date.today().isoformat()
     ended = anilist.finished(aid)
+    # AniList dates only a running show's recent episodes: one before an episode that has aired
+    # has aired too (One Piece's first 894 were never looked for).
+    latest = max((ep.number for ep in listed if ep.aired and ep.aired[:10] <= today), default=0)
     return [
         ep.number
         for ep in listed
         if ep.number >= 1
         and ep.number not in have
-        and ((ep.aired and ep.aired[:10] <= today) or (not ep.aired and ended))
+        and ((ep.aired and ep.aired[:10] <= today) or (not ep.aired and (ended or ep.number < latest)))
     ]
 
 
@@ -217,7 +220,8 @@ async def _find_releases(
     From the catalogue already crawled, then Nyaa searched under each entry's
     names, and an episode none of that reached searched by its number, as
     the drawer's search does. Every result is identified as the automation
-    would. 1080p first, then HEVC; a batch covering more of the wanted
+    would. 1080p first, whatever the encode (the Encode page makes an AVC
+    one HEVC); a batch covering more of the wanted
     episodes is one download for them; then seeders. Each candidate is
     checked for German in that order, and a release without seeders is none.
     """
@@ -265,7 +269,7 @@ async def _find_releases(
                 for episode in range(first, min(last, erai.SEASON_PACK_LAST - 1) + 1)
                 if (aid, episode) in wanted
             ]
-            score = (erai._resolution(item) == 1080, erai._is_hevc(item), len(covered), int(item.seeders or 0))
+            score = (erai._resolution(item) == 1080, len(covered), int(item.seeders or 0))
             for episode in covered:
                 found.setdefault((aid, episode), []).append((score, item, first, last))
         for rows in found.values():
@@ -326,6 +330,22 @@ async def _find_releases(
     return picked
 
 
+def _searched(held: dict[int, Any]) -> set[int]:
+    """The entries whose missing episodes are looked for: those with files, and every season of
+    every collection (one with nothing on disk too) -- what the library counts as missing,
+    specials aside. Before, only entries with files: a season with none on disk (Danmachi's
+    later ones, To Your Eternity) was never searched, and of the library's 3,911 missing
+    episodes 24 were (Nov 2026)."""
+    from bankai.web import anime_collections
+
+    store = anime_collections.load()
+    entries = set(held)
+    for row in store.collections.values():
+        placing = anime_collections.plan(row, episodes_on_disk=lambda aid: max(held.get(aid) or [0]), store=store)
+        entries.update(aid for season in placing.season_lists() for aid in season)
+    return entries
+
+
 async def check_missing_episodes(*, entries: int = 3) -> dict[str, int]:
     """Look, without downloading, for releases of a few entries' missing episodes.
 
@@ -341,16 +361,17 @@ async def check_missing_episodes(*, entries: int = 3) -> dict[str, int]:
     blocked = erai._policy_anilist_ids(await asyncio.to_thread(erai._load_policies))
     busy = on_their_way(state)
     held = anime_files.by_entry(rows)
+    searched = await asyncio.to_thread(_searched, held)
     now = time.time()
     queued = 0
     if get_settings().anime.auto_download_new:
         # Found by an earlier pass, while still new: queued now, not after the next search.
         waiting: dict[int, list[dict[str, Any]]] = {}
         for (aid, episode), row in available(state).items():
-            if aid in held and aid not in blocked and row.get("first") == row.get("last") == episode:
+            if aid in searched and aid not in blocked and row.get("first") == row.get("last") == episode:
                 waiting.setdefault(aid, []).append({**row, "episode": episode})
         for aid, found_rows in waiting.items():
-            fresh = _new_episodes(aid, set(held[aid]), held)
+            fresh = _new_episodes(aid, set(held.get(aid) or ()), held)
             new = [
                 {**row, "anilist_id": aid, "batch": False,
                  "episodes": [{"anilist_id": aid, "anilist_episode": row["episode"]}]}
@@ -362,11 +383,12 @@ async def check_missing_episodes(*, entries: int = 3) -> dict[str, int]:
                 except Exception as exc:  # noqa: BLE001 -- offered in the drawer as before
                     log.warning("New episodes of AniList %s not queued: %s", aid, exc)
     oldest: dict[int, float] = {}
-    for aid in sorted(held):
+    for aid in sorted(searched):
         if aid in blocked or now - _FAILED.get(aid, 0.0) < 86400:
             continue
-        fresh = _new_episodes(aid, set(held[aid]), held)
-        for episode in _aired_missing(aid, set(held[aid])):
+        have = set(held.get(aid) or ())
+        fresh = _new_episodes(aid, have, held)
+        for episode in _aired_missing(aid, have):
             if (aid, episode) in busy:
                 continue
             row = looked.get((aid, episode)) or {}

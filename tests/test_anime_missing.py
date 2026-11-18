@@ -106,6 +106,16 @@ def test_a_missing_episode_with_a_german_release_is_recorded_and_counted(client,
     assert asyncio.run(anime_missing.check_missing_episodes())["checked"] == 0
 
 
+
+def test_an_avc_release_is_taken_as_readily_as_hevc(client, show):
+    # The encoder makes it HEVC: the better-seeded one wins whatever its encode.
+    avc = release("[Erai-raws] Show - 03 [1080p][AVC][MultiSub][GER]", 3, seeders=90)
+    show.extend([release("[Erai-raws] Show - 03 [1080p][HEVC][MultiSub][GER]", 30, seeders=10), avc])
+
+    asyncio.run(anime_missing.check_missing_episodes())
+
+    assert anime_missing.checked()[(555, 3)]["info_hash"] == avc.info_hash
+
 def test_a_release_without_german_is_not_offered(client, show):
     show.append(release("[Erai-raws] Show - 03 [1080p][HEVC][MultiSub]", 3))
 
@@ -214,3 +224,35 @@ def test_upgrade_all_lists_the_episodes_an_upgrade_was_found_for(client, show, t
     assert response.json()["queued"] == 1 and response.json()["failed"] == []
     assert asked == [([555], approved)]
     assert client.get("/api/anime/library/bulk", params={"kind": "nope"}).status_code == 422
+
+
+def test_episodes_before_one_that_aired_have_aired_though_undated(monkeypatch):
+    # AniList dates only a running show's recent episodes (One Piece).
+    from bankai.web import anime_library
+
+    listed = [anime_library.EntryEpisode(1, None, None), anime_library.EntryEpisode(2, None, "2020-01-01"),
+              anime_library.EntryEpisode(3, None, None)]
+    monkeypatch.setattr(anime_library, "roster", lambda _aid: listed)
+    monkeypatch.setattr(anime_missing.anilist, "finished", lambda _aid: False)
+
+    assert anime_missing._aired_missing(21, set()) == [1, 2]
+
+
+def test_every_season_of_a_collection_is_searched_with_or_without_files(monkeypatch):
+    from bankai.web import anime_collections
+
+    store = anime_collections.Store()
+    store.collections[1] = anime_collections.Collection(id=1, members=[10, 11], title=10)
+    store.collections[2] = anime_collections.Collection(id=2, members=[20], title=20)
+
+    class Placing:
+        def __init__(self, members):
+            self.members = members
+
+        def season_lists(self):
+            return [[aid] for aid in self.members]
+
+    monkeypatch.setattr(anime_collections, "load", lambda: store)
+    monkeypatch.setattr(anime_collections, "plan", lambda row, **_kw: Placing(row.members))
+
+    assert anime_missing._searched({10: {1: ["a"]}, 99: {1: ["b"]}}) == {10, 11, 20, 99}

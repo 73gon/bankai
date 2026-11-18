@@ -140,6 +140,12 @@ class AnimeAutomationSettings(BaseModel):
     # directory; with the login bankai fetches them. Off while either is empty.
     erai_username: str = ""
     erai_password: str = ""
+    # The user's animez.to login (the AvistaZ network's anime tracker, ex-AnimeTorrents): its
+    # name, password and PID (the passkey on the site's profile page). Search's AnimeZ source;
+    # off while any is empty. Private: its torrents seed their H&R time (torrent.seeding).
+    animez_username: str = ""
+    animez_password: str = ""
+    animez_pid: str = ""
     # When an episode's HEVC encode has no German subtitles but Erai-raws lists
     # them for another encode of it (AVC), take that one: German is required,
     # HEVC only preferred.
@@ -217,6 +223,16 @@ class MangaSettings(BaseModel):
     openpanel_url: str = ""
     openpanel_username: str = ""
     openpanel_password: str = ""
+
+
+class AvistazSettings(BaseModel):
+    """The user's avistaz.to login (Asian films and shows, some with German audio): name,
+    password and PID (the passkey on the site's profile page). Movies & Shows' Torrents page
+    and its German review search it; off while any is empty. Private, like AnimeZ."""
+
+    username: str = ""
+    password: str = ""
+    pid: str = ""
 
 
 class QueueSettings(BaseModel):
@@ -357,6 +373,7 @@ class Settings(BaseSettings):
     transfer: TransferSettings = Field(default_factory=TransferSettings)
     anime: AnimeAutomationSettings = Field(default_factory=AnimeAutomationSettings)
     manga: MangaSettings = Field(default_factory=MangaSettings)
+    avistaz: AvistazSettings = Field(default_factory=AvistazSettings)
     paths: PathsSettings = Field(default_factory=PathsSettings)
     prowlarr: ProwlarrSettings = Field(default_factory=ProwlarrSettings)
     qbittorrent: QBittorrentSettings = Field(default_factory=QBittorrentSettings)

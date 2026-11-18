@@ -230,7 +230,7 @@ export function AgeRatingsPanel() {
           </Button>
         </div>
       </div>
-      <Table variant='plain' dense>
+      <Table variant='plain' size='sm'>
         <TableHeader>
           <TableRow>
             <TableHead className='w-8'>

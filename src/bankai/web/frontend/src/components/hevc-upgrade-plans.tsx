@@ -63,7 +63,7 @@ export function HevcUpgradePlans({
               </span>
             </span>
           </label>
-          <Table dense>
+          <Table size='sm'>
             <TableHeader>
               <TableRow>
                 <TableHead>Replaces</TableHead>

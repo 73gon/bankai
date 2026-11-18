@@ -2,8 +2,8 @@
 
 Read from ``/proc`` (the WSL distro's own view: its CPUs and the memory WSL
 gives it) and from ``nvidia-smi`` (WSL's copy under ``/usr/lib/wsl/lib``),
-which also says how hard NVENC works -- the Encode page's encodes. CPU,
-network and swap traffic are rates, so each read is compared with the one before it.
+which also says how hard NVENC works -- the Encode page's encodes. CPU and
+network are rates, so each read is compared with the one before it.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 _LOCK = threading.Lock()
 _LAST_CPU: tuple[int, int] | None = None
 _LAST_NET: tuple[float, int, int] | None = None
-_LAST_SWAP: tuple[float, int, int] | None = None
+_PEAK_NET = 0.0
 _GPU: tuple[float, list[dict[str, Any]] | None] = (0.0, None)
 # nvidia-smi takes a few hundred milliseconds; asked at most this often.
 _GPU_SECONDS = 2.0
@@ -113,37 +113,15 @@ def _memory() -> dict[str, Any]:
         "cached": info.get("Cached", 0) + info.get("Buffers", 0),
         "swap_total": swap_total,
         "swap_used": swap_total - info.get("SwapFree", 0),
-        **_swap_traffic(),
     }
 
 
-def _swap_traffic() -> dict[str, float | None]:
-    """Bytes a second moved out of swap and into it since the last read. A full swap is no trouble
-    by itself -- pages of programs idle for days stay there and nothing reads them -- traffic is."""
-    global _LAST_SWAP
-    counts: dict[str, int] = {}
-    with Path("/proc/vmstat").open(encoding="ascii") as handle:
-        for line in handle:
-            key, _, value = line.partition(" ")
-            if key in ("pswpin", "pswpout"):
-                counts[key] = int(value)
-    page = os.sysconf("SC_PAGE_SIZE")
-    swapped_in, swapped_out = counts.get("pswpin", 0) * page, counts.get("pswpout", 0) * page
-    now = time.monotonic()
-    rates: dict[str, float | None] = {"swap_in_per_second": None, "swap_out_per_second": None}
-    if _LAST_SWAP is not None and now > _LAST_SWAP[0]:
-        seconds = now - _LAST_SWAP[0]
-        rates = {
-            "swap_in_per_second": max(0.0, (swapped_in - _LAST_SWAP[1]) / seconds),
-            "swap_out_per_second": max(0.0, (swapped_out - _LAST_SWAP[2]) / seconds),
-        }
-    _LAST_SWAP = (now, swapped_in, swapped_out)
-    return rates
-
-
 def _network() -> dict[str, Any]:
-    """Bytes a second in and out since the last read, every interface but loopback and tunnels."""
-    global _LAST_NET
+    """Bytes a second in and out since the last read, every interface but loopback, tunnels and
+    docker's bridges (their traffic crosses eth0 too), what went each way since the distro booted,
+    and the busiest second seen since bankai-web started: the meters' scale, as a link's speed
+    is not known."""
+    global _LAST_NET, _PEAK_NET
     received = sent = 0
     with Path("/proc/net/dev").open(encoding="ascii") as handle:
         for line in handle.readlines()[2:]:
@@ -155,15 +133,18 @@ def _network() -> dict[str, Any]:
             received += int(fields[0])
             sent += int(fields[8])
     now = time.monotonic()
-    rates = {"received_per_second": None, "sent_per_second": None}
+    out: dict[str, Any] = {
+        "received_per_second": None, "sent_per_second": None,
+        "received_total": received, "sent_total": sent,
+    }
     if _LAST_NET is not None and now > _LAST_NET[0]:
         seconds = now - _LAST_NET[0]
-        rates = {
-            "received_per_second": max(0.0, (received - _LAST_NET[1]) / seconds),
-            "sent_per_second": max(0.0, (sent - _LAST_NET[2]) / seconds),
-        }
+        out["received_per_second"] = max(0.0, (received - _LAST_NET[1]) / seconds)
+        out["sent_per_second"] = max(0.0, (sent - _LAST_NET[2]) / seconds)
+        _PEAK_NET = max(_PEAK_NET, out["received_per_second"], out["sent_per_second"])
+    out["peak_per_second"] = _PEAK_NET or None
     _LAST_NET = (now, received, sent)
-    return rates
+    return out
 
 
 def sample() -> dict[str, Any]:

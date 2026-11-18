@@ -61,6 +61,12 @@ FAILED = "failed"
 DISCARDED = "discarded"
 OWNED = "owned"
 ACTIVE = frozenset({QUEUED, DOWNLOADING, PUBLISHING})
+# A download that has not moved for this long is given up: an old torrent whose seeders Nyaa still
+# lists but nobody can reach -- BEASTARS v04 (2020) sat ten days without even its file list (Nov 2026).
+STALL_SECONDS = 2 * 86400
+# Errored torrents are checked and started again this often before the download counts as failed:
+# "missingFiles" is what qBittorrent says of a folder not there yet when it started (G: after a reboot).
+ERROR_RETRIES = 2
 
 _NYAA = "https://nyaa.si"
 CATEGORY = "3_1"  # Literature - English-translated
@@ -200,8 +206,12 @@ def match(
         return sorted(found, key=lambda aid: (_is_novel(aid), aid))[0], True
     if searched is not None and (_is_novel(searched) or not release.tagged_novel):
         titles = [anilist.normalise(title) for title in manga_meta.titles(searched)]
-        for name in release.names:
+        for at, name in enumerate(release.names):
             key = anilist.normalise(name)
+            # One word of a release's other name is no guess: "Hoozuki-san Chi no Aneki | +Imouto" is not
+            # "Imouto no Ane" (Nov 2026). Its own name alone may be ("Frieren").
+            if at and len(key.split()) < 2:
+                continue
             if key and any(title.startswith(f"{key} ") for title in titles):
                 return searched, True
     return None, False
@@ -534,7 +544,7 @@ async def _discover(settings: Any) -> dict[str, Any]:
     try:
         from bankai.web import manga_collections
 
-        manga_collections.refresh(manga_collections.present())
+        await asyncio.to_thread(lambda: manga_collections.refresh(manga_collections.present()))
     except Exception as exc:
         log.warning("[manga] collections could not be updated: %s", exc)
     from bankai.web import manga_views
@@ -889,7 +899,10 @@ def approve(info_hash: str, *, auto: bool = False) -> dict[str, Any]:
     short = _free_enough(row)
     if short:
         raise ValueError(f"not enough room: {short}")
-    return _change(info_hash, status=QUEUED, approved_at=time.time(), auto=auto, error=None, reason=None, picked=False, copied=None, left=None)
+    return _change(
+        info_hash, status=QUEUED, approved_at=time.time(), auto=auto, error=None, reason=None, picked=False, copied=None,
+        left=None, retries=0, moved_at=time.time(),
+    )
 
 
 def discard(info_hash: str) -> dict[str, Any]:
@@ -1098,7 +1111,8 @@ async def reconcile() -> dict[str, Any]:
     """Approved releases: added to qBittorrent, followed, and filed once complete."""
     from bankai.torrent.qbittorrent import QBittorrentClient
 
-    active = {key: row for key, row in releases().items() if row.get("status") in (QUEUED, DOWNLOADING)}
+    # Publishing too: a restart while one was filed left it so, and nothing took it up again (Nov 2026).
+    active = {key: row for key, row in releases().items() if row.get("status") in ACTIVE}
     if not active:
         return {}
     settings = get_settings().manga
@@ -1108,7 +1122,7 @@ async def reconcile() -> dict[str, Any]:
         torrents = {torrent.hash.lower(): torrent for torrent in await qbit.list_torrents()}
         for info_hash, row in active.items():
             # Stopped since the pass began (its series removed): left alone, and never brought back.
-            if (releases().get(info_hash) or {}).get("status") not in (QUEUED, DOWNLOADING):
+            if (releases().get(info_hash) or {}).get("status") not in ACTIVE:
                 continue
             entry = row.get("entry") or {}
             torrent = torrents.get(info_hash)
@@ -1120,14 +1134,47 @@ async def reconcile() -> dict[str, Any]:
                         category=settings.qbittorrent_category,
                         save_path=save_path(),
                     )
-                    _change(info_hash, only=ACTIVE, status=DOWNLOADING, progress=0.0, error=None)
+                    _change(info_hash, only=ACTIVE, status=DOWNLOADING, progress=0.0, error=None, moved_at=time.time())
                 except Exception as exc:
                     _change(info_hash, only=ACTIVE, error=f"qBittorrent: {exc}")
                 continue
             phase = _phase(torrent)
+            now = time.time()
             if phase == "error":
-                _change(info_hash, only=ACTIVE, status=FAILED, error=f"qBittorrent: {torrent.state}")
-            elif phase == "downloading":
+                tries = int(row.get("retries") or 0)
+                if tries < ERROR_RETRIES:
+                    try:
+                        await qbit.recheck(info_hash)
+                        await qbit.resume(info_hash)
+                        log.info("[manga] %s: qBittorrent said %s, checked and started again", entry.get("title"), torrent.state)
+                    except Exception as exc:
+                        log.warning("[manga] %s could not be started again: %s", info_hash[:8], exc)
+                    _change(info_hash, only=ACTIVE, status=DOWNLOADING, retries=tries + 1, moved_at=now)
+                else:
+                    _change(info_hash, only=ACTIVE, status=FAILED, error=f"qBittorrent: {torrent.state}")
+                continue
+            if phase == "downloading":
+                moved = round(float(torrent.progress), 3) > float(row.get("progress") or 0)
+                since = float(row.get("moved_at") or row.get("approved_at") or now)
+                if not moved and now - since > STALL_SECONDS:
+                    # Given up: the torrent goes, and the series' next release may be tried (auto_review).
+                    try:
+                        await qbit.remove(info_hash, delete_files=True)
+                    except Exception as exc:
+                        log.warning("[manga] torrent %s could not be removed: %s", info_hash[:8], exc)
+                    days = round((now - since) / 86400)
+                    _change(info_hash, only=ACTIVE, status=FAILED, error=f"No progress in {days} days: no seeder reachable")
+                    log.info("[manga] %s: no progress in %d days, given up", entry.get("title"), days)
+                    continue
+                if moved:
+                    _change(info_hash, only=ACTIVE, moved_at=now)
+                if str(torrent.state).casefold() in {"stoppeddl", "pauseddl"}:
+                    # A start sent while its recheck ran is lost: it stays stopped after the check (Nov 2026).
+                    # Nothing else stops the manga category's torrents.
+                    try:
+                        await qbit.resume(info_hash)
+                    except Exception as exc:
+                        log.warning("[manga] %s could not be started: %s", info_hash[:8], exc)
                 if not row.get("picked"):
                     try:
                         if await _pick(qbit, info_hash, row) and releases()[info_hash].get("status") == DONE:
@@ -1135,7 +1182,7 @@ async def reconcile() -> dict[str, Any]:
                     except Exception as exc:
                         log.warning("[manga] the files of %s could not be picked: %s", info_hash[:8], exc)
                 _change(info_hash, only=ACTIVE, status=DOWNLOADING, progress=round(float(torrent.progress), 3))
-            else:
+            if phase == "complete":
                 _change(info_hash, only=ACTIVE, status=PUBLISHING, progress=1.0)
                 progress.update(step="filing", series=manga_meta.name(row["anilist_id"]))
                 try:
@@ -1148,8 +1195,16 @@ async def reconcile() -> dict[str, Any]:
                     for file in listed
                     if int(file.get("priority", 1)) > 0 and float(file.get("progress") or 0) >= 1
                 } if listed else None
+                content = Path(torrent.content_path)
+                # Just finished, qBittorrent may not have the file under its last name yet (a ".!qB" one):
+                # filed then, it "held no CBZ" and Tanya the Evil Vol.35 sat seeding as failed (Nov 2026).
+                if not await asyncio.to_thread(lambda: content.exists() and all(Path(path).is_file() for path in finished or ())):
+                    # Taken up again next pass, which reads downloading ones only.
+                    _change(info_hash, only=ACTIVE, status=DOWNLOADING, progress=1.0)
+                    progress.clear()
+                    continue
                 try:
-                    result = await asyncio.to_thread(file_release, row, Path(torrent.content_path), finished=finished)
+                    result = await asyncio.to_thread(file_release, row, content, finished=finished)
                 except (OSError, ValueError) as exc:
                     _change(info_hash, only=ACTIVE, status=FAILED, error=str(exc))
                     continue

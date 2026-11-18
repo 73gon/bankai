@@ -27,6 +27,11 @@ Environment=BANKAI_LIBRARY_WORKER=external
 ExecStart=/home/malik/projects/bankai/.venv/bin/bankai web serve --host 127.0.0.1 --port 3003
 Restart=on-failure
 RestartSec=10
+# A restart stops the web server alone. Jobs (downloads, the dub pipeline) are detached processes,
+# each under its own supervisor that records its result itself, and the next bankai-web finds them
+# in the job registry still running. With the default (control-group) every restart -- any deploy --
+# killed them, and they showed "Timed out" (Nov 2026).
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

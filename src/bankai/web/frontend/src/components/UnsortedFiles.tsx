@@ -229,7 +229,7 @@ export function UnsortedFiles({ onChanged, onCount }: { onChanged?: () => void; 
                 </Button>
               </div>
             </div>
-            <Table variant='plain' dense containerProps={{ className: 'max-h-96 overflow-auto' }}>
+            <Table variant='plain' size='sm' containerProps={{ className: 'max-h-96 overflow-auto' }}>
               <TableHeader className='sticky top-0 z-10 bg-(--control-surface)'>
                 <TableRow>
                   <TableHead className='w-7 pr-2'>

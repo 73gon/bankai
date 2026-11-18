@@ -59,7 +59,7 @@ function LanguageTable({ title, icon: Icon, rows, off, locked, onToggle, onOpen 
         <span className='ml-auto text-xs text-muted-foreground'>{rows.length} language{rows.length === 1 ? '' : 's'}</span>
       </CardHeader>
       {rows.length ? (
-        <Table variant='plain' dense containerProps={{ className: 'max-h-[60dvh] overflow-auto' }}>
+        <Table variant='plain' size='sm' containerProps={{ className: 'max-h-[60dvh] overflow-auto' }}>
           <TableHeader className='sticky top-0 z-10 bg-(--control-surface)'>
             <TableRow>
               <TableHead className='w-full'>Language</TableHead>

@@ -443,6 +443,13 @@ def test_the_show_nfo_reads_plainly_and_says_whether_it_continues(titan) -> None
     assert _xml(anime_layout.tvshow_nfo(row, AOT)).findtext("status") == "Continuing"
 
 
+def test_the_show_nfo_carries_its_tags(titan) -> None:
+    row = _titan_store().collections[1]
+
+    assert [t.text for t in _xml(anime_layout.tvshow_nfo(row, AOT, ["German Dub"])).findall("tag")] == ["German Dub"]
+    assert _xml(anime_layout.tvshow_nfo(row, AOT)).find("tag") is None
+
+
 def test_nfo_files_are_written_next_to_the_files_in_the_library(titan, roots) -> None:
     store = _titan_store()
     files = {_place(AOT, 1, 1): [(S1, 1)], _place(AOT, 4, 1): [(S3P2, 1)], _place(AOT, 0, 2): [(OVA, 2)]}

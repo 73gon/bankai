@@ -210,7 +210,7 @@ export function BrowserAudioCard({ scope, label }: { scope: TrackScopeName; labe
                   </Button>
                   <span className='text-xs text-muted-foreground'>The {files.length} with the most to add first{state.enabled ? '' : '; done one at a time even while the switch is off'}.</span>
                 </div>
-                <Table variant='plain' dense>
+                <Table variant='plain' size='sm'>
                   <TableHeader>
                     <TableRow>
                       <TableHead className='w-8'><span className='sr-only'>Pick</span></TableHead>

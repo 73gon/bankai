@@ -170,6 +170,8 @@ def test_searched_for_a_name_that_starts_the_series_title_is_a_guess_and_one_tha
 
     assert manga_releases.match(parse("Frieren - (Chapters 141-147)"), 300 * 2**20, index(), searched=FRIEREN) == (FRIEREN, True)
     assert manga_releases.match(parse("Frieren - Beyond Journey's End -Prelude- [Yen Press] [Stick]"), 15 * 2**20, index(), searched=FRIEREN) == (None, False)
+    # One word of the release's other name is no guess: "Hoozuki-san Chi no Aneki | +Imouto" was taken for "Imouto no Ane".
+    assert manga_releases.match(parse("Other Story | +Frieren"), 300 * 2**20, index(), searched=FRIEREN) == (None, False)
 
 
 def test_a_release_whose_tags_say_novel_is_no_manga(library):
@@ -404,6 +406,12 @@ class FakeQbit:
     async def file_priority(self, info_hash, indexes, priority):
         self.priorities.append((info_hash, indexes, priority))
 
+    async def recheck(self, info_hash):
+        self.rechecked = [*getattr(self, "rechecked", []), info_hash]
+
+    async def resume(self, info_hash):
+        self.resumed = [*getattr(self, "resumed", []), info_hash]
+
 
 class Torrent:
     def __init__(self, info_hash, state, progress, content_path):
@@ -435,6 +443,43 @@ def test_an_approved_release_is_added_to_qbittorrent_then_filed_and_removed_once
     assert fake.removed == [second]
     assert scans == [True]
     assert (manga_library.folder_of(FRIEREN) / "Vol 02.cbz").read_bytes() == b"volume two"
+
+
+def test_a_finished_download_whose_file_is_not_there_yet_waits_instead_of_failing(library, monkeypatch):
+    # Just finished, qBittorrent's file was not under its last name yet: Tanya the Evil Vol.35 "held no CBZ"
+    # and sat seeding as failed (Nov 2026).
+    from bankai.torrent import qbittorrent
+
+    [ident] = found(library, "Frieren v02 (Digital) (1r0n)")
+    manga_releases.approve(ident)
+    content = library["downloads"] / "manga" / "Frieren v02 (Digital) (1r0n).cbz"
+    fake = FakeQbit([Torrent(ident, "uploading", 1.0, content)])
+    monkeypatch.setattr(qbittorrent, "QBittorrentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(openpanel, "scan", lambda: asyncio.sleep(0))
+
+    asyncio.run(manga_releases.reconcile())
+    assert manga_releases.releases()[ident]["status"] == "downloading"
+
+    content.parent.mkdir(parents=True)
+    content.write_bytes(b"volume two")
+    asyncio.run(manga_releases.reconcile())
+    assert manga_releases.releases()[ident]["status"] == "done"
+
+
+def test_a_release_left_publishing_by_a_restart_is_filed_on_the_next_pass(library, monkeypatch):
+    from bankai.torrent import qbittorrent
+
+    [ident] = found(library, "Frieren v02 (Digital) (1r0n)")
+    manga_releases.approve(ident)
+    manga_releases._change(ident, status="publishing")
+    content = library["downloads"] / "manga" / "Frieren v02 (Digital) (1r0n).cbz"
+    content.parent.mkdir(parents=True)
+    content.write_bytes(b"volume two")
+    monkeypatch.setattr(qbittorrent, "QBittorrentClient", lambda *a, **k: FakeQbit([Torrent(ident, "stalledUP", 1.0, content)]))
+    monkeypatch.setattr(openpanel, "scan", lambda: asyncio.sleep(0))
+
+    asyncio.run(manga_releases.reconcile())
+    assert manga_releases.releases()[ident]["status"] == "done"
 
 
 def test_qbittorrent_downloads_only_what_the_library_lacks_and_nothing_when_it_lacks_nothing(library, monkeypatch):
@@ -1112,3 +1157,59 @@ def test_every_entry_of_a_collection_shows_the_same_graph_its_main_line_in_order
     shape = lambda graph: (sorted(node["anilist_id"] for node in graph["nodes"]), graph["members"])  # noqa: E731
     assert shape(first) == shape(second) == (sorted([GHOUL, GHOUL_RE, GHOUL_JACK]), [GHOUL, GHOUL_RE])
     assert (first["root"], second["root"]) == (GHOUL, GHOUL_RE)
+
+
+def test_a_download_that_never_moves_is_given_up(library, monkeypatch):
+    """An old torrent whose seeders Nyaa lists but nobody reaches: BEASTARS v04 sat ten days (Nov 2026)."""
+    import time
+
+    from bankai.torrent import qbittorrent
+
+    [ident] = found(library, "Frieren v02 (Digital) (1r0n)")
+    manga_releases.approve(ident)
+    fake = FakeQbit([Torrent(ident, "metaDL", 0.0, library["downloads"] / "manga" / "x")])
+    monkeypatch.setattr(qbittorrent, "QBittorrentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(openpanel, "scan", lambda: asyncio.sleep(0))
+
+    asyncio.run(manga_releases.reconcile())
+    assert manga_releases.releases()[ident]["status"] == "downloading"
+    manga_releases._change(ident, moved_at=time.time() - manga_releases.STALL_SECONDS - 60)
+    asyncio.run(manga_releases.reconcile())
+    row = manga_releases.releases()[ident]
+    assert row["status"] == "failed" and "No progress" in row["error"]
+    assert fake.removed == [ident]
+
+
+def test_an_errored_torrent_is_checked_and_started_again_before_it_fails(library, monkeypatch):
+    """"missingFiles": the download folder not there yet when qBittorrent started (G: after a reboot)."""
+    from bankai.torrent import qbittorrent
+
+    [ident] = found(library, "Frieren v02 (Digital) (1r0n)")
+    manga_releases.approve(ident)
+    fake = FakeQbit([Torrent(ident, "missingFiles", 0.0, library["downloads"] / "manga" / "x")])
+    monkeypatch.setattr(qbittorrent, "QBittorrentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(openpanel, "scan", lambda: asyncio.sleep(0))
+
+    for _ in range(manga_releases.ERROR_RETRIES):
+        asyncio.run(manga_releases.reconcile())
+        assert manga_releases.releases()[ident]["status"] == "downloading"
+    assert fake.rechecked == [ident] * manga_releases.ERROR_RETRIES
+    asyncio.run(manga_releases.reconcile())
+    assert manga_releases.releases()[ident]["status"] == "failed"
+    # Approved again by hand: it is tried afresh.
+    manga_releases.approve(ident)
+    asyncio.run(manga_releases.reconcile())
+    assert manga_releases.releases()[ident]["status"] == "downloading"
+
+
+def test_a_stopped_download_is_started_again(library, monkeypatch):
+    from bankai.torrent import qbittorrent
+
+    [ident] = found(library, "Frieren v02 (Digital) (1r0n)")
+    manga_releases.approve(ident)
+    fake = FakeQbit([Torrent(ident, "stoppedDL", 0.3, library["downloads"] / "manga" / "x")])
+    monkeypatch.setattr(qbittorrent, "QBittorrentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(openpanel, "scan", lambda: asyncio.sleep(0))
+
+    asyncio.run(manga_releases.reconcile())
+    assert fake.resumed == [ident]

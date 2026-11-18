@@ -147,6 +147,14 @@ def matches(row: dict[str, Any], *, quality: str | None, include: list[str], exc
     return not any(term in title for term in exclude)
 
 
+def _audio_languages(candidate: Any) -> list[str]:
+    """An AvistaZ row's audio besides English, named as ``languages`` names them."""
+    names = {"de": "German", "fr": "French", "it": "Italian", "es": "Spanish", "es-419": "Spanish", "hi": "Hindi",
+             "ru": "Russian", "ko": "Korean", "ja": "Japanese", "zh": "Chinese", "yue": "Cantonese", "th": "Thai"}
+    codes = [code for code in getattr(candidate, "audio_langs", None) or [] if code != "en"]
+    return list(dict.fromkeys(names.get(code, code.upper()) for code in codes))
+
+
 def _row(candidate: Any) -> dict[str, Any]:
     ident = candidate.info_hash or hashlib.sha1(
         (candidate.download_url or candidate.magnet_uri or candidate.title).encode()
@@ -162,7 +170,8 @@ def _row(candidate: Any) -> dict[str, Any]:
         "resolution": resolution(candidate.title),
         "codec": candidate.codec,
         "source": candidate.source,
-        "languages": languages(candidate.title),
+        # AvistaZ says what audio a release has; Prowlarr's indexers only name it.
+        "languages": _audio_languages(candidate) or languages(candidate.title),
         "info_url": candidate.info_url,
         "download_url": candidate.download_url or None,
         "magnet_uri": candidate.magnet_uri,
@@ -194,6 +203,14 @@ async def search(
         problem = await client.indexer_unavailable_reason() if not candidates else None
     finally:
         await client.aclose()
+    from bankai.web import avistaz
+
+    # AvistaZ, when set up: not in Prowlarr, asked here (its rows say their audio languages).
+    try:
+        candidates = [*candidates, *await avistaz.mas_search(query, kind)]
+    except Exception as exc:  # noqa: BLE001 -- Prowlarr's rows still show
+        log.warning("AvistaZ search failed: %s", exc)
+        problem = problem or f"AvistaZ could not be searched: {exc}"
     include, exclude = split_terms(title_filters), split_terms(exclude_filters)
     # Indexers match loosely: "Modern Family S02" brings season 8 too.
     wanted_season = guess(query)["season"] if kind == "show" else None
@@ -215,6 +232,39 @@ async def search(
         _FOUND.pop(next(iter(_FOUND)))
     shown = [{key: value for key, value in row.items() if key not in {"download_url", "magnet_uri"}} for row in items]
     return {"query": query, "kind": kind, "found": found, "items": shown, "problem": problem}
+
+
+def from_magnet(magnet: str) -> dict[str, Any]:
+    """A pasted magnet (or a dropped .torrent's, ``torrent.uploads``) as a search row, so the
+    download dialog takes it as it takes one Prowlarr found: named by its ``dn``, else the file's."""
+    from bankai.torrent import uploads
+    from bankai.web import erai
+
+    info_hash, name = erai.magnet_parts(magnet)
+    kept = uploads.stored(info_hash)
+    facts = uploads.read(kept) if kept else None
+    title = name or (facts or {}).get("name") or info_hash
+    row = {
+        "id": info_hash.casefold(),
+        "title": title,
+        "indexer": "magnet" if facts is None else ".torrent",
+        "size_bytes": int((facts or {}).get("size") or 0),
+        "seeders": 0,
+        "leechers": 0,
+        "published": None,
+        "resolution": resolution(title),
+        "codec": None,
+        "source": None,
+        "languages": languages(title),
+        "info_url": None,
+        "download_url": None,
+        "magnet_uri": magnet.strip(),
+        "info_hash": info_hash.casefold(),
+        "guess": guess(title),
+    }
+    _FOUND.pop(row["id"], None)
+    _FOUND[row["id"]] = row
+    return {key: value for key, value in row.items() if key not in {"download_url", "magnet_uri"}}
 
 
 def found(ident: str) -> dict[str, Any] | None:

@@ -28,11 +28,11 @@ from bankai.torrent.matcher import parse_se
 # Files of one show that arrived within this long of its newest file count as
 # a single addition: "Frieren -- 4 new episodes", not four rows.
 RECENT_WINDOW_SECONDS = 3 * 86400
-RECENT_LIMIT = 12
+RECENT_LIMIT = 50
 # Each lane's list of what is due stops here, with a count of the rest. The
 # page scrolls it, so this only keeps the answer to a sensible size.
 DUE_LIMIT = 50
-RECENT_EPISODES_LIMIT = 40
+RECENT_EPISODES_LIMIT = 50
 _RUNNING = {"running", "stopped"}
 # States in which qBittorrent holds a torrent in one of its download slots.
 _DOWNLOADING = {"downloading", "forcedDL", "metaDL", "forcedMetaDL", "stalledDL"}
@@ -117,6 +117,14 @@ def _lane(
     }
 
 
+def _bytes(value: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.2f} TiB"
+
+
 def _speed(value: float) -> str:
     for unit in ("B", "KiB", "MiB", "GiB"):
         if value < 1024 or unit == "GiB":
@@ -147,6 +155,7 @@ def build(
     recent: dict[str, Any],
     actions: list[dict] | None = None,
     encoding: dict[str, Any] | None = None,
+    moves: list[dict] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
@@ -385,7 +394,44 @@ def build(
         note=f"{waiting} more queued" if waiting else None,
     )
 
-    lanes = [actions_lane, pipelines, publishing, transfers, encoding_lane, automation_lane, scheduler, downloads]
+    # -- Moves ---------------------------------------------------------------
+    # Titles dragged to another library folder on the Library page, one at a time; finished ones a while.
+    move_workers = []
+    for row in moves or []:
+        moving, failed = row.get("status") == "running", row.get("status") == "failed"
+        size = float(row.get("size") or 0)
+        done_bytes = float(row.get("done_bytes") or 0)
+        detail = (
+            f"{row.get('step') or 'Moving'} · {_bytes(done_bytes)} of {_bytes(size)} → {Path(str(row.get('target'))).parent}"
+            if moving
+            else row.get("error") if failed
+            else f"Waiting · {_bytes(size)} → {Path(str(row.get('target'))).parent}" if row.get("status") == "queued"
+            else f"{row.get('step') or 'Done'} → {Path(str(row.get('target'))).parent}"
+        )
+        move_workers.append(
+            {
+                "id": f"move-{row['id']}",
+                "name": "Moving" if moving else "Waiting" if row.get("status") == "queued" else "Failed" if failed else "Done",
+                "busy": moving,
+                "extra": not moving,
+                "task": _task(
+                    str(row.get("title") or row.get("source")),
+                    detail=detail,
+                    percent=(100.0 * done_bytes / size if size else None) if moving else None,
+                    started_at=row.get("started_at") if moving else row.get("finished_at") or row.get("created_at"),
+                    href="/library",
+                ),
+            }
+        )
+    moves_lane = _lane(
+        "moves",
+        "Moves",
+        "Titles dragged to another library folder: renamed on one drive, copied, checked and only then removed across drives.",
+        move_workers,
+        capacity=None,
+    )
+
+    lanes = [actions_lane, pipelines, publishing, transfers, moves_lane, encoding_lane, automation_lane, scheduler, downloads]
 
     # -- Due -----------------------------------------------------------------
     queued_jobs = sorted(

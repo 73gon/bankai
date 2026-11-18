@@ -269,6 +269,10 @@ async def _verify_filmpalast_source(url: str) -> int:
         await backend.aclose()
 
 
+# Whether the review previews may use the GPU (NVDEC + NVENC); off after a CUDA failure.
+_GPU_PREVIEW: dict[str, bool] = {}
+
+
 def _waveform_envelope(
     samples: Any,
     bins: int,
@@ -636,8 +640,15 @@ class AnimeDownloadRequest(BaseModel):
     # from the Anime search page or a missing episode picked in the drawer.
     # A movie from the search page stages, for the movies' Transfer.
     publish: bool = False
-    # Where it was found: "nyaa", or "nekobt" -- by its magnet alone, no .torrent link.
+    # Where it was found: "nyaa", "nekobt" -- by its magnet alone, no .torrent link --, or
+    # "animez" -- by its .torrent alone (a private tracker: no magnet).
     source: str = "nyaa"
+
+
+class TorrentUploadRequest(BaseModel):
+    # The .torrent's bytes, base64: a JSON body needs no multipart parser.
+    data: str
+    name: str = ""
 
 
 class QueuePriorityRequest(BaseModel):
@@ -709,6 +720,11 @@ class TorrentChoiceRequest(BaseModel):
     title: str | None = None
 
 
+class LibraryMoveRequest(BaseModel):
+    source: str
+    target_root: str
+
+
 class ServerDirRequest(BaseModel):
     kind: str  # "movie" | "show"
     path: str = ""
@@ -749,6 +765,12 @@ SAFE_SETTING_KEYS: set[str] = {
     "anime.erai_feed_token",
     "anime.erai_username",
     "anime.erai_password",
+    "anime.animez_username",
+    "anime.animez_password",
+    "anime.animez_pid",
+    "avistaz.username",
+    "avistaz.password",
+    "avistaz.pid",
     "anime.german_avc_fallback",
     "anime.auto_download_new",
     "anime.thumbs_enabled",
@@ -907,7 +929,8 @@ def _validate_setting_value(key: str, value: Any) -> Any:
 
 
 def _is_secret_key(key: str) -> bool:
-    return any(part in key.casefold() for part in ("password", "api_key", "pin", "webhook", "token"))
+    # A PID is the AvistaZ network's passkey: whoever has it downloads as the user.
+    return key.endswith("pid") or any(part in key.casefold() for part in ("password", "api_key", "pin", "webhook", "token"))
 
 
 def _review_transfer_kind(path: Path, state: review_mod.ReviewState) -> str:
@@ -951,6 +974,14 @@ def create_app() -> Any:
         from bankai.web import stopping as stopping_mod
 
         stopping_mod.reset()
+        from bankai.web import loop_watch
+
+        loop_watch.start()
+        from bankai.web import library_moves
+
+        # A move cut off by the last stop left a hidden copy; it goes, the original stays.
+        with suppress(Exception):
+            await asyncio.to_thread(library_moves.recover)
         executor = ThreadPoolExecutor(max_workers=48, thread_name_prefix="bankai")
         asyncio.get_running_loop().set_default_executor(executor)
         try:
@@ -1695,6 +1726,16 @@ def create_app() -> Any:
 
         return {"targets": direct.targets()}
 
+    @app.post("/api/direct/magnet")
+    def direct_magnet(req: dict) -> dict:
+        """A magnet link (or a dropped .torrent's magnet) as a release to download like a search's."""
+        from bankai.web import direct
+
+        try:
+            return direct.from_magnet(str(req.get("magnet") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/api/direct/download")
     async def direct_download(req: DirectDownloadRequest) -> dict:
         from bankai.web import direct
@@ -1753,6 +1794,94 @@ def create_app() -> Any:
             title=f"{name} · {label} · {row['title']}",
             args=args,
         )
+
+    # -- Movies & Shows review: German-dubbed releases found by the pass (web/mas_releases.py) ----------
+
+    @app.get("/api/mas/review")
+    async def mas_review() -> dict:
+        """The German releases waiting for a word: a card per TMDB title, and the unmatched ones."""
+        from bankai.web import mas_releases
+
+        return await asyncio.to_thread(mas_releases.review)
+
+    @app.post("/api/mas/review/refresh")
+    async def mas_review_refresh() -> dict:
+        """Look for German releases now, not at the pass's next turn."""
+        from bankai.web import mas_releases
+
+        return await mas_releases.discover()
+
+    @app.post("/api/mas/review/discard")
+    async def mas_review_discard(req: dict) -> dict:
+        """Remove releases from the review; they are not offered again."""
+        from bankai.web import mas_releases
+
+        ids = [str(ident) for ident in req.get("ids") or [] if ident]
+        if not ids:
+            raise HTTPException(status_code=422, detail="ids are required")
+        return {"discarded": await asyncio.to_thread(mas_releases.discard, ids)}
+
+    @app.post("/api/mas/review/link")
+    async def mas_review_link(req: dict) -> dict:
+        """These releases are this TMDB title (``{ids, kind, tmdb_id, name, year, poster_url}``)."""
+        from bankai.web import mas_releases
+
+        ids = [str(ident) for ident in req.get("ids") or [] if ident]
+        kind = str(req.get("kind") or "")
+        if not ids or kind not in {"movie", "show"} or not str(req.get("tmdb_id") or "").isdigit():
+            raise HTTPException(status_code=422, detail="ids, kind (movie or show) and tmdb_id are required")
+        match = {
+            "tmdb_id": int(req["tmdb_id"]), "name": str(req.get("name") or ""), "year": req.get("year"),
+            "poster_url": req.get("poster_url"), "german_title": req.get("german_title"),
+        }
+        return {"linked": await asyncio.to_thread(mas_releases.link, ids, kind, match)}
+
+    @app.post("/api/mas/review/{ident}/download")
+    async def mas_review_download(ident: str) -> dict:
+        """Download a German release into the library: each file by its own audio into the German
+        folder (the English one if it turns out to have none), named as TMDB names the title."""
+        from bankai.web import direct, mas_releases
+
+        row = await asyncio.to_thread(mas_releases.release, ident)
+        if row is None:
+            raise HTTPException(status_code=404, detail="that release is no longer in the review")
+        kind = row["kind"]
+        match = row.get("match") or {}
+        guess = row.get("guess") or {}
+        title = str(match.get("name") or guess.get("title") or "").strip()
+        year = match.get("year") or guess.get("year")
+        if not title:
+            raise HTTPException(status_code=422, detail="link the release to a title first: its name gives none")
+        roots = await asyncio.to_thread(direct.default_roots, kind)
+        try:
+            for language in ("German", "English"):
+                if not roots.get(language):
+                    raise ValueError(f"there is no {language} folder for {'films' if kind == 'movie' else 'shows'}")
+                await asyncio.to_thread(direct.target, roots[language], kind)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        args = [
+            "direct-download", "--release-title", row["title"], "--kind", kind, "--title", title,
+            "--root-german", roots["German"], "--root-english", roots["English"],
+        ]
+        for option, value in (
+            ("--download-url", row.get("download_url")),
+            ("--magnet-uri", row.get("magnet_uri")),
+            ("--info-hash", row.get("info_hash")),
+            ("--info-url", row.get("info_url")),
+            ("--year", year),
+            ("--season", guess.get("season")),
+        ):
+            if value:
+                args.extend([option, str(value)])
+        if match.get("german_title") and match["german_title"] != title:
+            args.extend(["--also-named", str(match["german_title"])])
+        name = f"{title} ({year})" if year else title
+        job = await asyncio.to_thread(
+            webjobs.enqueue, kind="movie" if kind == "movie" else "show", title=f"{name} · German release · {row['title']}", args=args,
+        )
+        await asyncio.to_thread(mas_releases.mark_queued, ident, job.get("id"))
+        return job
 
     # Shows followed in English (web/mas_follow.py): every aired episode, German where a release has it.
     follow_tasks: set[asyncio.Task] = set()
@@ -1923,6 +2052,67 @@ def create_app() -> Any:
             raise HTTPException(status_code=502, detail=f"nekobt search failed: {exc}") from exc
         await asyncio.to_thread(anime_mod.mark_owned, result["items"])
         return result
+
+    @app.get("/api/anime/animez")
+    async def anime_search_animez(
+        q: str = Query(""),
+        page: int = Query(0, ge=0),
+        quality: str | None = Query(None),
+        publisher: str | None = Query(None),
+        title_filters: str | None = Query(None),
+        subtitles: str | None = Query(None, description="language codes, comma separated: any of them"),
+        audio: str | None = Query(None, description="language codes, comma separated: any of them"),
+        batch: bool | None = Query(None, description="true: batches alone, false: single episodes"),
+        min_seeders: int = Query(0, ge=0),
+        formats: str | None = Query(None, description="AnimeZ formats, comma separated: TV, MOVIE, OVA, ..."),
+        freeleech: bool = Query(False),
+    ) -> dict:
+        """Search's AnimeZ source (the AvistaZ network's anime tracker): rows as Nyaa's come."""
+        from bankai.web import avistaz
+
+        def codes(raw: str | None) -> list[str]:
+            return [code.strip() for code in (raw or "").split(",") if code.strip()]
+
+        try:
+            result = await avistaz.anime_search(
+                q, page=page, quality=quality, publisher=publisher, title_filters=title_filters,
+                subtitles=codes(subtitles), audio=codes(audio), batch=batch, min_seeders=min_seeders,
+                formats=[code.upper() for code in codes(formats)], freeleech=freeleech,
+            )
+        except avistaz.AvistazError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            log.warning("AnimeZ search failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"AnimeZ search failed: {exc}") from exc
+        await asyncio.to_thread(anime_mod.mark_owned, result["items"])
+        return result
+
+    @app.get("/api/anime/animez/description")
+    def anime_animez_description(id: str = Query(..., min_length=1)) -> dict:
+        from bankai.web import avistaz
+
+        try:
+            return {"description": avistaz.description(id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/torrents/upload")
+    def torrent_upload(req: TorrentUploadRequest) -> dict:
+        """A .torrent dropped where a magnet link goes: kept, and answered with the magnet that
+        stands for it (``torrent.uploads``)."""
+        import base64
+        import binascii
+
+        from bankai.torrent import uploads
+
+        try:
+            data = base64.b64decode(req.data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="the file did not arrive whole") from exc
+        try:
+            return uploads.save(data)
+        except uploads.TorrentFileError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/anime/owned")
     async def anime_owned(anilist_id: int = Query(..., ge=1)) -> dict:
@@ -4278,14 +4468,20 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail="episode must be positive")
         if req.kind == "movie" and req.episode is not None:
             raise HTTPException(status_code=422, detail="a movie has no episode")
+        from bankai.web import avistaz
+
         from_nekobt = req.source == "nekobt"
-        if not from_nekobt and (not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url)):
+        from_animez = req.source == "animez"
+        if from_animez:
+            if avistaz.site_of(req.torrent_url) != "animez" or avistaz.site_of(req.detail_url) != "animez":
+                raise HTTPException(status_code=422, detail="an AnimeZ download needs its AnimeZ links")
+        elif not from_nekobt and (not anime_mod.is_nyaa_url(req.torrent_url) or not anime_mod.is_nyaa_url(req.detail_url)):
             raise HTTPException(
                 status_code=422, detail="anime downloads only accept nyaa.si sources"
             )
         if not re.fullmatch(r"[0-9a-fA-F]{40}", req.info_hash.strip()):
-            raise HTTPException(status_code=422, detail="invalid Nyaa info hash")
-        if not req.magnet_uri.casefold().startswith(
+            raise HTTPException(status_code=422, detail="invalid info hash")
+        if not from_animez and not req.magnet_uri.casefold().startswith(
             f"magnet:?xt=urn:btih:{req.info_hash.casefold()}"
         ):
             raise HTTPException(status_code=422, detail="magnet does not match the Nyaa torrent")
@@ -4307,7 +4503,7 @@ def create_app() -> Any:
             # The CLI takes a magnet alone when both links are empty.
             torrent_url="" if from_nekobt else req.torrent_url.strip(),
             detail_url="" if from_nekobt else req.detail_url.strip(),
-            magnet_uri=req.magnet_uri.strip(),
+            magnet_uri="" if from_animez else req.magnet_uri.strip(),
             info_hash=req.info_hash.casefold(),
             kind=req.kind,
             episode=episode,
@@ -4414,6 +4610,10 @@ def create_app() -> Any:
             from bankai.web import manga_releases
 
             counts["manga_review"] = await asyncio.to_thread(manga_releases.review_count)
+        with suppress(Exception):
+            from bankai.web import mas_releases
+
+            counts["mas_review"] = await asyncio.to_thread(mas_releases.review_count)
         return {"counts": counts}
 
     # -- Erai-raws ---------------------------------------------------------
@@ -4700,6 +4900,8 @@ def create_app() -> Any:
         )
         from bankai.web import actions as actions_mod
 
+        from bankai.web import library_moves
+
         return dashboard.build(
             actions=actions_mod.listing(),
             mas_rows=mas_rows,
@@ -4715,6 +4917,7 @@ def create_app() -> Any:
             retry_pending=retry_pending,
             recent=recent,
             encoding=encode_library.lane(),
+            moves=library_moves.listing(),
         )
 
     snaps.add(
@@ -5416,10 +5619,12 @@ def create_app() -> Any:
         for j in best_by_norm.values():
             clean = _clean_title(j.get("title", ""))
             is_ep = j.get("kind") == "show"
-            poster_key = ("show:" if is_ep else "movie:") + _norm_title(clean)
+            # A direct download's title is "Name (Year) · German release · <release>": TMDB knows the name alone.
+            named = _clean_title(j.get("title", "").split(" · ")[0])
+            poster_key = ("show:" if is_ep else "movie:") + _norm_title(named)
             posters_mod.ensure(
                 poster_key,
-                clean,
+                named,
                 "series" if is_ep else "movie",
                 known=poster_cache,
             )
@@ -5525,6 +5730,17 @@ def create_app() -> Any:
         from bankai.cli import bgjobs
 
         raw = req.path
+        # A queue row sends its job's id: a download from the Torrents page or the review is no
+        # pipeline run to start over, and its title ("Name · German release · ...") found none --
+        # Redo answered 404/409 and did nothing. Such a job runs again with its own args.
+        same = bgjobs.get_job(raw) if raw and "/" not in raw and "\\" not in raw else None
+        if same is not None and same.args and same.args[0] != "run":
+            job = webjobs.enqueue(kind=same.kind, title=same.title, args=list(same.args))
+            if job.get("status") in {"running", "queued", "duplicate"}:
+                same.delete()
+            return {"redo": job, "title": same.title, "fresh": False, "stages": []}
+        if same is not None:
+            raw = same.title
         want = _norm_title(Path(raw).name if ("/" in raw or "\\" in raw) else raw)
         best = None
         for j in bgjobs.list_jobs():
@@ -5701,7 +5917,8 @@ def create_app() -> Any:
         normalized_hash = _qbittorrent_hash(torrent_hash)
         try:
             async with QBittorrentClient() as client:
-                await client.remove(normalized_hash, delete_files=delete_files)
+                # Asked for by hand: removed even while a private tracker's seeding is not done.
+                await client.remove(normalized_hash, delete_files=delete_files, force=True)
         except Exception as exc:
             log.warning("qBittorrent remove failed for %s: %s", normalized_hash, exc)
             raise HTTPException(
@@ -5721,7 +5938,12 @@ def create_app() -> Any:
         if info is None:
             raise HTTPException(status_code=422, detail="could not probe file")
         state = review_mod.get_state(str(p))
+        from bankai.web import review_audio
+
+        # Opening a large file in the studio starts its one read of the audio (review_audio).
+        audio_cache = review_audio.ensure(p) if review_audio.wanted(p) else None
         return {
+            "audio_cache": audio_cache,
             "path": info.path,
             "size": info.size,
             "duration": info.duration,
@@ -5911,6 +6133,24 @@ def create_app() -> Any:
         hit = _waveform_cache_get(key)
         if hit is not None:
             return hit
+        from bankai.web import review_audio
+
+        # A large file's audio is read once into a small copy (review_audio); until it is,
+        # the studio is told how far that is instead of a decode that cannot finish.
+        if review_audio.wanted(p):
+            cached = review_audio.samples(p, stream, start, dur, detailed=detailed) if review_audio.ready(p) else None
+            if cached is None:
+                return {"preparing": True, **review_audio.ensure(p)}
+            peaks = _waveform_envelope(cached, bins, smoothing_radius=0 if detailed else 1)
+            out = {
+                "start": start,
+                "dur": dur,
+                "bins": len(peaks),
+                "peaks": base64.b64encode(bytes(peaks)).decode("ascii"),
+                "detail": "pcm" if detailed else "pcm-overview",
+            }
+            _waveform_cache_put(key, out)
+            return out
         ffmpeg = media_mod.ffmpeg_bin()
         if ffmpeg is None:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
@@ -5986,6 +6226,13 @@ def create_app() -> Any:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
         st = p.stat()
 
+        from bankai.web import review_audio
+
+        # A large file's track is cut from its small listening copy once there is one.
+        listening = review_audio.listening_copy(p, stream) if review_audio.wanted(p) and review_audio.ready(p) else None
+        if review_audio.wanted(p) and listening is None:
+            review_audio.ensure(p)
+
         def build(out: Path) -> None:
             audible = max(0.05, dur - lead)
             source_dur = audible * rate + 0.25
@@ -6007,9 +6254,9 @@ def create_app() -> Any:
                         "-t",
                         str(source_dur),
                         "-i",
-                        str(p),
+                        str(listening or p),
                         "-map",
-                        f"0:{stream}",
+                        "0:a:0" if listening else f"0:{stream}",
                         "-ac",
                         "2",
                         "-af",
@@ -6154,50 +6401,54 @@ def create_app() -> Any:
             raise HTTPException(status_code=501, detail="ffmpeg not available")
         st = p.stat()
 
-        def build(out: Path) -> None:
+        from bankai.web import review_audio
+
+        # The reference track from the file's small listening copy when it has one (review_audio):
+        # read from the file, its audio cost more than its picture.
+        listening = (
+            review_audio.listening_copy(p, audio)
+            if audio is not None and review_audio.wanted(p) and review_audio.ready(p) else None
+        )
+
+        def command(out: Path, *, gpu: bool) -> list[str]:
+            inputs = ["-ss", str(start), "-t", str(dur), "-i", str(p)]
+            if listening is not None:
+                inputs += ["-ss", str(start), "-t", str(dur), "-i", str(listening)]
             audio_args = (
-                ["-map", f"0:{audio}", "-c:a", "aac", "-b:a", "128k"]
+                ["-map", "1:a:0" if listening is not None else f"0:{audio}", "-c:a", "aac", "-b:a", "128k"]
                 if audio is not None
                 else ["-an"]
             )
+            if gpu:
+                # A 4K HDR picture decoded on the CPU ran at a few frames a second: 46 s for a
+                # 10 s preview of The Odyssey; on the GPU, 8 s (most of it reading the file).
+                return [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                    *inputs, "-map", "0:v:0", *audio_args,
+                    "-vf", f"scale_cuda=-2:{height}:format=yuv420p",
+                    "-c:v", "h264_nvenc", "-preset", "p2", "-cq", "30",
+                    "-movflags", "+faststart", "-f", "mp4", "-y", str(out),
+                ]
+            return [
+                ffmpeg, "-hide_banner", "-loglevel", "error",
+                *inputs, "-map", "0:v:0", *audio_args,
+                "-vf", f"scale=-2:{height}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "30",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", "-y", str(out),
+            ]
+
+        def build(out: Path) -> None:
             with _ffmpeg_slot():
-                subprocess.run(
-                    [
-                        ffmpeg,
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-ss",
-                        str(start),
-                        "-t",
-                        str(dur),
-                        "-i",
-                        str(p),
-                        "-map",
-                        "0:v:0",
-                        *audio_args,
-                        "-vf",
-                        f"scale=-2:{height}",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "ultrafast",
-                        "-tune",
-                        "zerolatency",
-                        "-crf",
-                        "30",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-movflags",
-                        "+faststart",
-                        "-f",
-                        "mp4",
-                        "-y",
-                        str(out),
-                    ],
-                    timeout=300,
-                    check=False,
-                )
+                if _GPU_PREVIEW.get("ok", True):
+                    done = subprocess.run(command(out, gpu=True), timeout=300, check=False, capture_output=True)
+                    if done.returncode == 0 and out.exists() and out.stat().st_size > 0:
+                        return
+                    log.info("GPU preview failed, the CPU makes it: %s", (done.stderr or b"")[-200:].decode("utf-8", "replace"))
+                    # No GPU at all (tests, another machine): not tried again.
+                    if b"cuda" in (done.stderr or b"").lower() and b"cannot" in (done.stderr or b"").lower():
+                        _GPU_PREVIEW["ok"] = False
+                subprocess.run(command(out, gpu=False), timeout=300, check=False)
 
         key = _video_clip_cache_key(
             p,
@@ -6426,7 +6677,13 @@ def create_app() -> Any:
     def anime_publishers() -> dict:
         """The release groups Discover's publisher filter offers (anime settings)."""
         anime = get_settings().anime
-        return {"publishers": list(anime.publishers), "nekobt_languages": list(anime.nekobt_languages)}
+        from bankai.web import avistaz
+
+        return {
+            "publishers": list(anime.publishers),
+            "nekobt_languages": list(anime.nekobt_languages),
+            "animez": avistaz.configured("animez"),
+        }
 
     @app.post("/api/magnet/preview")
     async def magnet_preview(req: dict) -> dict:
@@ -6463,6 +6720,28 @@ def create_app() -> Any:
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    @app.get("/api/mas/uploaders")
+    def mas_uploaders() -> dict:
+        """Uploaders followed for German audio their release names do not say (web.uploaders)."""
+        from bankai.web import uploaders
+
+        return {**uploaders.listing(), "sites": [{"id": key, "label": label} for key, label in uploaders.LABEL.items()]}
+
+    @app.post("/api/mas/uploaders")
+    def mas_uploaders_follow(req: dict) -> dict:
+        from bankai.web import uploaders
+
+        try:
+            return uploaders.follow(str(req.get("site") or ""), str(req.get("name") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/mas/uploaders/{site}/{name}")
+    def mas_uploaders_unfollow(site: str, name: str) -> dict:
+        from bankai.web import uploaders
+
+        return uploaders.unfollow(site, name)
+
     @app.post("/api/mas/replace-magnet")
     async def mas_replace_magnet(req: dict) -> dict:
         """Replace the ticked episodes (or the film) of the Movies & Shows library with a magnet link's torrent.
@@ -6486,8 +6765,14 @@ def create_app() -> Any:
         files = card.get("episodes" if kind == "show" else "files") or []
         known = {str(row.get("path")): row for row in files if row.get("path")}
         paths = [str(path) for path in req.get("paths") or [] if str(path) in known]
-        if not paths:
-            raise HTTPException(status_code=422, detail="tick the files to replace")
+        # Ticked episodes with no file (a show's aired missing ones): downloaded from the same torrent.
+        missing = sorted({
+            f"S{int(row['season_number']):02d}E{int(row['episode']):02d}"
+            for row in req.get("missing") or []
+            if kind == "show" and isinstance(row, dict) and str(row.get("season_number", "")).isdigit() and str(row.get("episode", "")).isdigit()
+        })
+        if not paths and not missing:
+            raise HTTPException(status_code=422, detail="tick the files to replace or the episodes to download")
         followed = mas_follow.get(int(card["tmdb_id"])) if kind == "show" and card.get("tmdb_id") else None
         roots = dict((followed or {}).get("roots") or {})
         # Else the folders the title is in, by language; a language it is in nowhere, the first root of it.
@@ -6511,7 +6796,7 @@ def create_app() -> Any:
                 f"S{numbers[0]:02d}E{episode:02d}"
                 for path in paths if (numbers := direct.file_episode(Path(path).name))
                 for episode in range(numbers[1], (numbers[2] or numbers[1]) + 1)
-            })
+            } | set(missing))
             if not codes:
                 raise HTTPException(status_code=422, detail="the ticked files name no episode (SxxEyy)")
             args += ["--episodes", ",".join(codes)]
@@ -6526,7 +6811,12 @@ def create_app() -> Any:
         for path in paths:
             args += ["--replace-path", path]
         return await asyncio.to_thread(
-            webjobs.enqueue, kind=kind, title=f"{card['title']} · replace {len(paths)} · {name}", args=args,
+            webjobs.enqueue,
+            kind=kind,
+            title=f"{card['title']} · " + " + ".join(
+                part for part in (f"replace {len(paths)}" if paths else "", f"add {len(missing)}" if missing else "") if part
+            ) + f" · {name}",
+            args=args,
         )
 
     @app.post("/api/scheduler/passes/{name}/interval")
@@ -6547,6 +6837,26 @@ def create_app() -> Any:
         from bankai.web import system_usage as usage
 
         return await asyncio.to_thread(usage.sample)
+
+    @app.post("/api/mas/library/delete")
+    async def mas_library_delete(req: dict) -> dict:
+        """Delete a Movies & Shows title from disk: the folders its files are in (``library_moves.delete_title``)."""
+        from bankai.web import library_moves
+
+        kind, key = str(req.get("kind") or ""), str(req.get("key") or "")
+        if kind not in {"show", "movie"}:
+            raise HTTPException(status_code=422, detail="kind must be show or movie")
+        value = (await snaps["mas_library"].get()).value
+        card = next((row for row in value.get("shows" if kind == "show" else "movies") or [] if row.get("key") == key), None)
+        if card is None:
+            raise HTTPException(status_code=404, detail="no such title in the library")
+        paths = [str(row["path"]) for row in card.get("episodes" if kind == "show" else "files") or [] if row.get("path")]
+        if not paths:
+            raise HTTPException(status_code=422, detail="it has no files on disk")
+        try:
+            return await asyncio.to_thread(library_moves.delete_title, paths, kind)
+        except library_moves.MoveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/mas/library/match")
     async def mas_library_match(req: LibraryMatchRequest) -> dict:
@@ -6612,22 +6922,65 @@ def create_app() -> Any:
 
     @app.get("/api/server/contents")
     def server_contents(rescan: bool = Query(False)) -> dict:
+        """Every title straight under each library root -- one row each, a title in two roots twice, so
+        each can be dragged to another root -- and manga beside the three video libraries."""
+        from bankai.web import library_moves, library_walk
+
         if rescan:
             media_mod.invalidate_server_cache()
-        def rows(kind: str) -> list[dict]:
+
+        def listed(root: Path, *, held: bool) -> list[dict]:
+            if held:
+                top = library_walk.directories(root, rescan=rescan).get(str(root))
+                if top is None:
+                    return []
+                entries = [(name, True) for name in top["subdirs"]] + [(name, False) for name, _size, _mtime in top["files"]]
+            else:
+                # Manga lives on D:, outside the held tree; one listing of its root.
+                try:
+                    entries = [(item.name, item.is_dir()) for item in os.scandir(root)]
+                except OSError:
+                    return []
             return [
                 {
-                    "name": t.name,
-                    "present": t.present,
-                    "location": t.location,
-                    "directory": t.directory,
+                    "name": name if is_dir else Path(name).stem,
+                    "present": True,
+                    "location": str(root / name),
+                    "directory": str(root),
+                    "folder": is_dir,
                 }
-                for t in media_mod.scan_server(kind, use_cache=not rescan)
+                for name, is_dir in sorted(entries, key=lambda item: item[0].casefold())
+                if not name.startswith(".") and name.lower() not in {"desktop.ini", "thumbs.db"}
             ]
 
-        # All three, because this page is where anything already on the server
-        # is added and renamed, whichever library it belongs to.
-        return {"movies": rows("movie"), "shows": rows("show"), "anime": rows("anime")}
+        out: dict[str, list[dict]] = {}
+        for kind, key in (("movie", "movies"), ("show", "shows"), ("anime", "anime"), ("manga", "manga")):
+            out[key] = [row for root in library_moves.roots()[kind] for row in listed(root, held=kind != "manga")]
+        return out
+
+    @app.get("/api/library/moves")
+    def library_moves_list() -> dict:
+        from bankai.web import library_moves
+
+        return {"moves": library_moves.listing()}
+
+    @app.post("/api/library/moves/plan")
+    def library_moves_plan(req: LibraryMoveRequest) -> dict:
+        from bankai.web import library_moves
+
+        try:
+            return library_moves.plan(req.source, req.target_root)
+        except library_moves.MoveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/library/moves")
+    def library_moves_start(req: LibraryMoveRequest) -> dict:
+        from bankai.web import library_moves
+
+        try:
+            return library_moves.start(req.source, req.target_root)
+        except library_moves.MoveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/server/show")
     def server_show(path: str = Query(...)) -> dict:
@@ -6779,6 +7132,8 @@ def create_app() -> Any:
             "movie_dirs": [str(p) for p in s.web.server_movie_dirs],
             "show_dirs": [str(p) for p in s.web.server_show_dirs],
             "anime_dirs": [str(p) for p in s.web.server_anime_dirs],
+            # Manga's roots are its settings' (Manga -> Settings), shown here, not edited.
+            "manga_dirs": [str(s.manga.library_dir), str(s.manga.novels_dir)],
         }
 
     @app.post("/api/server/dirs")
@@ -6835,6 +7190,10 @@ def create_app() -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         path, _written = _set_config_value(req.key, value)
         reset_settings_cache()
+        if req.key.startswith(("anime.animez_", "avistaz.")):
+            from bankai.web import avistaz
+
+            avistaz.forget_token("animez" if req.key.startswith("anime.") else "avistaz")
         if req.key in {"anime.erai_username", "anime.erai_password"}:
             from bankai.web import erai_subs
 

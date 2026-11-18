@@ -5,6 +5,7 @@ import App from './App';
 import { Toaster } from '@zonsh/ui';
 import { TooltipProvider } from '@zonsh/ui';
 import { bakeGround } from '@/lib/ground';
+import 'licht/all.css';
 import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

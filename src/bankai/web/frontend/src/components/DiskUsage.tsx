@@ -64,7 +64,7 @@ function VolumeCard({ volume, areas }: { volume: StorageVolume; areas: StorageAr
   const full = volume.free / volume.total < 0.02;
 
   return (
-    <Card className='h-full [--card-padding:14px]'>
+    <Card variant='region' className='-mt-px h-full border-x-0 [--card-padding:14px] px-(--page-gutter)'>
       <CardHeader>
         <CardTitle className='flex items-center gap-2 text-base sm:text-base'><HardDrive className='size-4 text-muted-foreground' /> {volumeName(volume)}</CardTitle>
         <CardDescription>
@@ -228,7 +228,7 @@ export function DiskUsage() {
 
   return (
     <section className='flex flex-col gap-2'>
-      <div className='flex flex-wrap items-end justify-between gap-3'>
+      <div className='flex flex-wrap items-end justify-between gap-3 px-(--page-gutter)'>
         <div>
           <h2 className='font-heading text-lg font-light'>Disk usage</h2>
           <p className='text-xs text-muted-foreground'>
@@ -242,13 +242,13 @@ export function DiskUsage() {
         </Button>
       </div>
       {!usage || (!usage.scanned_at && usage.scanning) ? (
-        <div className='grid gap-3 xl:grid-cols-2'>
-          {Array.from({ length: 2 }, (_, index) => <Skeleton key={index} shape='card' className='h-64' />)}
+        <div className='grid gap-0 xl:grid-cols-2'>
+          {Array.from({ length: 2 }, (_, index) => <Skeleton key={index} shape='card' className='h-64 rounded-none' />)}
         </div>
       ) : usage.volumes.length === 0 ? (
         <p className='text-sm text-muted-foreground'>No scan yet.</p>
       ) : (
-        <div className={cn('grid gap-3 xl:grid-cols-2', usage.volumes.length >= 3 && 'min-[100rem]:grid-cols-3', usage.volumes.length >= 4 && 'min-[120rem]:grid-cols-4')}>
+        <div className={cn('grid gap-0 xl:grid-cols-2 xl:[&>*:nth-child(n+2)]:border-l', usage.volumes.length >= 3 && 'min-[100rem]:grid-cols-3', usage.volumes.length >= 4 && 'min-[120rem]:grid-cols-4')}>
           {usage.volumes.map((volume) => (
             <VolumeCard key={volume.path} volume={volume} areas={usage.areas.filter((area) => area.volume === volume.path)} />
           ))}

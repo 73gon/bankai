@@ -520,3 +520,17 @@ def test_nyaa_asking_to_wait_is_waited_for_then_said_plainly(monkeypatch) -> Non
     assert asyncio.run(go(False)) == [] and slept == [1.0]
     with pytest.raises(anime.RateLimited, match="try again"):
         asyncio.run(go(True))
+
+
+def test_a_choice_for_the_bare_name_is_not_taken_for_a_release_naming_its_season(shows) -> None:
+    """Erai's "Final Season - 01 ~ 12" has the key "shingeki no kyojin" too: the choice made for
+    the second season's plain "Shingeki no Kyojin - 01" took the final season's batch (BEASTARS, Nov 2026)."""
+    from bankai.web import erai
+
+    plain = "[Erai-raws] Shingeki no Kyojin - 01 ~ 12 [1080p][Multiple Subtitle]"
+    final = "[Erai-raws] Shingeki no Kyojin Final Season - 01 ~ 16 [1080p HEVC][Multiple Subtitle]"
+    mappings = {erai._mapping_key(plain): {"anilist_id": 2}}
+    assert erai._mapping_key(final) == erai._mapping_key(plain)
+
+    assert anime.anilist_match(plain, table=shows, mappings=mappings)["anilist_id"] == 2
+    assert anime.anilist_match(final, table=shows, mappings=mappings)["anilist_id"] == 5

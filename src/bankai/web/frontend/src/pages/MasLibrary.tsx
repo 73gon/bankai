@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Film, Tv, Search, ExternalLink, HardDrive, Magnet, Link2, Undo2, Image, X } from 'lucide-react';
+import { Film, Tv, Search, ExternalLink, HardDrive, Magnet, Link2, Undo2, Image, Trash2, X } from 'lucide-react';
+import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@zonsh/ui';
 import { inBackground, toast } from '@/lib/toast';
 import { api, pagePaths, recall, type AnimeLibraryEpisode, type DiscoverItem, type FollowOverview, type MasMovie, type MasShow } from '@/lib/api';
 import { StatusTag } from '@/components/status-tag';
@@ -336,6 +337,9 @@ export default function MasLibrary() {
   // Files ticked in the open title (Replace with magnet link), for the card they belong to.
   const [picked, setPicked] = useState<{ key: string; paths: string[] }>({ key: '', paths: [] });
   const [magnetOpen, setMagnetOpen] = useState(false);
+  // The open title, asked about before it is deleted from disk.
+  const [deleting, setDeleting] = useState<Row | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   // Only the titles to sort out: not matched to TMDB, or stored twice.
   const [only, setOnly] = useState<'unmatched' | 'duplicates' | null>(null);
   const [tab, setTab] = useState<'movies' | 'shows'>(() => (Number(new URLSearchParams(window.location.search).get('follow')) ? 'shows' : 'movies'));
@@ -576,7 +580,16 @@ export default function MasLibrary() {
   );
 
   const activeShow = active && isShow(active) ? active : null;
-  const pickedPaths = new Set(active && picked.key === active.key ? picked.paths : []);
+  // A film is replaced whole: every file of it.
+  const moviePaths = active && !activeShow ? (active as MasMovie).files.map((file) => file.path) : null;
+  // Ticked: files by path, and aired episodes with no file as "missing:<season>:<episode>" (added from the torrent).
+  const pickedKeys = new Set(active && picked.key === active.key ? picked.paths : []);
+  const pickedPaths = new Set([...pickedKeys].filter((key) => !key.startsWith('missing:')));
+  const pickedMissing = [...pickedKeys].filter((key) => key.startsWith('missing:')).map((key) => {
+    const [, season, episode] = key.split(':');
+    return { anilist_id: 0, anilist_episode: 0, season_number: Number(season), episode: Number(episode) };
+  });
+  const missingKey = (entry: { season_number: number | null; episode: number | null }) => `missing:${entry.season_number ?? 0}:${entry.episode ?? 0}`;
   function pick(paths: string[], on: boolean) {
     if (!active) return;
     setPicked((current) => {
@@ -595,8 +608,8 @@ export default function MasLibrary() {
       render={<button type='button' />}
       className='align-middle'
       aria-label={label}
-      checked={paths.length > 0 && paths.every((path) => pickedPaths.has(path))}
-      indeterminate={paths.some((path) => pickedPaths.has(path)) && !paths.every((path) => pickedPaths.has(path))}
+      checked={paths.length > 0 && paths.every((path) => pickedKeys.has(path))}
+      indeterminate={paths.some((path) => pickedKeys.has(path)) && !paths.every((path) => pickedKeys.has(path))}
       onCheckedChange={(on) => pick(paths, on)}
     />
   );
@@ -685,6 +698,17 @@ export default function MasLibrary() {
                       <ExternalLink data-icon='inline-start' /> TMDB
                     </Button>
                   )}
+                  {/* A film is one entry: its file is replaced whole, no ticking. */}
+                  {!activeShow && (active as MasMovie).files.length > 0 && (
+                    <Button variant='secondary' size='sm' onClick={() => setMagnetOpen(true)} title='Replace the film with the torrent of a magnet link or a .torrent file'>
+                      <Magnet data-icon='inline-start' /> Replace with magnet or .torrent…
+                    </Button>
+                  )}
+                  {!active.key.startsWith('follow:') && (
+                    <Button variant='ghost' size='sm' className='text-destructive' onClick={() => setDeleting(active)} title='Delete it from disk'>
+                      <Trash2 data-icon='inline-start' /> Delete
+                    </Button>
+                  )}
                 </div>
               </div>
             </div>
@@ -704,10 +728,14 @@ export default function MasLibrary() {
               {seasons.map((season) => (
                 <TabsPanel key={String(season)} value={String(season)} className='flex flex-col'>
                   {(() => {
-                    const files = [...new Set(activeShow.episodes.filter((entry) => entry.season_number === season && !entry.missing && entry.path).map((entry) => entry.path))];
+                    const inSeason = activeShow.episodes.filter((entry) => entry.season_number === season);
+                    const files = [
+                      ...new Set(inSeason.filter((entry) => !entry.missing && entry.path).map((entry) => entry.path)),
+                      ...inSeason.filter((entry) => entry.missing && !entry.tba && entry.episode != null).map(missingKey),
+                    ];
                     return files.length > 0 && (
                       <label className='flex items-center gap-2 pb-1 text-xs text-muted-foreground'>
-                        {tick(files, 'Select every file of this season')} Select the season
+                        {tick(files, 'Select every episode of this season')} Select the season
                       </label>
                     );
                   })()}
@@ -715,7 +743,10 @@ export default function MasLibrary() {
                     <tbody>
                       {activeShow.episodes.filter((entry) => entry.season_number === season).map((entry) => (
                         <tr key={entry.path ? entry.path + ':' + entry.episode : String(entry.season_number) + ':' + entry.episode} className='border-b border-border/60 last:border-0'>
-                          <td className='w-8 py-2.5 pr-1'>{!entry.missing && entry.path && tick([entry.path], 'Select ' + entry.name)}</td>
+                          <td className='w-8 py-2.5 pr-1'>
+                            {!entry.missing && entry.path && tick([entry.path], 'Select ' + entry.name)}
+                            {entry.missing && !entry.tba && entry.episode != null && tick([missingKey(entry)], `Select missing episode ${entry.episode}, to add it from a torrent`)}
+                          </td>
                           <td className='w-10 py-2.5 pr-3 font-mono text-xs tabular-nums'>{entry.episode ?? '—'}</td>
                           <td className='px-3 py-2.5 text-xs text-muted-foreground'>
                             {entry.episode_title && <p className='text-sm text-foreground'>{entry.episode_title}</p>}
@@ -751,7 +782,6 @@ export default function MasLibrary() {
               <ul className='flex flex-col gap-1'>
                 {(active as MasMovie).files.map((file) => (
                   <li key={file.path} className='flex items-center justify-between gap-3 rounded-item px-2 py-1.5'>
-                    {tick([file.path], 'Select ' + file.rel_path)}
                     <span className='min-w-0 flex-1 truncate font-mono text-[0.68rem]' title={file.path}>{file.rel_path}</span>
                     <span className='flex shrink-0 items-center gap-3'>
                       <Quality value={(file as AnimeLibraryEpisode).quality} />
@@ -764,13 +794,16 @@ export default function MasLibrary() {
             </div>
           )}
           {/* Under the rows and kept in sight at the bottom, as the anime library's: ticking never moves the rows. */}
-          {pickedPaths.size > 0 && (
+          {pickedKeys.size > 0 && (
             <div className='sticky bottom-4 z-10 flex flex-wrap items-center gap-2 rounded-control surface-container px-3 py-2 shadow-overlay'>
               <span className='text-xs text-muted-foreground'>
-                <span className='font-mono tabular-nums text-foreground'>{pickedPaths.size}</span> file{pickedPaths.size === 1 ? '' : 's'} selected
+                {[
+                  pickedPaths.size > 0 && <><span className='font-mono tabular-nums text-foreground'>{pickedPaths.size}</span> file{pickedPaths.size === 1 ? '' : 's'}</>,
+                  pickedMissing.length > 0 && <><span className='font-mono tabular-nums text-foreground'>{pickedMissing.length}</span> missing</>,
+                ].filter(Boolean).map((part, index) => <span key={index}>{index ? ' and ' : ''}{part}</span>)} selected
               </span>
-              <Button size='sm' onClick={() => setMagnetOpen(true)} title='Replace the selected files with the torrent of a magnet link'>
-                <Magnet data-icon='inline-start' /> Replace with magnet link…
+              <Button size='sm' onClick={() => setMagnetOpen(true)} title='Replace the selected files, and add the selected missing episodes, from one torrent'>
+                <Magnet data-icon='inline-start' /> {pickedPaths.size ? 'Replace' : 'Add'} with magnet or .torrent…
               </Button>
               <Button size='sm' variant='ghost' className='ml-auto' onClick={() => setPicked({ key: '', paths: [] })}>
                 <X data-icon='inline-start' /> Clear
@@ -794,16 +827,17 @@ export default function MasLibrary() {
 
       <MagnetReplaceDialog
         open={magnetOpen}
-        count={pickedPaths.size}
-        what={activeShow ? 'file' : 'film file'}
-        paths={[...pickedPaths]}
+        count={activeShow ? pickedPaths.size : 1}
+        what={activeShow ? 'episode' : 'film'}
+        paths={moviePaths ?? [...pickedPaths]}
+        missing={pickedMissing}
         scope={activeShow ? 'show' : 'movie'}
         onClose={() => setMagnetOpen(false)}
         onSubmit={async (magnet) => {
           if (!active) return { ok: false };
           try {
-            await api.masReplaceMagnet(activeShow ? 'show' : 'movie', active.key, [...pickedPaths], magnet);
-            toast.success(`${active.title}: the torrent is queued; each file it brings replaces the selected one of its episode`);
+            await api.masReplaceMagnet(activeShow ? 'show' : 'movie', active.key, moviePaths ?? [...pickedPaths], magnet, pickedMissing);
+            toast.success(`${active.title}: the torrent is queued; each file it brings replaces the selected one of its episode, or adds a selected missing one`);
             setPicked({ key: '', paths: [] });
             return { ok: true };
           } catch (error: any) {
@@ -814,6 +848,43 @@ export default function MasLibrary() {
       />
 
       <MatchDialog row={matching} onClose={() => setMatching(null)} onMatched={() => { closeRow(); void load(); }} />
+
+      <AlertDialog open={deleting !== null} onOpenChange={(open) => { if (!open && !deleteBusy) setDeleting(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {deleting?.title}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Its folder{(deleting?.folders?.length ?? 1) > 1 ? 's' : ''} ({(deleting?.folders ?? []).join(', ') || deleting?.title}, {formatSize(deleting?.size ?? 0)})
+              {' '}go from disk with everything in them: {deleting && isShow(deleting) ? 'every episode, subtitles and pictures' : 'the film, its subtitles, extras and pictures'}.
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button variant='secondary' onClick={() => setDeleting(null)} disabled={deleteBusy}>Cancel</Button>
+            <Button
+              variant='destructive'
+              disabled={deleteBusy}
+              onClick={async () => {
+                if (!deleting) return;
+                setDeleteBusy(true);
+                try {
+                  const done = await api.masLibraryDelete(isShow(deleting) ? 'show' : 'movie', deleting.key);
+                  toast.success(`${deleting.title} deleted (${formatSize(done.size)})`);
+                  setDeleting(null);
+                  closeRow();
+                  void load();
+                } catch (error: any) {
+                  toast.error(error.message);
+                } finally {
+                  setDeleteBusy(false);
+                }
+              }}
+            >
+              {deleteBusy ? <Spinner /> : <Trash2 data-icon='inline-start' />} Delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog open={following !== null} onOpenChange={(open) => { if (!open) setFollowing(null); }}>
         <DialogContent size='lg' className='max-h-[90vh] max-w-3xl overflow-y-auto'>

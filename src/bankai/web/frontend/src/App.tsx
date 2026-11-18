@@ -1,6 +1,6 @@
 import { Activity, memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, type Location } from 'react-router-dom';
-import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, ShieldCheck, LayoutDashboard, Subtitles, Languages, Shrink, BookOpen, Tags, Magnet } from 'lucide-react';
+import { CalendarClock, Compass, Search as SearchIcon, ListVideo, HardDrive, Settings as SettingsIcon, Loader2, Download, ArrowUpCircle, RefreshCw, AlertCircle, ShieldAlert, Ban, ShieldCheck, LayoutDashboard, Languages, Shrink, BookOpen, Tags, Magnet } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import { cn } from '@zonsh/ui';
 import { api, pagePaths, recall, type UpdateStatus, type VpnStatus } from '@/lib/api';
@@ -21,7 +21,6 @@ import AnimeQueue from '@/pages/AnimeQueue';
 import AnimeLibrary from '@/pages/AnimeLibrary';
 import AnimeSettings from '@/pages/AnimeSettings';
 import AnimeReview from '@/pages/AnimeReview';
-import AnimeErai from '@/pages/AnimeErai';
 import Recent from '@/pages/Recent';
 import QBittorrent from '@/pages/QBittorrent';
 import Tracks from '@/pages/Tracks';
@@ -29,6 +28,7 @@ import Encode from '@/pages/Encode';
 import Genres from '@/pages/Genres';
 import MangaLibrary from '@/pages/MangaLibrary';
 import MangaReview from '@/pages/MangaReview';
+import MasReview from '@/pages/MasReview';
 import MangaSearch from '@/pages/MangaSearch';
 import MangaSettings from '@/pages/MangaSettings';
 
@@ -41,6 +41,7 @@ const MAS_NAV = [
   { to: '/mas/torrents', label: 'Torrents', icon: Magnet },
   { to: '/mas/queue', label: 'Queue', icon: ListVideo, count: 'mas_queue' },
   { to: '/mas/library', label: 'Library', icon: HardDrive },
+  { to: '/mas/review', label: 'Review', icon: ShieldAlert, count: 'mas_review' },
   { to: '/mas/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -50,7 +51,6 @@ const ANIME_NAV = [
   { to: '/a/library', label: 'Library', icon: HardDrive },
   { to: '/a/review', label: 'Review', icon: ShieldAlert, count: 'anime_review' },
   { to: '/a/blacklist', label: 'Blacklist', icon: Ban, count: 'anime_blacklist' },
-  { to: '/a/erai', label: 'Erai-raws', icon: Subtitles },
   { to: '/a/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -340,13 +340,13 @@ const PAGES: Record<string, ReactNode> = {
   '/mas/torrents': <Torrents />,
   '/mas/queue': <Library />,
   '/mas/library': <MasLibrary />,
+  '/mas/review': <MasReview />,
   '/mas/settings': <Settings scope='mas' />,
   '/a/search': <Anime />,
   '/a/queue': <AnimeQueue />,
   '/a/library': <AnimeLibrary />,
   '/a/review': <AnimeReview key='review' />,
   '/a/blacklist': <AnimeReview key='blacklist' blacklist />,
-  '/a/erai': <AnimeErai />,
   '/a/settings': <AnimeSettings />,
   '/m/search': <MangaSearch />,
   '/m/library': <MangaLibrary />,
@@ -368,6 +368,8 @@ const REDIRECTS: Record<string, string> = {
   '/mas': '/mas/discover',
   '/a': '/a/search',
   '/a/discover': '/a/search',
+  // Erai-raws is one of Search's sources since Nov 2026.
+  '/a/erai': '/a/search?source=erai',
   '/m': '/m/library',
   '/discover': '/mas/discover',
   '/search': '/mas/search',

@@ -143,16 +143,19 @@ function SubtitleChips({ row, languages }: { row: EraiRelease; languages: Record
  * The Erai-raws listing. ``embedded`` drops the page header, for showing one
  * anime's releases in a dialog opened from review; ``initialQuery`` is what
  * it opens searched for. ``replaceFor`` is the review card it was opened
- * from: each row can then replace what that card holds.
+ * from: each row can then replace what that card holds. ``inSearch``: one of
+ * Search's sources (Nov 2026; its own tab before), under Search's heading.
  */
 export default function AnimeErai({
   initialQuery = '',
   embedded = false,
+  inSearch = false,
   replaceFor,
   onReplaced,
 }: {
   initialQuery?: string;
   embedded?: boolean;
+  inSearch?: boolean;
   replaceFor?: { key: string; label: string };
   onReplaced?: () => void;
 } = {}) {
@@ -248,9 +251,9 @@ export default function AnimeErai({
 
   return (
     <div className={cn('flex min-h-0 flex-col gap-4', embedded && 'flex-1')}>
-      {!embedded && <div className='flex flex-wrap items-end justify-between gap-3'>
+      {!embedded && <div className={cn('flex flex-wrap justify-between gap-3', inSearch ? 'items-center' : 'items-end')}>
         <div>
-          <h1 className='font-heading text-3xl font-light'>Erai-raws</h1>
+          {!inSearch && <h1 className='font-heading text-3xl font-light'>Erai-raws</h1>}
           <p className='text-sm text-muted-foreground'>
             Every release as erai-raws.info lists it, with the subtitle languages the site names.
             {data?.configured && (
@@ -261,7 +264,7 @@ export default function AnimeErai({
             )}
           </p>
         </div>
-        <Button variant='secondary' onClick={() => void refresh()} disabled={refreshing || !data?.configured}>
+        <Button variant='secondary' size={inSearch ? 'sm' : undefined} onClick={() => void refresh()} disabled={refreshing || !data?.configured}>
           <RefreshCw data-icon='inline-start' className={refreshing ? 'animate-spin' : ''} /> Read feeds now
         </Button>
       </div>}
@@ -319,7 +322,7 @@ export default function AnimeErai({
             <span className='ml-auto text-xs text-muted-foreground'>{data ? data.total.toLocaleString() + ' releases' : ''}</span>
           </div>
 
-          <Table variant='plain' dense className='min-w-[980px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
+          <Table variant='plain' size='sm' className='min-w-[980px]' containerProps={{ className: 'min-h-0 flex-1 overflow-auto' }}>
               <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
                 <TableRow>
                   <TableHead>Release</TableHead>

@@ -463,7 +463,7 @@ export default function Genres() {
               </p>
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
                 <SortableContext items={draft.vocabulary.map((row) => row.id)} strategy={verticalListSortingStrategy}>
-                  <Table variant='plain' dense>
+                  <Table variant='plain' size='sm'>
                     <TableHeader>
                       <TableRow>
                         <TableHead className='w-16'>Priority</TableHead>
@@ -535,7 +535,7 @@ export default function Genres() {
                 × takes a genre off a title, + gives it one; kept at once as that title's own choice (blue: added by hand, struck through:
                 removed by hand, click to give it back). Hover a genre for why the rules give it.
               </p>
-              <Table variant='plain' dense>
+              <Table variant='plain' size='sm'>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Title</TableHead>
@@ -568,7 +568,7 @@ export default function Genres() {
                 {plan.unmapped.length === 0 ? (
                   <p className='text-sm text-muted-foreground'>Every raw genre is mapped, or dropped knowingly below.</p>
                 ) : (
-                  <Table variant='plain' dense>
+                  <Table variant='plain' size='sm'>
                     <TableHeader>
                       <TableRow>
                         <TableHead>Raw genre</TableHead>
@@ -598,7 +598,7 @@ export default function Genres() {
                   Raw genres that give no genre at all: content flags (Ecchi, Hentai say how explicit a title is, not what kind of story
                   it is), and anything you dropped. The titles stay; they only lose that word. Pick genres to keep it after all.
                 </p>
-                <Table variant='plain' dense>
+                <Table variant='plain' size='sm'>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Raw genre</TableHead>

@@ -28,6 +28,7 @@ from bankai.logging import get_logger
 from bankai.metadata import anilist
 from bankai.processor.naming import render_movie_path
 from bankai.torrent import actions as torrent_actions
+from bankai.processor import bdmv
 from bankai.torrent.matcher import find_video_files, pick_movie_file
 from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError, TorrentStatus
 from bankai.web import anime_files, anime_layout, anime_unsorted, review
@@ -906,9 +907,14 @@ async def download_anime(
         before_hashes = {item.hash for item in before}
         existed_before = info_hash.casefold() in {item.hash.casefold() for item in before}
         save_path = Path(settings.qbittorrent.save_path) if settings.qbittorrent.save_path else None
+        from bankai.web import avistaz
+
+        # A private tracker's link needs the user's token: fetched here, handed over as a file.
+        private_file = await avistaz.fetch_torrent(torrent_url) if not magnet_uri and avistaz.site_of(torrent_url) else None
         await qbit.add(
             magnet=magnet_uri or None,
-            torrent_url=None if magnet_uri else torrent_url,
+            torrent_url=None if magnet_uri or private_file else torrent_url,
+            torrent_file=private_file,
             category=category,
             save_path=save_path,
         )
@@ -969,6 +975,12 @@ async def download_anime(
 
         log.info('BANKAI_STAGE step=2 total=%d key=organize label="Organize"', total_steps)
         root = _download_root(status)
+        # Blu-ray disc images ("COMPLETE BLURAY": BDMV folders, nameless .m2ts streams): their
+        # episodes or film remuxed from the discs' playlists, losslessly, beside the download.
+        disc_work: Path | None = None
+        if bdmv.discs(root) and not find_video_files(root):
+            disc_work = bdmv.work_folder(root, torrent_hash)
+            log.info("[anime] %s is a Blu-ray disc image: its playlists are read for the episodes", release_title)
         outputs: list[Path] = []
         kept_for_review = 0
         # Each show file with the AniList entry and episode it is.
@@ -977,7 +989,10 @@ async def download_anime(
         owned_left: list[Path] = []
         output = settings.output
         if media_kind == "movie":
-            source = pick_movie_file(root)
+            source = (
+                await asyncio.to_thread(bdmv.remux_film, root, disc_work, english_title or release_title)
+                if disc_work else pick_movie_file(root)
+            )
             if source is None:
                 raise RuntimeError(f"the Nyaa torrent contains no movie file under {root}")
             if require_german_subtitles:
@@ -994,8 +1009,14 @@ async def download_anime(
             _copy_with_sidecars(source, destination, replace=replace_existing)
             outputs.append(destination)
         else:
-            sources = find_video_files(root)
-            if skip_owned or ticked is not None:
+            if disc_work:
+                # Numbered on across the discs; a Replace's map files only its ticked episodes.
+                sources = await asyncio.to_thread(bdmv.remux_episodes, root, disc_work, only=set(ticked) if ticked is not None else None)
+                if not sources:
+                    raise RuntimeError("the Blu-ray discs hold no playlist long enough to be an episode")
+            else:
+                sources = find_video_files(root)
+            if not disc_work and (skip_owned or ticked is not None):
                 try:
                     skipped = _left_out_paths(await qbit.files(torrent_hash), status)
                 except Exception as exc:
@@ -1103,6 +1124,8 @@ async def download_anime(
                 log.info("[anime] removed torrent %s + files", torrent_hash[:8])
             except Exception as exc:
                 log.warning("[anime] could not remove torrent %s: %s", torrent_hash[:8], exc)
+        if disc_work:
+            bdmv.remove_work(disc_work)
         return {
             "final_path": str(outputs[0]) if outputs else None,
             "paths": [str(path) for path in outputs],

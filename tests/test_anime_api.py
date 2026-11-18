@@ -43,7 +43,8 @@ def test_the_server_library_manages_anime_roots_too(client: TestClient, tmp_path
     publishes to its own directory -- could not be reached from it.
     """
     body = client.get("/api/server/dirs").json()
-    assert set(body) == {"movie_dirs", "show_dirs", "anime_dirs"}
+    # Manga's folders are shown beside them (moves are dropped onto them), set in its own settings.
+    assert set(body) == {"movie_dirs", "show_dirs", "anime_dirs", "manga_dirs"}
 
     root = tmp_path / "extra_anime_root"
     root.mkdir()
@@ -53,7 +54,7 @@ def test_the_server_library_manages_anime_roots_too(client: TestClient, tmp_path
     assert str(root) in client.get("/api/server/dirs").json()["anime_dirs"]
 
     # Anime is listed beside movies and shows, not folded into them.
-    assert "anime" in client.get("/api/server/contents").json()
+    assert {"anime", "manga"} <= set(client.get("/api/server/contents").json())
 
     removed = client.request("DELETE", "/api/server/dirs", json={"kind": "anime", "path": str(root)})
     assert removed.status_code == 200

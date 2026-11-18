@@ -42,9 +42,23 @@ def find_video_files(root: Path) -> list[Path]:
     )
 
 
+# "...-sample", "sample-...": the word ending or opening the name; a film called "The Sample" is none.
+_SAMPLE = re.compile(r"(?:^|[\W_])sample$|^sample(?:[\W_]|$)", re.IGNORECASE)
+
+
+def is_sample(path: Path) -> bool:
+    """A release's sample clip ("...-wayne-sample.mkv", "Sample/x.mkv"): never the feature."""
+    return bool(_SAMPLE.search(path.stem)) or any(part.lower() in {"sample", "samples"} for part in path.parent.parts[-2:])
+
+
 def pick_movie_file(root: Path) -> Path | None:
-    """Largest video file under ``root`` â€” usually the feature in a movie release."""
-    files = find_video_files(root)
+    """Largest video file under ``root`` that is no sample -- usually the feature in a movie release.
+
+    None when there is only a sample: a scene release packs the film in RAR archives beside its
+    sample clip, and the sample, the largest video then, was filed as The Mandalorian and Grogu
+    (a minute long, Nov 2026).
+    """
+    files = [path for path in find_video_files(root) if not is_sample(path)]
     if not files:
         return None
     return max(files, key=lambda p: p.stat().st_size)

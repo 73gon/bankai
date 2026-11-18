@@ -149,6 +149,29 @@ def test_the_library_rows_carry_current_results_only(monkeypatch, tmp_path):
     assert "verify" not in rows[1]
 
 
+
+def test_a_result_for_another_entry_than_the_file_is_filed_as_now_is_no_result(monkeypatch, tmp_path):
+    """Violet Evergarden's Special, once taken for the Movie and matched again by hand, kept the
+    Movie's check: "runs 34 min, AniList says 140" (Nov 2026)."""
+    from bankai.web import anime_files
+
+    rel = "Show/Season 00/Show - S00E03.mkv"
+    (tmp_path / rel).parent.mkdir(parents=True)
+    (tmp_path / rel).write_bytes(b"x" * 10)
+    stat = (tmp_path / rel).stat()
+    old = {"anilist_id": 103047, "episode": 1, "verdict": "unsure", "size": 10, "mtime": stat.st_mtime,
+           "length": {"seconds": 2066, "expected_minutes": 140.0, "source": "AniList", "ok": False}}
+    monkeypatch.setattr(anime_files, "anime_root", lambda: tmp_path)
+    monkeypatch.setattr(anime_files, "load", lambda: {rel: [[101432, 1]]})
+    monkeypatch.setattr(verify, "results", lambda: {rel: old})
+    monkeypatch.setattr(anilist, "media", lambda aid: {})
+    verify._save({"files": {rel: old}, "first": []})
+
+    rows = [{"path": str(tmp_path / rel), "anilist_id": 101432, "anilist_episode": 1, "size": 10, "mtime": stat.st_mtime}]
+    assert verify.annotate(rows)["verify_length"] == 0
+    assert "verify" not in rows[0]
+    assert verify.due() == [rel]
+
 def test_results_follow_the_layouts_renames():
     verify._save({"files": {"Old/a.mkv": {"verdict": "verified"}}, "first": []})
     verify.follow_renames({"Old/a.mkv": "New/a.mkv"})

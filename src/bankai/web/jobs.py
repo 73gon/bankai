@@ -525,10 +525,18 @@ _MANGA_RECONCILE_SECONDS = 30.0
 _GENRE_SYNC_SECONDS = 3600.0
 # Shows followed in English (see mas_follow): their missing episodes looked for, a few searches a pass.
 _MAS_FOLLOW_SECONDS = 600.0
+# German-dubbed films and shows on the indexers (see mas_releases), kept for review.
+_MAS_REVIEW_SECONDS = 1800.0
 
 
 # The scheduler's periodic passes as the dashboard shows them: what each does,
 # when it is next due and whether one is running right now.
+# AvistaZ / AnimeZ torrents held to seed (torrent.seeding): their time is counted in hours.
+_PRIVATE_SEEDING_SECONDS = 30 * 60.0
+# Uploaders followed for German audio their names do not say (web.uploaders): a slice of their uploads read.
+_UPLOADERS_SECONDS = 15 * 60.0
+# Files waiting for review with their audio not read once yet (web.review_audio): queued.
+_REVIEW_AUDIO_SECONDS = 10 * 60.0
 _PASS_LABELS: dict[str, tuple[str, float]] = {
     "release_reconcile": ("Publish finished downloads", _RELEASE_RECONCILE_SECONDS),
     "library_walk": ("Check the libraries for changes", _LIBRARY_WALK_SECONDS),
@@ -549,6 +557,10 @@ _PASS_LABELS: dict[str, tuple[str, float]] = {
     "manga_reconcile": ("Download approved manga", _MANGA_RECONCILE_SECONDS),
     "genre_sync": ("Write curated genres to Jellyfin", _GENRE_SYNC_SECONDS),
     "mas_follow": ("Download followed shows", _MAS_FOLLOW_SECONDS),
+    "mas_review": ("Look for German-dubbed films and shows", _MAS_REVIEW_SECONDS),
+    "private_seeding": ("Remove private torrents once seeded", _PRIVATE_SEEDING_SECONDS),
+    "review_audio": ("Read large files' audio for review", _REVIEW_AUDIO_SECONDS),
+    "uploaders": ("Read followed uploaders' releases for German audio", _UPLOADERS_SECONDS),
 }
 _PASSES: dict[str, dict] = {}
 
@@ -728,6 +740,8 @@ def _pass_summary(name: str, result: object) -> str | None:
             f"{_plural(number('checked'), 'entry', 'entries')} checked, "
             f"{_plural(number('upgrades_found'), 'upgrade')} found, {number('remaining')} to go"
         )
+    if name == "mas_review":
+        return f"{_plural(number('added'), 'new release')} for review, {number('found')} German releases looked at"
     if name == "missing_check":
         return (
             f"{_plural(number('checked'), 'entry', 'entries')} checked, "
@@ -794,6 +808,13 @@ def _pass_summary(name: str, result: object) -> str | None:
             f"{_plural(number('searched'), 'search', 'searches')}, {_plural(number('queued'), 'download')} started, "
             f"{number('found_nothing')} found nothing ({_plural(number('followed'), 'show')} followed){held}"
         )
+    if name == "uploaders":
+        return f"{_plural(number('read'), 'upload')} read, {number('german')} with German audio"
+    if name == "review_audio":
+        return f"{_plural(number('queued'), 'file')} queued" if number("queued") else "Every large file waiting for review is read"
+    if name == "private_seeding":
+        removed = f"{_plural(number('removed'), 'torrent')} done seeding removed, " if number("removed") else ""
+        return f"{removed}{_plural(number('held'), 'private torrent')} still seeding"
     if name == "manga_reconcile":
         if result.get("idle"):
             return str(result["idle"])
@@ -827,6 +848,10 @@ def _pass_progress(name: str) -> dict | None:
         from bankai.web import anime_missing
 
         return dict(anime_missing.progress) or None
+    if name == "mas_review":
+        from bankai.web import mas_releases
+
+        return dict(mas_releases.progress) or None
     if name == "mas_follow":
         from bankai.web import mas_follow
 
@@ -1059,11 +1084,43 @@ async def _manga_reconcile() -> None:
     _pass_result("manga_reconcile", await manga_releases.reconcile() or {"idle": "Nothing downloading"})
 
 
+async def _uploaders() -> None:
+    from bankai.web import uploaders
+
+    _pass_result("uploaders", await uploaders.run())
+
+
+async def _private_seeding() -> None:
+    from bankai.torrent import seeding
+
+    held = len(await asyncio.to_thread(seeding.listing))
+    removed = await seeding.release_done()
+    _pass_result("private_seeding", {"removed": len(removed), "held": held - len(removed)})
+
+
 async def _genre_sync() -> None:
     from bankai.web import genre_sync
 
     result = await genre_sync.apply()
     _pass_result("genre_sync", {**result, "failed": len(result.get("failed") or [])} if "written" in result else result)
+
+
+async def _hevc_check() -> dict:
+    from bankai.web import erai as erai_mod
+
+    result = await erai_mod.check_hevc_upgrades(entries=_HEVC_CHECK_ENTRIES)
+    _pass_result("hevc_check", result)
+    return result
+
+
+async def _thumb_sweep() -> dict:
+    from bankai.web import anime_thumbs
+
+    result = await asyncio.to_thread(anime_thumbs.sweep, Path(get_settings().transfer.anime_shows_dir), limit=_THUMB_SWEEP_BATCH)
+    _pass_result("thumb_sweep", result)
+    if result["made"]:
+        log.info("Wrote %d episode picture(s); %d still to go", result["made"], result["remaining"])
+    return result
 
 
 async def _mas_follow() -> None:
@@ -1078,6 +1135,8 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_release_pass = 0.0
     next_codec_pass = 0.0
     next_thumb_pass = 0.0
+    thumb_task: asyncio.Future | None = None
+    hevc_task: asyncio.Future | None = None
     next_jellyfin_pass = 0.0
     next_hevc_check = 0.0
     next_missing_check = time.monotonic() + 60.0
@@ -1125,6 +1184,17 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
     next_mas_follow = time.monotonic() + 180.0
     mas_follow_task: asyncio.Future | None = None
     _pass_due("mas_follow", next_mas_follow)
+    next_mas_review = time.monotonic() + 240.0
+    mas_review_task: asyncio.Future | None = None
+    _pass_due("mas_review", next_mas_review)
+    next_uploaders = time.monotonic() + 150.0
+    uploaders_task: asyncio.Future | None = None
+    _pass_due("uploaders", next_uploaders)
+    next_review_audio = time.monotonic() + 90.0
+    _pass_due("review_audio", next_review_audio)
+    next_private_seeding = time.monotonic() + 120.0
+    private_seeding_task: asyncio.Future | None = None
+    _pass_due("private_seeding", next_private_seeding)
     from bankai.web import manga_releases
 
     _pass_due("manga_discover", next_manga_discover)
@@ -1216,6 +1286,32 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 _pass_due("manga_reconcile", next_manga_reconcile)
                 manga_reconcile_task = asyncio.ensure_future(_manga_reconcile())
                 _pass_task("manga_reconcile", manga_reconcile_task)
+        # Off to the side: a followed uploader's pages, one every two seconds.
+        if _due("uploaders", next_uploaders) and (uploaders_task is None or uploaders_task.done()):
+            next_uploaders = time.monotonic() + interval("uploaders")
+            _pass_due("uploaders", next_uploaders)
+            if uploaders_task is not None and uploaders_task.exception() is not None:
+                log.warning("uploader pass failed: %r", uploaders_task.exception())
+            uploaders_task = asyncio.ensure_future(_uploaders())
+            _pass_task("uploaders", uploaders_task)
+        # Large files waiting for review: their audio read once (a thread of review_audio's own).
+        if _due("review_audio", next_review_audio):
+            next_review_audio = time.monotonic() + interval("review_audio")
+            _pass_due("review_audio", next_review_audio)
+            try:
+                from bankai.web import review_audio
+
+                _pass_result("review_audio", {"queued": await asyncio.to_thread(review_audio.prepare_waiting)})
+            except Exception as exc:  # noqa: BLE001 -- the studio still starts it itself
+                log.warning("review audio pass failed: %r", exc)
+        # Private torrents held to seed: removed once the tracker's rule is met.
+        if _due("private_seeding", next_private_seeding) and (private_seeding_task is None or private_seeding_task.done()):
+            next_private_seeding = time.monotonic() + interval("private_seeding")
+            _pass_due("private_seeding", next_private_seeding)
+            if private_seeding_task is not None and private_seeding_task.exception() is not None:
+                log.warning("private seeding pass failed: %r", private_seeding_task.exception())
+            private_seeding_task = asyncio.ensure_future(_private_seeding())
+            _pass_task("private_seeding", private_seeding_task)
         # Off to the side: curated genres into Jellyfin, a few dozen titles an hour, once switched on.
         if _due("genre_sync", next_genre_sync) and (genre_sync_task is None or genre_sync_task.done()):
             next_genre_sync = time.monotonic() + interval("genre_sync")
@@ -1232,6 +1328,16 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 log.warning("follow pass failed: %r", mas_follow_task.exception())
             mas_follow_task = asyncio.ensure_future(_mas_follow())
             _pass_task("mas_follow", mas_follow_task)
+        # Off to the side too: Prowlarr's searches and TMDB's matches take a while.
+        if _due("mas_review", next_mas_review) and (mas_review_task is None or mas_review_task.done()):
+            next_mas_review = time.monotonic() + interval("mas_review")
+            _pass_due("mas_review", next_mas_review)
+            if mas_review_task is not None and mas_review_task.exception() is not None:
+                log.warning("German release pass failed: %r", mas_review_task.exception())
+            from bankai.web import mas_releases
+
+            mas_review_task = asyncio.ensure_future(mas_releases.discover())
+            _pass_task("mas_review", mas_review_task)
         if _due("job_archive", next_archive_pass):
             next_archive_pass = time.monotonic() + interval("job_archive")
             _pass_due("job_archive", next_archive_pass)
@@ -1300,29 +1406,15 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                 raise
             except Exception as exc:
                 log.warning("codec sweep failed: %s", exc)
-        if _due("thumb_sweep", next_thumb_pass):
+        # Off to the side: after a restart the first sweep reads every episode's picture over 9p, many minutes in
+        # which every other pass (manga downloads, the reviews) waited behind it (Nov 2026).
+        if _due("thumb_sweep", next_thumb_pass) and (thumb_task is None or thumb_task.done()):
             next_thumb_pass = time.monotonic() + interval("thumb_sweep")
             _pass_due("thumb_sweep", next_thumb_pass)
-            try:
-                from pathlib import Path
-
-                from bankai.web import anime_thumbs
-
-                with _pass_running("thumb_sweep"):
-                    result = await asyncio.to_thread(
-                        anime_thumbs.sweep,
-                        Path(get_settings().transfer.anime_shows_dir),
-                        limit=_THUMB_SWEEP_BATCH,
-                    )
-                _pass_result("thumb_sweep", result)
-                if result["made"]:
-                    log.info(
-                        "Wrote %d episode picture(s); %d still to go", result["made"], result["remaining"]
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("thumbnail sweep failed: %s", exc)
+            if thumb_task is not None and thumb_task.exception() is not None:
+                log.warning("thumbnail sweep failed: %s", thumb_task.exception())
+            thumb_task = asyncio.ensure_future(_thumb_sweep())
+            _pass_task("thumb_sweep", thumb_task)
         if _due("jellyfin_refresh", next_jellyfin_pass):
             next_jellyfin_pass = time.monotonic() + interval("jellyfin_refresh")
             from bankai.web import jellyfin
@@ -1343,19 +1435,14 @@ async def scheduler(*, poll_seconds: float = 2.0) -> None:
                     raise
                 except Exception as exc:
                     log.warning("Jellyfin pass failed: %s", exc)
-        if _due("hevc_check", next_hevc_check):
+        # Off to the side: its Nyaa searches take minutes, and dispatching must not wait for them.
+        if _due("hevc_check", next_hevc_check) and (hevc_task is None or hevc_task.done()):
             next_hevc_check = time.monotonic() + interval("hevc_check")
             _pass_due("hevc_check", next_hevc_check)
-            try:
-                from bankai.web import erai as erai_mod
-
-                with _pass_running("hevc_check"):
-                    result = await erai_mod.check_hevc_upgrades(entries=_HEVC_CHECK_ENTRIES)
-                _pass_result("hevc_check", result)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("HEVC upgrade check failed: %s", exc)
+            if hevc_task is not None and hevc_task.exception() is not None:
+                log.warning("HEVC upgrade check failed: %s", hevc_task.exception())
+            hevc_task = asyncio.ensure_future(_hevc_check())
+            _pass_task("hevc_check", hevc_task)
         # Off to the side: its Nyaa searches are spaced seconds apart, minutes
         # for a long show, and dispatching queued work must not wait for them.
         if _due("missing_check", next_missing_check) and (missing_task is None or missing_task.done()):

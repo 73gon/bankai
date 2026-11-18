@@ -15,7 +15,7 @@ function Rows({ arcs, total, onChange }: { arcs: AnimeArc[]; total: number; onCh
     onChange(arcs.map((arc, at) => (at === index ? { ...arc, ...change } : arc)));
   }
   return (
-    <Table variant='plain' dense>
+    <Table variant='plain' size='sm'>
       <TableHeader>
         <TableRow>
           <TableHead className='w-16'>Season</TableHead>

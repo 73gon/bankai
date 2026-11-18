@@ -622,9 +622,15 @@ def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict |
         # A choice made for "Honzuki no Gekokujou" may not be one for its "S04E23": the key lost
         # the season. What the name itself says goes first then, the choice after.
         entry, number, special = read()
+    elif parsed and erai._SHOW_SEASON_SUFFIX.search(name) and not erai._SHOW_SEASON_SUFFIX.search(key):
+        # So for Erai's "Beastars Final Season - 01 ~ 12": its key is "beastars", and the choice made
+        # for the second season's "Beastars - 01" took the final season's batch for it (Nov 2026).
+        entry = anilist.resolve_in(table, name).anime
+    chosen = False
     if entry is not None:
         pass
     elif str(saved.get("anilist_id") or "").isdigit():
+        chosen = True
         entry = table.anime.get(int(saved["anilist_id"]))
         if number is not None:
             number += int(saved.get("anilist_episode_offset") or 0)
@@ -645,7 +651,7 @@ def anilist_match(title: str, *, table: Any, mappings: dict[str, Any]) -> dict |
     if entry is not None and special:
         # A special's number is the show's count of specials, not the entry's.
         number = 1 if number is not None and anilist.episode_count(entry.id) == 1 else None
-    elif entry is not None and number is not None and not str(saved.get("anilist_id") or "").isdigit():
+    elif entry is not None and number is not None and not chosen:
         entry, number = anilist.settle_in(entry, *_counted_from_start(entry, number))
     if entry is None:
         return None

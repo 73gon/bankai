@@ -19,7 +19,7 @@ const QUALITY_ITEMS = [
 
 const SETTING_UI: Record<
   string,
-  { label: string; description: string; kind: 'number' | 'quality' | 'paths' | 'switch'; min?: number; step?: number; suffix?: string }
+  { label: string; description: string; kind?: 'number' | 'quality' | 'paths' | 'switch'; min?: number; step?: number; suffix?: string }
 > = {
   'web.server_movie_dirs': {
     label: 'Movie directories',
@@ -56,6 +56,18 @@ const SETTING_UI: Record<
     label: 'German release first',
     description: 'Before taking the German track from a stream and syncing it, look for a torrent that has German audio itself; taken as it is, nothing to sync.',
     kind: 'switch',
+  },
+  'avistaz.username': {
+    label: 'AvistaZ login',
+    description: 'Your avistaz.to member name. AvistaZ has Asian films and shows, some with German audio: the Torrents page and the German review search it.',
+  },
+  'avistaz.password': {
+    label: 'AvistaZ password',
+    description: 'Kept in config.toml.',
+  },
+  'avistaz.pid': {
+    label: 'AvistaZ PID',
+    description: 'The passkey on your avistaz.to profile page. A private tracker: its downloads seed until the hit-and-run rule is met (74 hours for 1 GB up to 472 for 1000 GB, or 90% uploaded back), then go.',
   },
   'selector.min_seeders': {
     label: 'Minimum seeders',
@@ -95,7 +107,7 @@ function fieldLabel(key: string): string {
 }
 
 function sectionLabel(section: string): string {
-  return section === 'selector' ? 'HQ torrent downloads' : labelize(section);
+  return section === 'selector' ? 'HQ torrent downloads' : section === 'avistaz' ? 'AvistaZ' : labelize(section);
 }
 
 function valuesEqual(a: any, b: any): boolean {
@@ -113,7 +125,7 @@ function valuesEqual(a: any, b: any): boolean {
  */
 export type SettingsScope = 'mas' | 'global' | 'all';
 
-const MAS_SECTIONS = new Set(['scraper', 'selector']);
+const MAS_SECTIONS = new Set(['scraper', 'selector', 'avistaz']);
 const MAS_KEYS = new Set(['web.server_movie_dirs', 'web.server_show_dirs']);
 
 function inScope(key: string, scope: SettingsScope): boolean {

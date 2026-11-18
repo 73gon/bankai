@@ -367,8 +367,13 @@ class PipelineWorker(Worker):
                 queries.append(f"{german_name} {year.group(0)}" if year else german_name)
         queries = list(dict.fromkeys(queries))
         policy = get_settings().selector
-        # German preferred, nothing marked down for being foreign.
-        selector = TorrentSelector(policy.model_copy(update={"preferred_audio_languages": ["german", "deutsch"]}))
+        # German preferred, nothing marked down for being foreign. Few German releases are on the
+        # public indexers, and most have a handful of seeders: the minimum set for English releases
+        # (20) rejected every one found for Inception and Oppenheimer (Nov 2026); 3 still downloads.
+        selector = TorrentSelector(policy.model_copy(update={
+            "preferred_audio_languages": ["german", "deutsch"],
+            "min_seeders": min(policy.min_seeders, 3),
+        }))
         chosen = None
         prowlarr = ProwlarrClient()
         try:
@@ -1061,7 +1066,9 @@ def german_audio_named(title: str) -> bool:
     if not _GERMAN_AUDIO_WORDS & set(words):
         return False
     if _SUBTITLE_ONLY_WORDS & set(words):
-        return bool({"dl", "dubbed", "dual"} & set(words))
+        # "WEB-DL" is the source, not German DL: "... AMZN WEB-DL ... German Sub" carries no German audio.
+        said = {word for at, word in enumerate(words) if not (word == "dl" and at and words[at - 1] == "web")}
+        return bool({"dl", "dubbed", "dual"} & said)
     return True
 
 

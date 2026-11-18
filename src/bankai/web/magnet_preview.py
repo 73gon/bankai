@@ -77,7 +77,7 @@ def plan(
 ) -> list[dict[str, Any]]:
     """Each of the torrent's files with the ticked file it would replace (``replaces``), or why it stays out.
 
-    ``missing``: ticked anime episodes with no file ({season_number, episode}, the library's numbers):
+    ``missing``: ticked episodes with no file ({season_number, episode}, the library's numbers; anime or a show):
     a torrent file of that episode fills it (``fills``), nothing replaced."""
     from bankai.processor.anime import episode_number
     from bankai.torrent.matcher import parse_se
@@ -109,11 +109,11 @@ def plan(
                 for number in range(span[1], (span[2] or span[1]) + 1):
                     wanted[(span[0], number)] = name
     filling: set[str] = set()
-    if scope == "anime":
-        for row in missing or []:
-            label = missing_label(row)
-            wanted.setdefault(int(row["episode"]), label)
-            filling.add(label)
+    for row in missing or []:
+        # Anime goes by the entry's episode number; a Movies & Shows show by season and episode.
+        label = missing_label(row)
+        wanted.setdefault(int(row["episode"]) if scope == "anime" else (int(row["season_number"]), int(row["episode"])), label)
+        filling.add(label)
     for row in rows:
         if row not in videos:
             row.update(replaces=None, why="not a video")
@@ -137,11 +137,20 @@ async def preview(magnet: str, paths: list[str], scope: str, missing: list[dict[
 
     info_hash, name = erai.magnet_parts(magnet)
     out: dict[str, Any] = {"info_hash": info_hash, "name": name, "known": await asyncio.to_thread(known, info_hash)}
-    meta = await metadata(magnet.strip())
+    from bankai.torrent import uploads
+
+    # A dropped .torrent is read from itself; a magnet's files are asked of the swarm.
+    meta = await asyncio.to_thread(uploads.metadata, info_hash) or await metadata(magnet.strip())
     if meta is None:
         return {**out, "pending": True}
     files = files_of(meta)
-    missing = missing if scope == "anime" else []
+    # A Blu-ray disc image: its episodes are told from the discs' playlists once downloaded.
+    streams = [row for row in files if "/BDMV/STREAM/" in "/" + row["path"].replace("\\", "/") and row["path"].casefold().endswith(".m2ts")]
+    disc_image = {
+        "discs": len({row["path"].replace("\\", "/").split("/BDMV/")[0] for row in streams}),
+        "long_streams": sum(row["size"] >= 1024**3 for row in streams),
+    } if streams else None
+    missing = missing if scope in {"anime", "show"} else []
     rows = await asyncio.to_thread(plan, files, paths, scope, missing)
     # What would replace something first, in episode order; then the rest by name.
     rows.sort(key=lambda row: (row.get("replaces") is None, str(row.get("episode") or "").zfill(6), row["name"]))
@@ -154,6 +163,7 @@ async def preview(magnet: str, paths: list[str], scope: str, missing: list[dict[
         "private": bool((meta.get("info") or {}).get("private")),
         "trackers": len(meta.get("trackers") or []),
         "files": rows,
+        "disc_image": disc_image,
         "ticked": len(paths) + len(missing or []),
         "covered": len(covered),
         "filled": len({row["replaces"] for row in rows if row.get("fills")}),

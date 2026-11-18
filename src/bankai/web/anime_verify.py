@@ -805,7 +805,7 @@ def annotate(episodes: list[dict]) -> dict[str, int]:
         if rel not in rows:
             continue
         result = found.get(rel)
-        current = bool(result) and _same(result, row.get("size"), row.get("mtime"))
+        current = bool(result) and _same(result, row.get("size"), row.get("mtime")) and _filed_as(result, rows[rel])
         confirmed = rel in sure and _same(sure[rel], row.get("size"), row.get("mtime"))
         if not current and not confirmed and not extra.get(rel):
             continue
@@ -845,6 +845,19 @@ def _same(result: dict, size: object, mtime: object) -> bool:
         return False
 
 
+def _filed_as(result: dict, pairs: object) -> bool:
+    """A result for the entry and episode the file is filed as now. Matched again by hand, a file
+    kept the old check's: Violet Evergarden's Special, once taken for the Movie, "runs 34 min,
+    AniList says 140" (Nov 2026)."""
+    if result.get("anilist_id") is None:
+        return True
+    try:
+        filed = {(int(aid), int(ep)) for aid, ep in pairs}  # type: ignore[union-attr]
+        return (int(result["anilist_id"]), int(result.get("episode") or 0)) in filed
+    except (TypeError, ValueError):
+        return True
+
+
 def _current(rel: str, result: dict) -> bool:
     from bankai.web import anime_files
 
@@ -870,7 +883,14 @@ def due() -> list[str]:
     # Confirmed by the user: no check needed while the file is as it was.
     sure = {rel for rel, row in data["confirmed"].items() if _current(rel, row)}
     fresh = [rel for rel in sorted(index) if rel not in asked and rel not in found and rel not in sure]
-    stale = [rel for rel in sorted(index) if rel not in asked and rel in found and rel not in sure and not _current(rel, found[rel])]
+    stale = [
+        rel
+        for rel in sorted(index)
+        if rel not in asked
+        and rel in found
+        and rel not in sure
+        and not (_current(rel, found[rel]) and _filed_as(found[rel], index[rel]))
+    ]
     return order + fresh + stale
 
 

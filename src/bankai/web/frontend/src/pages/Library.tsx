@@ -1,3 +1,4 @@
+import { TorrentLinkField } from '@/components/torrent-link-field';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Library as LibraryIcon,
@@ -14,9 +15,6 @@ import {
   Film,
   ChevronUp,
   ChevronDown,
-  ChevronsUpDown,
-  Filter,
-  Check,
   ZoomIn,
   ZoomOut,
   Languages,
@@ -29,12 +27,12 @@ import {
   Link2,
   MoreHorizontal,
 } from 'lucide-react';
-import { toast } from '@/lib/toast';
-import { api, pagePaths, recall, type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
+import { inBackground, toast } from '@/lib/toast';
+import { api, pagePaths, recall, type AudioCacheStatus,
+  type MediaInfo, type TitleRow, type AudioTrack, type TorrentCandidate } from '@/lib/api';
 import { POSTER_IMG, posterSources } from '@/lib/posters';
 import { Button } from '@zonsh/ui';
 import { Input } from '@zonsh/ui';
-import { Badge } from '@zonsh/ui';
 import { Slider } from '@zonsh/ui';
 import { Skeleton } from '@zonsh/ui';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@zonsh/ui';
@@ -54,15 +52,23 @@ import { Popover, PopoverContent, PopoverDescription, PopoverTitle, PopoverTrigg
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@zonsh/ui';
 import { StatusTag } from '@/components/status-tag';
 import { SortHeader } from '@/components/sort-header';
+import {
+  QueueBody,
+  QueueDeleteDialog,
+  QueueFilters,
+  QueueHeader,
+  QueuePager,
+  QueueProgress,
+  QueueSelectionBar,
+  QueueTick,
+  retryJobs,
+  formatQueueTime,
+  useQueueChips,
+  useQueuePicks,
+  useSettled,
+} from '@/components/queue/queue-page';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@zonsh/ui';
-
-const PAGE_SIZE_ITEMS = [
-  { value: '10', label: '10' },
-  { value: '25', label: '25' },
-  { value: '50', label: '50' },
-  { value: '100', label: '100' },
-];
 
 const QUALITY_ITEMS = [
   { value: '360', label: '360p' },
@@ -221,53 +227,29 @@ function TruncCell({
   );
 }
 
-function SourceCell({ r }: { r: TitleRow }) {
+/** The German stream and the HQ torrent a row came from, as two small links after its line. */
+function SourceLinks({ r }: { r: TitleRow }) {
   const sources = [
-    {
-      label: 'DE',
-      name: 'German stream',
-      url: r.german_source_url,
-      title: null,
-    },
-    {
-      label: 'HQ',
-      name: 'HQ torrent',
-      url: r.torrent_source_url,
-      title: r.torrent_source_title,
-    },
+    { label: 'DE', name: 'German stream', url: r.german_source_url, title: null as string | null },
+    { label: 'HQ', name: 'HQ torrent', url: r.torrent_source_url, title: r.torrent_source_title },
   ].filter((source) => source.url);
-
-  if (sources.length === 0) return <span className='text-foreground'>—</span>;
+  if (sources.length === 0) return null;
   return (
-    <div className='flex items-center gap-1'>
+    <span className='flex shrink-0 items-center gap-1'>
       {sources.map((source) => (
-        <Tooltip key={source.label}>
-          <TooltipTrigger
-            render={
-              <Button
-                size='sm'
-                variant='secondary'
-                className='w-10 px-2 font-mono text-xs'
-                aria-label={`Open ${source.name} source in a new tab`}
-                nativeButton={false}
-                render={<a href={source.url!} target='_blank' rel='noreferrer' onClick={(event) => event.stopPropagation()} />}
-              />
-            }
-          >
-            {source.label}
-          </TooltipTrigger>
-          <TooltipContent variant='text' className='max-w-md'>
-            <div className='flex flex-col gap-1'>
-              <span className='font-medium'>
-                Open {source.name} source
-              </span>
-              {source.title && <span>{source.title}</span>}
-              <span className='break-all font-mono text-xs'>{source.url}</span>
-            </div>
-          </TooltipContent>
-        </Tooltip>
+        <a
+          key={source.label}
+          href={source.url!}
+          target='_blank'
+          rel='noreferrer'
+          onClick={(event) => event.stopPropagation()}
+          title={`Open the ${source.name}${source.title ? `: ${source.title}` : ''}`}
+          className='rounded-item px-1 font-mono text-[0.65rem] text-foreground-soft ring-1 ring-border hover:text-foreground focus-ring'
+        >
+          {source.label}
+        </a>
       ))}
-    </div>
+    </span>
   );
 }
 
@@ -281,7 +263,7 @@ function TorrentCandidateTable({
   onSelect: (candidate: TorrentCandidate) => void | Promise<void>;
 }) {
   return (
-    <Table variant='plain' dense containerProps={{ className: 'min-h-0 overflow-auto' }} className='min-w-[58rem] table-fixed text-foreground'>
+    <Table variant='plain' size='sm' containerProps={{ className: 'min-h-0 overflow-auto' }} className='min-w-[58rem] table-fixed text-foreground'>
       <TableHeader className='sticky top-0 z-10 bg-(--field-surface)'>
         <TableRow>
           <TableHead className='w-[46%]'>Title</TableHead>
@@ -394,19 +376,19 @@ function TorrentPickerTools({
           Apply
         </Button>
       </div>
-      <div className='flex flex-col gap-2 sm:flex-row'>
-        <Input
+      <div className='flex flex-col gap-2 sm:flex-row sm:items-start'>
+        <TorrentLinkField
+          className='flex-1'
           value={filters.magnet}
-          onChange={(event) => onChange({ ...filters, magnet: event.target.value })}
-          placeholder='Paste a magnet link'
-          className='min-w-0 flex-1 font-mono text-xs'
+          onChange={(magnet) => onChange({ ...filters, magnet })}
+          disabled={busy}
         />
         <Button
           variant='secondary'
           onClick={() => onMagnet(filters.magnet)}
           disabled={busy || !filters.magnet.trim()}
         >
-          <Download data-icon='inline-start' /> Use magnet
+          <Download data-icon='inline-start' /> Use torrent
         </Button>
       </div>
     </div>
@@ -483,25 +465,6 @@ const STATUS_VARIANT: Record<Status, 'queue' | 'starting' | 'extract' | 'torrent
   deleted: 'muted',
 };
 
-const STATUS_ROW_TINT: Record<Status, string> = {
-  queued: 'bg-control-surface/80 hover:bg-control-hover',
-  starting: 'bg-starting/[0.15] hover:bg-starting/[0.22]',
-  extracting: 'bg-extract/[0.13] hover:bg-extract/[0.2]',
-  downloading: 'bg-torrent/[0.13] hover:bg-torrent/[0.2]',
-  syncing: 'bg-info/[0.12] hover:bg-info/[0.18]',
-  remuxing: 'bg-repack/[0.13] hover:bg-repack/[0.2]',
-  waiting_action: 'bg-warning/[0.14] hover:bg-warning/[0.21]',
-  failed: 'bg-destructive/[0.14] hover:bg-destructive/[0.2]',
-  stopped: 'bg-amber-500/[0.12] hover:bg-amber-500/[0.18]',
-  cancelled: 'bg-warning/[0.12] hover:bg-warning/[0.18]',
-  review: 'bg-foreground/[0.08] hover:bg-foreground/[0.13]',
-  repacking: 'bg-repack/[0.13] hover:bg-repack/[0.2]',
-  approved: 'bg-success/[0.1] hover:bg-success/[0.16]',
-  transferring: 'bg-transfer/[0.13] hover:bg-transfer/[0.19]',
-  done: 'bg-success/[0.13] hover:bg-success/[0.19]',
-  deleted: 'bg-muted/20 hover:bg-muted/30',
-};
-
 const STATUS_LABEL: Record<Status, string> = {
   queued: 'Queued',
   starting: 'Starting',
@@ -556,64 +519,6 @@ function rowStatus(r: TitleRow): Status {
   return 'review';
 }
 
-function StatusCell({ r }: { r: TitleRow }) {
-  const s = rowStatus(r);
-  if (s === 'queued') {
-    return (
-      <StatusTag variant={STATUS_VARIANT[s]}>
-        Queued{r.queue_position != null ? ` #${r.queue_position}` : ''}
-      </StatusTag>
-    );
-  }
-  if (['starting', 'extracting', 'downloading', 'syncing', 'remuxing'].includes(s)) {
-    const pct = Math.round(r.overall_percent ?? 0);
-    return (
-      <div className='min-w-[10rem]'>
-        <StatusTag variant={STATUS_VARIANT[s]} className='gap-1.5'>
-          <Loader2 className='h-3 w-3 animate-spin' />
-          {r.step_label || STATUS_LABEL[s]} {pct > 0 ? `${pct}%` : ''}
-        </StatusTag>
-        {pct > 0 && (
-          <div className='mt-1 h-1 overflow-hidden rounded-full bg-control-surface'>
-            <div
-              className={cn(
-                'h-full rounded-full',
-                s === 'downloading' ? 'bg-torrent' : s === 'extracting' ? 'bg-extract' : s === 'remuxing' ? 'bg-repack' : 'bg-info',
-              )}
-              style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-            />
-          </div>
-        )}
-      </div>
-    );
-  }
-  if (s === 'transferring') {
-    const pct = Math.round(r.transfer_percent || 0);
-    return (
-      <StatusTag variant={STATUS_VARIANT[s]} className='gap-1.5'>
-        <Loader2 className='h-3 w-3 animate-spin' /> Transferring {pct > 0 ? `${pct}%` : ''}
-      </StatusTag>
-    );
-  }
-  if (s === 'repacking') {
-    const pct = Math.round(r.repack_percent || 0);
-    return (
-      <StatusTag variant={STATUS_VARIANT[s]} className='gap-1.5'>
-        <Loader2 className='h-3 w-3 animate-spin' /> {r.repack_label || (r.repack_kind === 'torrent' ? 'Replacing torrent' : 'Repacking')}{' '}
-        {pct > 0 ? `${pct}%` : ''}
-      </StatusTag>
-    );
-  }
-  if (s === 'failed' && r.reason) {
-    return (
-      <StatusTag variant='destructive' title={r.reason_detail || r.reason} className='max-w-[18rem]'>
-        <span className='truncate'>{r.reason}</span>
-      </StatusTag>
-    );
-  }
-  return <StatusTag variant={STATUS_VARIANT[s]}>{STATUS_LABEL[s]}</StatusTag>;
-}
-
 function statusRank(r: TitleRow): number {
   if (r.row_kind === 'job') {
     if (r.action_required) return 0;
@@ -631,48 +536,66 @@ function statusRank(r: TitleRow): number {
   return 6; // transferred
 }
 
-type SortCol = 'title' | 'type' | 'status' | 'created_at' | 'updated_at';
+type SortCol = 'title' | 'type' | 'status' | 'progress' | 'created_at' | 'updated_at';
 type SortDir = 'asc' | 'desc';
-type PageSize = 10 | 25 | 50 | 100;
 
 const QUEUE_PREFERENCES_KEY = 'bankai:queue-table-preferences';
-const SORT_COLUMNS: SortCol[] = ['title', 'type', 'status', 'created_at', 'updated_at'];
-const PAGE_SIZES: PageSize[] = [10, 25, 50, 100];
+const SORT_COLUMNS: SortCol[] = ['title', 'type', 'status', 'progress', 'created_at', 'updated_at'];
+const QUEUE_PAGE_SIZE = 100;
 
 interface QueuePreferences {
-  filter: string;
-  statuses: Status[];
-  filtersOpen: boolean;
+  status: string;
+  showCompleted: boolean;
   sortCol: SortCol;
   sortDir: SortDir;
-  pageSize: PageSize;
 }
 
 function readQueuePreferences(): QueuePreferences {
-  const fallback: QueuePreferences = {
-    filter: '',
-    statuses: [],
-    filtersOpen: false,
-    sortCol: 'created_at',
-    sortDir: 'desc',
-    pageSize: 50,
-  };
+  const fallback: QueuePreferences = { status: 'all', showCompleted: false, sortCol: 'created_at', sortDir: 'desc' };
   try {
     const raw = localStorage.getItem(QUEUE_PREFERENCES_KEY);
     if (!raw) return fallback;
     const saved = JSON.parse(raw) as Partial<QueuePreferences>;
-    const allStatuses = Object.keys(STATUS_LABEL) as Status[];
     return {
-      filter: typeof saved.filter === 'string' ? saved.filter : fallback.filter,
-      statuses: Array.isArray(saved.statuses) ? saved.statuses.filter((status): status is Status => allStatuses.includes(status as Status)) : [],
-      filtersOpen: typeof saved.filtersOpen === 'boolean' ? saved.filtersOpen : fallback.filtersOpen,
+      status: typeof saved.status === 'string' && (saved.status === 'all' || saved.status in STATUS_LABEL) ? saved.status : fallback.status,
+      showCompleted: typeof saved.showCompleted === 'boolean' ? saved.showCompleted : fallback.showCompleted,
       sortCol: SORT_COLUMNS.includes(saved.sortCol as SortCol) ? (saved.sortCol as SortCol) : fallback.sortCol,
       sortDir: saved.sortDir === 'asc' || saved.sortDir === 'desc' ? saved.sortDir : fallback.sortDir,
-      pageSize: PAGE_SIZES.includes(saved.pageSize as PageSize) ? (saved.pageSize as PageSize) : fallback.pageSize,
     };
   } catch {
     return fallback;
   }
+}
+
+// The statuses in the order work flows through them, for the chips; done and deleted are "completed".
+const STATUS_ORDER: Status[] = [
+  'queued', 'starting', 'extracting', 'downloading', 'syncing', 'remuxing', 'waiting_action', 'review',
+  'repacking', 'approved', 'transferring', 'done', 'failed', 'stopped', 'cancelled', 'deleted',
+];
+const COMPLETED: ReadonlySet<Status> = new Set(['done', 'deleted']);
+const CHIP_LABEL: Record<Status, string> = {
+  queued: 'Queued', starting: 'Starting', extracting: 'Extracting', downloading: 'Downloading', syncing: 'Syncing',
+  remuxing: 'Remuxing', waiting_action: 'Needs action', review: 'Review', repacking: 'Repacking', approved: 'Approved',
+  transferring: 'Transferring', done: 'Done', failed: 'Failed', stopped: 'Stopped', cancelled: 'Cancelled', deleted: 'Deleted',
+};
+const chipLabel = (value: string) => CHIP_LABEL[value as Status] ?? value;
+
+/** The bar for a row at work: the pipeline's own progress, a transfer's or a repack's bytes. */
+function RowProgress({ r }: { r: TitleRow }) {
+  const s = rowStatus(r);
+  if (s === 'transferring') return <QueueProgress percent={r.transfer_percent} label='Transfer' tone='transfer' />;
+  if (s === 'repacking') return <QueueProgress percent={r.repack_percent} label={r.repack_kind === 'torrent' ? 'Torrent' : 'Repack'} tone='repack' />;
+  if (['starting', 'extracting', 'downloading', 'syncing', 'remuxing'].includes(s)) {
+    return <QueueProgress percent={r.overall_percent} />;
+  }
+  return <span className='text-muted-foreground'>—</span>;
+}
+
+function progressOf(r: TitleRow): number {
+  const s = rowStatus(r);
+  if (s === 'transferring') return r.transfer_percent || 0;
+  if (s === 'repacking') return r.repack_percent || 0;
+  return ['starting', 'extracting', 'downloading', 'syncing', 'remuxing'].includes(s) ? r.overall_percent ?? 0 : -1;
 }
 
 function dateTimeLabel(ts: number | null): string {
@@ -716,90 +639,19 @@ function torrentContext(r: TitleRow) {
   };
 }
 
-// Multi-select dropdown of every row status (a lightweight popover — no
-// external dependency). Selecting none means "all".
-function StatusMultiSelect({
-  selected,
-  onToggle,
-  onClear,
-  counts,
-}: {
-  selected: Set<Status>;
-  onToggle: (s: Status) => void;
-  onClear: () => void;
-  counts: Record<string, number>;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
-  const all = Object.keys(STATUS_LABEL) as Status[];
-  const label =
-    selected.size === 0
-      ? 'All statuses'
-      : all
-          .filter((s) => selected.has(s))
-          .map((s) => STATUS_LABEL[s])
-          .join(', ');
-  return (
-    <div ref={ref} className='relative'>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className='flex min-h-(--control-h) min-w-[12rem] max-w-[20rem] cursor-pointer items-center justify-between gap-2 rounded-control material-field px-3.5 text-sm'
-      >
-        <span className='truncate text-left text-muted-foreground'>{label}</span>
-        <ChevronsUpDown className='h-4 w-4 shrink-0 text-muted-foreground' />
-      </button>
-      {open && (
-        <div className='absolute z-50 mt-1.5 w-64 rounded-button material-menu p-1'>
-          {all.map((s) => (
-            <button
-              key={s}
-              onClick={() => onToggle(s)}
-              className='flex w-full cursor-pointer items-center justify-between gap-2 rounded-item px-2 py-1.5 text-sm text-foreground-soft hover:bg-control-hover hover:text-foreground'
-            >
-              <span className='flex items-center gap-2'>
-                <span
-                  className={cn(
-                    'flex h-4 w-4 items-center justify-center rounded border',
-                    selected.has(s) ? 'border-primary bg-primary text-primary-foreground' : 'border-input',
-                  )}
-                >
-                  {selected.has(s) && <Check className='h-3 w-3' strokeWidth={3} />}
-                </span>
-                {STATUS_LABEL[s]}
-              </span>
-              <span className='font-mono text-xs text-muted-foreground tabular-nums'>{counts[s] ?? 0}</span>
-            </button>
-          ))}
-          {selected.size > 0 && (
-            <button onClick={onClear} className='mt-1 w-full cursor-pointer rounded-item px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-control-hover hover:text-foreground'>
-              Clear all
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Library() {
   const [initialPreferences] = useState(readQueuePreferences);
   const [rows, setRows] = useState<TitleRow[]>(queueRowsCache ?? []);
   const [loading, setLoading] = useState(queueRowsCache == null);
-  const [filter, setFilter] = useState(initialPreferences.filter);
-  const [statusFilters, setStatusFilters] = useState<Set<Status>>(() => new Set(initialPreferences.statuses));
-  const [filtersOpen, setFiltersOpen] = useState(initialPreferences.filtersOpen);
+  const [query, setQuery] = useState('');
+  const filter = useSettled(query, 150);
+  const [status, setStatus] = useState(initialPreferences.status);
+  const [showCompleted, setShowCompleted] = useState(initialPreferences.showCompleted);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [sortCol, setSortCol] = useState<SortCol>(initialPreferences.sortCol);
   const [sortDir, setSortDir] = useState<SortDir>(initialPreferences.sortDir);
   const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState<PageSize>(initialPreferences.pageSize);
+  const pageSize = QUEUE_PAGE_SIZE;
   const [logEntry, setLogEntry] = useState<TitleRow | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [redoing, setRedoing] = useState<Set<string>>(new Set());
@@ -827,19 +679,12 @@ export default function Library() {
   const loadInFlightRef = useRef<Promise<void> | null>(null);
   useEffect(() => {
     try {
-      const preferences: QueuePreferences = {
-        filter,
-        statuses: Array.from(statusFilters),
-        filtersOpen,
-        sortCol,
-        sortDir,
-        pageSize,
-      };
+      const preferences: QueuePreferences = { status, showCompleted, sortCol, sortDir };
       localStorage.setItem(QUEUE_PREFERENCES_KEY, JSON.stringify(preferences));
     } catch {
       /* localStorage may be unavailable in a locked-down browser. */
     }
-  }, [filter, statusFilters, filtersOpen, sortCol, sortDir, pageSize]);
+  }, [status, showCompleted, sortCol, sortDir]);
 
   async function load(silent = false, preserveScroll = false) {
     if (preserveScroll) restoreScrollRef.current = tableScrollRef.current?.scrollTop ?? null;
@@ -912,46 +757,81 @@ export default function Library() {
     return 'Movie';
   }
 
+  // Rows the title search and the completed switch let through: what the chips count.
+  const matched = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    return rows.filter((r) => (showCompleted || !COMPLETED.has(rowStatus(r))) && (!needle || titleWithYear(r).toLowerCase().includes(needle)));
+  }, [rows, filter, showCompleted]);
+
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const r of rows) {
+    for (const r of matched) {
       const k = rowStatus(r);
       c[k] = (c[k] ?? 0) + 1;
     }
     return c;
-  }, [rows]);
+  }, [matched]);
+  const chips = useQueueChips(STATUS_ORDER, counts, status, chipLabel);
 
   const filtered = useMemo(() => {
-    const list = rows.filter(
-      (e) => titleWithYear(e).toLowerCase().includes(filter.toLowerCase()) && (statusFilters.size === 0 || statusFilters.has(rowStatus(e))),
-    );
+    const list = matched.filter((e) => status === 'all' || rowStatus(e) === status);
     const dir = sortDir === 'asc' ? 1 : -1;
     list.sort((a, b) => {
       let d = 0;
       if (sortCol === 'title') d = a.title.localeCompare(b.title);
       else if (sortCol === 'type') d = typeLabel(a).localeCompare(typeLabel(b));
       else if (sortCol === 'status') d = statusRank(a) - statusRank(b);
+      else if (sortCol === 'progress') d = progressOf(a) - progressOf(b);
       else if (sortCol === 'created_at') d = (a.created_at ?? 0) - (b.created_at ?? 0);
       else d = (a.updated_at ?? 0) - (b.updated_at ?? 0);
       if (d === 0) d = (a.created_at ?? 0) - (b.created_at ?? 0);
       return d * dir;
     });
     return list;
-  }, [rows, filter, statusFilters, sortCol, sortDir]);
+  }, [matched, status, sortCol, sortDir]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = useMemo(() => filtered.slice(safePage * pageSize, safePage * pageSize + pageSize), [filtered, safePage, pageSize]);
   useEffect(() => {
     setPage(0);
-  }, [filter, statusFilters, sortCol, sortDir, pageSize]);
+  }, [filter, status, showCompleted, sortCol, sortDir]);
 
-  function toggleFilter(k: Status) {
-    setStatusFilters((prev) => {
-      const n = new Set(prev);
-      n.has(k) ? n.delete(k) : n.add(k);
-      return n;
-    });
+  // Hiding completed rows while filtered to them would leave an empty table with no visible reason why.
+  useEffect(() => {
+    if (!showCompleted && COMPLETED.has(status as Status)) setStatus('all');
+  }, [showCompleted, status]);
+
+  // Only jobs tick: a library row is a file, and deleting files is its own button.
+  const tickable = useMemo(() => pageRows.filter((r) => r.row_kind === 'job' && r.job_id), [pageRows]);
+  const { picked, setPicked, pick } = useQueuePicks(tickable.map((r) => r.id), [filter, status, showCompleted, safePage, sortCol, sortDir]);
+  const pickedRows = tickable.filter((r) => picked.has(r.id));
+  const allPicked = tickable.length > 0 && pickedRows.length === tickable.length;
+
+  function deletePicked() {
+    const targets = pickedRows;
+    setPicked(new Set());
+    setConfirmDelete(false);
+    const work = (async () => {
+      const failed: string[] = [];
+      // A few at a time: each delete may stop a process or remove a torrent.
+      for (let start = 0; start < targets.length; start += 4) {
+        const results = await Promise.allSettled(targets.slice(start, start + 4).map((r) => api.deleteJob(r.job_id!)));
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') failed.push(targets[start + index].title);
+        });
+      }
+      if (failed.length === targets.length) throw new Error(`none could be deleted: ${failed.slice(0, 3).join(', ')}`);
+      return failed;
+    })();
+    void inBackground(work, {
+      loading: `Deleting ${targets.length} job${targets.length === 1 ? '' : 's'}…`,
+      success: (failed) => {
+        const removed = targets.length - failed.length;
+        return `${removed} job${removed === 1 ? '' : 's'} deleted`
+          + (failed.length ? ` · ${failed.length} could not be: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}` : '');
+      },
+    }).finally(() => void load(true, true)).catch(() => undefined);
   }
 
   function sortBy(col: SortCol) {
@@ -1020,7 +900,8 @@ export default function Library() {
   }
 
   async function redo(r: TitleRow) {
-    const key = r.path || r.title;
+    // A queue row runs its own job again (a torrent download is no pipeline run to look up by title).
+    const key = r.row_kind === 'job' && r.job_id ? r.job_id : r.path || r.title;
     setRedoing((s) => new Set(s).add(r.id));
     try {
       const res = await api.redoTitle(key);
@@ -1331,9 +1212,9 @@ export default function Library() {
   }
 
   function Poster({ r }: { r: TitleRow }) {
-    if (r.poster) return <img {...posterSources(r.poster)} {...POSTER_IMG} alt='' className='h-14 w-10 shrink-0 rounded object-cover' />;
+    if (r.poster) return <img {...posterSources(r.poster)} {...POSTER_IMG} alt='' className='aspect-[2/3] w-8 shrink-0 rounded object-cover' />;
     return (
-      <div className='flex h-14 w-10 shrink-0 items-center justify-center rounded bg-secondary/60'>
+      <div className='flex aspect-[2/3] w-8 shrink-0 items-center justify-center rounded bg-secondary/60'>
         {r.kind === 'episode' ? <LibraryIcon className='h-4 w-4 text-muted-foreground' /> : <Film className='h-4 w-4 text-muted-foreground' />}
       </div>
     );
@@ -1359,29 +1240,33 @@ export default function Library() {
     const stop = (e: React.MouseEvent) => e.stopPropagation();
     return (
       <>
-        <TableRow className={cn('text-foreground', STATUS_ROW_TINT[status])}>
-          <TableCell className='px-2 py-2'>
-            <Poster r={r} />
+        <TableRow className='data-row' data-selected={picked.has(r.id) ? '' : undefined}>
+          <TableCell>
+            {r.row_kind === 'job' && r.job_id ? <QueueTick label={'Select ' + r.title} checked={picked.has(r.id)} onChange={(on) => pick(r.id, on)} /> : null}
           </TableCell>
-          <TableCell className='max-w-[24rem] px-2 py-2 text-foreground'>
-            <div className='flex items-center gap-1.5'>
-              <span className='truncate font-medium'>{titleWithYear(r)}</span>
+          <TableCell>
+            <div className='flex items-center gap-2.5'>
+              <Poster r={r} />
+              <div className='min-w-0'>
+                <p className='truncate font-medium text-foreground' title={titleWithYear(r)}>{titleWithYear(r)}</p>
+                <p className='flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground'>
+                  <span className='truncate' title={r.reason_detail || r.reason || r.step_label || undefined}>
+                    {[typeLabel(r), isLib && r.size ? formatBytes(r.size) : null, r.reason || r.step_label].filter(Boolean).join(' · ')}
+                  </span>
+                  <SourceLinks r={r} />
+                </p>
+              </div>
             </div>
-            {isLib && r.size ? <div className='font-mono text-xs text-foreground-soft tabular-nums'>{formatBytes(r.size)}</div> : null}
           </TableCell>
-          <TableCell className='px-2 py-2 text-xs text-foreground'>{typeLabel(r)}</TableCell>
-          <TableCell className='px-2 py-2'>
-            <StatusCell r={r} />
+          <TableCell>
+            <StatusTag variant={STATUS_VARIANT[status]}>
+              {status === 'queued' && r.queue_position != null ? `Queued #${r.queue_position}` : chipLabel(status)}
+            </StatusTag>
           </TableCell>
-          <TableCell className='px-2 py-2'>
-            <SyncCell r={r} />
-          </TableCell>
-          <TableCell className='whitespace-nowrap px-2 py-2 font-mono text-xs text-foreground tabular-nums'>{dateTimeLabel(r.created_at)}</TableCell>
-          <TableCell className='whitespace-nowrap px-2 py-2 font-mono text-xs text-foreground tabular-nums'>{dateTimeLabel(r.updated_at)}</TableCell>
-          <TableCell className='px-2 py-2'>
-            <SourceCell r={r} />
-          </TableCell>
-          <TableCell className='px-2 py-2' onClick={stop}>
+          <TableCell><RowProgress r={r} /></TableCell>
+          <TableCell><SyncCell r={r} /></TableCell>
+          <TableCell className='font-mono text-[0.68rem] tabular-nums text-muted-foreground' title={`Added ${dateTimeLabel(r.created_at)}`}>{formatQueueTime(r.updated_at)}</TableCell>
+          <TableCell onClick={stop}>
             <div className='flex items-center justify-end gap-1'>
               {r.action_required && (
                 <Button size='sm' variant='secondary' onClick={() => openTorrentAction(r)}>
@@ -1568,65 +1453,56 @@ export default function Library() {
   }
 
   return (
-    <div className='flex h-full min-h-0 flex-col gap-4'>
-      <header className='flex flex-wrap items-center justify-between gap-3'>
-        <div className='flex items-baseline gap-2'>
-          <h1 className='font-heading text-3xl font-light tracking-[-0.02em]'>Queue</h1>
-          <span className='text-sm text-muted-foreground'>— Every title in one table: downloads, review, sync and transfer.</span>
-        </div>
-      </header>
+    <div className='flex flex-col gap-6'>
+      <QueueHeader
+        subtitle='German dubs and torrent downloads: download, sync, review and transfer'
+        showCompleted={showCompleted}
+        onShowCompleted={setShowCompleted}
+        completedLabel='Movies & Shows jobs'
+        loading={loading}
+        onRefresh={() => void load(false, true)}
+      />
+      <QueueFilters query={query} onQuery={setQuery} chips={chips} status={status} onStatus={setStatus} what='Movies & Shows jobs' />
 
-      {/* Collapsible filter bar */}
-      <div className='rounded-button surface-container'>
-        <button onClick={() => setFiltersOpen((o) => !o)} className='flex w-full cursor-pointer items-center justify-between rounded-button px-3 py-2 text-sm font-medium focus-ring'>
-          <span className='flex items-center gap-2'>
-            <Filter className='h-4 w-4 text-muted-foreground' />
-            Filters
-            {(statusFilters.size > 0 || filter) && <Badge variant='secondary' count={statusFilters.size + (filter ? 1 : 0)} />}
-          </span>
-          {filtersOpen ? <ChevronUp className='h-4 w-4' /> : <ChevronDown className='h-4 w-4' />}
-        </button>
-        {filtersOpen && (
-          <div className='flex flex-wrap items-center gap-3 border-t border-border/60 px-3 py-3'>
-            <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder='Search title…' className='w-56' />
-            <StatusMultiSelect selected={statusFilters} onToggle={toggleFilter} onClear={() => setStatusFilters(new Set())} counts={counts} />
-            {(statusFilters.size > 0 || filter) && (
-              <Button
-                variant='ghost'
-                size='sm'
-                onClick={() => {
-                  setStatusFilters(new Set());
-                  setFilter('');
-                }}
-              >
-                Reset
-              </Button>
-            )}
-          </div>
-        )}
-      </div>
-
-      {loading ? (
-        <div className='space-y-2'>
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} shape='item' className='h-12 w-full' />
-          ))}
-        </div>
-      ) : filtered.length === 0 ? (
-        <EmptyNote icon={LibraryIcon} title='Nothing here yet' description='Queue a title from Discover or Search — it will appear here.' />
-      ) : (
-        <Table variant='plain' containerProps={{ ref: tableScrollRef, className: 'min-h-0 flex-1 overflow-auto' }}>
-          <TableHeader className='sticky top-0 z-10 bg-(--secondary)'>
+      <QueueBody
+        loading={loading}
+        empty={filtered.length === 0}
+        what='Movies & Shows'
+        filtered={filter.trim() !== '' || status !== 'all'}
+        showCompleted={showCompleted}
+        emptyHint='Queue a title from Discover or Search: it will appear here.'
+        onClearFilters={() => {
+          setQuery('');
+          setStatus('all');
+        }}
+      >
+        <Table variant='plain' className='min-w-[1000px] table-fixed'>
+          <colgroup>
+            <col className='w-10' />
+            <col />
+            <col className='w-32' />
+            <col className='w-56' />
+            <col className='w-32' />
+            <col className='w-32' />
+            <col className='w-52' />
+          </colgroup>
+          <TableHeader>
             <TableRow>
-              <TableHead className='w-14 px-2' />
-              <SortHeader column='title' label='Title' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
-              <SortHeader column='type' label='Type' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
-              <SortHeader column='status' label='Status' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
-              <TableHead className='px-2'>Sync</TableHead>
-              <SortHeader column='created_at' label='Created at' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
-              <SortHeader column='updated_at' label='Updated at' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} className='px-2' />
-              <TableHead className='px-2'>Sources</TableHead>
-              <TableHead numeric className='px-2'>Actions</TableHead>
+              <TableHead>
+                <QueueTick
+                  label='Select every job on this page'
+                  checked={allPicked}
+                  disabled={tickable.length === 0}
+                  indeterminate={pickedRows.length > 0 && !allPicked}
+                  onChange={(on) => setPicked(on ? new Set(tickable.map((r) => r.id)) : new Set())}
+                />
+              </TableHead>
+              <SortHeader column='title' label='Title' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} />
+              <SortHeader column='status' label='Status' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} />
+              <SortHeader column='progress' label='Progress' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} />
+              <TableHead>Sync</TableHead>
+              <SortHeader column='updated_at' label='Updated' sort={{ key: sortCol, dir: sortDir }} onSort={sortBy} />
+              <TableHead numeric>Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -1635,53 +1511,30 @@ export default function Library() {
             ))}
           </TableBody>
         </Table>
-      )}
+      </QueueBody>
 
-      {!loading && (
-        <div className='flex items-center justify-between gap-3 text-sm'>
-          <div className='flex items-center gap-2 text-xs text-muted-foreground'>
-            <span>
-              {filtered.length === 0 ? '0' : `${safePage * pageSize + 1}–${Math.min(filtered.length, (safePage + 1) * pageSize)}`} of{' '}
-              {filtered.length}
-            </span>
-            <span>·</span>
-            <span>Per page</span>
-            <Select
-              items={PAGE_SIZE_ITEMS}
-              value={String(pageSize)}
-              onValueChange={(value) => {
-                if (value == null) return;
-                const next = Number(value) as PageSize;
-                if (PAGE_SIZES.includes(next)) setPageSize(next);
-              }}
-            >
-              <SelectTrigger size='sm' className='w-[86px] min-w-0' aria-label='Rows per page'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {PAGE_SIZE_ITEMS.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>
-                      {item.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className='flex items-center gap-2'>
-            <Button size='sm' variant='secondary' disabled={safePage === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>
-              Prev
-            </Button>
-            <span className='text-xs text-muted-foreground'>
-              Page {safePage + 1} / {pageCount}
-            </span>
-            <Button size='sm' variant='secondary' disabled={safePage >= pageCount - 1} onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}>
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
+      <QueueSelectionBar
+        count={pickedRows.length}
+        onDelete={() => setConfirmDelete(true)}
+        onClear={() => setPicked(new Set())}
+        retryable={pickedRows.filter((r) => r.job_status === 'failed').length}
+        onRetry={() => {
+          const failed = pickedRows.filter((r) => r.job_status === 'failed' && r.job_id).map((r) => ({ id: r.job_id!, title: r.title }));
+          setPicked(new Set());
+          retryJobs(failed, (id) => api.retryJob(id), () => void load(true, true));
+        }}
+      />
+
+      <QueueDeleteDialog
+        open={confirmDelete}
+        titles={pickedRows.map((r) => titleWithYear(r))}
+        running={pickedRows.filter((r) => r.job_status === 'running').length}
+        description='They leave the queue for good, and their torrents leave qBittorrent with them (unless another job still needs one). Files already in the library are never touched.'
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => deletePicked()}
+      />
+
+      <QueuePager page={safePage} pageSize={pageSize} total={filtered.length} loading={loading} onPage={setPage} />
 
       <Dialog open={!!logEntry} onOpenChange={(open) => !open && setLogEntry(null)}>
         <DialogContent size='xl' className='max-h-[86vh] max-w-5xl'>
@@ -1940,6 +1793,9 @@ function fmtClockMs(s: number): string {
 function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => void }) {
   const path = entry.path as string;
   const [info, setInfo] = useState<MediaInfo | null>(null);
+  // A large file's audio, read once before its waveforms and clips can come quickly.
+  const [audioPrep, setAudioPrep] = useState<AudioCacheStatus | null>(null);
+  const audioReady = audioPrep == null || audioPrep.ready;
   const [engStream, setEngStream] = useState<number | null>(null);
   const [gerStream, setGerStream] = useState<number | null>(null);
   // Both lanes are fetched as WIDE track-time buffers (3× the view) so panning
@@ -2158,6 +2014,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         const m = await api.mediaInfo(path);
         if (cancelled) return;
         setInfo(m);
+        setAudioPrep(m.audio_cache ?? null);
         setDelayMs(m.delay_ms);
         setSavedDelay(m.delay_ms);
         setStretch(1);
@@ -2219,7 +2076,9 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
         try {
           await run();
           return;
-        } catch {
+        } catch (error) {
+          // Being prepared: asked again once it is ready (audioReady), not now.
+          if ((error as { preparing?: boolean }).preparing) return;
           if (attempt === 0) {
             await new Promise<void>((resolve) => {
               retryTimer = setTimeout(resolve, 1200);
@@ -2262,7 +2121,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       if (retryTimer) clearTimeout(retryTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging, delayMs, stretch]);
+  }, [path, engStream, gerStream, viewStart, windowSec, canvasW, dragging, delayMs, stretch, audioReady]);
 
   // Fetch compact full-track overviews in backend-safe 30-minute chunks.
   // Chunks are requested sequentially so this background work consumes only
@@ -2283,7 +2142,7 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           return await api.waveform(path, stream, start, dur, bins);
         } catch (error) {
           lastError = error;
-          if (cancelled) throw error;
+          if (cancelled || (error as { preparing?: boolean }).preparing) throw error;
           await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
         }
       }
@@ -2359,7 +2218,17 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [path, engStream, gerStream, engOverviewDuration, gerOverviewDuration]);
+  }, [path, engStream, gerStream, engOverviewDuration, gerOverviewDuration, audioReady]);
+
+  // While the audio is read once, how far it is, asked every few seconds; ready, the lanes load.
+  useEffect(() => {
+    if (!audioPrep || audioPrep.ready) return;
+    let live = true;
+    const timer = window.setInterval(() => {
+      api.mediaInfo(path).then((m) => { if (live) setAudioPrep(m.audio_cache ?? null); }).catch(() => undefined);
+    }, 4000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [path, audioPrep?.ready]);
 
   function markVideoClipCached(start: number, len: number) {
     if (!Number.isFinite(start) || !Number.isFinite(len) || len <= 0) return;
@@ -3496,6 +3365,23 @@ function WaveformReview({ entry, onClose }: { entry: TitleRow; onClose: () => vo
           </Button>
         </div>
       </div>
+      {audioPrep && !audioPrep.ready && (
+        <div className='flex flex-wrap items-center gap-3 border-b border-border/50 bg-info/10 px-4 py-2 text-sm text-foreground md:px-6'>
+          {audioPrep.error ? (
+            <span className='text-warning'>The audio could not be read for review: {audioPrep.error}</span>
+          ) : (
+            <>
+              <Loader2 className='size-4 animate-spin text-info' />
+              <span>
+                Reading this file&apos;s audio once ({formatBytes(info?.size ?? 0)}): waveforms and sound come from that copy, in an instant, from then on.
+              </span>
+              <span className='font-mono tabular-nums'>{(audioPrep.percent ?? 0).toFixed(0)}%</span>
+              {audioPrep.eta != null && <span className='text-muted-foreground'>about {Math.max(1, Math.round(audioPrep.eta / 60))} min left</span>}
+              <span className='text-muted-foreground'>The picture can be watched meanwhile.</span>
+            </>
+          )}
+        </div>
+      )}
 
       <Dialog open={replaceOpen} onOpenChange={setReplaceOpen}>
         <DialogContent size='xl' className='max-h-[88vh] max-w-7xl'>

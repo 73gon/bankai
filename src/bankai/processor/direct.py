@@ -24,8 +24,8 @@ from bankai.config import get_settings
 from bankai.logging import get_logger
 from bankai.processor.anime import _copy_with_sidecars, _download_root, _progress
 from bankai.torrent import actions as torrent_actions
-from bankai.torrent.matcher import find_video_files, pick_movie_file
-from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError, TorrentStalled
+from bankai.torrent.matcher import find_video_files, is_sample, pick_movie_file
+from bankai.torrent.qbittorrent import QBittorrentClient, QBittorrentError
 from bankai.web import direct
 
 log = get_logger(__name__)
@@ -42,6 +42,12 @@ async def _link(magnet_uri: str | None, download_url: str | None) -> tuple[str |
 
     if magnet_uri and magnet_uri.casefold().startswith("magnet:"):
         return magnet_uri, None, torrent_info_hash(magnet_uri, None)
+    from bankai.web import avistaz
+
+    if avistaz.site_of(download_url):
+        # A private tracker's .torrent, fetched with the user's token (there is no magnet).
+        data = await avistaz.fetch_torrent(str(download_url))
+        return None, data, torrent_info_hash(None, data)
     # Prowlarr's "magnet" for some indexers (The Pirate Bay via Knaben) is its own
     # http link: handed over as it was, qBittorrent answered 202 "pending" and never
     # got it, and every Modern Family season failed in its first second (Oct 2026).
@@ -50,6 +56,46 @@ async def _link(magnet_uri: str | None, download_url: str | None) -> tuple[str |
     if not magnet and not data:
         raise RuntimeError("the release's download link gave no torrent")
     return magnet, data, torrent_info_hash(magnet, data)
+
+
+def _same_name(left: str, right: str) -> bool:
+    """One release's name as two indexers spell it: "DDP5.1 H.264" and "DDP5 1 H 264" alike."""
+    return re.sub(r"[^a-z0-9]", "", left.casefold()) == re.sub(r"[^a-z0-9]", "", right.casefold())
+
+
+async def _elsewhere(release_title: str, media_kind: str) -> str | None:
+    """The same release's magnet from another indexer. Prowlarr answers 429 to every grab
+    from an indexer it has disabled -- 1337x, its site down, gives no info hash to build a
+    magnet from -- and each such job failed in its first second, however often run again
+    (Nov 2026); kickasstorrents and Knaben list the same releases with their magnets."""
+    from bankai.torrent.prowlarr import ProwlarrClient
+
+    client = ProwlarrClient()
+    try:
+        found = await client.search(release_title, categories=[2000] if media_kind == "movie" else [5000])
+    finally:
+        await client.aclose()
+    same = [
+        row for row in found
+        if _same_name(row.title, release_title)
+        and ((row.magnet_uri or "").casefold().startswith("magnet:") or row.info_hash)
+    ]
+    if not same:
+        return None
+    best = max(same, key=lambda row: row.seeders or 0)
+    log.info("[direct] the release's own link failed; taking %s's copy of it", best.indexer)
+    if (best.magnet_uri or "").casefold().startswith("magnet:"):
+        return best.magnet_uri
+    return f"magnet:?xt=urn:btih:{best.info_hash}"
+
+
+def _plain(exc: BaseException) -> str:
+    """An error without the link it was about: Prowlarr's links carry its API key."""
+    import httpx
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{exc.response.status_code} {exc.response.reason_phrase}"
+    return re.sub(r"apikey=[^&\s']+", "apikey=***", str(exc))
 
 
 async def _locate(client: QBittorrentClient, *, expected: str | None, before: set[str]) -> tuple[str, bool]:
@@ -104,7 +150,15 @@ async def download_direct(
     try:
         await qbit.login()
         before = {row.hash for row in await qbit.list_torrents(category=None)}
-        magnet, torrent_file, found_hash = await _link(magnet_uri, download_url)
+        try:
+            magnet, torrent_file, found_hash = await _link(magnet_uri, download_url)
+        except Exception as exc:
+            elsewhere = await _elsewhere(release_title, media_kind)
+            if not elsewhere:
+                raise RuntimeError(
+                    f"the release's torrent could not be fetched ({_plain(exc)}), and no other indexer lists it"
+                ) from None
+            magnet, torrent_file, found_hash = await _link(elsewhere, None)
         expected = (info_hash or found_hash or "").casefold() or None
         save_path = Path(settings.qbittorrent.save_path) if settings.qbittorrent.save_path else None
         await qbit.add(
@@ -120,15 +174,9 @@ async def download_direct(
         await qbit.resume(torrent_hash)
         await qbit.force_start(torrent_hash, enabled=True)
         try:
-            status = await qbit.wait_until_complete(torrent_hash, progress_cb=_progress, stall_seconds=STALL_SECONDS)
-        except TorrentStalled as exc:
-            # Dead: never to be picked again; the torrent and what it fetched go.
-            _reject(torrent_hash, release_title, f"stalled: {exc}")
-            try:
-                await qbit.remove(torrent_hash, delete_files=True)
-            except Exception as remove_exc:
-                log.warning("[direct] could not remove stalled torrent %s: %s", torrent_hash[:8], remove_exc)
-            raise RuntimeError(f"{release_title}: stalled, {exc}; another release is looked for") from exc
+            # No stall limit: a slow or seederless download waits (the user's word, Nov 2026) --
+            # after an hour without progress it was failed and its torrent deleted, 11.8% gone.
+            status = await qbit.wait_until_complete(torrent_hash, progress_cb=_progress)
         finally:
             try:
                 await qbit.force_start(torrent_hash, enabled=False)
@@ -145,13 +193,26 @@ async def download_direct(
             target["label"] if target else " / ".join(row["label"] for row in by_language.values()),
         )
         content = _download_root(status)
+        from bankai.processor import bdmv
+
+        # A film's Blu-ray disc image: its longest playlist remuxed (lossless) beside the download.
+        disc_work = bdmv.work_folder(content, torrent_hash) if media_kind == "movie" and bdmv.discs(content) and not find_video_files(content) else None
         if media_kind == "movie":
-            picked = pick_movie_file(content)
+            picked = await asyncio.to_thread(bdmv.remux_film, content, disc_work, title) if disc_work else pick_movie_file(content)
             sources = [picked] if picked else []
         else:
-            sources = find_video_files(content)
+            sources = [path for path in find_video_files(content) if not is_sample(path)]
         if not sources:
-            raise RuntimeError(f"the torrent holds no video under {content}")
+            packed = content.is_dir() and any(path.suffix.lower() == ".rar" or re.fullmatch(r"\.r\d\d", path.suffix.lower()) for path in content.rglob("*"))
+            reason = "its video is packed in RAR archives (only a sample clip is a video)" if packed else "it holds no video but a sample"
+            # Never to be picked again, and its files go: nothing of it can be filed.
+            _reject(torrent_hash, release_title, reason)
+            if ours:
+                try:
+                    await qbit.remove(torrent_hash, delete_files=True)
+                except Exception as remove_exc:
+                    log.warning("[direct] could not remove %s: %s", torrent_hash[:8], remove_exc)
+            raise RuntimeError(f"{release_title}: {reason}; another release is looked for")
         if target:
             placed, left = direct.placements(
                 sources, kind=media_kind, root=Path(target["root"]), title=title, year=year, season=season
@@ -226,6 +287,8 @@ async def download_direct(
             # The library holds its own name for the bytes (or a copy), or had the episodes
             # already: nothing more to take from the torrent, so it goes.
             await _remove(qbit, torrent_hash)
+        if disc_work:
+            bdmv.remove_work(disc_work)
         return {
             "final_path": str((filed or already)[0]) if filed or already else "",
             "paths": [str(path) for path in filed],
@@ -295,8 +358,6 @@ async def sweep(qbit: QBittorrentClient | None = None, *, now: float | None = No
 
 
 NO_ENGLISH_SUBTITLES = "no English subtitles"
-# A download whose progress has not moved this long is given up (no metadata, no seeder).
-STALL_SECONDS = 60 * 60
 
 
 def _rejected_path() -> Path:

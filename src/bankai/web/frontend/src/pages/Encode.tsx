@@ -328,7 +328,7 @@ function ScopePanel({ library, scope, current, onQueued }: {
       </div>
       {scope.candidates.length > 0 && (
         <Card className='gap-0 overflow-hidden [--card-padding:0]'>
-          <Table variant='plain' dense containerProps={{ className: 'max-h-[65dvh] overflow-auto' }}>
+          <Table variant='plain' size='sm' containerProps={{ className: 'max-h-[65dvh] overflow-auto' }}>
             <TableHeader className='sticky top-0 z-10 bg-(--control-surface)'>
               <TableRow>
                 <TableHead className='w-7 pr-2'>

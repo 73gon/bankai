@@ -2496,8 +2496,12 @@ def anime_download(
 
     # A Nyaa release, or a magnet link pasted by hand (Replace with magnet link): no Nyaa page to it.
     from_magnet = magnet_uri.strip().casefold().startswith("magnet:") and not torrent_url and not detail_url
-    if not from_magnet and (not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url)):
-        console.print("[red]anime downloads only accept nyaa.si sources, or a magnet link[/red]")
+    from bankai.web.avistaz import site_of
+
+    # AnimeZ: a private tracker's .torrent, fetched with the user's token.
+    from_animez = site_of(torrent_url) == "animez" and site_of(detail_url) == "animez"
+    if not from_magnet and not from_animez and (not is_nyaa_url(torrent_url) or not is_nyaa_url(detail_url)):
+        console.print("[red]anime downloads only accept nyaa.si or AnimeZ sources, or a magnet link[/red]")
         raise typer.Exit(code=1)
     if media_kind == "show" and not anilist_id:
         console.print("[red]an anime show download needs --anilist-id[/red]")

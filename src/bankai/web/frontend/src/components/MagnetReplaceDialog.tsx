@@ -6,7 +6,7 @@ import { formatBytes, timeAgo } from '@/lib/utils';
 import { Button } from '@zonsh/ui';
 import { Spinner } from '@zonsh/ui';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@zonsh/ui';
-import { Textarea } from '@zonsh/ui';
+import { TorrentLinkField } from '@/components/torrent-link-field';
 
 /**
  * Replace ticked library files with a magnet link's torrent. ``onSubmit`` queues it and returns
@@ -44,10 +44,10 @@ export function MagnetReplaceDialog({ open, count, what, paths, missing = [], sc
   const preview = useMagnetPreview(open && valid && scope ? magnet.trim() : '', paths ?? [], scope ?? 'anime', missing);
   const filling = missing.length;
   const heading = count && filling
-    ? `Replace ${count} ${what}${count === 1 ? '' : 's'} and download ${filling} with a magnet link`
+    ? `Replace ${count} ${what}${count === 1 ? '' : 's'} and download ${filling} with a magnet link or .torrent`
     : filling
-      ? `Download ${filling} missing ${what}${filling === 1 ? '' : 's'} with a magnet link`
-      : `Replace ${count} ${what}${count === 1 ? '' : 's'} with a magnet link`;
+      ? `Download ${filling} missing ${what}${filling === 1 ? '' : 's'} with a magnet link or .torrent`
+      : `Replace ${count} ${what}${count === 1 ? '' : 's'} with a magnet link or .torrent`;
   async function submit() {
     setBusy(true);
     try {
@@ -65,19 +65,18 @@ export function MagnetReplaceDialog({ open, count, what, paths, missing = [], sc
         <DialogHeader>
           <DialogTitle>{heading}</DialogTitle>
           <DialogDescription>
-            Paste the magnet link of a torrent that holds {count + filling === 1 ? `this ${what}` : `these ${what}s`} — one episode for one
+            Paste the magnet link, or drop the .torrent file, of a torrent that holds {count + filling === 1 ? `this ${what}` : `these ${what}s`} — one episode for one
             episode, a season pack for a season. Each file of the torrent replaces the ticked one of its episode{filling ? ', or fills a ticked missing one' : ''};
             the rest of the torrent is left out. The old files go once the new ones are in the library.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className='flex flex-col gap-3'>
-          <Textarea
-            value={magnet}
-            onChange={(event) => { setMagnet(event.target.value); setConfirm(null); }}
-            placeholder='magnet:?xt=urn:btih:…'
-            className='min-h-24 font-mono text-xs'
-            aria-label='Magnet link'
+          <TorrentLinkField
+            multiline
             autoFocus
+            value={magnet}
+            onChange={(next) => { setMagnet(next); setConfirm(null); }}
+            disabled={busy}
           />
           {magnet.trim() && !valid && <p className='text-xs text-warning'>That is not a magnet link (magnet:?xt=urn:btih:…).</p>}
           {preview.state !== 'idle' && <PreviewPanel preview={preview} />}
@@ -159,6 +158,13 @@ function PreviewPanel({ preview }: { preview: PreviewState }) {
         {erai && <StatusTag variant={erai.german ? 'success' : 'warning'} title={erai.subtitles.join(', ')}>{erai.german ? 'German subtitles' : 'No German subtitles'}</StatusTag>}
         {data.known?.release && <StatusTag variant='muted' title={data.known.release.title}>bankai: {data.known.release.status}</StatusTag>}
       </p>
+      {data.disc_image && (
+        <p className='text-xs text-warning'>
+          A Blu-ray disc image: {data.disc_image.discs} disc{data.disc_image.discs === 1 ? '' : 's'}, {data.disc_image.long_streams} stream{data.disc_image.long_streams === 1 ? '' : 's'} of a GiB
+          or more (episodes and extras), none with an episode in its name. Which file is which episode is read from the discs'
+          playlists once it is downloaded, so it cannot replace ticked files here: download it from Search instead.
+        </p>
+      )}
       <p className={replacing.length ? 'text-xs text-foreground' : 'text-xs text-warning'}>
         {replacing.length
           ? [

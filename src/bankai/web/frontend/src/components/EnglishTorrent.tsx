@@ -189,7 +189,7 @@ export function FollowPanel({ tmdbId, onChange }: { tmdbId: number; onChange?: (
         {preview.problem ? ` ${preview.problem}` : ''}
       </p>
 
-      <Table dense>
+      <Table size='sm'>
         <TableHeader>
           <TableRow>
             <TableHead>Season</TableHead>
@@ -319,7 +319,7 @@ export function MovieTorrentPanel({ tmdbId }: { tmdbId: number }) {
 
 function ReleaseTable({ rows, best, busy, onDownload }: { rows: (DirectRelease & { german?: boolean; fits?: boolean })[]; best: string | null; busy: string | null; onDownload: (row: DirectRelease) => void }) {
   return (
-    <Table dense>
+    <Table size='sm'>
       <TableHeader>
         <TableRow>
           <TableHead>Release</TableHead>
@@ -623,7 +623,7 @@ export function FollowedShowView({ tmdbId, onChanged, actions, cardKey }: { tmdb
             <span className='font-mono tabular-nums text-foreground'>{picked.size}</span> file{picked.size === 1 ? '' : 's'} selected
           </span>
           <Button size='sm' onClick={() => setMagnetOpen(true)} title='Replace the selected files with the torrent of a magnet link'>
-            <Magnet data-icon='inline-start' /> Replace with magnet link…
+            <Magnet data-icon='inline-start' /> Replace with magnet or .torrent…
           </Button>
           <Button size='sm' variant='ghost' className='ml-auto' onClick={() => setPicked(new Set())}>
             <X data-icon='inline-start' /> Clear

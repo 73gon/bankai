@@ -335,11 +335,16 @@ export interface SystemUsage {
     cached: number;
     swap_total: number;
     swap_used: number;
-    /** Bytes a second moved out of swap and into it since the last read; null on the first. */
-    swap_in_per_second?: number | null;
-    swap_out_per_second?: number | null;
   } | null;
-  network: { received_per_second: number | null; sent_per_second: number | null } | null;
+  network: {
+    received_per_second: number | null;
+    sent_per_second: number | null;
+    /** Bytes each way since the distro booted. */
+    received_total?: number;
+    sent_total?: number;
+    /** The busiest second either way since bankai-web started: the meters' scale. */
+    peak_per_second?: number | null;
+  } | null;
   gpus: {
     name: string;
     percent: number | null;
@@ -409,6 +414,45 @@ export interface HealthResponse {
   ffmpeg: boolean;
   mkvmerge: boolean;
   tmdb_configured: boolean;
+}
+
+/** One German release the Movies & Shows pass found. */
+export interface MasReviewRelease {
+  id: string;
+  title: string;
+  indexer: string | null;
+  size_bytes: number;
+  seeders: number;
+  leechers: number;
+  published: string | null;
+  resolution: string | null;
+  info_url: string | null;
+  status: 'review' | 'queued';
+  found_at: number;
+  season: number | null;
+  /** As the pass found it: a show's German episodes the library has (of that season). */
+  held: { german?: boolean; german_episodes?: number };
+  /** The title, year and season its name gives. */
+  guess?: { title: string; year: number | null; season: number | null };
+}
+
+/** A TMDB title with the German releases found of it. */
+export interface MasReviewTitle {
+  key: string;
+  kind: 'movie' | 'show';
+  tmdb_id: number;
+  name: string;
+  year: number | null;
+  poster_url: string | null;
+  german_title: string | null;
+  found_at: number;
+  releases: MasReviewRelease[];
+}
+
+export interface MasReview {
+  titles: MasReviewTitle[];
+  /** Releases no TMDB title answered for: linked by hand, downloaded or removed. */
+  unmatched: Array<MasReviewRelease & { kind: 'movie' | 'show'; guess: { title: string; year: number | null; season: number | null } }>;
 }
 
 export interface DiscoverItem {
@@ -501,7 +545,8 @@ export interface AnimeAniListMatch {
   gains?: { kind: 'audio' | 'subtitles'; language: string; episodes: number; of: number }[];
 }
 
-export type AnimeSource = 'nyaa' | 'nekobt';
+/** Where Search finds releases: Erai-raws has a listing of its own (``eraiReleases``), the rest these rows. */
+export type AnimeSource = 'nyaa' | 'nekobt' | 'animez';
 
 export interface AnimeEntry {
   source: AnimeSource;
@@ -534,6 +579,8 @@ export interface AnimeEntry {
   codec?: string | null;
   audio_langs?: string[];
   sub_langs?: string[];
+  /** AnimeZ only: downloaded without its share counted (a private tracker's freeleech). */
+  freeleech?: boolean;
   fansub_langs?: string[];
   groups?: string[];
 }
@@ -686,6 +733,12 @@ export interface NekobtSearchOptions {
   /** true: batches alone; false: single episodes alone; unset: both. */
   batch?: boolean;
   minSeeders?: number;
+}
+
+export interface AnimezSearchOptions extends NekobtSearchOptions {
+  /** AnimeZ's formats (TV, TV_SHORT, MOVIE, SPECIAL, OVA, ONA); none for all of them. */
+  formats?: string[];
+  freeleech?: boolean;
 }
 
 export interface HeldRelease {
@@ -1437,6 +1490,26 @@ export interface AnimeLibraryEpisode extends AnimeLibraryEntry {
 /** One file's episode check: its keyframes against TMDB's stills, its length, other files. */
 /** A magnet link looked at before a replace: ``pending`` while the swarm has not answered. */
 /** A ticked anime episode the library has no file of: its entry and number, and the library's season and episode. */
+export interface MasUploader {
+  site: string;
+  name: string;
+  label: string;
+  /** Uploads read, and those with a German audio track. */
+  read: number;
+  german: number;
+  /** The listing page the reading back has got to; done once it reached the first upload. */
+  back_to_page: number | null;
+  done: boolean;
+  /** Uploads whose description is not read yet, and until when the site asked to wait (The Pirate Bay). */
+  unread?: number;
+  blocked_until?: number | null;
+}
+
+export interface MasUploaders {
+  uploaders: MasUploader[];
+  sites?: { id: string; label: string }[];
+}
+
 export interface MagnetMissingEpisode {
   anilist_id: number;
   anilist_episode: number;
@@ -1457,6 +1530,8 @@ export interface MagnetPreview {
   /** Of the files it takes, those filling a ticked missing episode. */
   filled?: number;
   uncovered?: string[];
+  /** A Blu-ray disc image: its discs, and its streams of a GiB or more (about its episodes). */
+  disc_image?: { discs: number; long_streams: number } | null;
   known?: {
     erai?: { name: string; subtitles: string[]; german: boolean; resolution: string | null; published: number | null };
     release?: { status: string; title: string };
@@ -2007,7 +2082,20 @@ export interface AudioTrack {
   duration: number | null;
 }
 
+/** A large file's audio, read once for review (``web/review_audio``). */
+export interface AudioCacheStatus {
+  ready: boolean;
+  preparing?: boolean;
+  percent?: number;
+  /** Seconds left, once it can tell. */
+  eta?: number | null;
+  step?: string;
+  error?: string;
+}
+
 export interface MediaInfo {
+  /** Null for a file small enough to be read as it is. */
+  audio_cache?: AudioCacheStatus | null;
   path: string;
   size: number;
   duration: number | null;
@@ -2040,6 +2128,37 @@ export interface ServerTitle {
   present: boolean;
   location: string | null;
   directory: string | null;
+  /** A folder (a bare file otherwise: a film as one .mkv). */
+  folder?: boolean;
+}
+
+/** A title dragged to another library root (web/library_moves.py). */
+export interface LibraryMove {
+  id: string;
+  source: string;
+  target: string;
+  title: string;
+  size: number;
+  files: number;
+  done_bytes: number;
+  percent?: number;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  step: string;
+  error: string | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export interface LibraryMovePlan {
+  source: string;
+  target: string;
+  from_kind: ServerDirKind | 'manga';
+  to_kind: ServerDirKind | 'manga';
+  files: number;
+  size: number;
+  same_drive: boolean;
+  warnings: string[];
 }
 
 export interface ServerEpisode {
@@ -2133,6 +2252,9 @@ export const api = {
       candidates: TorrentCandidate[];
     }>(`/api/torrents/search?${params.toString()}`);
   },
+  /** A magnet link (or a dropped .torrent's) as a release the download dialog takes like a search's. */
+  directMagnet: (magnet: string) =>
+    request<DirectRelease>('/api/direct/magnet', { method: 'POST', body: JSON.stringify({ magnet }) }),
   directSearch: (q: string, kind: DirectKind, options: DirectSearchOptions = {}) => {
     const params = new URLSearchParams({ q, kind });
     if (options.quality) params.set('quality', options.quality);
@@ -2178,6 +2300,28 @@ export const api = {
     if (options.minSeeders) params.set('min_seeders', String(options.minSeeders));
     return request<AnimeSearchPage>(`/api/anime/nekobt?${params.toString()}`);
   },
+  animeSearchAnimez: (q: string, options: AnimezSearchOptions = {}) => {
+    const params = new URLSearchParams({ q });
+    if (options.page != null) params.set('page', String(options.page));
+    if (options.quality) params.set('quality', options.quality);
+    if (options.publisher) params.set('publisher', options.publisher);
+    if (options.titleFilters) params.set('title_filters', options.titleFilters);
+    if (options.subtitles?.length) params.set('subtitles', options.subtitles.join(','));
+    if (options.audio?.length) params.set('audio', options.audio.join(','));
+    if (options.batch != null) params.set('batch', String(options.batch));
+    if (options.minSeeders) params.set('min_seeders', String(options.minSeeders));
+    if (options.formats?.length) params.set('formats', options.formats.join(','));
+    if (options.freeleech) params.set('freeleech', 'true');
+    return request<AnimeSearchPage>(`/api/anime/animez?${params.toString()}`);
+  },
+  /** A .torrent dropped where a magnet goes: kept by bankai, answered with the magnet that stands for it. */
+  uploadTorrent: (data: string, name: string) =>
+    request<{ info_hash: string; name: string; size: number; files: number; private: boolean; trackers: number; magnet: string }>(
+      '/api/torrents/upload',
+      { method: 'POST', body: JSON.stringify({ data, name }) },
+    ),
+  animezDescription: (id: string) =>
+    request<{ description: string }>(`/api/anime/animez/description?id=${encodeURIComponent(id)}`),
   nekobtDescription: (id: string) =>
     request<{ description: string }>(`/api/anime/nekobt/description?id=${encodeURIComponent(id)}`),
   animeDetail: (url: string) =>
@@ -2522,7 +2666,7 @@ export const api = {
       method: 'POST', body: JSON.stringify({ kind, key, slot, url }),
     }),
   /** The release groups Discover's publisher filter offers (anime settings). */
-  animePublishers: () => request<{ publishers: string[]; nekobt_languages: string[] }>('/api/anime/publishers'),
+  animePublishers: () => request<{ publishers: string[]; nekobt_languages: string[]; animez?: boolean }>('/api/anime/publishers'),
   /** An AniList entry's episodes in the library, which a download of it leaves out. */
   animeOwned: (anilistId: number) =>
     request<{ owned: number[]; episodes: number | null }>(`/api/anime/owned?anilist_id=${anilistId}`),
@@ -2536,9 +2680,16 @@ export const api = {
       method: 'POST', body: JSON.stringify({ paths, magnet, lose_german: loseGerman, missing }),
     }),
   /** Replace ticked Movies & Shows files (episodes, or a film's file) with a magnet link's torrent. */
-  masReplaceMagnet: (kind: 'show' | 'movie', key: string, paths: string[], magnet: string) =>
+  /** Uploaders followed for German audio their release names do not say (web/uploaders.py). */
+  masUploaders: () => request<MasUploaders>('/api/mas/uploaders'),
+  masFollowUploader: (site: string, name: string) =>
+    request<MasUploaders>('/api/mas/uploaders', { method: 'POST', body: JSON.stringify({ site, name }) }),
+  masUnfollowUploader: (site: string, name: string) =>
+    request<MasUploaders>(`/api/mas/uploaders/${encodeURIComponent(site)}/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  /** ``missing``: a show's ticked aired episodes with no file, added from the same torrent. */
+  masReplaceMagnet: (kind: 'show' | 'movie', key: string, paths: string[], magnet: string, missing: MagnetMissingEpisode[] = []) =>
     request<{ status: string; id?: string }>('/api/mas/replace-magnet', {
-      method: 'POST', body: JSON.stringify({ kind, key, paths, magnet }),
+      method: 'POST', body: JSON.stringify({ kind, key, paths, magnet, missing }),
     }),
   /** Take every episode picture again at the saved setting. */
   regenerateThumbs: () => request<{ ok: boolean }>('/api/anime/thumbs/regenerate', { method: 'POST' }),
@@ -2664,10 +2815,14 @@ export const api = {
   deleteFile: (path: string) => request('/api/library/file', { method: 'DELETE', body: JSON.stringify({ path }) }),
   streamUrl: (path: string) => `/api/media/stream?path=${encodeURIComponent(path)}`,
   transcodeUrl: (path: string, audio = 0, t = 0) => `/api/media/transcode?path=${encodeURIComponent(path)}&audio=${audio}&t=${t}`,
-  waveform: (path: string, stream: number, start: number, dur: number, bins: number) =>
-    request<{ start: number; dur: number; bins: number; peaks: string }>(
+  /** Throws an error with ``preparing`` set while a large file's audio is still being read once. */
+  waveform: async (path: string, stream: number, start: number, dur: number, bins: number) => {
+    const answer = await request<{ start: number; dur: number; bins: number; peaks: string } & Partial<AudioCacheStatus>>(
       `/api/media/waveform?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}&bins=${bins}`,
-    ),
+    );
+    if (answer.preparing) throw Object.assign(new Error('The audio is being prepared for review'), { preparing: true });
+    return answer;
+  },
   audioClipUrl: (path: string, stream: number, start: number, dur: number, lead = 0, rate = 1) =>
     `/api/media/audioclip?path=${encodeURIComponent(path)}&stream=${stream}&start=${start}&dur=${dur}&lead=${lead}&rate=${rate}`,
   audioClipCache: (path: string, stream: number, segment: number, delayMs = 0, rate = 1) =>
@@ -2723,9 +2878,29 @@ export const api = {
     return fresh;
   },
   /** Match a library folder to a TMDB title by hand; ``tmdb_id: null`` goes back to the automatic match. */
+  /** Movies & Shows review: German-dubbed releases the pass found (web/mas_releases.py). */
+  masReview: () => request<MasReview>('/api/mas/review'),
+  masReviewRefresh: () => request<{ found: number; added: number; matched: number }>('/api/mas/review/refresh', { method: 'POST' }),
+  masReviewDownload: (id: string) => request<{ id?: string; status?: string }>(`/api/mas/review/${encodeURIComponent(id)}/download`, { method: 'POST' }),
+  masReviewDiscard: (ids: string[]) =>
+    request<{ discarded: number }>('/api/mas/review/discard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }),
+  masReviewLink: (ids: string[], kind: 'movie' | 'show', item: DiscoverItem) =>
+    request<{ linked: number }>('/api/mas/review/link', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, kind, tmdb_id: item.tmdb_id, name: item.name, year: item.year, poster_url: item.poster_url }),
+    }),
+  /** Delete a Movies & Shows title from disk: the folders its files are in. */
+  masLibraryDelete: (kind: 'movie' | 'show', key: string) =>
+    request<{ deleted: string[]; size: number }>('/api/mas/library/delete', { method: 'POST', body: JSON.stringify({ kind, key }) }),
   masLibraryMatch: (body: { kind: 'movie' | 'show'; key: string; tmdb_id: number | null; name?: string; year?: number | null; poster_url?: string | null }) =>
     request<{ ok: boolean }>('/api/mas/library/match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-  serverContents: (rescan = false) => request<{ movies: ServerTitle[]; shows: ServerTitle[]; anime: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
+  serverContents: (rescan = false) =>
+    request<{ movies: ServerTitle[]; shows: ServerTitle[]; anime: ServerTitle[]; manga?: ServerTitle[] }>(`/api/server/contents${rescan ? '?rescan=true' : ''}`),
+  libraryMoves: () => request<{ moves: LibraryMove[] }>('/api/library/moves'),
+  planLibraryMove: (source: string, targetRoot: string) =>
+    request<LibraryMovePlan>('/api/library/moves/plan', { method: 'POST', body: JSON.stringify({ source, target_root: targetRoot }) }),
+  startLibraryMove: (source: string, targetRoot: string) =>
+    request<LibraryMove>('/api/library/moves', { method: 'POST', body: JSON.stringify({ source, target_root: targetRoot }) }),
 
   serverShow: (path: string) => request<{ path: string; seasons: ServerSeason[] }>(`/api/server/show?path=${encodeURIComponent(path)}`),
   renameServerItem: (kind: 'movie' | 'episode', path: string, title: string) =>
@@ -2734,7 +2909,7 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ kind, path, title }) },
     ),
 
-  serverDirs: () => request<{ movie_dirs: string[]; show_dirs: string[]; anime_dirs: string[] }>('/api/server/dirs'),
+  serverDirs: () => request<{ movie_dirs: string[]; show_dirs: string[]; anime_dirs: string[]; manga_dirs?: string[] }>('/api/server/dirs'),
   addServerDir: (kind: ServerDirKind, path: string) =>
     request<{ kind: string; dirs: string[] }>('/api/server/dirs', {
       method: 'POST',
