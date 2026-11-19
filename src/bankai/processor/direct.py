@@ -150,26 +150,34 @@ async def download_direct(
     try:
         await qbit.login()
         before = {row.hash for row in await qbit.list_torrents(category=None)}
-        try:
-            magnet, torrent_file, found_hash = await _link(magnet_uri, download_url)
-        except Exception as exc:
-            elsewhere = await _elsewhere(release_title, media_kind)
-            if not elsewhere:
-                raise RuntimeError(
-                    f"the release's torrent could not be fetched ({_plain(exc)}), and no other indexer lists it"
-                ) from None
-            magnet, torrent_file, found_hash = await _link(elsewhere, None)
-        expected = (info_hash or found_hash or "").casefold() or None
-        save_path = Path(settings.qbittorrent.save_path) if settings.qbittorrent.save_path else None
-        await qbit.add(
-            magnet=magnet,
-            torrent_file=None if magnet else torrent_file,
-            category=CATEGORY,
-            save_path=save_path,
-        )
-        torrent_hash, existed_before = await _locate(qbit, expected=expected, before=before)
+        held = next((h for h in before if info_hash and h.casefold() == info_hash.casefold()), None)
+        if held:
+            # Already in qBittorrent (a retry hands on the hash an earlier attempt downloaded):
+            # taken as it is, the release's link not fetched again -- it may fail now.
+            log.info("[direct] the torrent is in qBittorrent already: %s", held[:8])
+            torrent_hash, existed_before = held, True
+        else:
+            try:
+                magnet, torrent_file, found_hash = await _link(magnet_uri, download_url)
+            except Exception as exc:
+                elsewhere = await _elsewhere(release_title, media_kind)
+                if not elsewhere:
+                    raise RuntimeError(
+                        f"the release's torrent could not be fetched ({_plain(exc)}), and no other indexer lists it"
+                    ) from None
+                magnet, torrent_file, found_hash = await _link(elsewhere, None)
+            expected = (info_hash or found_hash or "").casefold() or None
+            save_path = Path(settings.qbittorrent.save_path) if settings.qbittorrent.save_path else None
+            await qbit.add(
+                magnet=magnet,
+                torrent_file=None if magnet else torrent_file,
+                category=CATEGORY,
+                save_path=save_path,
+            )
+            torrent_hash, existed_before = await _locate(qbit, expected=expected, before=before)
         if background_id:
             torrent_actions.set_active_torrent(background_id, torrent_hash)
+            bgjobs.set_provenance(background_id, torrent_hash=torrent_hash)
         await qbit.top_priority(torrent_hash)
         await qbit.resume(torrent_hash)
         await qbit.force_start(torrent_hash, enabled=True)
@@ -314,6 +322,10 @@ async def _remove(qbit: QBittorrentClient, torrent_hash: str, why: str = "") -> 
 # A finished torrent no job reads is left this long before the sweep removes it: time for a
 # job that just found it to record it, and for one still running older code to file it.
 SWEEP_GRACE_SECONDS = 2 * 3600
+# The torrent of a failed job still in the queue is kept this long for its Retry to take up
+# (bgjobs.BgJob.torrent_hash). Animals' finished download went 2 h after it finished, minutes
+# after its retry, and the next attempt fetched all 1.9 GB again (Nov 2026).
+RETRY_KEEP_SECONDS = 7 * 86400
 
 
 async def sweep(qbit: QBittorrentClient | None = None, *, now: float | None = None) -> list[str]:
@@ -323,16 +335,25 @@ async def sweep(qbit: QBittorrentClient | None = None, *, now: float | None = No
     ended by a failure after the download left them seeding for good, and the next attempt took
     one up as "already there". Unfinished ones once they are two hours old: no job waits for
     them any more -- three Modern Family torrents of Oct 28 were still fetching their metadata
-    two days later -- and the follow pass searches the episode again.
+    two days later -- and the follow pass searches the episode again. Not the torrent of a failed
+    job still in the queue, for a week: its Retry takes it up (``RETRY_KEEP_SECONDS``).
     """
     import time
 
     now = time.time() if now is None else now
+    jobs = [job for job in bgjobs.list_jobs() if job.args and job.args[0] == "direct-download"]
     reading = {
         (torrent_actions.get_active_torrent(job.id) or "").casefold()
-        for job in bgjobs.list_jobs()
-        if job.status in {"running", "stopped"} and job.args and job.args[0] == "direct-download"
+        for job in jobs
+        if job.status in {"running", "stopped"}
     }
+    reading |= {
+        (getattr(job, "torrent_hash", None) or "").casefold()
+        for job in jobs
+        if job.status in {"failed", "cancelled"}
+        and now - (getattr(job, "finished_at", None) or now) < RETRY_KEEP_SECONDS
+    }
+    reading.discard("")
     own = qbit is None
     client = qbit or QBittorrentClient()
     removed: list[str] = []

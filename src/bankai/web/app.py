@@ -499,6 +499,17 @@ def _title_membership_keys(title: str) -> set[str]:
     return {key for key in keys if key}
 
 
+async def _in_qbittorrent(torrent_hash: str) -> bool:
+    """Whether qBittorrent still has this torrent (False when it cannot be asked)."""
+    from bankai.torrent.qbittorrent import QBittorrentClient
+
+    try:
+        async with QBittorrentClient(timeout=6.0) as qbit:
+            return bool(await qbit.info([torrent_hash]))
+    except Exception:
+        return False
+
+
 def _set_cli_option(args: list[str], option: str, value: str) -> list[str]:
     """Return argv with one canonical ``option value`` pair."""
     updated: list[str] = []
@@ -5228,13 +5239,18 @@ def create_app() -> Any:
                 await asyncio.to_thread(job.delete)
                 return {"status": "resolved", "title": job.title, "detail": handled}
 
+        if args and args[0] == "direct-download" and job.torrent_hash and await _in_qbittorrent(job.torrent_hash):
+            # The torrent the failed attempt downloaded: taken up as it is, not fetched again.
+            args = _set_cli_option(args, "--info-hash", job.torrent_hash)
+
         result = await asyncio.to_thread(
-            webjobs.enqueue, kind=job.kind, title=job.title, args=args
+            webjobs.enqueue, kind=job.kind, title=job.title, args=args, retry_of=[job.id, *job.retry_of]
         )
         # "duplicate" means the same work is already running or pending, which
-        # is just as good a reason to stop showing the failure.
+        # is just as good a reason to stop showing the failure. The record is
+        # archived, not deleted: its log says why it failed.
         if result.get("status") in {"running", "queued", "duplicate"}:
-            await asyncio.to_thread(job.delete)
+            await asyncio.to_thread(bgjobs_mod.archive, job)
         return result
 
     @app.post("/api/queue/{job_id}/retry-with-source")

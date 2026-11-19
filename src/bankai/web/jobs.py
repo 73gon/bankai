@@ -208,6 +208,7 @@ class PendingJob:
     title: str
     args: list[str]
     created_at: float = field(default_factory=time.time)
+    retry_of: list[str] = field(default_factory=list)  # bgjobs.BgJob.retry_of
 
 
 def _load_pending() -> list[PendingJob]:
@@ -341,7 +342,7 @@ def _running_titles(jobs: list | None = None) -> set[str]:
     }
 
 
-def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
+def enqueue(*, kind: str, title: str, args: list[str], retry_of: list[str] | None = None) -> dict:
     """Queue a job. Transfers start immediately; pipelines obey the limit.
 
     Refuses to queue a duplicate of something already running or already
@@ -357,7 +358,7 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
             return {"status": "duplicate", "title": title}
         paused = updates.maintenance_active()
         if not paused and kind in _OPERATION_KINDS:
-            job = bgjobs.spawn(kind=kind, title=title, args=args)
+            job = bgjobs.spawn(kind=kind, title=title, args=args, retry_of=retry_of)
             return {"status": "running", "id": job.id, "title": title}
         # An anime job counts against the anime limit, not the pipelines' (which it never
         # counted against): without one, "Download all" started every episode at once.
@@ -367,9 +368,9 @@ def enqueue(*, kind: str, title: str, args: list[str]) -> dict:
             else _is_direct_job(args) or _running_count() < limit
         )
         if not paused and room and _anime_storage_ready(args):
-            job = bgjobs.spawn(kind=kind, title=title, args=args)
+            job = bgjobs.spawn(kind=kind, title=title, args=args, retry_of=retry_of)
             return {"status": "running", "id": job.id, "title": title}
-        item = PendingJob(id=uuid.uuid4().hex[:8], kind=kind, title=title, args=args)
+        item = PendingJob(id=uuid.uuid4().hex[:8], kind=kind, title=title, args=args, retry_of=list(retry_of or []))
         pending.append(item)
         _save_pending(pending)
         return {"status": "queued", "id": item.id, "title": title}
@@ -408,6 +409,7 @@ def reconcile() -> int:
                     title=item.title,
                     args=item.args,
                     created_at=item.created_at,
+                    retry_of=item.retry_of,
                 )
                 running_titles.add(nt)
                 if not _is_operation(item.kind, item.args):
@@ -454,6 +456,7 @@ def reconcile() -> int:
                     title=item.title,
                     args=item.args,
                     created_at=item.created_at,
+                    retry_of=item.retry_of,
                 )
                 running_titles.add(nt)
                 if _is_anime_job(item.args):
@@ -1524,6 +1527,7 @@ def force_start_pending(job_id: str) -> bgjobs.BgJob | None:
                 title=item.title,
                 args=item.args,
                 created_at=item.created_at,
+                retry_of=item.retry_of,
             )
         except Exception:
             pending.insert(index, item)

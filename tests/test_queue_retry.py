@@ -22,6 +22,8 @@ class FakeJob:
         self.args = args
         self.status = "failed"
         self.deleted = False
+        self.torrent_hash: str | None = None
+        self.retry_of: list[str] = []
 
     def delete(self) -> bool:
         self.deleted = True
@@ -69,6 +71,8 @@ def retry(monkeypatch: pytest.MonkeyPatch):
         in_qbittorrent: bool = False,
     ) -> dict:
         monkeypatch.setattr(app_mod.bgjobs_mod, "get_job", lambda _id: job)
+        # Archived (kept in jobs_archive) rather than deleted; to the queue it is gone either way.
+        monkeypatch.setattr(app_mod.bgjobs_mod, "archive", lambda j: j.delete())
         monkeypatch.setattr(erai_mod, "_episode_on_disk", lambda *a, **k: on_disk)
         releases = {} if release_status is None else {"a" * 40: {"status": release_status}}
         monkeypatch.setattr(erai_mod, "_load_state", lambda: {"releases": releases})
@@ -85,7 +89,10 @@ def retry(monkeypatch: pytest.MonkeyPatch):
 
                 return [SimpleNamespace(hash="a" * 40)] if in_qbittorrent else []
 
-        monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", Qbit)
+            async def info(self, hashes):
+                return [{"hash": h} for h in hashes if in_qbittorrent and h == "a" * 40]
+
+        monkeypatch.setattr("bankai.torrent.qbittorrent.QBittorrentClient", lambda *a, **k: Qbit())
 
         def enqueue(**kwargs):
             calls["enqueued"].append(kwargs)
@@ -188,6 +195,53 @@ def test_a_non_anime_job_is_retried_without_the_anime_checks(client, retry):
     assert body["status"] == "queued"
     assert len(calls["enqueued"]) == 1
     assert job.deleted is True
+
+
+DIRECT_ARGS = ["direct-download", "--release-title", "Animals 2026", "--kind", "movie", "--title", "Animals",
+               "--download-url", "http://prowlarr/link", "--info-hash", "c" * 40]
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_a_direct_download_retried_takes_up_the_torrent_its_attempt_downloaded(client, retry, held):
+    """Animals (Nov 2026): the retry fetched the link again, got 429, and failed beside a finished download."""
+    job = FakeJob(list(DIRECT_ARGS), kind="movie", title="Animals (2026)")
+    job.torrent_hash = "a" * 40
+    job.retry_of = ["older"]
+    calls = retry(job, in_qbittorrent=held)
+
+    client.post("/api/queue/job1/retry")
+
+    (sent,) = calls["enqueued"]
+    assert app_mod_value(sent["args"], "--info-hash") == ("a" * 40 if held else "c" * 40)
+    assert sent["retry_of"] == ["job1", "older"]
+    assert job.deleted is True
+
+
+def app_mod_value(args: list[str], option: str) -> str | None:
+    from bankai.cli import bgjobs
+
+    return bgjobs.argument_value(args, option)
+
+
+def test_a_retried_attempts_log_stays_readable_after_the_new_one(tmp_path, monkeypatch):
+    from bankai.cli import bgjobs
+
+    monkeypatch.setattr(bgjobs, "jobs_root", lambda: tmp_path / "jobs")
+    old = bgjobs.BgJob(id="old1", kind="movie", title="Animals", args=[], started_at=1.0, status="failed")
+    old.save()
+    old.log_path.write_text("downloading\nRuntimeError: it broke\n", encoding="utf-8")
+    assert bgjobs.archive(old) is True
+    assert not (tmp_path / "jobs" / "old1").exists()
+
+    new = bgjobs.BgJob(id="new1", kind="movie", title="Animals", args=[], started_at=2.0, retry_of=["old1"])
+    new.save()
+    new.log_path.write_text("starting again\n", encoding="utf-8")
+
+    assert bgjobs.tail(new, lines=50).splitlines() == [
+        "downloading", "RuntimeError: it broke", "── attempt old1 above failed; retried below ──", "starting again",
+    ]
+    # With no room left, only this attempt's own lines.
+    assert bgjobs.tail(new, lines=1) == "starting again"
 
 
 def test_retrying_something_that_is_gone_is_a_404(client, monkeypatch):

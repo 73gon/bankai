@@ -237,6 +237,7 @@ def test_force_start_pending_bypasses_limit(monkeypatch: pytest.MonkeyPatch) -> 
             "title": "Queued",
             "args": ["run", "Queued"],
             "created_at": item.created_at,
+            "retry_of": [],
         }
     ]
 

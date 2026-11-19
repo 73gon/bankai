@@ -351,6 +351,32 @@ def test_a_finished_torrent_an_earlier_attempt_added_goes_once_the_library_has_i
     assert qbit.removed == ["aa" * 20] and episode.read_bytes() == b"there"
 
 
+def test_a_torrent_qbittorrent_has_is_taken_up_without_fetching_its_link(tmp_path, monkeypatch):
+    """Animals (Nov 2026): a retry's link answered 429 while the first attempt's download sat finished."""
+    import asyncio
+
+    root = tmp_path / "movies"
+    root.mkdir()
+    download = tmp_path / "qbit" / "Animals (2026) [tmdbid-1].mkv"
+    download.parent.mkdir(parents=True)
+    download.write_bytes(b"x" * 10)
+    qbit = _SeedingQbit([("bb" * 20, direct_job.CATEGORY, 1, str(download))])
+    monkeypatch.setattr(direct_job, "QBittorrentClient", lambda: qbit)
+    monkeypatch.setattr(direct_job.direct, "target", lambda path, kind: {"root": str(root), "label": "Movies"})
+
+    async def no_fetch(*_args):
+        raise AssertionError("the link must not be fetched")
+
+    monkeypatch.setattr(direct_job, "_link", no_fetch)
+    asyncio.run(direct_job.download_direct(
+        release_title="Animals 2026 1080p GER ENG WEBRip HEVC x265", download_url="http://prowlarr/dead",
+        magnet_uri=None, info_hash="BB" * 20, info_url=None, media_kind="movie", root=str(root),
+        title="Animals", year=2026,
+    ))
+    assert (root / "Animals (2026)" / "Animals (2026).mkv").read_bytes() == b"x" * 10
+    assert qbit.removed == ["bb" * 20]
+
+
 def test_the_sweep_removes_finished_torrents_no_running_job_reads(monkeypatch):
     import asyncio
 
@@ -368,7 +394,18 @@ def test_the_sweep_removes_finished_torrents_no_running_job_reads(monkeypatch):
     class Job:
         id, status, args = "j1", "running", ["direct-download", "--release-title", "x"]
 
-    monkeypatch.setattr(bgjobs, "list_jobs", lambda: [Job()])
-    monkeypatch.setattr(actions, "get_active_torrent", lambda job_id: "read")
-    assert asyncio.run(direct_job.sweep(qbit, now=now)) == ["old"]
-    assert qbit.removed == ["old"]
+    class Failed:
+        # A failed job still in the queue keeps its torrent for its Retry, a week long.
+        id, status, args, torrent_hash, finished_at = "j2", "failed", ["direct-download"], "kept", now - 3 * 3600
+
+    class FailedLongAgo:
+        id, status, args, torrent_hash, finished_at = "j3", "failed", ["direct-download"], "stale", now - 8 * 86400
+
+    qbit.rows += _SeedingQbit([
+        ("kept", direct_job.CATEGORY, now - 3 * 3600, ""),
+        ("stale", direct_job.CATEGORY, now - 8 * 86400, ""),
+    ]).rows
+    monkeypatch.setattr(bgjobs, "list_jobs", lambda: [Job(), Failed(), FailedLongAgo()])
+    monkeypatch.setattr(actions, "get_active_torrent", lambda job_id: "read" if job_id == "j1" else None)
+    assert asyncio.run(direct_job.sweep(qbit, now=now)) == ["old", "stale"]
+    assert qbit.removed == ["old", "stale"]

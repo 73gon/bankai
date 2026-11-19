@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,13 @@ class BgJob:
     torrent_source_url: str | None = None
     torrent_source_title: str | None = None
     restart_safe: bool = False
+    # The torrent this job downloads, once it has one: a retry takes it up instead of
+    # fetching the release's link again (Animals, Nov 2026: the second attempt's link
+    # answered 429, while the first attempt's download sat finished in qBittorrent).
+    torrent_hash: str | None = None
+    # The attempts this one retries, newest first: their records are moved to
+    # ``jobs_archive``, not deleted, and their logs shown after this one's (``tail``).
+    retry_of: list[str] = field(default_factory=list)
 
     @property
     def dir(self) -> Path:
@@ -769,6 +776,7 @@ def set_provenance(
     german_source_url: str | None = None,
     torrent_source_url: str | None = None,
     torrent_source_title: str | None = None,
+    torrent_hash: str | None = None,
 ) -> bool:
     """Persist source provenance on a running background-job ledger."""
     job = _load_job(job_id)
@@ -780,6 +788,8 @@ def set_provenance(
         job.torrent_source_url = torrent_source_url
     if torrent_source_title is not None:
         job.torrent_source_title = torrent_source_title
+    if torrent_hash is not None:
+        job.torrent_hash = torrent_hash
     job.save()
     return True
 
@@ -862,7 +872,9 @@ def _launch(job: BgJob) -> BgJob:
     return job
 
 
-def spawn(*, kind: str, title: str, args: list[str], created_at: float | None = None) -> BgJob:
+def spawn(
+    *, kind: str, title: str, args: list[str], created_at: float | None = None, retry_of: list[str] | None = None
+) -> BgJob:
     """Spawn ``bankai <args>`` detached. Returns the BgJob."""
     return _launch(
         BgJob(
@@ -872,8 +884,30 @@ def spawn(*, kind: str, title: str, args: list[str], created_at: float | None = 
             args=args,
             started_at=created_at or time.time(),
             german_source_url=argument_value(args, "--url"),
+            retry_of=list(retry_of or []),
         )
     )
+
+
+def archive_dir() -> Path:
+    return jobs_root().parent / "jobs_archive"
+
+
+def archive(job: BgJob) -> bool:
+    """Take a job out of the queue but keep its record and log in ``jobs_archive``.
+
+    A retry used to delete the attempt it replaced, log and all, so why that attempt
+    failed could no longer be found out."""
+    target = archive_dir() / job.id
+    try:
+        archive_dir().mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        shutil.move(str(job.dir), str(target))
+    except OSError:
+        return job.delete()
+    _JOB_CACHE.pop(str(job.dir), None)
+    return True
 
 
 def resume(job: BgJob) -> BgJob:
@@ -968,6 +1002,16 @@ def tail(job: BgJob, *, lines: int = 50) -> str:
     except Exception as exc:
         return f"(log unreadable: {exc})"
     out = data.splitlines()[-lines:]
+    # The attempts this one retries, while there is room: why they failed stays readable.
+    for previous in job.retry_of:
+        room = lines - len(out) - 1
+        if room <= 0:
+            break
+        try:
+            earlier = (archive_dir() / previous / "log").read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        out = [*earlier[-room:], f"── attempt {previous} above failed; retried below ──", *out] if earlier else out
     return "\n".join(out)
 
 

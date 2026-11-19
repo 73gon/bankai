@@ -804,7 +804,7 @@ after an hour without progress it was failed, its torrent and what it had fetche
 A release whose own link fails (Prowlarr answers 429 to every grab from an indexer it has disabled; 1337x, its site
 down, gives no info hash) is taken from another indexer listing the same name (`direct._elsewhere`: letters and
 digits compared, most seeders): before, such jobs failed in their first second however often run again (Nov 2026).
-Error texts leave out the link (`_plain`, Prowlarr's carry its API key), and `reasons.classify_reason` reads no
+**Retry takes up what the failed attempt downloaded** (Nov 19 2026): a direct download records its torrent on the job (`BgJob.torrent_hash`); Retry hands it on as `--info-hash` while qBittorrent still has it, and `download_direct` takes a torrent qBittorrent already holds without fetching the release's link (Animals: the retry's 1337x link answered 429 beside the first attempt's finished download). The sweep keeps a failed queued job's torrent a week (`RETRY_KEEP_SECONDS`), not 2 h. A retried attempt is archived to `jobs_archive`, not deleted, and its log shows above the new one's (`BgJob.retry_of`, `bgjobs.tail`). Error texts leave out the link (`_plain`, Prowlarr's carry its API key), and `reasons.classify_reason` reads no
 links: the base64 of one held "vOe" and a 429 showed as "Stream extraction failed". Search rows keep their links server-side (`direct.found`): Prowlarr's
 download links carry its API key.
 
