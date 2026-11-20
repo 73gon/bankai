@@ -30,6 +30,7 @@
 @import "../node_modules/@zonsh/ui/dist/styles/parts/feedback.css";
 @import "../node_modules/@zonsh/ui/dist/styles/parts/data.css";
 @import "../node_modules/@zonsh/ui/dist/styles/parts/inputs.css";
+@import "../node_modules/@zonsh/ui/dist/styles/parts/react-flow.css";
 
 @custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *, .theme-dark, .theme-dark *, .theme-night, .theme-night *));
 
