@@ -694,7 +694,9 @@ German review (`mas_releases.discover`: its newest `AVISTAZ_PAGES` pages per kin
 tracker's word, `german_audio`, stands where the name says nothing; a resolution missing from the name is added).
 **Private torrents seed** (`torrent/seeding.py`): `QBittorrentClient.remove` hands a finished torrent qBittorrent marks
 `private` whose seeding is not done (the site's H&R rules, 2026-10-21: the seed time of what was downloaded -- 72 h + 2 h per GB to 50 GB, then 100 ln(GB) - 219 h, 472 h at 1000 GB -- or 0.9 of it uploaded back; under 10% downloaded may go at once; a partial torrent of 10% or more is held too, kept running, its time counted from the hold) to `hold_unseeded` -- moved
-into category `bankai-seeding`, out of every category bankai tidies, kept in `seeding_holds.json` -- and pass
+into category `bankai-seeding`, out of every category bankai tidies, kept in `seeding_holds.json`, force-started
+(qBittorrent's queue -- 10 uploads, 20 torrents -- would leave it queuedUP, not announcing; the pass starts it again
+while it owes) -- and pass
 `private_seeding` (30 min) removes it with its files once done. `force=True` (the qBittorrent tab's delete) removes at
 once. Every place bankai tidies a torrent away would otherwise have left a hit and run.
 

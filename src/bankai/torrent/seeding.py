@@ -6,9 +6,9 @@ fine; AvistaZ and AnimeZ (the AvistaZ network) count a torrent left before its s
 of those close the account. So ``QBittorrentClient.remove`` hands every finished
 private torrent whose seeding is not done to ``hold_unseeded``: it moves into
 the category ``bankai-seeding`` (out of every category bankai tidies) with what
-its remover asked for kept, and ``release_done`` -- a scheduler pass -- removes
-it once the rule is met. Unfinished private torrents are removed at once: a hit
-and run counts only what was downloaded whole.
+its remover asked for kept, force-started past qBittorrent's queue, and
+``release_done`` -- a scheduler pass -- removes it once the rule is met. One
+downloaded under 10% is removed at once: the rules ask nothing of it.
 
 Which torrents are private qBittorrent says itself (``private``), not a list
 of tracker names.
@@ -133,6 +133,9 @@ async def hold_unseeded(client: QBittorrentClient, hashes: list[str]) -> list[st
         await client.set_category(list(held), CATEGORY)
         # Kept running: a stopped torrent counts as gone. An unfinished one goes on downloading.
         await client.resume("|".join(held))
+        # Force-started: qBittorrent's queue (10 uploads, 20 torrents) left one "queuedUP" once
+        # its slots filled -- not announcing, so not seeding to the tracker.
+        await client.force_start("|".join(held), enabled=True)
     except Exception as exc:
         log.warning("could not move private torrents aside to seed; removing them: %s", exc)
         return hashes
@@ -174,6 +177,11 @@ async def release_done(client: QBittorrentClient | None = None) -> list[str]:
             key for key, row in details.items()
             if seeded_enough(row, held_at=(holds.get(key) or {}).get("held_at")) or not owes(row)
         ]
+        waiting = [key for key in details if key not in done]
+        if waiting:
+            # Still owing: kept force-started, whatever turned that off since (a job's own
+            # force_start(False) when it ends, a click in qBittorrent).
+            await client.force_start("|".join(waiting), enabled=True)
         if done:
             await client.remove("|".join(done), delete_files=True, force=True)
             removed = [str(details[key].get("name")) for key in done]

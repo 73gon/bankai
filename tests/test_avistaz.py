@@ -121,6 +121,8 @@ class _Qbit:
         self.rows = rows
         self.moved: list = []
         self.resumed: list = []
+        self.forced: list = []
+        self.removed: list = []
 
     async def info(self, hashes):
         return [row for row in self.rows if row["hash"] in hashes]
@@ -131,6 +133,20 @@ class _Qbit:
     async def resume(self, hashes):
         self.resumed.append(hashes)
 
+    async def force_start(self, hashes, *, enabled):
+        self.forced.append((hashes, enabled))
+
+    async def login(self):
+        pass
+
+    async def list_torrents(self, *, category=None):
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(hash=row["hash"]) for row in self.rows]
+
+    async def remove(self, hashes, *, delete_files=False, force=False):
+        self.removed.append((hashes, delete_files, force))
+
 
 def _t(key, *, private=True, progress=1.0, size=4, downloaded=None, uploaded=0.0, seeding=3600):
     gb = 10**9
@@ -139,6 +155,18 @@ def _t(key, *, private=True, progress=1.0, size=4, downloaded=None, uploaded=0.0
         "downloaded": int((size * progress if downloaded is None else downloaded) * gb), "uploaded": int(uploaded * gb),
         "seeding_time": seeding,
     }
+
+
+def test_held_torrents_stay_force_started_until_released(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(seeding, "_path", lambda: tmp_path / "holds.json")
+    client = _Qbit([_t("owed"), _t("time met", seeding=82 * 3600)])
+
+    removed = asyncio.run(seeding.release_done(client))
+
+    assert removed == ["time met"]
+    assert client.removed == [("time met", True, True)]
+    # The one still owing is force-started again: a job ending may have turned that off.
+    assert client.forced == [("owed", True)]
 
 
 def test_private_torrents_seed_by_the_hit_and_run_rules(monkeypatch, tmp_path) -> None:
@@ -156,6 +184,8 @@ def test_private_torrents_seed_by_the_hit_and_run_rules(monkeypatch, tmp_path) -
     assert left == ["public", "under 10%", "time met", "0.9 back"]
     assert client.moved == [(["owed", "partial", "0.8 back"], seeding.CATEGORY)]
     assert client.resumed == ["owed|partial|0.8 back"]
+    # Past qBittorrent's queue: a queued torrent does not announce, so the tracker sees no seeding.
+    assert client.forced == [("owed|partial|0.8 back", True)]
     # The rules' table: 1 GB 74 h, 50 GB 172 h, 60 GB 190 h, 1000 GB 472 h.
     for gb, hours in ((1, 74), (50, 172), (60, 190), (80, 219), (1000, 472)):
         assert round(seeding.required_hours(gb * 10**9)) == hours
