@@ -161,11 +161,13 @@ function PreviewPanel({ preview }: { preview: PreviewState }) {
       {data.disc_image && (
         <p className='text-xs text-warning'>
           A Blu-ray disc image: {data.disc_image.discs} disc{data.disc_image.discs === 1 ? '' : 's'}, {data.disc_image.long_streams} stream{data.disc_image.long_streams === 1 ? '' : 's'} of a GiB
-          or more (episodes and extras), none with an episode in its name. Which file is which episode is read from the discs'
-          playlists once it is downloaded, so it cannot replace ticked files here: download it from Search instead.
+          or more (episodes and extras), none with an episode in its name. It downloads whole ({formatBytes(data.size ?? 0)}); then its
+          episodes are read from the discs' playlists — every one of 15 minutes or more, numbered on across the discs — and
+          the {data.ticked} ticked episode{data.ticked === 1 ? '' : 's'} taken by those numbers. An extra that long before an
+          episode shifts the numbers: the episode check marks such files as wrong episodes.
         </p>
       )}
-      <p className={replacing.length ? 'text-xs text-foreground' : 'text-xs text-warning'}>
+      {!data.disc_image && <p className={replacing.length ? 'text-xs text-foreground' : 'text-xs text-warning'}>
         {replacing.length
           ? [
               data.covered! - (data.filled ?? 0) > 0 && `Replaces ${data.covered! - (data.filled ?? 0)}`,
@@ -173,7 +175,7 @@ function PreviewPanel({ preview }: { preview: PreviewState }) {
             ].filter(Boolean).join(', ') + ` of the ${data.ticked} ticked episode${data.ticked === 1 ? '' : 's'}`
           : 'None of its files is one of the ticked episodes: nothing would be taken.'}
         {(data.uncovered?.length ?? 0) > 0 && replacing.length > 0 && <span className='text-warning'> · not in it: {data.uncovered!.join(', ')}</span>}
-      </p>
+      </p>}
       <ul className='flex max-h-56 flex-col gap-0.5 overflow-y-auto text-xs'>
         {files.map((file) => (
           <li key={file.path} className='flex items-baseline gap-2'>

@@ -715,7 +715,8 @@ minutes or more, the same clips and length once, a "play all" (other playlists w
 left out, in disc order then by first clip, numbered on across discs; each remuxed losslessly (every track, chapters) into
 `.bankai-bdmv-<hash>` beside the download as `Episode NN.mkv`, filed like a batch, the work folder removed after. A film
 is the longest playlist (anime and Movies & Shows films). The discs stay to seed. The magnet preview says a torrent is a
-disc image (`disc_image`); it cannot be a Replace (no episode in its names).
+disc image (`disc_image`): a Replace or missing-episode fill downloads it whole and takes the ticked episode numbers
+from the playlists' numbering (`remux_episodes(only=…)`); the dialog says so instead of "nothing would be taken".
 
 ## 15b. Library upkeep: Tracks and Shrink
 
